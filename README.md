@@ -36,3 +36,4 @@ npm run generate
 
 - `npm run build` - Bundle the site generator
 - `npm run generate` - Generate the static site
+/
