@@ -8,12 +8,14 @@ import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { DailySummaryContent } from "@/components/daily-summary-content";
 
+// Define the expected structure of params
 interface PageProps {
   params: {
     date: string;
   };
 }
 
+// Generate static paths for all dates
 export async function generateStaticParams() {
   const dates = await getAllDailySummaryDates();
   return dates.map((date) => ({
@@ -21,6 +23,7 @@ export async function generateStaticParams() {
   }));
 }
 
+// Main page component
 export default async function DailySummaryPage({ params }: PageProps) {
   const [summary, dates] = await Promise.all([
     getDailySummary(params.date),
