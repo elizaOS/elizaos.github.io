@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, Suspense } from "react";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -20,6 +20,14 @@ export interface LeaderboardProps {
 }
 
 export function Leaderboard({ users, period }: LeaderboardProps) {
+  return (
+    <Suspense fallback={<div>Loading leaderboard...</div>}>
+      <LeaderboardContent users={users} period={period} />
+    </Suspense>
+  );
+}
+
+function LeaderboardContent({ users, period }: LeaderboardProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [searchTerm, setSearchTerm] = useState("");
@@ -126,23 +134,23 @@ export function Leaderboard({ users, period }: LeaderboardProps) {
           {/* <TabsTrigger value="weekly">Weekly</TabsTrigger> */}
         </TabsList>
         <TabsContent value="all">
-          <LeaderboardContent
+          <LeaderboardContentWrapper
             users={filteredUsers}
             onSkillClick={handleSkillChange}
           />
         </TabsContent>
         {/* <TabsContent value="monthly">
-          <LeaderboardContent users={filteredUsers} />
+          <LeaderboardContentWrapper users={filteredUsers} />
         </TabsContent>
         <TabsContent value="weekly">
-          <LeaderboardContent users={filteredUsers} />
+          <LeaderboardContentWrapper users={filteredUsers} />
         </TabsContent> */}
       </Tabs>
     </div>
   );
 }
 
-const LeaderboardContent = ({
+const LeaderboardContentWrapper = ({
   users,
   onSkillClick,
 }: {

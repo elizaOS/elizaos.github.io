@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Leaderboard } from "@/components/leaderboard";
 import { getUsers } from "@/lib/get-users";
 import { getDailySummary } from "@/lib/get-daily-summary";
@@ -14,7 +15,9 @@ export default async function Home() {
 
   return (
     <main className="container mx-auto p-4 space-y-8">
-      <Leaderboard users={users} period="all" />
+      <Suspense fallback={<div>Loading leaderboard...</div>}>
+        <Leaderboard users={users} period="all" />
+      </Suspense>
     </main>
   );
 }
