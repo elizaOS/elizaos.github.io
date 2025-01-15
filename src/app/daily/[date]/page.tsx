@@ -10,9 +10,7 @@ import { DailySummaryContent } from "@/components/daily-summary-content";
 
 // Define the expected structure of params
 interface PageProps {
-  params: {
-    date: string;
-  };
+  params: Promise<{ date: string }>;
 }
 
 // Generate static paths for all dates
@@ -24,9 +22,10 @@ export async function generateStaticParams() {
 }
 
 // Main page component
-export default async function DailySummaryPage({ params }: { params: { date: string } }) {
+export default async function DailySummaryPage({ params }: PageProps) {
+  const { date } = await params; // Await the params Promise
   const [summary, dates] = await Promise.all([
-    getDailySummary(params.date),
+    getDailySummary(date),
     getAllDailySummaryDates(),
   ]);
 
@@ -35,14 +34,14 @@ export default async function DailySummaryPage({ params }: { params: { date: str
   }
 
   // Find current date index and adjacent dates
-  const currentIndex = dates.indexOf(params.date);
+  const currentIndex = dates.indexOf(date);
   const prevDate =
     currentIndex < dates.length - 1 ? dates[currentIndex + 1] : null;
   const nextDate = currentIndex > 0 ? dates[currentIndex - 1] : null;
 
   // Extract date from title (format: "elizaos Eliza (2025-01-12)")
   const dateMatch = summary.title.match(/\(([^)]+)\)/);
-  const date = dateMatch ? dateMatch[1] : "";
+  const displayDate = dateMatch ? dateMatch[1] : "";
 
   return (
     <div className="container mx-auto py-8">
@@ -73,8 +72,8 @@ export default async function DailySummaryPage({ params }: { params: { date: str
             </Link>
           </Button>
 
-          <time dateTime={date} className="text-md font-bold">
-            {date}
+          <time dateTime={displayDate} className="text-md font-bold">
+            {displayDate}
           </time>
 
           <Button
