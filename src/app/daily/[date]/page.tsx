@@ -44,8 +44,6 @@ export default async function DailySummaryPage({ params }: PageProps) {
   return (
     <div className="container mx-auto py-8">
       <div className="max-w-4xl mx-auto">
-        {/* <h1 className="text-2xl font-semibold mb-6">Daily Summary</h1> */}
-
         <div className="flex items-center justify-between mb-6">
           <Button
             variant="outline"
