@@ -24,7 +24,7 @@ export async function generateStaticParams() {
 }
 
 // Main page component
-export default async function DailySummaryPage({ params }: PageProps) {
+export default async function DailySummaryPage({ params }: { params: { date: string } }) {
   const [summary, dates] = await Promise.all([
     getDailySummary(params.date),
     getAllDailySummaryDates(),
