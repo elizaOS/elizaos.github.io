@@ -48,9 +48,9 @@ export function denormalizeDate(date: string): string {
 }
 
 /**
- * Extracts date from a filename in format "summary_2025_01_12.json"
+ * Extracts date from any filename containing a date pattern YYYY-MM-DD or YYYY_MM_DD
  */
 export function extractDateFromFilename(filename: string): string | null {
-  const match = filename.match(/summary_(\d{4}[-_]\d{2}[-_]\d{2})\.json$/);
-  return match ? denormalizeDate(match[1]) : null;
+  const dateMatch = filename.match(/\d{4}[-_]\d{2}[-_]\d{2}/);
+  return dateMatch ? denormalizeDate(dateMatch[0]) : null;
 }
