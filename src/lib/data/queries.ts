@@ -38,8 +38,13 @@ export async function getContributorRecentPRs(username: string, limit = 5) {
 
   if (!summary) return [];
 
-  const prs = JSON.parse(summary.pullRequests);
-  return prs.slice(0, limit);
+  try {
+    const prs = JSON.parse(summary.pullRequests);
+    return prs.slice(0, limit);
+  } catch (error) {
+    console.error("Failed to parse pull requests:", error);
+    return [];
+  }
 }
 
 export async function getContributorRecentCommits(
@@ -57,8 +62,13 @@ export async function getContributorRecentCommits(
 
   if (!summary) return [];
 
-  const commits = JSON.parse(summary.commits);
-  return commits.slice(0, limit);
+  try {
+    const commits = JSON.parse(summary.commits);
+    return commits.slice(0, limit);
+  } catch (error) {
+    console.error("Failed to parse commits:", error);
+    return [];
+  }
 }
 
 export async function getContributorStats(username: string) {
