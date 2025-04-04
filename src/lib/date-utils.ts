@@ -54,3 +54,42 @@ export function extractDateFromFilename(filename: string): string | null {
   const dateMatch = filename.match(/\d{4}[-_]\d{2}[-_]\d{2}/);
   return dateMatch ? denormalizeDate(dateMatch[0]) : null;
 }
+
+/**
+ * Converts a date to YYYY-MM-DD format string
+ * @param date - Date object, timestamp, or date string that can be parsed by new Date()
+ * @returns string in YYYY-MM-DD format
+ */
+export function toDateString(date: string | number | Date): string {
+  return new Date(date).toISOString().split("T")[0];
+}
+
+export type IntervalType = "day" | "week" | "month";
+
+export interface TimeInterval {
+  intervalStart: Date;
+  intervalEnd: Date;
+  intervalType: IntervalType;
+}
+
+/**
+ * Generates a formatted name for a time interval
+ * @param interval - The time interval object
+ * @returns Formatted name for the interval
+ */
+export function generateIntervalName(interval: TimeInterval): string {
+  switch (interval.intervalType) {
+    case "day":
+      return toDateString(interval.intervalStart);
+    case "week":
+      return toDateString(interval.intervalStart);
+    case "month":
+      const date = interval.intervalStart;
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+        2,
+        "0"
+      )}`;
+    default:
+      throw new Error(`Invalid interval type: ${interval.intervalType}`);
+  }
+}

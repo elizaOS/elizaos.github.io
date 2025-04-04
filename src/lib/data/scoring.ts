@@ -1,329 +1,278 @@
+import { ScoringConfig } from "./pipelineConfig";
+import { groupBy } from "../arrayHelpers";
+import { toDateString } from "../date-utils";
 import {
-  ContributorData,
-  PullRequestSchema,
-  CommitSchema,
-  PullRequestReviewSchema,
-  IssueSchema,
-  CommentSchema,
-} from "@/lib/data/types";
-import type { z } from "zod";
-import fuzzysort from "fuzzysort";
+  prComments,
+  prReviews,
+  rawIssues,
+  rawPullRequests,
+  rawPullRequestFiles,
+} from "./schema";
+import {
+  getContributorPRs,
+  getContributorIssueMetrics,
+  getContributorReviewMetrics,
+  getContributorCommentMetrics,
+  QueryParams,
+  getContributorPRMetrics,
+} from "./queries";
 
-/*
-Test implementation of scoring logic in typescript.
-*/
-
-export interface ScoringConfig {
-  // PR scoring weights
-  baseMergedPRPoints: number;
-  prReviewPoints: number;
-  prApprovedReviewPoints: number;
-  prCommentPoints: number;
-
-  // Impact multipliers
-  coreFileMultiplier: number; // Changes to core functionality
-  testFileMultiplier: number; // Test coverage improvements
-  docsFileMultiplier: number; // Documentation improvements
-  securityFixMultiplier: number; // Security-related changes
-  performanceFixMultiplier: number; // Performance improvements
-  accessibilityFixMultiplier: number; // Accessibility improvements
-  bugFixMultiplier: number; // Bug fixes
-
-  // Review quality weights
-  inDepthReviewBonus: number; // Detailed code reviews
-  suggestionsBonus: number; // Helpful suggestions
-  mentorshipBonus: number; // Helping new contributors
-
-  // Issue scoring weights
-  baseEngagedIssuePoints: number;
-  issueCommentPoints: number;
-  issueReferenceBonus: number; // Issue spawns multiple PRs
-
-  // Commit scoring weights
-  baseCommitPoints: number;
-
-  // Review scoring weights
-  reviewerPoints: number;
-
-  // Volume scoring weights
-  volumeCommitPoints: number;
-  volumePRPoints: number;
-  volumeIssuePoints: number;
-  volumeCommentPoints: number;
+export interface ScoreResult {
+  totalScore: number;
+  prScore: number;
+  issueScore: number;
+  reviewScore: number;
+  commentScore: number;
+  metrics: {
+    pullRequests: {
+      total: number;
+      merged: number;
+      open: number;
+      closed: number;
+    };
+    issues: {
+      total: number;
+      open: number;
+      closed: number;
+    };
+    reviews: {
+      total: number;
+      approved: number;
+      changesRequested: number;
+      commented: number;
+    };
+    comments: {
+      pullRequests: number;
+      issues: number;
+    };
+    codeChanges: {
+      additions: number;
+      deletions: number;
+      files: number;
+    };
+  };
 }
 
-export const defaultScoringConfig: ScoringConfig = {
-  // PR scoring weights
-  baseMergedPRPoints: 7,
-  prReviewPoints: 3,
-  prApprovedReviewPoints: 2,
-  prCommentPoints: 0.5,
-
-  // Impact multipliers
-  coreFileMultiplier: 2.0,
-  testFileMultiplier: 1.5,
-  docsFileMultiplier: 1.5,
-  securityFixMultiplier: 3.0,
-  performanceFixMultiplier: 2.0,
-  accessibilityFixMultiplier: 1.5,
-  bugFixMultiplier: 1.5,
-
-  // Review quality weights
-  inDepthReviewBonus: 5,
-  suggestionsBonus: 3,
-  mentorshipBonus: 5,
-
-  // Issue scoring weights
-  baseEngagedIssuePoints: 5,
-  issueCommentPoints: 0.5,
-  issueReferenceBonus: 5,
-
-  // Commit scoring weights
-  baseCommitPoints: 1,
-
-  // Review scoring weights
-  reviewerPoints: 5,
-
-  // Volume scoring weights
-  volumeCommitPoints: 1,
-  volumePRPoints: 2,
-  volumeIssuePoints: 1,
-  volumeCommentPoints: 0.5,
-};
-
-type PR = z.infer<typeof PullRequestSchema>;
-type Commit = z.infer<typeof CommitSchema>;
-type Review = z.infer<typeof PullRequestReviewSchema>;
-type Issue = z.infer<typeof IssueSchema>;
-type IssueComment = z.infer<typeof CommentSchema>;
-
-const hasEngagement = (issue: Issue): boolean => {
-  const hasComments = (issue.comments?.length ?? 0) > 0;
-  const hasReactions =
-    issue.comments?.some(
-      (comment: IssueComment) => (comment.reactions?.length ?? 0) > 0
-    ) ?? false;
-  return hasComments || hasReactions;
-};
-
-// Impact indicators with common variations and typos
-const impactIndicators = {
-  security: ["security", "secure", "vulnerability", "vuln", "cve", "exploit"],
-  performance: [
-    "performance",
-    "optimize",
-    "optimization",
-    "speed",
-    "fast",
-    "slow",
-    "perf",
-  ],
-  accessibility: ["accessibility", "a11y", "aria", "wcag", "screen reader"],
-  bugfix: ["fix", "bug", "issue", "problem", "error", "crash", "exception"],
-} as const;
-
-const fuzzyMatch = (text: string, patterns: readonly string[]): boolean => {
-  // Prepare text for fuzzy search
-  const target = text.toLowerCase();
-
-  // Try to match any of the patterns
-  return patterns.some((pattern) => {
-    const result = fuzzysort.single(pattern, target);
-    // Check if we got a match and if it's a good match (score > -5000)
-    // fuzzysort scores range from 0 (perfect) to about -10000 (no match)
-    return result !== null && result.score > -5000;
-  });
-};
-
-const calculateImpactMultiplier = (pr: PR, config: ScoringConfig): number => {
-  let multiplier = 1.0;
-
-  // Check file types affected
-  const paths = pr.files?.map((f) => f.path) ?? [];
-  const hasCore = paths.some(
-    (f) => f.includes("src/core") || f.includes("src/lib")
-  );
-  const hasTests = paths.some(
-    (f) => f.includes("test") || f.includes(".spec.") || f.includes(".test.")
-  );
-  const hasDocs = paths.some(
-    (f) => f.includes("docs") || f.includes("README") || f.includes(".md")
-  );
-
-  // Apply multipliers
-  if (hasCore) multiplier *= config.coreFileMultiplier;
-  if (hasTests) multiplier *= config.testFileMultiplier;
-  if (hasDocs) multiplier *= config.docsFileMultiplier;
-
-  // Check only PR title for impact indicators with fuzzy matching
-  const title = pr.title ?? "";
-
-  if (fuzzyMatch(title, impactIndicators.security)) {
-    multiplier *= config.securityFixMultiplier;
-  }
-  if (fuzzyMatch(title, impactIndicators.performance)) {
-    multiplier *= config.performanceFixMultiplier;
-  }
-  if (fuzzyMatch(title, impactIndicators.accessibility)) {
-    multiplier *= config.accessibilityFixMultiplier;
-  }
-  if (fuzzyMatch(title, impactIndicators.bugfix)) {
-    multiplier *= config.bugFixMultiplier;
-  }
-
-  return multiplier;
-};
-
-const calculatePRPoints = (pr: PR, config: ScoringConfig): number => {
-  let points = 0;
-
-  if (pr.merged) {
-    // Base points for merged PR
-    points += config.baseMergedPRPoints;
-
-    // Points for reviews
-    points += (pr.reviews?.length ?? 0) * config.prReviewPoints;
-
-    // Extra points for approved reviews
-    const approvedReviews =
-      pr.reviews?.filter((r) => r.state === "APPROVED").length ?? 0;
-    points += approvedReviews * config.prApprovedReviewPoints;
-
-    // Apply impact multiplier
-    points *= calculateImpactMultiplier(pr, config);
-  }
-
-  // Points for review comments
-  if (pr.comments?.length) {
-    points += pr.comments.length * config.prCommentPoints;
-  }
-
-  return points;
-};
-
-const calculateReviewQuality = (
-  review: Review,
-  pr: PR,
-  config: ScoringConfig
-): number => {
-  let points = 0;
-
-  // Check for in-depth review
-  if (review.body && review.body.length > 200) {
-    points += config.inDepthReviewBonus;
-  }
-
-  // Check for helpful suggestions
-  if (review.body?.toLowerCase().includes("suggestion:")) {
-    points += config.suggestionsBonus;
-  }
-
-  // Check for mentorship (helping new contributors)
-  const authorContributions =
-    (pr as { author_contributions_count?: number })
-      .author_contributions_count ?? 0;
-  const isNewContributor = authorContributions <= 3;
-  if (isNewContributor && review.body && review.body.length > 100) {
-    points += config.mentorshipBonus;
-  }
-
-  return points;
-};
-
-const calculateIssuePoints = (issue: Issue, config: ScoringConfig): number => {
-  let points = 0;
-
-  if (hasEngagement(issue)) {
-    // Base points for engaged issues
-    points += config.baseEngagedIssuePoints;
-
-    // Points for comments
-    const commentCount = issue.comments?.length ?? 0;
-    points += commentCount * config.issueCommentPoints;
-
-    // Bonus for issues that spawn multiple PRs
-    const relatedPRs =
-      (issue as { related_prs?: PR[] }).related_prs?.length ?? 0;
-    if (relatedPRs > 0) {
-      points += config.issueReferenceBonus * relatedPRs;
-    }
-  }
-
-  return points;
-};
-
-const calculateCommitPoints = (
-  commit: Commit,
-  config: ScoringConfig
-): number => {
-  const points = config.baseCommitPoints;
-
-  // Add impact multiplier for commits
-  const multiplier = calculateImpactMultiplier(
-    {
-      number: 0, // Placeholder
-      title: commit.message ?? "",
-      state: "closed",
-      merged: true,
-      created_at: commit.created_at,
-      updated_at: commit.created_at,
-      body: commit.message ?? "",
-      files: [
-        {
-          path: commit.sha,
-          additions: commit.additions,
-          deletions: commit.deletions,
-        },
-      ],
-      reviews: [],
-      comments: [],
-    },
-    config
-  );
-
-  return points * multiplier;
-};
-
-export const calculateScore = (
-  contributor: ContributorData,
-  config: ScoringConfig = defaultScoringConfig
+/**
+ * Calculate score for pull requests
+ */
+export const calculatePRScore = (
+  prs: (typeof rawPullRequests.$inferSelect)[],
+  scoringConfig: ScoringConfig
 ): number => {
   let score = 0;
+  const { pullRequest } = scoringConfig;
 
-  // Calculate PR points
-  for (const pr of contributor.activity.code.pull_requests ?? []) {
-    score += calculatePRPoints(pr, config);
-  }
+  // Group PRs by date for applying daily caps
+  const prsByDate = groupBy(prs, (pr) => {
+    const date = new Date(pr.createdAt);
+    return toDateString(date);
+  });
 
-  // Calculate issue points
-  for (const issue of contributor.activity.issues?.opened ?? []) {
-    score += calculateIssuePoints(issue, config);
-  }
+  for (const [_, datePRs] of Object.entries(prsByDate)) {
+    // Apply daily cap
+    const dayPRs = datePRs.slice(0, pullRequest.maxPerDay || 10);
 
-  // Calculate commit points
-  for (const commit of contributor.activity.code.commits ?? []) {
-    score += calculateCommitPoints(commit, config);
-  }
+    for (const pr of dayPRs) {
+      // Calculate PR base score
+      let prPointsBase = pullRequest.base;
+      if (pr.merged) {
+        prPointsBase += pullRequest.merged;
+      }
 
-  // Points for being reviewer with quality metrics
-  for (const pr of contributor.activity.code.pull_requests ?? []) {
-    const reviews =
-      pr.reviews?.filter((r) => r.author === contributor.contributor) ?? [];
-    for (const review of reviews) {
-      score +=
-        config.reviewerPoints + calculateReviewQuality(review, pr, config);
+      // Add points for description quality (if available)
+      const descriptionLength = pr.body?.length || 0;
+      const descriptionPoints = Math.min(
+        descriptionLength * pullRequest.descriptionMultiplier,
+        10 // Cap description points
+      );
+
+      // Calculate PR complexity (based on file count and changes)
+      const complexity =
+        Math.min(pr.changedFiles || 0, 10) *
+        Math.log(Math.min((pr.additions || 0) + (pr.deletions || 0), 1000) + 1);
+
+      // Apply complexity multiplier
+      const complexityScore =
+        complexity * (pullRequest.complexityMultiplier || 0.5);
+
+      // Optimal size bonus
+      let sizeBonus = 0;
+      const totalChanges = (pr.additions || 0) + (pr.deletions || 0);
+      if (totalChanges >= 100 && totalChanges <= 500) {
+        sizeBonus = pullRequest.optimalSizeBonus || 5;
+      } else if (totalChanges > 1000) {
+        sizeBonus = -5;
+      }
+
+      // Calculate final PR score
+      score += prPointsBase + descriptionPoints + complexityScore + sizeBonus;
     }
   }
 
-  // Base points for volume of activity
-  score +=
-    (contributor.activity.code.total_commits ?? 0) * config.volumeCommitPoints;
-  score += (contributor.activity.code.total_prs ?? 0) * config.volumePRPoints;
-  score +=
-    (contributor.activity.issues?.total_opened ?? 0) * config.volumeIssuePoints;
-  score +=
-    (contributor.activity.engagement?.total_comments ?? 0) *
-    config.volumeCommentPoints;
-
-  return Math.round(score);
+  return score;
 };
+
+/**
+ * Calculate score for issues
+ */
+export const calculateIssueScore = (
+  issueMetrics: {
+    total: number;
+    open: number;
+    closed: number;
+    commentCount: number;
+  },
+  scoringConfig: ScoringConfig
+): number => {
+  let score = 0;
+  const { issue } = scoringConfig;
+  const basePoints = issue.base;
+
+  // Count metrics from the issues array
+  const total = issueMetrics.total;
+  const closed = issueMetrics.closed;
+  const commentCount = issueMetrics.commentCount;
+
+  // Base score for each issue
+  score += total * basePoints;
+
+  // Bonus for closed issues
+  score += closed * (issue.closedBonus || 5);
+
+  // Points for comments
+  const effectiveComments = Math.min(
+    commentCount,
+    scoringConfig.comment.maxPerThread || 3
+  );
+  score += effectiveComments * issue.perComment;
+
+  return score;
+};
+
+/**
+ * Calculate score for reviews
+ */
+export const calculateReviewScore = (
+  reviewMetrics: {
+    total: number;
+    approved: number;
+    changesRequested: number;
+    commented: number;
+  },
+  scoringConfig: ScoringConfig
+): number => {
+  let score = 0;
+  const { review } = scoringConfig;
+  const basePoints = review.base;
+
+  // Count metrics from the reviews array
+  const approved = reviewMetrics.approved;
+  const changesRequested = reviewMetrics.changesRequested;
+  const commented = reviewMetrics.commented;
+
+  // Score for each review type
+  score += approved * (basePoints + review.approved);
+  score += changesRequested * (basePoints + review.changesRequested);
+  score += commented * (basePoints + review.commented);
+
+  return score;
+};
+
+/**
+ * Calculate score for comments
+ */
+export const calculateCommentScore = (
+  commentMetrics: {
+    pullRequests: number;
+    issues: number;
+  },
+  scoringConfig: ScoringConfig
+): number => {
+  let score = 0;
+  const { comment } = scoringConfig;
+  const basePoints = comment.base;
+  const maxPerThread = comment.maxPerThread || 3;
+  const diminishingReturns = comment.diminishingReturns || 0.7;
+
+  // Calculate total threads (PRs with comments + issues with comments)
+  const pullRequestsWithComments = commentMetrics.pullRequests;
+  const issuesWithComments = commentMetrics.issues;
+
+  // Calculate score with diminishing returns
+  let factor = 1.0;
+  const totalComments = Math.min(
+    pullRequestsWithComments + issuesWithComments,
+    maxPerThread
+  );
+
+  for (let i = 0; i < totalComments; i++) {
+    score += basePoints * factor;
+    factor *= diminishingReturns;
+  }
+
+  return score;
+};
+
+/**
+ * Calculate overall contributor score directly using query functions
+ */
+export async function calculateContributorScore(
+  username: string,
+  queryParams: QueryParams,
+  scoringConfig: ScoringConfig
+): Promise<ScoreResult> {
+  // Get contributor PRs
+  const contributorPRs = await getContributorPRs(username, queryParams);
+
+  const contributorPRMetrics = await getContributorPRMetrics(
+    username,
+    queryParams
+  );
+
+  // Get issue metrics
+  const issueMetrics = await getContributorIssueMetrics(username, queryParams);
+
+  // Get review metrics
+  const reviewMetrics = await getContributorReviewMetrics(
+    username,
+    queryParams
+  );
+
+  // Get comment metrics
+  const commentMetrics = await getContributorCommentMetrics(
+    username,
+    queryParams
+  );
+
+  // Calculate individual scores
+  const prScore = calculatePRScore(contributorPRs, scoringConfig);
+  const issueScore = calculateIssueScore(issueMetrics, scoringConfig);
+  const reviewScore = calculateReviewScore(reviewMetrics, scoringConfig);
+  const commentScore = calculateCommentScore(commentMetrics, scoringConfig);
+
+  // Calculate total score
+  const totalScore = prScore + issueScore + reviewScore + commentScore;
+
+  // Calculate code changes
+  const codeChanges = {
+    additions: contributorPRs.reduce((sum, pr) => sum + (pr.additions || 0), 0),
+    deletions: contributorPRs.reduce((sum, pr) => sum + (pr.deletions || 0), 0),
+    files: contributorPRs.reduce((sum, pr) => sum + (pr.changedFiles || 0), 0),
+  };
+
+  return {
+    totalScore,
+    prScore,
+    issueScore,
+    reviewScore,
+    commentScore,
+    metrics: {
+      pullRequests: contributorPRMetrics,
+      issues: issueMetrics,
+      reviews: reviewMetrics,
+      comments: commentMetrics,
+      codeChanges,
+    },
+  };
+}

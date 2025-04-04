@@ -1,131 +1,136 @@
 import { z } from "zod";
 
-export const CommitSchema = z.object({
-  sha: z.string(),
-  message: z.string().optional().default(""),
-  created_at: z.string(),
+// GitHub User Schema (matches GraphQL Author type)
+export const GithubUserSchema = z.object({
+  login: z.string(),
+  avatarUrl: z.string().nullable().optional(),
+});
+
+// GitHub Raw Data Schemas
+export const RawCommitSchema = z.object({
+  oid: z.string(),
+  message: z.string(),
+  messageHeadline: z.string().optional(),
+  committedDate: z.string(),
+  author: z.object({
+    name: z.string(),
+    email: z.string(),
+    date: z.string(),
+    user: GithubUserSchema.nullable().optional(),
+  }),
   additions: z.number().default(0),
   deletions: z.number().default(0),
-  changed_files: z.number().default(0),
+  changedFiles: z.number().default(0),
 });
 
-export const CommentSchema = z.object({
-  id: z.string().optional(),
-  author: z.string(),
-  body: z.string().nullable().optional(),
-  reactions: z.array(z.string()).optional(),
-});
-
-export const PullRequestFileSchema = z.object({
+export const RawPRFileSchema = z.object({
   path: z.string(),
   additions: z.number().default(0),
   deletions: z.number().default(0),
+  changeType: z.string().optional(),
 });
 
-export const PullRequestReviewSchema = z.object({
-  author: z.string(),
+export const RawPRReviewSchema = z.object({
+  id: z.string(),
   state: z.string(),
   body: z.string().nullable().optional(),
+  createdAt: z.string().optional(),
+  author: GithubUserSchema.nullable().optional(),
+  url: z.string().optional(),
 });
 
-export const PullRequestSchema = z.object({
-  number: z.number(),
-  title: z.string().optional().default(""),
-  state: z.string().optional().default("open"),
-  merged: z.boolean().optional().default(false),
-  created_at: z.string(),
-  updated_at: z.string().optional(),
+export const RawCommentSchema = z.object({
+  id: z.string(),
   body: z.string().nullable().optional(),
-  files: z.array(PullRequestFileSchema).optional(),
-  reviews: z.array(PullRequestReviewSchema).optional(),
-  comments: z.array(CommentSchema).optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  author: GithubUserSchema.nullable().optional(),
+  url: z.string().optional(),
 });
 
-export const IssueLabelSchema = z.object({
+export const RawLabelSchema = z.object({
+  id: z.string(),
   name: z.string(),
-  color: z.string().optional().default(""),
+  color: z.string(),
   description: z.string().nullable().optional(),
 });
 
-export const IssueSchema = z.object({
-  id: z.string().optional(),
+export const RawPullRequestSchema = z.object({
+  id: z.string(),
   number: z.number(),
-  title: z.string().optional().default(""),
+  title: z.string(),
   body: z.string().nullable().optional(),
-  state: z
-    .string()
-    .transform((s) => s.toLowerCase())
-    .optional()
-    .default("open"),
-  created_at: z.string(),
-  updated_at: z.string(),
-  author: z
+  state: z.string(),
+  merged: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  closedAt: z.string().nullable().optional(),
+  mergedAt: z.string().nullable().optional(),
+  headRefOid: z.string(),
+  baseRefOid: z.string(),
+  additions: z.number().default(0),
+  deletions: z.number().default(0),
+  changedFiles: z.number().default(0),
+  author: GithubUserSchema.nullable().optional(),
+  labels: z
     .object({
-      login: z.string(),
-      avatarUrl: z.string().nullable().optional(),
+      nodes: z.array(RawLabelSchema),
     })
     .optional(),
-  labels: z.array(IssueLabelSchema).optional(),
-  comments: z.array(CommentSchema).optional(),
+  commits: z
+    .object({
+      totalCount: z.number(),
+      nodes: z.array(
+        z.object({
+          commit: RawCommitSchema,
+        })
+      ),
+    })
+    .optional(),
+  reviews: z
+    .object({
+      nodes: z.array(RawPRReviewSchema),
+    })
+    .optional(),
+  comments: z
+    .object({
+      nodes: z.array(RawCommentSchema),
+    })
+    .optional(),
+  files: z
+    .object({
+      nodes: z.array(RawPRFileSchema),
+    })
+    .optional(),
 });
 
-export const ContributorActivityCodeSchema = z.object({
-  total_commits: z.number().default(0),
-  total_prs: z.number().default(0),
-  commits: z.array(CommitSchema).optional(),
-  pull_requests: z.array(PullRequestSchema).optional(),
+export const RawIssueSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  title: z.string(),
+  body: z.string().nullable().optional(),
+  state: z.string(),
+  locked: z.boolean().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  closedAt: z.string().nullable().optional(),
+  author: GithubUserSchema.nullable().optional(),
+  labels: z
+    .object({
+      nodes: z.array(RawLabelSchema),
+    })
+    .optional(),
+  comments: z
+    .object({
+      totalCount: z.number(),
+      nodes: z.array(RawCommentSchema),
+    })
+    .optional(),
 });
 
-export const ContributorActivityIssuesSchema = z.object({
-  total_opened: z.number().default(0),
-  opened: z.array(IssueSchema).optional(),
-});
+export type GithubUser = z.infer<typeof GithubUserSchema>;
 
-export const ContributorActivityEngagementSchema = z.object({
-  total_comments: z.number().default(0),
-  total_reviews: z.number().default(0),
-  comments: z.array(CommentSchema).optional(),
-  reviews: z.array(PullRequestReviewSchema).optional(),
-});
-
-export const ContributorDataSchema = z.object({
-  contributor: z.string(),
-  score: z.number().default(0),
-  summary: z.string().optional().default(""),
-  avatar_url: z.string().nullable().optional(),
-  activity: z.object({
-    code: ContributorActivityCodeSchema,
-    issues: ContributorActivityIssuesSchema.optional(),
-    engagement: ContributorActivityEngagementSchema.optional(),
-  }),
-});
-
-export const TagLevelSchema = z.object({
-  level: z.number().default(0),
-  progress: z.number().default(0),
-  points: z.number().default(0),
-  points_next_level: z.number().default(0),
-});
-
-export const AnalysisStatsSchema = z.object({
-  total_prs: z.number().default(0),
-  merged_prs: z.number().default(0),
-  closed_prs: z.number().default(0),
-  total_files: z.number().default(0),
-  total_additions: z.number().default(0),
-  total_deletions: z.number().default(0),
-  files_by_type: z.record(z.string(), z.number()).default({}),
-  prs_by_month: z.record(z.string(), z.number()).default({}),
-});
-
-export const AnalysisDataSchema = z.object({
-  username: z.string(),
-  tag_scores: z.record(z.string(), z.number()).default({}),
-  tag_levels: z.record(z.string(), TagLevelSchema).default({}),
-  tags: z.array(z.string()).default([]),
-  stats: AnalysisStatsSchema,
-  focus_areas: z.array(z.tuple([z.string(), z.number()])).default([]),
-});
-
-export type ContributorData = z.infer<typeof ContributorDataSchema>;
-export type AnalysisData = z.infer<typeof AnalysisDataSchema>;
+export interface DateRange {
+  startDate: string;
+  endDate?: string;
+}
