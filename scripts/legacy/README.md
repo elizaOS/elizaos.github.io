@@ -6,95 +6,76 @@ This directory contains the original Python implementation of the Eliza Leaderbo
 
 The Eliza Leaderboard was designed to track GitHub contributions, generate analytics, and maintain a contributor leaderboard. This legacy Python implementation served as the foundation for the current TypeScript-based system.
 
-## Migration Status
+### Data Collection
 
-All functionality from these Python scripts has been migrated to TypeScript in the following locations:
+- `scripts/legacy/fetch_github.sh`: Fetches raw GitHub data (PRs, issues, commits) using GitHub's GraphQL API
+- `scripts/legacy/combine_raw.py`: Combines raw GitHub data into a unified contributor activity format
 
-- Main pipeline: `src/scripts/analyze-pipeline.ts`
-- Site generation: `src/scripts/generate_site.ts`
+### Analysis & Processing
 
-## Script Descriptions
-
-### Core Analytics Scripts
-
-- **`analyze_contributors.py`**: Performs detailed analysis of contributor data, including expertise tagging, focus area identification, and level calculation.
-- **`calculate_scores.py`**: Calculates contributor scores based on activity metrics (PRs, issues, commits, reviews).
-- **`combine_raw.py`**: Combines raw data from various GitHub sources (PRs, issues, commits) into a unified contributor format.
-- **`merge_contributors.py`**: Merges contributor data from multiple time periods while preserving history.
-- **`merge_contributors_xp.py`**: Merges contributor experience data with existing contributor information.
+- `scripts/legacy/calculate_scores.py`: Calculates contributor scores based on various metrics (PRs, commits, engagement)
+- `scripts/legacy/analyze_contributors.py`: Performs detailed analysis of contributor activity, generates tags and insights
+- `scripts/legacy/merge_contributors.py`: Merges contributor data across multiple time periods
+- `scripts/legacy/merge_contributors_xp.py`: Merges contributor experience/level data with main contributor data
 
 ### Summary Generation
 
-- **`summarize.py`**: Generates natural language summaries of contributor activity using AI models.
-- **`summarize_daily.py`**: Creates daily project summaries with metrics and top contributor highlights.
-- **`aggregate_summaries.py`**: Aggregates daily summaries into weekly and monthly views.
-- **`aggregate_temporal.py`**: Groups contributor data by time periods (daily, weekly, monthly).
-- **`update_historical_summaries.py`**: Updates historical summary data with improved AI-generated summaries.
+- `scripts/legacy/summarize.py`: Generates human-readable summaries of contributor activity
+- `scripts/legacy/summarize_daily.py`: Creates daily activity summaries with metrics and insights
+- `scripts/legacy/aggregate_summaries.py`: Aggregates summaries across time periods
+- `scripts/legacy/aggregate_temporal.py`: Handles temporal aggregation of contributor data
 
-### Shell Scripts
+### History Management
 
-- **`fetch_github.sh`**: Fetches data from GitHub API using GraphQL queries for PRs, issues, and commits.
-- **`generate_history_summaries.sh`**: Generates historical summaries and social media thread content.
-- **`manage_thread_history.sh`**: Manages versioning and backup of thread content.
+- `scripts/legacy/manage_thread_history.sh`: Manages versioning and backup of discussion threads
+- `scripts/legacy/update_historical_summaries.py`: Updates historical summary data
+- `scripts/legacy/generate_history_summaries.sh`: Generates historical summary reports
 
-### Supporting Files
+### Site Generation
 
-- **`requirements.txt`**: Python dependencies for the legacy scripts.
-- **`README.md`**: Original documentation for the legacy implementation.
+- `scripts/generate_site.js`: Generates static contributor profile pages
+- `scripts/components/ContributorProfile.js`: React component for contributor profiles
 
-## Usage Notes
+## GitHub Actions Workflow
 
-These scripts are provided for reference only and should not be used in production. The TypeScript implementation (`scripts/analyze-pipeline.ts`) is the current supported version.
+The system uses `weekly-summaries.yml` for automated data processing:
 
-### Original Workflow
+### Daily Workflow
 
-For historical reference, the legacy workflow followed these steps:
-
-1. Fetch GitHub data:
-   ```bash
-   ./scripts/legacy/fetch_github.sh owner repo --type prs --days 7
+1. Runs at 5:30 PM EST daily
+2. Creates directories:
    ```
-
-2. Combine raw data:
-   ```bash
-   python scripts/legacy/combine_raw.py -p data/prs.json -i data/issues.json -o data/combined.json
+   data/daily/
+   data/daily/history/
    ```
+3. Fetches data:
+   - PRs, issues, commits for last 24 hours
+   - Saves to both current and historical locations
+4. Processes data:
+   - Combines raw data
+   - Calculates scores
+   - Generates summaries
+   - Updates historical merge data
 
-3. Calculate scores:
-   ```bash
-   python scripts/legacy/calculate_scores.py data/combined.json data/scored.json
-   ```
+### Weekly Workflow (Fridays)
 
-4. Generate summaries:
-   ```bash
-   python scripts/legacy/summarize.py data/scored.json data/contributors.json --model openai
-   ```
+1. Runs at 6:00 PM EST on Fridays
+2. Combines last 7 days of daily data
+3. Generates weekly summaries
+4. Creates and manages weekly discussion threads
+5. Aggregates weekly analysis
 
-5. Generate weekly thread content:
-   ```bash
-   bash scripts/legacy/generate_history_summaries.sh
-   ```
+### Monthly Workflow (4th of month)
 
-## Implementation Details
+1. Runs at 6:30 PM EST on the 4th
+2. Combines last 31 days of daily data
+3. Generates monthly summaries
+4. Aggregates monthly analysis
 
-### Key Features
+## Data Storage
 
-- Language Model Integration: Uses OpenAI and Ollama for summary generation
-- GraphQL Queries: Efficient GitHub API access via GraphQL
-- Contributor Tagging: Automatically tags contributors with areas of expertise
-- Activity Scoring: Advanced algorithm for scoring GitHub contributions
-- Summary Generation: AI-powered summaries of contributions
-
-### Architecture
-
-The legacy system follows a pipeline architecture where data flows through several processing stages:
-
-1. Data Collection (fetch_github.sh)
-2. Data Merging (combine_raw.py)
-3. Analytics Processing (calculate_scores.py, analyze_contributors.py)
-4. Summary Generation (summarize.py, summarize_daily.py)
-5. Temporal Aggregation (aggregate_temporal.py, aggregate_summaries.py)
-
-## Note
-
-These scripts are deprecated and should not be used in production. Please use the TypeScript implementation instead.
+- `data/daily/`: Current day's data (legacy)
+- `data/daily/history/`: Historical daily data (legacy)
+- `data/weekly/`: Weekly aggregated data (legacy)
+- `data/monthly/`: Monthly aggregated data (legacy)
+- `data/db.sqlite`: SQLite database (new TypeScript pipeline)

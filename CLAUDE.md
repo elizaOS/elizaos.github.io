@@ -54,5 +54,5 @@ GitHub Contributor Analytics Generator for tracking, analyzing, and visualizing 
 - `src/lib/data/` - Database schema and data processing logic
 - `src/lib/` - Utility and helper functions
 - `src/components/` - React components for the web interface
-- `scripts/` - Python scripts and TypeScript pipeline code
+- `cli/` - TypeScript pipeline CLI code
 - `drizzle/` - Database migration files
