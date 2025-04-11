@@ -1,0 +1,220 @@
+Technical Architecture
+System Components:
+SQLite database managed via Drizzle ORM, configured in src/lib/data/db.ts.
+
+Next.js App Router for server-side rendering and static generation.
+
+Frontend components in src/components/ and pages in src/app/.
+
+Data Models:
+Defined in src/lib/data/schema.ts: users, raw_pull_requests, raw_issues, raw_commits, user_summaries, user_tag_scores, repo_summaries, etc.
+
+APIs and Integrations:
+No external APIs; all data is fetched from the local SQLite database.
+
+Infrastructure Requirements:
+SQLite database file (data/db.sqlite) must be populated before building the site.
+
+Development Roadmap
+Phase 1: Query Implementation
+Objective: Create new SQLite queries tailored for the frontend, colocated with their respective pages/components, and reuse existing pipeline queries where feasible.
+Leaderboard Queries
+Task: Create src/app/leaderboard/queries.ts
+Location: New file in src/app/
+
+Changes: Add query function getLeaderboard(period: "all" | "monthly" | "weekly")
+Fetch users with aggregated scores from users and user_tag_scores.
+
+Filter by time period using date conditions on raw_pull_requests.createdAt or similar.
+
+Return type: Promise<{ username: string; score: number }[]>
+
+Reasoning: Leaderboard needs ranked users by score, which can be computed from tag scores or activity metrics.
+
+Dependencies: Import db from src/lib/data/db.ts, schema from src/lib/data/schema.ts.
+
+Reuse: Adapt logic from lib/data/pipelines/contributors/queries.ts (e.g., getContributorPRMetrics) for score calculation if applicable.
+
+Impact: Replaces getUsers calls in src/app/page.tsx.
+
+Daily Summary Queries
+Task: Create src/app/daily/[[...date]]/queries.ts
+Location: New file in src/app/daily/[[...date]]/
+
+Changes: Add query function getDailyMetrics(date: string)
+Fetch daily metrics (e.g., PRs merged, issues opened, contributors) from raw_pull_requests, raw_issues, etc.
+
+Use date range filtering (e.g., date + "T00:00:00Z" to date + "T23:59:59Z").
+
+Return type: Promise<{ prsMerged: number; issuesOpened: number; contributors: number; ... }>
+
+Reasoning: Daily page needs repo stats for a specific day, similar to getRepositoryMetrics.
+
+Dependencies: Import db and schema; reuse date range helpers if extracted.
+
+Reuse: Leverage lib/data/pipelines/export/queries.ts:getRepositoryMetrics logic, tailoring it for daily granularity.
+
+Impact: Replaces getDailySummaryData in src/app/daily/[[...date]]/utils.ts.
+
+User Profile Queries
+Task: Create src/app/profile/[username]/queries.ts
+Location: New file in src/app/profile/[username]/
+
+Changes: Add query function getUserProfile(username: string)
+Fetch:
+User details from users.
+
+Monthly/weekly summaries from user_summaries.
+
+Tag scores from user_tag_scores.
+
+Recent PRs (open first) from raw_pull_requests.
+
+Overall stats (PRs merged/closed, issues, lines added/removed, files touched) from raw_pull_requests, raw_issues, raw_commits.
+
+Return type: Promise<{ user: User; summaries: { monthly: Summary; weekly: Summary }; tagScores: TagScore[]; recentPRs: PR[]; stats: Stats }>
+
+Reasoning: User profile needs comprehensive data, some of which is precomputed in user_summaries or derivable from raw tables.
+
+Dependencies: Import db and schema.
+
+Reuse: Use lib/data/pipelines/contributors/queries.ts:getContributorPRs and getContributorPRMetrics for PRs and stats; adapt for summaries and tags.
+
+Impact: Replaces getUserById and related calls in src/app/profile/[username]/page.tsx.
+
+Phase 2: Page Updates
+Objective: Update pages to fetch data from SQLite using new queries and ensure static generation works.
+Leaderboard Page
+Task: Update src/app/page.tsx
+Location: Home function
+
+Changes:
+Replace getUsers calls with getLeaderboard for each period (all, monthly, weekly).
+
+Update tabs array to use query results directly.
+
+Reasoning: Home page is the leaderboard; it should fetch data at build time.
+
+Dependencies: Import getLeaderboard from ./leaderboard/queries.ts.
+
+Impact: No dynamic routes, so static generation is straightforward.
+
+Daily Summary Page
+Task: Update src/app/daily/[[...date]]/page.tsx
+Location: generateStaticParams and DailySummaryPage
+
+Changes:
+Update generateStaticParams to fetch all dates from raw_pull_requests.mergedAt or repo_summaries.
+
+Replace getDailySummaryData with getDailyMetrics in DailySummaryPage.
+
+Adjust navigation logic to derive prevDate/nextDate from queried dates.
+
+Reasoning: Dynamic route requires static params; page needs daily metrics.
+
+Dependencies: Import getDailyMetrics from ./queries.ts.
+
+Impact: Simplifies utils.ts by removing JSON-specific logic.
+
+User Profile Page
+Task: Update src/app/profile/[username]/page.tsx
+Location: generateStaticParams, generateMetadata, and ProfilePage
+
+Changes:
+Update generateStaticParams to fetch usernames from users table.
+
+Replace getUserById and getMonthlyAnalysis with getUserProfile in ProfilePage and metadata.
+
+Pass query result directly to UserProfile component.
+
+Reasoning: Dynamic route needs static usernames; profile data should come from one query.
+
+Dependencies: Import getUserProfile from ./queries.ts.
+
+Impact: Consolidates data fetching, removes JSON dependencies.
+
+Phase 3: Helper Functions and Reusability
+Objective: Extract common logic to avoid duplication across frontend and pipeline queries.
+Extract Common Query Logic
+Task: Create src/lib/data/helpers.ts
+Location: New file in src/lib/data/
+
+Changes: Add helper function buildDateRangeCondition(column: any, startDate?: string, endDate?: string)
+Logic: Construct Drizzle ORM conditions for date ranges (e.g., gte, lte).
+
+Return type: SQL | undefined
+
+Reasoning: Date filtering is repeated across queries (e.g., daily metrics, PRs).
+
+Impact: Used in getDailyMetrics, getUserProfile, etc.
+
+Type Updates
+Task: Update component props in src/components/
+Location: leaderboard.tsx, daily-summary-content.tsx, user-profile.tsx
+
+Changes: Adjust prop types to match new query return structures (e.g., remove JSON-specific fields).
+
+Reasoning: Ensures type safety with new data shapes.
+
+Impact: Minimal, as components are data-driven.
+
+Phase 4: Cleanup
+Objective: Remove obsolete JSON fetching code.
+Remove Old Code
+Task: Delete JSON fetching logic
+Location: src/app/daily/[[...date]]/utils.ts, src/lib/get-users.ts, src/lib/get-daily-summaries.ts, src/lib/get-monthly-analysis.ts
+
+Changes: Remove functions like getDailySummaryData, getUsers, etc., and their imports.
+
+Reasoning: New queries replace all JSON dependencies.
+
+Impact: Simplifies codebase; ensure all references are updated first.
+
+Logical Dependency Chain
+Query Implementation:
+Start with getLeaderboard (simplest, foundational for home page).
+
+Then getDailyMetrics (requires date logic, builds on schema knowledge).
+
+Finally getUserProfile (most complex, depends on understanding all tables).
+
+Page Updates:
+Update src/app/page.tsx first for a working leaderboard example.
+
+Then src/app/daily/[[...date]]/page.tsx to ensure static generation works with dynamic routes.
+
+Lastly src/app/profile/[username]/page.tsx for full profile functionality.
+
+Extract Helpers:
+Implement helpers.ts as date-related patterns emerge in queries.
+
+Cleanup:
+Remove old code once new implementation is fully functional.
+
+Risks and Mitigations
+Query Performance:
+Risk: Complex queries (e.g., user stats) may be slow without optimization.
+
+Mitigation: Use indexes (already in schema) and limit results where possible.
+
+Static Generation:
+Risk: Missing new users/dates post-build.
+
+Mitigation: Ensure database is updated before build; consider incremental static regeneration later.
+
+Data Consistency:
+Risk: Frontend expects data that’s missing in SQLite.
+
+Mitigation: Align schema with frontend needs; populate database fully before refactoring.
+
+Appendix
+Research Findings:
+Existing queries in lib/data/pipelines/**/queries.ts (e.g., getContributorPRMetrics, getRepositoryMetrics) provide reusable logic for stats and metrics.
+
+Technical Specifications:
+Use Drizzle ORM for type-safe queries.
+
+Colocate queries with pages (e.g., app/profile/[username]/queries.ts) for maintainability.
+
+Prefer server components for data fetching in Next.js App Router.
+

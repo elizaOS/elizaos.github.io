@@ -1,19 +1,20 @@
 import { Leaderboard, LeaderboardFallback } from "@/components/leaderboard";
-import { getUsers } from "@/lib/get-users";
 import { Suspense } from "react";
-import { LeaderboardPeriod, UserFocusAreaData } from "@/types/user-profile";
+import { LeaderboardPeriod } from "@/types/user-profile";
+import { getLeaderboard } from "@/app/leaderboard/queries";
 
 interface LeaderboardTab {
   id: LeaderboardPeriod;
   title: string;
-  users: UserFocusAreaData[];
+  users: Awaited<ReturnType<typeof getLeaderboard>>;
 }
 
 export default async function Home() {
+  // Fetch leaderboard data for all time periods using the new DB-based query
   const [allTimeUsers, monthlyUsers, weeklyUsers] = await Promise.all([
-    getUsers("all"),
-    getUsers("monthly"),
-    getUsers("weekly"),
+    getLeaderboard("all"),
+    getLeaderboard("monthly"),
+    getLeaderboard("weekly"),
   ]);
 
   const tabs: LeaderboardTab[] = [
@@ -23,7 +24,7 @@ export default async function Home() {
   ];
 
   return (
-    <main className="container mx-auto p-4 space-y-8">
+    <main className="container mx-auto space-y-8 p-4">
       <Suspense fallback={<LeaderboardFallback />}>
         <Leaderboard tabs={tabs} />
       </Suspense>
