@@ -11,21 +11,14 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 // User table - stores basic user information
-export const users = sqliteTable(
-  "users",
-  {
-    username: text("username").primaryKey(),
-    avatarUrl: text("avatar_url").default(""),
-    isBot: integer("is_bot").notNull().default(0),
-    lastUpdated: text("last_updated")
-      .notNull()
-      .default(sql`CURRENT_TIMESTAMP`),
-    score: real("score").notNull().default(0),
-  },
-  (table) => [
-    index("idx_users_score").on(table.score), // For sorting by score
-  ],
-);
+export const users = sqliteTable("users", {
+  username: text("username").primaryKey(),
+  avatarUrl: text("avatar_url").default(""),
+  isBot: integer("is_bot").notNull().default(0),
+  lastUpdated: text("last_updated")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
 
 // Repositories being tracked
 export const repositories = sqliteTable("repositories", {
@@ -408,6 +401,44 @@ export const issueLabels = sqliteTable(
   ],
 );
 
+// User daily scores for leaderboard and time-based analytics
+export const userDailyScores = sqliteTable(
+  "user_daily_scores",
+  {
+    id: text("id").primaryKey(), // username_date
+    username: text("username")
+      .notNull()
+      .references(() => users.username, { onDelete: "cascade" }),
+    date: text("date").notNull(), // YYYY-MM-DD format
+    timestamp: text("timestamp")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    score: real("score").notNull().default(0),
+    prScore: real("pr_score").default(0),
+    issueScore: real("issue_score").default(0),
+    reviewScore: real("review_score").default(0),
+    commentScore: real("comment_score").default(0),
+    metrics: text("metrics").notNull().default("{}"), // JSON string of all metrics
+    category: text("category").default("overall"),
+    lastUpdated: text("last_updated")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_user_daily_scores_username").on(table.username),
+    index("idx_user_daily_scores_date").on(table.date),
+    index("idx_user_daily_scores_timestamp").on(table.timestamp),
+    index("idx_user_daily_scores_category").on(table.category),
+    index("idx_user_daily_scores_score").on(table.score),
+    uniqueIndex("idx_user_daily_scores_username_date_category").on(
+      table.username,
+      table.date,
+      table.category,
+    ),
+    index("idx_user_daily_scores_username_date").on(table.username, table.date),
+  ],
+);
+
 // Now define all relations after all tables are defined
 export const usersRelations = relations(users, ({ many }) => ({
   pullRequests: many(rawPullRequests),
@@ -415,6 +446,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   commits: many(rawCommits),
   tagScores: many(userTagScores),
   dailySummaries: many(userSummaries),
+  dailyScores: many(userDailyScores),
 }));
 
 export const pullRequestRelations = relations(
@@ -562,3 +594,14 @@ export const repoSummariesRelations = relations(repoSummaries, ({ one }) => ({
     references: [repositories.repoId],
   }),
 }));
+
+// Add relations for userDailyScores
+export const userDailyScoresRelations = relations(
+  userDailyScores,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [userDailyScores.username],
+      references: [users.username],
+    }),
+  }),
+);

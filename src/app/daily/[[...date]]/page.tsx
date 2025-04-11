@@ -1,6 +1,7 @@
 import { DailySummaryContent } from "@/components/daily-summary-content";
-import { DateNavigation } from "./components";
+import { DateNavigation, DailyMetricsDisplay } from "./components";
 import { getDailySummaryData, fetchDateData } from "./utils";
+import { getDailyMetrics } from "./queries";
 
 interface PageProps {
   params: Promise<{
@@ -21,12 +22,23 @@ export async function generateStaticParams() {
 
 export default async function DailySummaryPage({ params }: PageProps) {
   const { date } = await params;
-  const { summary, navigation } = await getDailySummaryData(date?.[0]);
+  const targetDate = date?.[0];
+  const { summary, navigation } = await getDailySummaryData(targetDate);
+
+  // Fetch daily metrics for the current date
+  const dailyMetrics = await getDailyMetrics(navigation.currentDate);
 
   return (
-    <div className="container mx-auto py-8 px-6 md:px-8">
-      <div className="max-w-4xl mx-auto">
+    <div className="container mx-auto px-6 py-8 md:px-8">
+      <div className="mx-auto max-w-4xl">
         <DateNavigation {...navigation} />
+
+        {/* Display the daily metrics */}
+        <div className="mb-8">
+          <DailyMetricsDisplay metrics={dailyMetrics} />
+        </div>
+
+        {/* Display the daily summary */}
         <DailySummaryContent data={summary} />
       </div>
     </div>

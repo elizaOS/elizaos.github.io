@@ -24,6 +24,8 @@ export interface UserFocusAreaData {
   stats: UserStats;
   focus_areas: [string, number][];
   summary: string;
+  score?: number;
+  avatarUrl?: string | null;
 }
 
 export type LeaderboardPeriod = "all" | "weekly" | "monthly";

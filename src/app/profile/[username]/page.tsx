@@ -1,5 +1,4 @@
-import { getUsers, getUserById } from "@/lib/get-users";
-import { getMonthlyAnalysis } from "@/lib/get-monthly-analysis";
+import { getUsers } from "@/lib/get-users";
 import {
   getAllDailySummaryDates,
   getDailySummary,
@@ -7,6 +6,7 @@ import {
 import UserProfile from "@/components/user-profile";
 import { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { getUserProfile } from "./queries";
 
 type ProfilePageProps = {
   params: Promise<{ username: string }>;
@@ -21,14 +21,14 @@ export async function generateStaticParams() {
 
   // Get all daily summaries
   const dailySummaries = await Promise.all(
-    allDates.map((date) => getDailySummary(date))
+    allDates.map((date) => getDailySummary(date)),
   );
 
   // Extract usernames from daily summaries
   const dailyUsers = new Set(
     dailySummaries
       .flatMap((summary) => summary?.top_contributors ?? [])
-      .map((contributor) => contributor.name)
+      .map((contributor) => contributor.name),
   );
 
   // Combine with existing users
@@ -46,33 +46,27 @@ export async function generateMetadata({
   params,
 }: ProfilePageProps): Promise<Metadata> {
   const { username } = await params;
-  const user = await getUserById(username);
+  const userData = await getUserProfile(username);
+
   return {
-    title: user
-      ? `${user.username}'s Eliza Contributer Profile`
+    title: userData
+      ? `${userData.username}'s Eliza Contributer Profile`
       : "Profile Not Found",
-    description: user?.summary || "Eliza contributor profile",
+    description: userData?.summary || "Eliza contributor profile",
   };
 }
 
 export default async function ProfilePage({ params }: ProfilePageProps) {
   const { username } = await params;
-  const user = await getUserById(username);
-  const monthlyAnalysis = await getMonthlyAnalysis(username);
+  const userData = await getUserProfile(username);
 
-  if (!user) {
+  if (!userData) {
     notFound();
   }
 
-  // Strip username prefix from monthly summary if it exists
-  const monthlySummary = monthlyAnalysis?.summary?.replace(
-    new RegExp(`^${username}:\\s*`, "i"),
-    ""
-  );
-
   return (
     <main className="container mx-auto p-4">
-      <UserProfile {...user} summary={monthlySummary || user.summary} />
+      <UserProfile {...userData} />
     </main>
   );
 }
