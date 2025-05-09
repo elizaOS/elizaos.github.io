@@ -16,6 +16,7 @@ import { LeaderboardCard } from "./leaderboard-card";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import { groupBy } from "@/lib/arrayHelpers";
+import { Button } from "@/components/ui/button";
 
 export function LeaderboardFallback() {
   return (
@@ -64,6 +65,8 @@ export function Leaderboard({ tabs, tags }: LeaderboardProps) {
   const [currentPeriod, setCurrentPeriod] = useState<LeaderboardPeriod>(
     (searchParams.get("period") as LeaderboardPeriod) || "all",
   );
+  const [currentPage, setCurrentPage] = useState(1);
+  const ITEMS_PER_PAGE = 100;
 
   const currentTab = useMemo(
     () => tabs.find((tab) => tab.id === currentPeriod) || tabs[0],
@@ -72,13 +75,19 @@ export function Leaderboard({ tabs, tags }: LeaderboardProps) {
 
   useEffect(() => {
     setSelectedSkill(searchParams.get("skill") || "all");
-  }, [searchParams]);
+    setCurrentPage(1);
+  }, [searchParams, setSelectedSkill]);
 
   useEffect(() => {
     setCurrentPeriod(
       (searchParams.get("period") as LeaderboardPeriod) || "all",
     );
-  }, [searchParams]);
+    setCurrentPage(1);
+  }, [searchParams, setCurrentPeriod]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm]);
 
   // Group skills by category
   const skillsByCategory = useMemo(() => {
@@ -149,6 +158,16 @@ export function Leaderboard({ tabs, tags }: LeaderboardProps) {
       });
   }, [currentTab.users, searchTerm, selectedSkill, getTagData, currentPeriod]);
 
+  const totalPages = useMemo(() => {
+    return Math.ceil(filteredUsers.length / ITEMS_PER_PAGE);
+  }, [filteredUsers.length]);
+
+  const paginatedUsers = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    const endIndex = startIndex + ITEMS_PER_PAGE;
+    return filteredUsers.slice(startIndex, endIndex);
+  }, [filteredUsers, currentPage]);
+
   return (
     <div className="space-y-4">
       <h2 className="text-2xl font-bold capitalize">
@@ -212,9 +231,16 @@ export function Leaderboard({ tabs, tags }: LeaderboardProps) {
         {tabs.map((tab) => (
           <TabsContent key={tab.id} value={tab.id}>
             <VirtualizedLeaderboardList
-              users={filteredUsers}
+              users={paginatedUsers}
               onSkillClick={handleSkillChange}
               showScore={currentPeriod !== "all"}
+              currentPage={currentPage}
+              itemsPerPage={ITEMS_PER_PAGE}
+            />
+            <PaginationControls
+              currentPage={currentPage}
+              totalPages={totalPages}
+              onPageChange={setCurrentPage}
             />
           </TabsContent>
         ))}
@@ -227,10 +253,14 @@ const VirtualizedLeaderboardList = ({
   users,
   onSkillClick,
   showScore,
+  currentPage,
+  itemsPerPage,
 }: {
   users: LeaderboardUser[];
   onSkillClick: (skill: string) => void;
   showScore: boolean;
+  currentPage: number;
+  itemsPerPage: number;
 }) => {
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -266,7 +296,7 @@ const VirtualizedLeaderboardList = ({
           >
             <LeaderboardCard
               user={users[virtualRow.index]}
-              rank={virtualRow.index + 1}
+              rank={(currentPage - 1) * itemsPerPage + virtualRow.index + 1}
               onSkillClick={onSkillClick}
               showScore={showScore}
             />
@@ -276,3 +306,55 @@ const VirtualizedLeaderboardList = ({
     </div>
   );
 };
+
+interface PaginationControlsProps {
+  currentPage: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+}
+
+function PaginationControls({
+  currentPage,
+  totalPages,
+  onPageChange,
+}: PaginationControlsProps) {
+  if (totalPages <= 1) {
+    return null;
+  }
+
+  const handlePrevious = () => {
+    if (currentPage > 1) {
+      onPageChange(currentPage - 1);
+    }
+  };
+
+  const handleNext = () => {
+    if (currentPage < totalPages) {
+      onPageChange(currentPage + 1);
+    }
+  };
+
+  return (
+    <div className="mt-6 flex items-center justify-center space-x-3">
+      <Button
+        onClick={handlePrevious}
+        disabled={currentPage === 1}
+        variant="outline"
+        size="sm"
+      >
+        Previous
+      </Button>
+      <span className="text-sm font-medium text-muted-foreground">
+        Page {currentPage} of {totalPages}
+      </span>
+      <Button
+        onClick={handleNext}
+        disabled={currentPage === totalPages}
+        variant="outline"
+        size="sm"
+      >
+        Next
+      </Button>
+    </div>
+  );
+}

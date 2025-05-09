@@ -27,12 +27,8 @@ export async function getLeaderboard(period: LeaderboardPeriod) {
   // Get the date range for period filtering
   const { startDate, endDate } = getDateRangeForPeriod(period);
 
-  // Get top users from userDailyScores for the specified period
-  const topUsers = await getTopUsersByScore(
-    startDate,
-    endDate,
-    100, // Get top 100 users
-  );
+  // Get all users with their scores for the specified period
+  const topUsers = await getTopUsersByScore(startDate, endDate, null);
 
   const usernameList = topUsers.map((user) => user.username);
 

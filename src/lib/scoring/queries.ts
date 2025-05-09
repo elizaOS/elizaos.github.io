@@ -302,7 +302,7 @@ export type UserActivityHeatmap = Awaited<
 export async function getTopUsersByScore(
   startDate?: string,
   endDate?: string,
-  limit = 10,
+  limit?: number | null,
 ) {
   // Start with base conditions
   const conditions = [
@@ -317,7 +317,8 @@ export async function getTopUsersByScore(
   // Generate score fields using our helper
   const scoreFields = generateScoreSelectFields(userDailyScores);
 
-  const results = await db
+  // Build the base query
+  const baseQuery = db
     .select({
       username: userDailyScores.username,
       avatarUrl: users.avatarUrl,
@@ -327,9 +328,17 @@ export async function getTopUsersByScore(
     .leftJoin(users, eq(userDailyScores.username, users.username))
     .where(and(...conditions))
     .groupBy(userDailyScores.username)
-    .orderBy(desc(scoreFields.totalScore))
-    .limit(limit)
-    .all();
+    .orderBy(desc(scoreFields.totalScore));
+
+  // Conditionally apply the limit
+  let finalQuery;
+  if (typeof limit === "number" && limit > 0) {
+    finalQuery = baseQuery.limit(limit);
+  } else {
+    finalQuery = baseQuery; // No limit is applied if limit is null, undefined, 0, or negative
+  }
+
+  const results = finalQuery.all();
 
   return results;
 }
