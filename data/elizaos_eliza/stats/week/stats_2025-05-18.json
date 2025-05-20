@@ -5,8 +5,20 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-05-18 to 2025-05-25, elizaos/eliza had 14 new PRs (18 merged), 0 new issues, and 16 active contributors.",
+  "overview": "From 2025-05-18 to 2025-05-25, elizaos/eliza had 43 new PRs (40 merged), 0 new issues, and 24 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs61qUx2",
+      "title": "Agent Hangs After Core Init / REST API Bind (Anthropic + Twitter Config)",
+      "author": "kunleulysses",
+      "number": 4486,
+      "repository": "elizaos/eliza",
+      "body": "Environment:\nOS: Ubuntu 22.04.5 LTS (on VPS)\nNode.js Version: v23.11.0 (installed via NVM)\npnpm Version: v9.15.0\nElizaOS Installation Method: Manual Monorepo Clone (git clone https://github.com/elizaos/eliza.git)\nElizaOS Version: Checked out to latest tag (Likely v0.25.9 based on agent package version in logs)\n\nKey Packages:\n@elizaos/agent: v0.25.9\n@elizaos/core: Likely v0.25.9 (based on agent)\n@elizaos/plugin-twitter: 0.25.6-alpha.1 (or version installed via @latest)\n@elizaos/plugin-anthropic: 1.0.0-alpha.0 (or version installed via @latest)\nHardware: VPS with 3GB RAM\n\nProblem Description:\nThe ElizaOS agent process successfully initializes its core components but hangs indefinitely immediately after the Direct Client REST API binds to its port (e.g., 3000). This occurs when configured to use a custom character (flappy.character.json) located in a root characters/ directory, with the goal of using the Anthropic model provider (@elizaos/plugin-anthropic) and the Twitter client (@elizaos/plugin-twitter) with auto-interactions enabled.\nThe logs show successful character loading, correct plugin identification (@elizaos/plugin-twitter, @elizaos/plugin-anthropic), selection of \"anthropic\" as the model provider, database connection, and REST API binding. However, the process never proceeds to the expected Twitter client initialization logs (Creating default Twitter client..., Successfully logged in., Start Hanldeling Twitter Timeline, etc.) or any Anthropic-related activity. The process does not crash or exit; it simply stalls.\n\nSteps to Reproduce:\n(Based on troubleshooting sequence followed)\nClean VPS environment.\nInstall prerequisites: Node v23.11.0 (via NVM), pnpm v9.15.0, git, build-essential.\nClone the main eliza monorepo: git clone https://github.com/elizaos/eliza.git && cd eliza.\nCheck out the latest stable tag: git checkout $(git describe --tags --abbrev=0).\nCreate and configure ~/eliza/.env with valid Twitter API credentials (Key, Secret, Access Token, Secret) and a valid Anthropic API Key. Ensure ENABLE_TWITTER_POST_GENERATION=true and ENABLE_ACTION_PROCESSING=true. Ensure conflicting AI providers (USE_LOCAL_AI, USE_OLLAMA_TEXT_MODELS, OPENAI_API_KEY, etc.) are explicitly set to false or commented out.\nCreate a ~/eliza/characters/ directory.\nCreate ~/eliza/characters/flappy.character.json configured with \"clients\": [\"twitter\"], \"plugins\": [\"@elizaos/plugin-twitter\", \"@elizaos/plugin-anthropic\"], \"modelProvider\": \"anthropic\", and a specific \"model\": \"claude-3-haiku-20240307\". Include Twitter interaction settings under settings.twitter.\nCreate ~/eliza/characters/flappy.agent.json pointing to the character file.\nInstall dependencies: pnpm install.\nEnsure correct plugins are installed and linked to the agent package:\npnpm remove @elizaos/plugin-local-ai (if present)\npnpm add @elizaos/plugin-anthropic@latest -F @elizaos/agent\npnpm add @elizaos/plugin-twitter@latest -F @elizaos/agent\npnpm install\nBuild the project: pnpm build.\nStart the agent: pnpm start --characters=\"characters/flappy.character.json\".\n\nExpected Result:\nThe agent starts fully, logs confirm Twitter login and timeline handling begins, and subsequent AI tasks utilize the Anthropic API via the loaded plugin. The process remains active and responsive.\n\nActual Result:\nThe agent process hangs indefinitely after the SUCCESS: REST API bound to... log message. No further logs related to Twitter client initialization, AI provider interaction, or timeline handling appear. The process doesn't exit or crash.\n\n\n``` Relevant Logs:\n\n[2025-05-08 01:16:54] SUCCESS: REST API bound to 0.0.0.0:3000. If running locally, access it at http://localhost:3000.\n# <-- HANGS HERE -->\n\nLog\nConfiguration:\n.env (Relevant Sections):\n# --- Twitter/X Configuration ---\nTWITTER_USERNAME=featherweightai\n# TWITTER_PASSWORD=********* # Masked\n# TWITTER_EMAIL=********* # Masked\n# TWITTER_API_KEY=********* # Masked\n# TWITTER_API_SECRET=********* # Masked\n# TWITTER_ACCESS_TOKEN=********* # Masked\n# TWITTER_ACCESS_SECRET=********* # Masked\nENABLE_TWITTER_POST_GENERATION=true\nENABLE_ACTION_PROCESSING=true\n\n# --- Anthropic Configuration ---\nANTHROPIC_API_KEY=sk-ant-...#### # <<< IMPORTANT: Make sure this is correct\n# ANTHROPIC_API_URL=\n\n# --- Disabled Providers ---\nUSE_LOCAL_AI=false\nUSE_OLLAMA_TEXT_MODELS=false\n# OPENAI_API_KEY=\n# GAIA_API_KEY=\n# ... etc other providers blank/commented ...\nUse code [with caution](https://support.google.com/legal/answer/13505487).\nDotenv\ncharacters/flappy.character.json (Relevant Sections):\n{\n  \"name\": \"Flappy\",\n  // ... Bio/Lore/Examples/Style ...\n  \"clients\": [\n    \"twitter\"\n  ],\n  \"plugins\": [\n    \"@elizaos/plugin-twitter\",\n    \"@elizaos/plugin-anthropic\"\n  ],\n  \"modelProvider\": \"anthropic\", // Lowercase\n  \"model\": \"claude-3-haiku-20240307\",\n  \"settings\": {\n    \"secrets\": {},\n    \"twitter\": {\n      \"enable_replies\": true,\n      \"enable_timeline_search\": false,\n      \"enable_follow_thanks\": true,\n      \"enable_auto_retweet\": false\n    }\n  }\n  // ...\n}\n\nAdditional Context / Troubleshooting Steps Taken:\nIssue persists even after regenerating Twitter API keys/tokens and confirming \"Read, Write and access Direct Messages\" permissions are set correctly in the Twitter Dev Portal (OAuth 1.0a).\nIssue occurred similarly when trying to configure GAIA via Ollama settings (using plugin-local-ai, modelProvider: \"OLLAMA\"), hanging at the same point.\nRemoving both Twitter and AI plugins allowed the agent core to start without hanging (in previous testing phases), suggesting the issue occurs during plugin/client initialization after the core runtime is up.\nNetwork connectivity to api.anthropic.com was verified via curl from the VPS (connection succeeded, though curl syntax errors prevented full request validation).\nVPS has 3GB RAM, eliminating the previous RAM constraint issue encountered with local models.\nExplicitly adding the required plugins (plugin-twitter, plugin-anthropic) as dependencies to the @elizaos/agent package using pnpm add -F @elizaos/agent ... successfully resolved earlier \"Cannot find package\" errors during plugin loading.",
+      "createdAt": "2025-05-08T04:30:57Z",
+      "closedAt": "2025-05-20T09:40:07Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDOMT5cIs62U-wk",
       "title": "Make a publish to npm",
@@ -28,6 +40,18 @@
       "body": "Gathering some ideas and sharing notes on how to improve the community section of docs\n\n\n## AI recommendations\n\n1. **Enhance the Navigation Flowchart** - Add clear paths for both technical and non-technical users, with complexity increasing as users go deeper.\n\n2. **Create a Prominent FAQ Section** - Develop a comprehensive, searchable FAQ that addresses the recurring questions mentioned by respondents.\n\n3. **Add a Clear \"Getting Started\" Guide** - Provide step-by-step instructions for different user types (developers, AI researchers, content creators).\n\n4. **Develop Use Case Examples** - Showcase practical applications that demonstrate real value (addressing the \"useless AI agent\" concern).\n\n5. **Clarify Project Direction** - Include a current roadmap and priorities section that's regularly updated to keep the community aligned.\n\n6. **Highlight Active Community Spaces** - Emphasize where meaningful discussions are happening (coder's channel, braintrust telegram).\n\n7. **Create a Community Structure Overview** - Outline how the community is organized, key working groups, and how decisions are made.\n\n8. **Include Non-Developer Contribution Paths** - Document how non-technical people can contribute (documentation, testing, community management, content creation).\n\n---\n\n## Notes\n\nVision: What We're Building Together\n\nThe internet is transforming, launching an agent is the new launching a new website. We're building:\n\n- **AI agents we can trust**, true ownership via free open source software and native TEE integration\n- **Seamless integration**, meeting us on platforms where we already spend our time\n- **Autonomous systems collaborate in swarms**, sharing context and solving complex problems together\n- **Sustainable community-driven development**, enabled by transparent AI assisted governance\n\n\nProject History\n\nWhat began as ai16z, a venture capital DAO led by AI agents on the Solana blockchain, has grown into a comprehensive open-source framework for building, deploying, and managing AI agents across platforms.\n\n- **October 2024**: Launched on Solana via daos.fun, raising 420.69 SOL\n- **November-December 2024**: Explosive growth in contributors, GitHub stars, and community engagement\n- **January 2025**: Rebranded from ai16z to ElizaOS, focusing on broader AI agent development\n- **March 2025**: Launched research beta of ElizaOS V2, representing a major architectural evolution\n\n\n```\n## Contributing to the ElizaOS DAO: High-Level Overview\n\n### Core Goals\n- Help build AI agents using the Eliza framework\n- Support democratized venture capital through AI-driven decisions\n- Advance the integration of AI and blockchain technologies\n\n### Impactful Contributions\n1. **Technical**: Code contributions to the Eliza framework, building new AI agents, or creating integrations\n \n2. **Governance**: Proposing investments, participating in token votes, and helping shape the project's direction\n\n3. **Strategy**: Researching investment opportunities, contributing to tokenomics discussions, organizing information\n\n4. **Community**: Creating educational content, onboarding developers, and representing the project to wider audiences\n```\n\nother ways to contribute:\n\n```\n- **Answer questions** in the coders/tech support channels—it gets noticed!\n- **Help with documentation**: Test steps, verify information, create issues and PRs\n- **Collaborate on AI news aggregation**: Generate show ideas or automations using our tools\n- **Develop specialized agents**: Create community scribes, lore keepers, moderators, or social media managers\n- **Build plugins**: Extend the ElizaOS framework with new capabilities\n- **Join community events**: Participate in our evolving formats for community coordination and project showcasing\n\n```\n\ntokenomics page: https://hackmd.io/EK6vGnyHT0WnFIL9P4nsQA\n",
       "createdAt": "2025-04-10T19:10:58Z",
       "closedAt": "2025-05-18T18:33:42Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs6qCQvW",
+      "title": "Suggestion: Add platform interface to core package for eliza v2",
+      "author": "roninjin10",
+      "number": 3491,
+      "repository": "elizaos/eliza",
+      "body": "**Is your feature request related to a problem? Please describe.**\n\nThis is a problem in that I'm trying to build a platform agnostic core package but eliza has no way of injecting specific platforms into it. It also seems like I will have to pollyfill some node.js libraries to use elizav2 core package\n\n**Describe the solution you'd like**\n\nV2 is super clean but it really needs a platform abstraction. \n\n```typescript\ninterface Platform {\n  name: string\n  readFile?: typeof fs.readFile\n  ...etc\n}\n\nclass NodePlatform implements Platform {\n  name: 'NODEJS'\n  readFile fs.readFile\n  ..etc\n} \n```\n\nSuch that now \n- the entire core package has no platform specific logic in it. Less complexity\n- no imports (except typescript types)  in core package reference a node.js module. No need to polyfill\n- Flexible to provide our own platform for say bun if bun has a node incompatability causing issue in eliza or being in the browser but emulating a file system, etc.\n\nThis is a common pattern in other libraries such as [effect.ts](https://github.com/Effect-TS/effect/tree/main/packages/platform)\n**Describe alternatives you've considered**\n\n<!-- A clear and concise description of any alternative solutions or features you've considered. -->\nAnother option would be to create seperate packages core-web, core-node. But this leads to a lot of code duplication.\n",
+      "createdAt": "2025-02-14T05:30:55Z",
+      "closedAt": "2025-05-20T18:34:59Z",
       "state": "CLOSED",
       "commentCount": 0
     }
@@ -95,10 +119,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 53170,
-    "deletions": 11590,
-    "files": 279,
-    "commitCount": 85
+    "additions": 58663,
+    "deletions": 29605,
+    "files": 386,
+    "commitCount": 188
   },
   "completedItems": [
     {
@@ -204,32 +228,194 @@
       "body": ""
     },
     {
+      "title": "feat: API endpoint for creating new rooms",
+      "prNumber": 4647,
+      "type": "feature",
+      "body": "Currently we dont have API endpoint to create new rooms, so I added this feature in PR. \r\n\r\nDid some tests, rooms are created and IDs returned. Adding screenshots from tests\r\n\r\n<img width=\"845\" alt=\"image\" src=\"https://github.com/user-attac"
+    },
+    {
+      "title": "Eliza290/update docs readme and tests for all cli commands",
+      "prNumber": 4646,
+      "type": "tests",
+      "body": "this is a complimentary PR to update docs, readme, and tests for all the changes related to ELIZA290, cli testing + polish.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- **New Featu"
+    },
+    {
       "title": "remove pr title CI",
       "prNumber": 4644,
       "type": "other",
       "body": "annoying imo, idc what name PR, should not fail CI, causes more failed looking PRs then needed."
+    },
+    {
+      "title": "add 30s timeout to registry parsing",
+      "prNumber": 4678,
+      "type": "feature",
+      "body": ""
+    },
+    {
+      "title": "bring back local ai test",
+      "prNumber": 4676,
+      "type": "tests",
+      "body": ""
+    },
+    {
+      "title": "remove mock tests for cli",
+      "prNumber": 4674,
+      "type": "tests",
+      "body": ""
+    },
+    {
+      "title": "chore: update project starter character & fix path for core pckg",
+      "prNumber": 4671,
+      "type": "bugfix",
+      "body": "\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- **New Features**\n\t- Eliza now responds helpfully and conversationally to a broader range of topics, including technology, business, cr"
+    },
+    {
+      "title": "fix: shortcut reply only if no dynamic provider is present",
+      "prNumber": 4670,
+      "type": "bugfix",
+      "body": "This PR updates the reply logic to only shortcut (reuse existing replies) when no dynamic providers are involved. It also fixes a bug where providers were incorrectly taken from the message instead of the response content."
+    },
+    {
+      "title": "remove plugin twitter",
+      "prNumber": 4669,
+      "type": "other",
+      "body": "removes plugin twitter from mono repo has been moved to: https://github.com/elizaos-plugins/plugin-twitter"
+    },
+    {
+      "title": "feat: Create world api endpoints",
+      "prNumber": 4667,
+      "type": "feature",
+      "body": " I wanted to create World with API endpoints, so I can have a consistent usage of a world.\r\n There wasnt any endpoints for this so I am adding them here. \r\n-To create new world\r\n-To update current one with new info\r\n-To get all rooms in cur"
+    },
+    {
+      "title": "Remove global env support",
+      "prNumber": 4666,
+      "type": "other",
+      "body": "## Summary\n- drop global env logic from CLI and server\n- update UI to only manage local envs\n- rewrite docs about environment variables\n- tweak plugin messages and runtime warnings\n\n## Testing\n- `bun test` *(fails: Cannot find package 'dote"
+    },
+    {
+      "title": "add CHANNEL_IDS to discord_plugin",
+      "prNumber": 4665,
+      "type": "feature",
+      "body": "adds ENVs for CHANNEL_IDS so can limit the responses to certain channels"
+    },
+    {
+      "title": "attempt dev command tear down",
+      "prNumber": 4664,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review "
+    },
+    {
+      "title": "Fix bats test flakiness",
+      "prNumber": 4663,
+      "type": "bugfix",
+      "body": "## Summary\n- guard port cleanup in bats tests\n- improve timing in dev-command tests\n- use `seq` for loops for broader shell compatibility\n\n## Testing\n- `./run_all_bats.sh` *(fails: 'bats' not found)*"
+    },
+    {
+      "title": "fixed agent tests",
+      "prNumber": 4661,
+      "type": "bugfix",
+      "body": ""
+    },
+    {
+      "title": "cleaner readable test files",
+      "prNumber": 4660,
+      "type": "refactor",
+      "body": ""
+    },
+    {
+      "title": "attempt: change pglite default dir",
+      "prNumber": 4656,
+      "type": "other",
+      "body": ""
+    },
+    {
+      "title": "default sentry better",
+      "prNumber": 4655,
+      "type": "other",
+      "body": "Since requires new ENV added, usually would always be not true, this turns off sentry only if user sets false. Even if env not added."
+    },
+    {
+      "title": "fix sharp install in CI, integration tests failing",
+      "prNumber": 4654,
+      "type": "bugfix",
+      "body": "Add libvips-dev install to linux in CI, to fix error in integration tests:\n\n```\ngyp info spawn make\ngyp info spawn args [ 'BUILDTYPE=Release', '-C', 'build' ]\n../src/common.cc:13:10: fatal error: vips/vips8: No such file or directory\n13 | #"
+    },
+    {
+      "title": "generalized eliza agent character",
+      "prNumber": 4653,
+      "type": "other",
+      "body": "Reduces lock in on default eliza character, removes IGNORES from message examples, goal is should be a good 1 on 1 chat that always responds for first time users."
+    },
+    {
+      "title": "flyio docker deploy action for dev agent",
+      "prNumber": 4652,
+      "type": "other",
+      "body": ""
+    },
+    {
+      "title": "fix: reply action skipping dynamic providers",
+      "prNumber": 4651,
+      "type": "bugfix",
+      "body": "This PR removes the skipping logic in the reply action. Previously, if a dynamic provider was added, it wouldn't be processed because the reply action would skip it.\r\n\r\nI think we might still need that shortcut if there's no dynamic provide"
+    },
+    {
+      "title": "Add sentry logging to core logger errors.",
+      "prNumber": 4650,
+      "type": "feature",
+      "body": "![image](https://github.com/user-attachments/assets/036e4f1c-bc4b-4271-a9fc-d707f1ce6ecf)\r\n\r\nInitial Sentry hookup into core logger errors.\r\n\r\nHas envs for custom Sentry setups, but defaults to ours."
     }
   ],
   "topContributors": [
     {
       "username": "wtfsayo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
-      "totalScore": 145.846490372788,
-      "prScore": 140.568490372788,
+      "totalScore": 493.30554374155844,
+      "prScore": 482.5895437415585,
       "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0.7779999999999999,
+      "reviewScore": 9.5,
+      "commentScore": 1.2159999999999997,
       "summary": "wtfsayo: Made substantial code changes across 743 files (+20510/-3309 lines) with a focus on other work (67%) and feature work (22%). Merged two PRs: #4643 adding a missing plugin failure test and #4637 enabling world selection in the message API. Has three open PRs in draft/development including work on registry functionality, RSS feed plugin, and deepsearch plugin."
     },
     {
       "username": "ChristopherTrimboli",
       "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
-      "totalScore": 70.2956560920129,
-      "prScore": 50.79565609201289,
+      "totalScore": 351.763567626325,
+      "prScore": 302.063567626325,
       "issueScore": 0,
-      "reviewScore": 19.5,
-      "commentScore": 0,
+      "reviewScore": 49.5,
+      "commentScore": 0.2,
       "summary": "ChristopherTrimboli: Fixed documentation deployment issues by merging PR #4640 which removed 8 lines of code, and proposed a fix for agent start button functionality in PR #4642 which is still open. Also contributed one code review with approval, focusing exclusively on bugfixes across configuration and code files."
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 79.91572767414081,
+      "prScore": 79.91572767414081,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 74.61888210570757,
+      "prScore": 69.18088210570757,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": "0xbbjoker: Made significant code changes across 14 files (+3275/-1616 lines) in 3 commits, with activity concentrated on a single day. The work primarily focused on feature development (67%) with some additional miscellaneous changes (33%), though no PRs were merged or opened during this period."
+    },
+    {
+      "username": "0xCardiE",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/8969767?u=8b05509ceb96fd63a6246dfbf0860fd1df586e59&v=4",
+      "totalScore": 57.029558593880395,
+      "prScore": 57.029558593880395,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "odilitime",
@@ -239,6 +425,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "tcm390",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/60634884?u=c6c41679b8322eaa0c81f72e0b4ed95e80f0ac16&v=4",
+      "totalScore": 45.21684631185576,
+      "prScore": 45.21684631185576,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -272,10 +468,10 @@
       "summary": "HarshModi2005: Opened one pull request (#4636 \"Merge addpolygon resolution\") with substantial code changes across 83 files (+13,489/-5,374 lines). The work was concentrated on a single day, with contributions split between code (54%) and tests (30%), suggesting a significant feature integration or refactoring effort."
     },
     {
-      "username": "0xCardiE",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/8969767?u=8b05509ceb96fd63a6246dfbf0860fd1df586e59&v=4",
-      "totalScore": 14.560828834461905,
-      "prScore": 14.560828834461905,
+      "username": "crypto-cooker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16945788?u=819d567b766cb43113f89fb60ba0fac4c5137cf5&v=4",
+      "totalScore": 33.9277738965761,
+      "prScore": 33.9277738965761,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -290,11 +486,21 @@
       "reviewScore": 10,
       "commentScore": 0,
       "summary": "monilpat: Made substantial code changes across 41 files (+7411/-1541 lines) in 2 commits during a single day of activity this week. Provided 2 approving code reviews for teammates' work."
+    },
+    {
+      "username": "HashWarlock",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64296537?u=1d8228a93c06c603e08d438677b3f736d6b1ab22&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 14,
-  "mergedPRs": 18,
+  "newPRs": 43,
+  "mergedPRs": 40,
   "newIssues": 0,
-  "closedIssues": 2,
-  "activeContributors": 16
+  "closedIssues": 4,
+  "activeContributors": 24
 }
