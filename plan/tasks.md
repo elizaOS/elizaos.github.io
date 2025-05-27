@@ -6,26 +6,26 @@ This document breaks down the implementation tasks for adding multi-repository s
 
 **Goal:** Enable the pipeline to ingest, process, and store data from multiple configured repositories, with basic per-repository output.
 
-- [ ] **Task 1.1: Modify `pipeline.config.ts` Structure**
-  - [ ] Update the `repositories` array in `config/pipeline.config.ts` to accept objects containing `owner`, `name`, and `repoId` (e.g., `{ owner: "elizaos", name: "eliza", repoId: "elizaos/eliza" }`).
-  - [ ] Ensure existing configuration loading logic correctly parses the new structure.
-  - [ ] Update type definitions for `PipelineConfig` to reflect this change.
-- [ ] **Task 1.2: Update Core Pipeline Scripts for Iteration**
-  - [ ] Modify the `ingest` pipeline in `cli/analyze-pipeline.ts` (and its underlying modules in `src/lib/pipelines/ingest/`) to iterate over each configured repository.
-    - [ ] Pass the correct `repoId` (and owner/name if needed) to GitHub API calls and data processing functions.
-  - [ ] Modify the `process` pipeline in `cli/analyze-pipeline.ts` (and `src/lib/pipelines/process/`) to operate on data from all configured repositories, ensuring `repoId` is used for correct association.
-  - [ ] Modify the `export` pipeline in `cli/analyze-pipeline.ts` (and `src/lib/pipelines/export/`) to generate outputs for each repository, likely maintaining the `data/<owner_repo>/` structure.
+- [x] **Task 1.1: Modify `pipeline.config.ts` Structure**
+  - [x] Update the `repositories` array in `config/pipeline.config.ts` to accept objects containing `owner`, `name`, and `repoId` (e.g., `{ owner: "elizaos", name: "eliza", repoId: "elizaos/eliza" }`).
+  - [x] Ensure existing configuration loading logic correctly parses the new structure.
+  - [x] Update type definitions for `PipelineConfig` to reflect this change.
+- [x] **Task 1.2: Update Core Pipeline Scripts for Iteration**
+  - [x] Modify the `ingest` pipeline in `cli/analyze-pipeline.ts` (and its underlying modules in `src/lib/pipelines/ingest/`) to iterate over each configured repository.
+    - [x] Pass the correct `repoId` (and owner/name if needed) to GitHub API calls and data processing functions.
+  - [x] Modify the `process` pipeline in `cli/analyze-pipeline.ts` (and `src/lib/pipelines/process/`) to operate on data from all configured repositories, ensuring `repoId` is used for correct association.
+  - [x] Modify the `export` pipeline in `cli/analyze-pipeline.ts` (and `src/lib/pipelines/export/`) to generate outputs for each repository, likely maintaining the `data/<owner_repo>/` structure.
 - [ ] **Task 1.3: Ensure Data Segregation**
   - [ ] **Database:** Confirm that all database interactions (inserts, updates, queries) in Drizzle ORM correctly use the `repoId` (or equivalent `repository` field) to associate data with the correct repository (ref: `src/lib/data/schema.ts`).
     - [ ] Verify `repositories` table is populated correctly for each new repo.
     - [ ] Verify raw data tables (`rawPullRequests`, `rawIssues`, etc.) correctly link to `repositories.repoId`.
-  - [ ] **File System:** Confirm that file-based outputs (JSON summaries, logs if any) are correctly placed in per-repository directories (e.g., `data/elizaos_eliza/`, `data/elizaos-plugins_myplugin/`).
+  - [x] **File System:** Confirm that file-based outputs (JSON summaries, logs if any) are correctly placed in per-repository directories (e.g., `data/elizaos_eliza/`, `data/elizaos-plugins_myplugin/`).
 - [ ] **Task 1.4: Verify Commit Deduplication**
   - [ ] Test the ingestion process with repositories that have shared commit history (if identifiable examples exist).
   - [ ] Confirm that commits with identical hashes are stored only once in `rawCommits` or are handled appropriately to avoid duplicate processing and scoring.
     - Investigate if `rawCommits.oid` (primary key) handles this naturally.
-- [ ] **Task 1.5: Basic Per-Repository Reporting/Summarization**
-  - [ ] Ensure the `summarize` pipeline (project summaries) can run for each configured repository and outputs to the correct `data/<owner_repo>/summaries/` directory.
+- [x] **Task 1.5: Basic Per-Repository Reporting/Summarization**
+  - [x] Ensure the `summarize` pipeline (project summaries) can run for each configured repository and outputs to the correct `data/<owner_repo>/summaries/` directory.
   - [ ] Initial verification that existing website/UI components can (at a minimum) display data if pointed to a specific repository's output, or that per-repo pages can be generated. (Focus on data backend first).
 - [ ] **Task 1.6: Update CLI Commands**
   - [ ] Review and update CLI command options in `cli/analyze-pipeline.ts` if necessary. For example, `--repository` flags might need to accept multiple values, or a new `--all-repos` flag might be introduced. Or, it might default to all repos in the config unless specified.
