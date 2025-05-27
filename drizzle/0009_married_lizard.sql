@@ -1,0 +1,1 @@
+ALTER TABLE `repositories` ADD `org` text NOT NULL;
