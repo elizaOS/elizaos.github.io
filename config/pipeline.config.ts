@@ -18,8 +18,14 @@ export default {
   // Repositories to track
   repositories: [
     {
-      repoId: "elizaos/eliza",
+      owner: "elizaos",
+      name: "eliza",
       defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-twitter",
+      defaultBranch: "1.x",
     },
   ],
 
@@ -384,4 +390,4 @@ export default {
     Decentralization & Open Collaboration: AI systems should move beyond centralized control towards distributed intelligence and community-driven progress.
     `,
   },
-} as const satisfies PipelineConfig;
+} as const;
