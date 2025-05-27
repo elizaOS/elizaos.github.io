@@ -10,8 +10,8 @@ export { createIngestionContext };
 export const ingestPipeline = pipe(
   getSelectedRepositories,
   createStep("mapRepos", (repositories) => {
-    return repositories.map(({ repoId, defaultBranch }) => ({
-      repository: { repoId, defaultBranch },
+    return repositories.map(({ repoId, org, name, defaultBranch }) => ({
+      repository: { repoId, owner: org, name, defaultBranch },
     }));
   }),
   mapStep(ingestWeeklyGithubData),

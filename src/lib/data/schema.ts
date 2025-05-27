@@ -23,6 +23,7 @@ export const users = sqliteTable("users", {
 // Repositories being tracked
 export const repositories = sqliteTable("repositories", {
   repoId: text("repo_id").primaryKey(),
+  org: text("org").notNull(),
   lastFetchedAt: text("last_fetched_at").default(""),
   lastUpdated: text("last_updated")
     .notNull()

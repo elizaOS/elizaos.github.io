@@ -40,6 +40,7 @@ export const getSelectedRepositories = createStep(
         return {
           repoId: configRepo.repoId,
           org: configRepo.owner,
+          name: configRepo.name,
           defaultBranch: configRepo.defaultBranch,
         };
       })
