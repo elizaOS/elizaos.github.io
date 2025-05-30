@@ -28,6 +28,7 @@ export default function ProfileEditor() {
     readmeContent,
     handleCreateProfileRepo,
     handleGenerateWalletSection,
+    defaultBranch,
   } = useProfileWallets();
 
   if (pageLoading && !user) {
@@ -108,6 +109,7 @@ export default function ProfileEditor() {
                   userLogin={userLogin}
                   walletSection={walletSection}
                   readmeContent={readmeContent}
+                  defaultBranch={defaultBranch}
                 />
               )}
             </>

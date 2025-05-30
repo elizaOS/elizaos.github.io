@@ -24,6 +24,7 @@ export function useProfileWallets() {
   const [readmeContent, setReadmeContent] = useState<string | null>(null);
   const [walletData, setWalletData] = useState<WalletLinkingData | null>(null);
   const [walletSection, setWalletSection] = useState<string | null>(null);
+  const [defaultBranch, setDefaultBranch] = useState<string>("main");
 
   const [pageLoading, setPageLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -38,8 +39,12 @@ export function useProfileWallets() {
       const repoResponse = await fetch(repoUrl);
       if (!repoResponse.ok) {
         setProfileRepoExists(false);
+        // Default to 'main' if repo fetch fails or repo doesn't exist
+        setDefaultBranch("main");
         return;
       }
+      const repoData = await repoResponse.json();
+      setDefaultBranch(repoData.default_branch || "main");
       setProfileRepoExists(true);
 
       // check if the Readme exists
@@ -67,6 +72,8 @@ export function useProfileWallets() {
       setProfileRepoExists(null);
       setReadmeContent(null);
       setWalletData(null);
+      // Default to 'main' on error
+      setDefaultBranch("main");
     } finally {
       setPageLoading(false);
     }
@@ -170,5 +177,6 @@ export function useProfileWallets() {
     getWalletAddress,
     handleCreateProfileRepo,
     handleGenerateWalletSection,
+    defaultBranch,
   };
 }

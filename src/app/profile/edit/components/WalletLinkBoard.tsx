@@ -16,12 +16,14 @@ interface WalletLinkBoardProps {
   userLogin: string;
   walletSection: string;
   readmeContent: string | null;
+  defaultBranch: string;
 }
 
 export function WalletLinkBoard({
   userLogin,
   walletSection,
   readmeContent,
+  defaultBranch,
 }: WalletLinkBoardProps) {
   const [copied, copyToClipboard] = useCopyToClipboard();
 
@@ -33,14 +35,20 @@ export function WalletLinkBoard({
     // Always open GitHub regardless of copy success
     const githubUrl =
       readmeContent === null
-        ? `https://github.com/${userLogin}/${userLogin}/new/main?filename=README.md`
-        : `https://github.com/${userLogin}/${userLogin}/edit/main/README.md`;
+        ? `https://github.com/${userLogin}/${userLogin}/new/${defaultBranch}?filename=README.md`
+        : `https://github.com/${userLogin}/${userLogin}/edit/${defaultBranch}/README.md`;
 
     // Attempt to copy, but don't block GitHub opening
     await copyToClipboard(walletSection);
 
     window.open(githubUrl, "_blank");
-  }, [copyToClipboard, walletSection, userLogin, readmeContent]);
+  }, [
+    copyToClipboard,
+    walletSection,
+    userLogin,
+    readmeContent,
+    defaultBranch,
+  ]);
 
   return (
     <div className="space-y-4">
