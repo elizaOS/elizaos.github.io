@@ -1,4 +1,5 @@
 import { NextPage } from "next";
+import ProgressSection from "./components/ProgressSection";
 
 const AboutPage: NextPage = () => {
   return (
@@ -183,104 +184,7 @@ const AboutPage: NextPage = () => {
           </p>
         </section>
 
-        <section className="mb-12">
-          <h2>Progress Bar</h2>
-          <div className="space-y-4">
-            <div className="rounded-lg border bg-card p-6">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center">
-                  <span className="mr-3 text-2xl">🎯</span>
-                  <h3 className="text-xl font-semibold">Phase 1: Foundation</h3>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className="h-2 w-24 rounded-full bg-muted">
-                    <div className="h-2 w-20 rounded-full bg-primary"></div>
-                  </div>
-                  <span className="text-sm font-medium text-muted-foreground">
-                    85%
-                  </span>
-                </div>
-              </div>
-              <ul className="space-y-1 text-muted-foreground">
-                <li>✅ GitHub data processing with skill progression</li>
-                <li>✅ AI-powered daily/weekly/monthly summaries</li>
-                <li>🔄 Contributor profiles showing expertise levels</li>
-              </ul>
-            </div>
-
-            <div className="rounded-lg border bg-card p-6">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center">
-                  <span className="mr-3 text-2xl">🔐</span>
-                  <h3 className="text-xl font-semibold">Phase 2: Identity</h3>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className="h-2 w-24 rounded-full bg-muted">
-                    <div className="h-2 w-3 rounded-full bg-primary"></div>
-                  </div>
-                  <span className="text-sm font-medium text-muted-foreground">
-                    15%
-                  </span>
-                </div>
-              </div>
-              <ul className="space-y-1 text-muted-foreground">
-                <li>🔄 GitHub OAuth for user authentication</li>
-                <li>📋 Wallet linking (ETH/SOL) bridging Web2/Web3</li>
-                <li>📋 Public API for reputation queries</li>
-              </ul>
-            </div>
-
-            <div className="rounded-lg border bg-card p-6">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center">
-                  <span className="mr-3 text-2xl">🏆</span>
-                  <h3 className="text-xl font-semibold">
-                    Phase 3: Achievements
-                  </h3>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className="h-2 w-24 rounded-full bg-muted"></div>
-                  <span className="text-sm font-medium text-muted-foreground">
-                    0%
-                  </span>
-                </div>
-              </div>
-              <ul className="space-y-1 text-muted-foreground">
-                <li>
-                  📋 Character Studio integration - unlock 3D wearables based on
-                  your skill levels
-                </li>
-                <li>
-                  📋 Achievement NFTs for reaching milestones (Level 99
-                  TypeScript!)
-                </li>
-                <li>📋 Cross-platform reputation portability</li>
-              </ul>
-            </div>
-
-            <div className="rounded-lg border bg-card p-6">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center">
-                  <span className="mr-3 text-2xl">🌍</span>
-                  <h3 className="text-xl font-semibold">
-                    Phase 4: The Great Online Game
-                  </h3>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <div className="h-2 w-24 rounded-full bg-muted"></div>
-                  <span className="text-sm font-medium text-muted-foreground">
-                    0%
-                  </span>
-                </div>
-              </div>
-              <ul className="space-y-1 text-muted-foreground">
-                <li>📋 Quest systems for coordinated development</li>
-                <li>📋 Guild formation around shared expertise</li>
-                <li>📋 Internet-scale achievement system</li>
-              </ul>
-            </div>
-          </div>
-        </section>
+        <ProgressSection />
 
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-8 text-center">
           <h3 className="mb-4 text-2xl font-bold text-primary">
