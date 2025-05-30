@@ -220,7 +220,7 @@ export class GitHubClient {
             );
 
             this.rateLimitInfo = this.parseRateLimitHeaders(response.headers);
-            this.logger.info("Rate limit status", {
+            this.logger.debug("Rate limit status", {
               remaining: this.rateLimitInfo.remaining,
               resetAt: this.rateLimitInfo.resetAt,
               pointsRemaining: Math.floor(this.pointsBucket.tokens),
@@ -579,6 +579,147 @@ export class GitHubClient {
     } catch (error) {
       this.logger.error("Failed to fetch commits", { error });
       throw error;
+    }
+  }
+
+  private async executeREST<T>(
+    endpoint: string,
+    options: { headers?: Record<string, string> } = {},
+  ): Promise<T> {
+    await this.checkRateLimit();
+    await this.checkSecondaryRateLimits(1); // REST API calls cost 1 point
+
+    this.concurrentRequests++;
+
+    try {
+      return await pRetry(
+        async () => {
+          try {
+            const url = endpoint.startsWith("http")
+              ? endpoint
+              : `https://api.github.com${endpoint}`;
+
+            const response = await axios.get(url, {
+              headers: {
+                Authorization: `Bearer ${this.token}`,
+                Accept: "application/vnd.github.v3+json",
+                ...options.headers,
+              },
+            });
+
+            this.rateLimitInfo = this.parseRateLimitHeaders(response.headers);
+            this.logger.debug("Rate limit status", {
+              remaining: this.rateLimitInfo.remaining,
+              resetAt: this.rateLimitInfo.resetAt,
+              pointsRemaining: Math.floor(this.pointsBucket.tokens),
+              concurrentRemaining: Math.floor(this.concurrentBucket.tokens),
+            });
+
+            return response.data;
+          } catch (error) {
+            const axiosError = error as AxiosError;
+            if (axiosError.response) {
+              this.rateLimitInfo = this.parseRateLimitHeaders(
+                axiosError.response.headers as Record<string, string>,
+              );
+
+              const status = axiosError.response.status;
+              const retryAfter = axiosError.response.headers["retry-after"];
+              const message =
+                (axiosError.response.data as Record<string, string>)?.message ||
+                "";
+
+              if (status === 404) {
+                // For 404s, don't retry - just return null
+                return null;
+              }
+              this.logger.warn(`REST API Error`, {
+                data: axiosError.response.data,
+              });
+              if (status === 403 && message.includes("secondary rate limit")) {
+                const waitTime = retryAfter
+                  ? parseInt(retryAfter, 10) * 1000
+                  : this.retryConfig.maxTimeout;
+                throw new SecondaryRateLimitError(
+                  `Secondary rate limit exceeded: ${message}`,
+                  waitTime,
+                );
+              }
+
+              if (
+                status === 403 ||
+                (this.rateLimitInfo?.remaining === 0 &&
+                  this.rateLimitInfo?.resetAt)
+              ) {
+                throw new RateLimitExceededError(
+                  `Primary rate limit exceeded: ${message}`,
+                  this.rateLimitInfo.resetAt,
+                );
+              }
+
+              throw new Error(
+                `GitHub API Error (${status}): ${message || axiosError.message}`,
+              );
+            }
+            throw error; // Rethrow non-Axios errors
+          }
+        },
+        {
+          retries: this.retryConfig.maxRetries,
+          minTimeout: this.retryConfig.minTimeout,
+          maxTimeout: this.retryConfig.maxTimeout,
+          factor: this.retryConfig.factor,
+          randomize: true,
+          onFailedAttempt: async (error) => {
+            this.logger.warn(
+              `REST API attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
+              { error: error.message },
+            );
+
+            if (error instanceof RateLimitExceededError) {
+              await this.wait(error.resetAt.getTime() - Date.now() + 1000);
+              throw new AbortError(error.message);
+            }
+
+            if (error instanceof SecondaryRateLimitError) {
+              await this.wait(error.waitTime);
+            }
+          },
+        },
+      );
+    } finally {
+      this.concurrentRequests--;
+    }
+  }
+
+  async fetchFileContent(
+    owner: string,
+    repo: string,
+    path: string,
+  ): Promise<{ content: string; sha: string } | null> {
+    try {
+      const endpoint = `/repos/${owner}/${repo}/contents/${path}`;
+      const response = await this.executeREST<{
+        content: string;
+        sha: string;
+        encoding: string;
+      }>(endpoint);
+
+      if (!response) {
+        this.logger.warn(`File not found: ${owner}/${repo}/${path}`);
+        return null;
+      }
+
+      return {
+        content: response.content,
+        sha: response.sha,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to fetch file content for ${owner}/${repo}/${path}`,
+        { error },
+      );
+      return null;
     }
   }
 }
