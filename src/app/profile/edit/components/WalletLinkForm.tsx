@@ -5,7 +5,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Loader2, Info, Shield, ArrowRight } from "lucide-react";
-import { isAddress } from "viem"; // For ETH address validation
+import { isAddress as isEvmAddress } from "viem"; // For ETH address validation
+import { normalize } from "viem/ens";
+import { viemClient } from "@/lib/walletLinking/viem";
 import { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
 
 interface WalletLinkFormProps {
@@ -17,6 +19,10 @@ interface WalletLinkFormProps {
 // Basic regex for Solana address (Base58, 32-44 chars)
 // For more robust validation, consider @solana/web3.js PublicKey.isOnCurve or similar
 const SOL_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+// ENS name regex (name.eth format)
+// Matches names that end with .eth and contain valid characters
+const ENS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.eth$/;
 
 export function WalletLinkForm({
   wallets = [],
@@ -40,7 +46,7 @@ export function WalletLinkForm({
     setEthAddress(ethWallet?.address || "");
     setSolAddress(solWallet?.address || "");
 
-    if (!ethWallet?.address || isAddress(ethWallet.address)) {
+    if (!ethWallet?.address || isEvmAddress(ethWallet.address)) {
       setIsEthValid(true);
       setEthAddressError("");
     } else {
@@ -59,11 +65,15 @@ export function WalletLinkForm({
     if (ethAddress === "") {
       setIsEthValid(true);
       setEthAddressError("");
-    } else {
-      const isValid = isAddress(ethAddress);
-      setIsEthValid(isValid);
-      setEthAddressError(isValid ? "" : "Invalid Ethereum address.");
+      return;
     }
+
+    const isEVMValid = isEvmAddress(ethAddress);
+    const isENSValid = ENS_NAME_REGEX.test(ethAddress);
+    setIsEthValid(isEVMValid || isENSValid);
+    setEthAddressError(
+      isEVMValid || isENSValid ? "" : "Invalid Ethereum address or ENS name.",
+    );
   }, [ethAddress]);
 
   useEffect(() => {
@@ -87,9 +97,23 @@ export function WalletLinkForm({
     const updatedWallets: LinkedWallet[] = [];
 
     if (ethAddress) {
+      const isENSValid = ENS_NAME_REGEX.test(ethAddress);
+      const address = isENSValid
+        ? await viemClient.getEnsAddress({
+            name: normalize(ethAddress),
+          })
+        : ethAddress;
+
+      // If the address is not found, set the error and return
+      if (!address) {
+        setEthAddressError("Invalid Ethereum address or ENS name.");
+        return;
+      }
+
       updatedWallets.push({
         chain: "ethereum",
-        address: ethAddress,
+        address,
+        ...(isENSValid && { ensName: ethAddress }),
       });
     }
 
@@ -125,7 +149,7 @@ export function WalletLinkForm({
           type="text"
           value={ethAddress}
           onChange={(e) => setEthAddress(e.target.value)}
-          placeholder="0x..."
+          placeholder="Your Ethereum address (e.g., 0x...) or ENS name (e.g., vitalik.eth)"
           disabled={isProcessing}
           className={ethAddressError ? "border-destructive" : ""}
         />
