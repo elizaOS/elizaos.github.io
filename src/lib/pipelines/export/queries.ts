@@ -17,7 +17,6 @@ import { categorizeWorkItem } from "@/lib/pipelines/codeAreaHelpers";
 import { getActiveContributors } from "../getActiveContributors";
 import { getTopUsersByScore } from "@/lib/scoring/queries";
 import { getIntervalTypeFromDateRange } from "@/lib/date-utils";
-import type { InferSelectModel } from "drizzle-orm";
 
 /**
  * Get top pull requests for a repository in a time period
@@ -283,6 +282,16 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
+  // Process prFiles for detailed file changes and sort them
+  const changedFilesDetails = prFiles
+    .map((file) => ({
+      path: file.path,
+      additions: file.additions || 0,
+      deletions: file.deletions || 0,
+      totalChanges: (file.additions || 0) + (file.deletions || 0),
+    }))
+    .sort((a, b) => b.totalChanges - a.totalChanges);
+
   // Get completed items (PRs merged in this period)
   const completedItems = mergedPRsThisPeriod.map((pr) => ({
     title: pr.title,
@@ -300,6 +309,7 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     codeChanges,
     focusAreas,
     completedItems,
+    sortedChangedFiles: changedFilesDetails,
   };
 }
 export type RepositoryMetrics = Awaited<ReturnType<typeof getProjectMetrics>>;

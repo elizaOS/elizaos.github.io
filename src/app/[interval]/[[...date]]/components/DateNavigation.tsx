@@ -3,7 +3,6 @@ import {
   formatTimeframeTitle,
   getIntervalTypeTitle,
 } from "@/lib/date-utils";
-import { IntervalSelector } from "./IntervalSelector";
 import { NavigationButton } from "./NavigationButton";
 
 interface DateNavigationProps {

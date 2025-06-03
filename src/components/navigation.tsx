@@ -10,12 +10,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  MenuIcon,
   LinkIcon,
   LogOutIcon,
   SunIcon,
@@ -53,7 +51,7 @@ export function Navigation() {
           href="/dashboard/day"
           className={cn(
             "w-full justify-start rounded-md px-2 text-base text-muted-foreground",
-           isDashboardActive ? "font-semibold text-primary" : ""
+            isDashboardActive ? "font-semibold text-primary" : "",
           )}
         >
           Dashboard
@@ -64,7 +62,7 @@ export function Navigation() {
           href="/about"
           className={cn(
             "w-full justify-start rounded-md px-2 text-base text-muted-foreground",
-            isAboutActive ? "font-semibold text-primary" : ""
+            isAboutActive ? "font-semibold text-primary" : "",
           )}
         >
           About
@@ -75,7 +73,7 @@ export function Navigation() {
           href="/leaderboard"
           className={cn(
             "w-full justify-start rounded-md px-2 text-base text-muted-foreground",
-            isLeaderboardActive ? "font-semibold text-primary" : ""
+            isLeaderboardActive ? "font-semibold text-primary" : "",
           )}
         >
           Leaderboard

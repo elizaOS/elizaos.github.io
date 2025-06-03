@@ -48,7 +48,11 @@ export function SummaryContent({
   return (
     <div
       className={cn(
-        "prose prose-sm mx-auto mt-8 dark:prose-invert sm:prose lg:prose-lg xl:prose-xl",
+        "prose prose-lg mt-8 max-w-none dark:prose-invert",
+        "[&_ol]:max-w-none [&_p]:max-w-none [&_ul]:max-w-none",
+        "[&_blockquote]:max-w-none [&_h2]:max-w-none [&_h3]:max-w-none",
+        "[&_pre]:max-w-none [&_pre]:overflow-x-auto",
+        "[&_table]:block [&_table]:w-full [&_table]:overflow-x-auto",
         className,
       )}
     >

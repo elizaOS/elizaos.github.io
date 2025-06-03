@@ -180,9 +180,10 @@ export async function getMetricsForInterval(
     codeChanges: repoMetrics.codeChanges,
     topContributors: repoMetrics.topContributors,
     focusAreas: repoMetrics.focusAreas,
+    sortedChangedFiles: repoMetrics.sortedChangedFiles,
     topIssues,
     topPullRequests,
-    detailedContributorSummaries, // Add the new field here
+    detailedContributorSummaries,
   };
 }
 
