@@ -17,17 +17,119 @@ import { rawPullRequests } from "@/lib/data/schema";
 import { UTCDate } from "@date-fns/utc";
 import fs from "fs/promises";
 import { getRepoFilePath } from "@/lib/fsHelpers";
+import {
+  TimelineActivityData,
+  ContributorActivityHour,
+} from "@/lib/data/types";
+import * as schema from "@/lib/data/schema";
+import { sql } from "drizzle-orm";
+import { addDays } from "date-fns"; // For calculating next day
 
 export async function getLatestAvailableDate() {
   const date = await db
     .select({
-      max: rawPullRequests.updatedAt,
+      max: schema.rawPullRequests.updatedAt,
     })
-    .from(rawPullRequests)
-    .orderBy(desc(rawPullRequests.updatedAt))
+    .from(schema.rawPullRequests)
+    .orderBy(desc(schema.rawPullRequests.updatedAt))
     .limit(1);
 
   return toDateString(date[0].max);
+}
+
+export async function getTimelineActivityData(
+  targetDate: string, // Expects YYYY-MM-DD
+  intervalType: IntervalType, // 'day', 'week', 'month' - though current use case is 'day'
+): Promise<TimelineActivityData> {
+  if (intervalType !== "day") {
+    // For now, this function is specifically designed for daily activity
+    console.warn(
+      `getTimelineActivityData called with intervalType '${intervalType}', but currently only supports 'day'. Proceeding as 'day'.`,
+    );
+  }
+
+  const startDate = new UTCDate(targetDate); // Sets time to 00:00:00.000Z for that date
+  const nextDayDate = addDays(startDate, 1); // Start of the next day
+
+  const startOfDayISO = startDate.toISOString();
+  const startOfNextDayISO = nextDayDate.toISOString();
+
+  // Define the raw SQL query using UNION ALL
+  // Ensure all selected columns are aliased consistently (login, avatarUrl, activityTime)
+  // Also, ensure that users.avatarUrl can be null and handle it.
+  const queryString = sql`
+    SELECT users.username as login, users.avatar_url as avatarUrl, raw_commits.committed_date as activityTime
+    FROM ${schema.rawCommits} raw_commits
+    JOIN ${schema.users} users ON raw_commits.author = users.username
+    WHERE raw_commits.committed_date >= ${startOfDayISO} AND raw_commits.committed_date < ${startOfNextDayISO}
+    UNION ALL
+    SELECT users.username as login, users.avatar_url as avatarUrl, raw_pull_requests.created_at as activityTime
+    FROM ${schema.rawPullRequests} raw_pull_requests
+    JOIN ${schema.users} users ON raw_pull_requests.author = users.username
+    WHERE raw_pull_requests.created_at >= ${startOfDayISO} AND raw_pull_requests.created_at < ${startOfNextDayISO}
+    UNION ALL
+    SELECT users.username as login, users.avatar_url as avatarUrl, raw_issues.created_at as activityTime
+    FROM ${schema.rawIssues} raw_issues
+    JOIN ${schema.users} users ON raw_issues.author = users.username
+    WHERE raw_issues.created_at >= ${startOfDayISO} AND raw_issues.created_at < ${startOfNextDayISO}
+    UNION ALL
+    SELECT users.username as login, users.avatar_url as avatarUrl, pr_reviews.created_at as activityTime
+    FROM ${schema.prReviews} pr_reviews
+    JOIN ${schema.users} users ON pr_reviews.author = users.username
+    WHERE pr_reviews.created_at >= ${startOfDayISO} AND pr_reviews.created_at < ${startOfNextDayISO}
+    UNION ALL
+    SELECT users.username as login, users.avatar_url as avatarUrl, pr_comments.created_at as activityTime
+    FROM ${schema.prComments} pr_comments
+    JOIN ${schema.users} users ON pr_comments.author = users.username
+    WHERE pr_comments.created_at >= ${startOfDayISO} AND pr_comments.created_at < ${startOfNextDayISO}
+    UNION ALL
+    SELECT users.username as login, users.avatar_url as avatarUrl, issue_comments.created_at as activityTime
+    FROM ${schema.issueComments} issue_comments
+    JOIN ${schema.users} users ON issue_comments.author = users.username
+    WHERE issue_comments.created_at >= ${startOfDayISO} AND issue_comments.created_at < ${startOfNextDayISO};
+  `;
+
+  type RawActivityResult = {
+    login: string;
+    avatarUrl: string | null;
+    activityTime: string; // ISO date string
+  };
+
+  // Execute the raw query. db.execute should be used for raw SQL.
+  // The result type from db.execute is an array of objects, but the exact shape depends on the driver.
+  // For bun:sqlite, it should be `unknown[]` or `Record<string, unknown>[]`.
+  // We cast it to RawActivityResult[] for easier processing.
+  const results = (await db.execute(queryString)) as RawActivityResult[];
+
+  if (!results || results.length === 0) {
+    return [];
+  }
+
+  const processedActivities = new Map<string, ContributorActivityHour>();
+
+  for (const row of results) {
+    if (!row.login || !row.activityTime) { // Basic validation
+        console.warn("Skipping row with missing login or activityTime:", row);
+        continue;
+    }
+    try {
+      const activityDate = new UTCDate(row.activityTime);
+      const hour = activityDate.getUTCHours();
+      const key = `${row.login}-${hour}`;
+
+      if (!processedActivities.has(key)) {
+        processedActivities.set(key, {
+          login: row.login,
+          avatarUrl: row.avatarUrl ?? undefined, // Ensure it's string | undefined
+          hour: hour,
+        });
+      }
+    } catch (e) {
+        console.error("Error processing activity row:", row, e);
+    }
+  }
+
+  return Array.from(processedActivities.values());
 }
 
 /**

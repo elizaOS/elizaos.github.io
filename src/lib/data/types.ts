@@ -168,6 +168,14 @@ export const RawIssueSchema = z.object({
 
 export type GithubUser = z.infer<typeof GithubUserSchema>;
 
+export interface ContributorActivityHour {
+  login: string;
+  avatarUrl?: string;
+  hour: number;
+}
+
+export type TimelineActivityData = ContributorActivityHour[];
+
 export interface DateRange {
   startDate?: string;
   endDate?: string;
