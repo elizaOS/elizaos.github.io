@@ -15,6 +15,8 @@ import EthereumIcon from "@/components/icons/EthereumIcon";
 import SolanaIcon from "@/components/icons/SolanaIcon";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
 import { getUserWalletData } from "@/lib/walletLinking/getUserWalletAddresses";
+import { ProfileCopyButton } from "@/components/ui/ProfileCopyButton";
+import { UserProfileData } from "@/app/profile/[username]/queries";
 
 export interface UserStats {
   totalPrs: number;
@@ -54,6 +56,20 @@ export default function UserProfile({
 }: UserProfileProps) {
   const [ethAddress, setEthAddress] = useState<string | undefined>(undefined);
   const [solAddress, setSolAddress] = useState<string | undefined>(undefined);
+
+  const profileDataForButton: UserProfileData = {
+    username,
+    monthlySummaries,
+    weeklySummaries,
+    roleTags,
+    skillTags,
+    focusAreaTags,
+    totalXp,
+    totalLevel,
+    stats,
+    dailyActivity,
+    score: totalXp, // Mapping totalXp to score as per plan
+  };
 
   useEffect(() => {
     let isCancelled = false;
@@ -136,6 +152,7 @@ export default function UserProfile({
                   label="SOL"
                 />
               )}
+              <ProfileCopyButton profileData={profileDataForButton} />
             </div>
           </div>
         </div>
