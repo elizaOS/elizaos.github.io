@@ -1,4 +1,5 @@
 "use client";
+
 import { Clock, Calendar, CalendarRange } from "lucide-react";
 import { IntervalType } from "@/lib/date-utils";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -22,8 +23,9 @@ export function IntervalSelector({
   const router = useRouter();
 
   const handleIntervalChange = (newInterval: string) => {
+    // Corrected path for dashboard
     router.push(
-      `/${newInterval}${currentDate && currentInterval === newInterval ? `/${currentDate}` : ""}`,
+      `/dashboard/${newInterval}${currentDate && currentInterval === newInterval ? `/${currentDate}` : ""}`,
     );
   };
 

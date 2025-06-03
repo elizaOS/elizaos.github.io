@@ -3,7 +3,10 @@ import {
   formatTimeframeTitle,
   getIntervalTypeTitle,
 } from "@/lib/date-utils";
-import { NavigationButton } from "./NavigationButton";
+// IntervalSelector is not used directly in DateNavigation in the original file,
+// but NavigationButton is. Let's copy NavigationButton first or ensure its path is correct.
+// For now, I'll assume NavigationButton will be copied into the same directory.
+import { NavigationButton } from "./NavigationButton"; // Adjusted path
 
 interface DateNavigationProps {
   prevDate: string | null;
@@ -22,7 +25,7 @@ export function DateNavigation({
     <div className="mb-6">
       <div className="flex items-center justify-between">
         <NavigationButton
-          href={prevDate ? `/${intervalType}/${prevDate}` : "#"}
+          href={prevDate ? `/dashboard/${intervalType}/${prevDate}` : "#"} // Corrected path for dashboard
           direction="prev"
           isVisible={!!prevDate}
         />
@@ -37,7 +40,7 @@ export function DateNavigation({
         </div>
 
         <NavigationButton
-          href={nextDate ? `/${intervalType}/${nextDate}` : "#"}
+          href={nextDate ? `/dashboard/${intervalType}/${nextDate}` : "#"} // Corrected path for dashboard
           direction="next"
           isVisible={!!nextDate}
         />

@@ -3,16 +3,17 @@ import {
   getMatcherFunction,
   clearMatcherCache,
   getMatcherCacheSize,
-  createMatcher, // Import createMatcher to test error caching
+  // createMatcher, // Unused: Import createMatcher to test error caching
 } from "../getMatcherFunction";
 import { PatternType, TagPattern } from "../types";
 import { TagPatternType } from "../../data/tags";
 
 // Mock createMatcher to track calls and simulate errors
-let createMatcherCallCount = 0;
-let shouldThrowError = false;
-const originalCreateMatcher = createMatcher; // Keep original for non-throwing tests
+// let createMatcherCallCount = 0; // Unused
+// let shouldThrowError = false; // Unused
+// const originalCreateMatcher = createMatcher; // Unused. createMatcher is imported directly where needed.
 
+/* // mockCreateMatcher is unused
 const mockCreateMatcher = (tagPattern: TagPattern) => {
   createMatcherCallCount++;
   if (shouldThrowError) {
@@ -21,6 +22,7 @@ const mockCreateMatcher = (tagPattern: TagPattern) => {
   // Use the original implementation for successful cases
   return originalCreateMatcher(tagPattern);
 };
+*/
 
 // Dynamically replace createMatcher import (adjust based on testing framework capabilities if needed)
 // For Bun/Jest, mocking might require different setup. Assuming direct replacement for simplicity here.
@@ -31,8 +33,8 @@ const mockCreateMatcher = (tagPattern: TagPattern) => {
 describe("Matcher Cache", () => {
   beforeEach(() => {
     clearMatcherCache();
-    createMatcherCallCount = 0;
-    shouldThrowError = false;
+    // createMatcherCallCount = 0; // This variable is removed
+    // shouldThrowError = false; // This variable is removed
     // Reset mock (if a more complex mocking setup was used)
   });
 
@@ -103,11 +105,11 @@ describe("Matcher Cache", () => {
     expect(getMatcherCacheSize()).toBe(0);
 
     // Re-getting should create new functions and populate cache again
-    const matcherFn1AfterClear = getMatcherFunction(pattern1);
+    getMatcherFunction(pattern1); // No need to assign to unused matcherFn1AfterClear
     expect(getMatcherCacheSize()).toBe(1);
     // expect(createMatcherCallCount).toBe(1); // Reset count in beforeEach
 
-    const matcherFn2AfterClear = getMatcherFunction(pattern2);
+    getMatcherFunction(pattern2); // No need to assign to unused matcherFn2AfterClear
     expect(getMatcherCacheSize()).toBe(2);
     // expect(createMatcherCallCount).toBe(2);
   });

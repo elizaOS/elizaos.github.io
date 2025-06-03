@@ -6,6 +6,7 @@ import {
   useState,
   useEffect,
   ReactNode,
+  useCallback,
 } from "react";
 
 interface GitHubUser {
@@ -38,6 +39,53 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Log the user out - memoized
+  const signout = useCallback(() => {
+    setUser(null);
+    setToken(null);
+    setError(null);
+    localStorage.removeItem("github_token");
+    localStorage.removeItem("github_user");
+    localStorage.removeItem("oauth_state");
+    localStorage.removeItem("github_token_expires_at");
+  }, []); // No dependencies, as it only uses setters and localStorage
+
+  // Fetch user data from GitHub API - memoized
+  const fetchUserData = useCallback(
+    async (accessToken: string) => {
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch("https://api.github.com/user", {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+
+        if (!response.ok) {
+          if (response.status === 401) {
+            signout(); // Use memoized signout
+            throw new Error("Authentication token is invalid or expired");
+          }
+          throw new Error(`GitHub API error: ${response.status}`);
+        }
+
+        const userData = await response.json();
+        setUser(userData);
+        localStorage.setItem("github_user", JSON.stringify(userData));
+      } catch (error) {
+        console.error("Error fetching user data:", error);
+        setError(
+          error instanceof Error ? error.message : "Failed to fetch user data",
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [signout],
+  ); // Dependency on memoized signout
+
   // Load user data from localStorage on initial load
   useEffect(() => {
     const storedToken = localStorage.getItem("github_token");
@@ -48,8 +96,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (storedToken && storedExpiresAt) {
       const expiresAt = parseInt(storedExpiresAt, 10);
       if (Date.now() > expiresAt) {
-        // Token has expired
-        signout(); // This will clear token, user, and expires_at
+        signout();
         setIsLoading(false);
         return;
       }
@@ -62,66 +109,18 @@ export function AuthProvider({ children }: AuthProviderProps) {
           userRestoredSynchronously = true;
         } catch (e) {
           console.error("Failed to parse stored user data:", e);
-          // Will proceed to fetchUserData below
         }
       }
 
       if (!userRestoredSynchronously) {
-        // Fetch user data if not restored synchronously or if parsing failed
-        fetchUserData(storedToken)
-          .catch((err) => {
-            // Error already set in fetchUserData or logout called
-            console.error(
-              "Failed to fetch user data on init (after possible parse fail or no stored user):",
-              err,
-            );
-          })
-          .finally(() => {
-            // setIsLoading(false) is already called in fetchUserData's finally block
-            // However, if fetchUserData itself is not even called because storedToken is null,
-            // isLoading needs to be set to false.
-            // If fetchUserData *is* called, its finally block handles setIsLoading.
-          });
-        return; //isLoading is handled by fetchUserData's finally block.
+        fetchUserData(storedToken).catch((err) => {
+          console.error("Failed to fetch user data on init:", err);
+        });
+        return;
       }
     }
-    // If no storedToken, or if user was restored synchronously:
     setIsLoading(false);
-  }, []); // Removed fetchUserData from dependency array
-
-  // Fetch user data from GitHub API
-  const fetchUserData = async (accessToken: string) => {
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      const response = await fetch("https://api.github.com/user", {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          // Token is invalid or expired
-          signout();
-          throw new Error("Authentication token is invalid or expired");
-        }
-        throw new Error(`GitHub API error: ${response.status}`);
-      }
-
-      const userData = await response.json();
-      setUser(userData);
-      localStorage.setItem("github_user", JSON.stringify(userData));
-    } catch (error) {
-      console.error("Error fetching user data:", error);
-      setError(
-        error instanceof Error ? error.message : "Failed to fetch user data",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  }, [fetchUserData, signout]); // Added fetchUserData and signout to dependency array
 
   // Start the GitHub OAuth flow
   const signin = () => {
@@ -218,17 +217,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  // Log the user out
-  const signout = () => {
-    setUser(null);
-    setToken(null);
-    setError(null);
-    localStorage.removeItem("github_token");
-    localStorage.removeItem("github_user");
-    localStorage.removeItem("oauth_state");
-    localStorage.removeItem("github_token_expires_at"); // Ensure this is cleared
   };
 
   const value = {

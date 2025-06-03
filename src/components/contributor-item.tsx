@@ -2,7 +2,6 @@ import React from "react";
 import Link from "next/link";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { StatBadge } from "./stat-badge";
 
 interface ContributorItemProps {
