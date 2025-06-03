@@ -34,6 +34,7 @@ export function Navigation() {
 
   const isLeaderboardActive = pathname === "/leaderboard";
   const isAboutActive = pathname === "/about";
+  const isDashboardActive = pathname.startsWith("/dashboard");
 
   const navLinksForMenuJsx = (
     <>
@@ -49,9 +50,21 @@ export function Navigation() {
       </DropdownMenuItem>
       <DropdownMenuItem asChild className="py-3 text-base">
         <Link
+          href="/dashboard/day"
+          className={cn(
+            "w-full justify-start rounded-md px-2 text-base text-muted-foreground",
+           isDashboardActive ? "font-semibold text-primary" : ""
+          )}
+        >
+          Dashboard
+        </Link>
+      </DropdownMenuItem>
+      <DropdownMenuItem asChild className="py-3 text-base">
+        <Link
           href="/about"
           className={cn(
             "w-full justify-start rounded-md px-2 text-base text-muted-foreground",
+            isAboutActive ? "font-semibold text-primary" : ""
           )}
         >
           About
@@ -62,6 +75,7 @@ export function Navigation() {
           href="/leaderboard"
           className={cn(
             "w-full justify-start rounded-md px-2 text-base text-muted-foreground",
+            isLeaderboardActive ? "font-semibold text-primary" : ""
           )}
         >
           Leaderboard
@@ -77,9 +91,22 @@ export function Navigation() {
         size={"sm"}
         className={cn(
           "rounded-full px-4 text-sm font-medium",
+          isDashboardActive
+            ? "bg-muted hover:bg-muted/80"
+            : "text-muted-foreground hover:bg-transparent hover:text-primary",
+        )}
+        asChild
+      >
+        <Link href="/dashboard/day">Dashboard</Link>
+      </Button>
+      <Button
+        variant="ghost"
+        size={"sm"}
+        className={cn(
+          "rounded-full px-4 text-sm font-medium",
           isAboutActive
             ? "bg-muted hover:bg-muted/80"
-            : "text-muted-foreground hover:bg-transparent",
+            : "text-muted-foreground hover:bg-transparent hover:text-primary",
         )}
         asChild
       >
@@ -92,7 +119,7 @@ export function Navigation() {
           "rounded-full px-4 text-sm font-medium",
           isLeaderboardActive
             ? "bg-muted hover:bg-muted/80"
-            : "text-muted-foreground hover:bg-transparent",
+            : "text-muted-foreground hover:bg-transparent hover:text-primary",
         )}
         asChild
       >
