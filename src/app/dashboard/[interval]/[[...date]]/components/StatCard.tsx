@@ -14,7 +14,7 @@ interface StatCardProps {
 export function StatCard({
   title,
   icon: Icon,
-  bgColor = "bg-primary/10 group-hover:bg-primary/20",
+  bgColor = "bg-muted/30 group-hover:bg-muted/50",
   children,
   listContent,
   className,
