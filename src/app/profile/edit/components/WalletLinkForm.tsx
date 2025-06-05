@@ -185,7 +185,7 @@ export function WalletLinkForm({
           type="text"
           value={solAddress}
           onChange={(e) => setSolAddress(e.target.value)}
-          placeholder="Your Solana address (e.g., So1...)"
+          placeholder="Your Solana address (e.g., So1...) or SNS name (e.g., example.sol)"
           disabled={isProcessing}
           className={solAddressError ? "border-destructive" : ""}
         />
