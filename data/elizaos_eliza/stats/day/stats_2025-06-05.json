@@ -1,0 +1,410 @@
+{
+  "interval": {
+    "intervalStart": "2025-06-05T00:00:00.000Z",
+    "intervalEnd": "2025-06-06T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-06-05 to 2025-06-06, elizaos/eliza had 20 new PRs (16 merged), 3 new issues, and 19 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs66Hl5D",
+      "title": "Creating room via REST API first works but then returns empty rooms array",
+      "author": "exitsimulation",
+      "number": 4955,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nI am creating a room for an existing agent via the Rest API which returns a success response\n\nPOST `/api/agents/b850bc30-45f8-0041-a00a-83df46d8555d/rooms` with \n```\n{\n  \"name\": \"TestRoom\",\n  \"worldId\": \"00000000-0000-0000-0000-000000000000\",\n  \"roomId\": \"c06bb360-e84f-49ff-b43a-75a9eb6df8f3\",\n  \"enitityId\": \"b850bc30-45f8-0041-a00a-83df46d8555d\"\n}\n```\n\nResponse:\n```\n{\n    \"success\": true,\n    \"data\": {\n        \"id\": \"143da10d-b1e5-00cb-b315-a64f6062d9de\",\n        \"name\": \"TestRoom\",\n        \"agentId\": \"b850bc30-45f8-0041-a00a-83df46d8555d\",\n        \"createdAt\": 1749153906448,\n        \"source\": \"client\",\n        \"type\": \"dm\",\n        \"worldId\": \"00000000-0000-0000-0000-000000000000\",\n        \"serverId\": \"server-1749153906404\"\n    }\n}\n```\n\nNow, the strange thing is then when I call the rooms endpoint via GET\n`api/agents/b850bc30-45f8-0041-a00a-83df46d8555d/rooms`\n\nI am getting an empty array\n\n```\n{\n    \"success\": true,\n    \"data\": {\n        \"rooms\": []\n    }\n}\n```\n\nAlso the ID in the success response is not the one that I supplied in the request.\n\nIt seems like internally the room has not been created despite the success response?\n\nIs this a bug in the current version? I am on 1.0.4. Any help would be appreciated!",
+      "createdAt": "2025-06-05T20:24:03Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs66FJn6",
+      "title": "Custom Plugin - callback from action is getting replaced by `ATTACHMENTS` provider.",
+      "author": "HuzarO",
+      "number": 4947,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nI'm creating a custom plugin to generate images using comfy.icu api. I've added action to generate a picture, but whenever I call a `callback` from action with proper response, the web chat receives completely different message, even if the action below the message shows proper action, but the content is completely different. And the `providers` array has `ATTACHMENTS` entry.\n\n**To Reproduce**\n\nHere's my code:\n`import type { HandlerCallback, IAgentRuntime, Memory, Plugin, State } from \"@elizaos/core\";\nimport { logger } from \"@elizaos/core\";\nimport { fetch } from \"undici\";\n\n/**\n * Gets a configuration setting from the runtime or environment\n */\nfunction getSetting(\n  runtime: IAgentRuntime,\n  key: string,\n  defaultValue?: string\n): string | undefined {\n  return runtime.getSetting(key) ?? process.env[key] ?? defaultValue;\n}\n\n/**\n * Gets the Comfy.icu API key\n */\nfunction getApiKey(runtime: IAgentRuntime): string | undefined {\n  return getSetting(runtime, \"COMFY_ICU_API_KEY\");\n}\n\n/**\n * Executes a workflow on comfy.icu and returns the result\n */\nasync function executeWorkflow(\n  runtime: IAgentRuntime,\n  workflowId: string,\n  params: Record<string, any> = {}\n): Promise<{ success: boolean; imageUrl?: string; error?: string }> {\n  const apiKey = getApiKey(runtime);\n\n  if (!apiKey) {\n    logger.error(\"COMFY_ICU_API_KEY is not set\");\n    return { success: false, error: \"API key not configured\" };\n  }\n\n  try {\n    // Trigger the workflow\n    const response = await fetch(\n      `https://comfy.icu/api/v1/workflows/${workflowId}/runs`,\n      {\n        method: \"POST\",\n        headers: {\n          \"Content-Type\": \"application/json\",\n          Authorization: `Bearer ${apiKey}`,\n        },\n        body: JSON.stringify(params),\n      }\n    );\n\n    if (!response.ok) {\n      const errorText = await response.text();\n      logger.error(\n        `Failed to trigger workflow: ${response.status} - ${errorText}`\n      );\n      return {\n        success: false,\n        error: `Workflow execution failed: ${response.status} - ${errorText}`,\n      };\n    }\n\n    const result = (await response.json()) as {\n      id: string;\n    };\n\n    if (!result.id) {\n      logger.error(\"Workflow execution failed: Unknown error\");\n      return { success: false, error: \"Unknown error\" };\n    }\n\n    // Poll for completion\n    const runId = result.id;\n    const imageUrl = await pollForCompletion(runtime, workflowId, runId);\n\n    if (!imageUrl) {\n      return { success: false, error: \"Failed to retrieve generated image\" };\n    }\n\n    return { success: true, imageUrl };\n  } catch (error) {\n    const message = error instanceof Error ? error.message : String(error);\n    logger.error(`Error executing workflow: ${message}`);\n    return { success: false, error: `Error: ${message}` };\n  }\n}\n\n/**\n * Polls the comfy.icu API for workflow completion\n */\nasync function pollForCompletion(\n  runtime: IAgentRuntime,\n  workflowId: string,\n  runId: string\n): Promise<string | null> {\n  const apiKey = getApiKey(runtime);\n  const maxAttempts = 30; // 5 minutes with 10-second intervals\n  let attempts = 0;\n\n  while (attempts < maxAttempts) {\n    try {\n      const response = await fetch(\n        `https://comfy.icu/api/v1/workflows/${workflowId}/runs/${runId}`,\n        {\n          headers: {\n            Authorization: `Bearer ${apiKey}`,\n          },\n        }\n      );\n\n      if (!response.ok) {\n        logger.warn(`Status check failed: ${response.status}`);\n        await new Promise((resolve) => setTimeout(resolve, 10000)); // Wait 10 seconds\n        attempts++;\n        continue;\n      }\n\n      const status = (await response.json()) as {\n        status: \"STARTED\" | \"COMPLETED\" | \"ERROR\";\n        output?: Array<{ url: string }>;\n        error?: string;\n      };\n\n      if (\n        status.status === \"COMPLETED\" &&\n        status.output &&\n        status.output.length > 0\n      ) {\n        // Get the first image URL\n        const imageUrl = status.output[0].url;\n        if (imageUrl) {\n          logger.info(`Workflow completed, image URL: ${imageUrl}`);\n          return imageUrl;\n        } else {\n          logger.error(\"Workflow completed but no image URL found\");\n          return null;\n        }\n      } else if (status.status === \"ERROR\") {\n        logger.error(`Workflow failed: ${status.error || \"Unknown error\"}`);\n        return null;\n      }\n\n      // Still processing, wait and try again\n      logger.debug(`Workflow status: ${status.status}, waiting...`);\n      await new Promise((resolve) => setTimeout(resolve, 10000)); // Wait 10 seconds\n      attempts++;\n    } catch (error) {\n      const message = error instanceof Error ? error.message : String(error);\n      logger.error(`Error checking workflow status: ${message}`);\n      await new Promise((resolve) => setTimeout(resolve, 10000)); // Wait 10 seconds\n      attempts++;\n    }\n  }\n\n  logger.error(\"Timed out waiting for workflow completion\");\n  return null;\n}\n\n/**\n * Comfy.icu plugin for ElizaOS\n */\nexport const comfyIcuPlugin: Plugin = {\n  name: \"comfy-icu\",\n  description: \"Comfy.icu integration for ElizaOS\",\n  config: {\n    COMFY_ICU_API_KEY: process.env.COMFY_ICU_API_KEY,\n    WORKFLOW_ID_SFW: process.env.WORKFLOW_ID_SFW,\n    WORKFLOW_ID_NSFW: process.env.WORKFLOW_ID_NSFW,\n  },\n  async init(_config, runtime) {\n    if (!getApiKey(runtime)) {\n      logger.warn(\n        \"COMFY_ICU_API_KEY is not set - Comfy.icu functionality will be limited\"\n      );\n      return;\n    }\n\n    logger.info(\"Comfy.icu plugin initialized\");\n  },\n  actions: [\n    {\n      name: \"GENERATE_IMAGE\",\n      description: \"Generates an image based on the provided description using comfy.icu API\",\n      similes: [\n        \"CREATE_IMAGE\",\n        \"IMAGE_GENERATOR\",\n        \"PICTURE_CREATOR\",\n        \"COMFY_IMAGE\",\n      ],\n      examples: [\n        [\n          {\n            name: \"{{user1}}\",\n            content: {\n              text: \"Generate an image of a sunset over mountains\",\n            },\n          },\n          {\n            name: \"{{agentName}}\",\n            content: {\n              text: \"Here's an image of a sunset over mountains:\",\n              actions: [\"GENERATE_IMAGE\"],\n              attachements: [{id: \"2242142-fasa-323-asd3d\", url: \"https://comfy.icu/generated-image.jpg\"}],\n            },\n          },\n        ],\n        [\n          {\n            name: \"{{user1}}\",\n            content: {\n              text: \"Can you create a picture of a futuristic city?\",\n            },\n          },\n          {\n            name: \"{{agentName}}\",\n            content: {\n              text: \"Here's an image of a futuristic city:\",\n              actions: [\"GENERATE_IMAGE\"],\n              attachements: [{id: \"2242142-fasa-323-asd3d\", url: \"https://comfy.icu/generated-image.jpg\"}],\n            },\n          },\n        ],\n      ],\n      validate: async (runtime: IAgentRuntime, message: Memory, state?: State): Promise<boolean> => {\n        return true;\n      },\n      handler: async (runtime: IAgentRuntime, message: Memory, state?: State, options?: any, callback?: HandlerCallback): Promise<boolean> => {\n        logger.info(\"Generating image using Comfy.icu...\");\n        logger.info('Message callback:' + typeof callback);\n\n        const responseContent = {\n          text: 'Here is your generated image:',\n          actions: ['GENERATE_IMAGE'],\n          attachments: [\n            {\n              id: '1234f-fasd-32fsa-1234f',\n              url: 'https://some-domain.com/custom-picture.png',\n            }\n          ]\n        };\n\n        if (callback) {\n          await callback(responseContent);\n        }\n\n        return true;\n    },\n  ],\n};\n\nexport default comfyIcuPlugin;\n`\n\n**Expected behavior**\n\nIt should return a message as it is in `responseContent`. \n\n**Screenshots**\n\n<img width=\"621\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/04169c3d-77bf-4b6f-8138-cf1a892cec71\" />\n\n**Additional context**\n\n<!-- Add any other context about the problem here. -->\n",
+      "createdAt": "2025-06-05T16:51:08Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs65--J8",
+      "title": "Successive replies on target users",
+      "author": "imanngabriel",
+      "number": 4940,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n The replies on the target users behavior has successive replies, it provides 2 response in a row. I saw related issues with here as well. \n\n**To Reproduce**\n\nSet a target users on env and provide a post interval min and max. The reply of the agent behavior is inconsistent sometimes provide one reply per target users but there are scenario where it successive replies in a row (2 replies in a row)\n\n**Expected behavior**\n\nThere should be one reply per target users post or tweet and will not have successive replies. \n\n**Screenshots**\n\n<img width=\"589\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/dba6c082-3df1-45b6-9a71-d9f6e37ba8a0\" />\n\n<img width=\"612\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/126bc8bd-882b-426b-8465-7de2440e32d8\" />\n\n**Additional context**\n\n<!-- Add any other context about the problem here. -->\n",
+      "createdAt": "2025-06-05T08:19:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6ZHABe",
+      "title": "Puga/community agent2",
+      "author": "alpuga",
+      "number": 4938,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-05T00:05:22Z",
+      "mergedAt": null,
+      "additions": 16801,
+      "deletions": 80002
+    },
+    {
+      "id": "PR_kwDOMT5cIs6ZR5cO",
+      "title": "Feature/polymarket plugin enhancements",
+      "author": "HarshModi2005",
+      "number": 4959,
+      "body": "",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-05T21:14:45Z",
+      "mergedAt": null,
+      "additions": 10099,
+      "deletions": 2942
+    },
+    {
+      "id": "PR_kwDOMT5cIs6ZQt0-",
+      "title": "feat: plugin migrator command",
+      "author": "samarth30",
+      "number": 4950,
+      "body": "This pull request introduces a comprehensive migration system for the ElizaOS CLI, focusing on structured migration processes, configuration management, repository analysis, and code quality improvements. Key changes include the addition of migration-related constants, utilities, structured components, and detailed migration phases.\r\n\r\n### Migration System Enhancements:\r\n\r\n* **Configuration Management**: Added constants in `config.ts` for managing migration settings, such as `MAX_TOKENS`, `CLAUDE_CODE_TIMEOUT`, and `LOCK_FILE_NAME`. These ensure consistent configuration across migration processes.\r\n\r\n* **Structured Migration Components**: Introduced exports for migration-related classes and types in `index.ts`, including `PluginMigrator`, `MigrationStepExecutor`, and `MigrationResult`. This facilitates a modular approach to migration.\r\n\r\n### Repository Analysis and Utilities:\r\n\r\n* **Repository Analyzer**: Implemented a `analyzeRepository` function in `repository-analyzer.ts` to scan repositories, extract key files, and build a context string for migration. This includes token counting and file filtering based on size and content type.\r\n\r\n* **Utilities**: Added utility functions in `utils.ts` for dependency installation (`ensureDependenciesInstalled`), disk space checking (`getAvailableDiskSpace`), and command availability validation (`isCommandAvailable`). These enhance the robustness of the migration process.\r\n\r\n### Migration Phases and Patterns:\r\n\r\n* **Mega Prompt Parsing**: Added `mega-prompt-parser.ts` to define migration phases, critical architecture issues, and success metrics. This includes mappings for imports, model types, and testing patterns to ensure compatibility with V2 standards.\r\n\r\n* **File Structure Adjustment**: Updated `tsup.config.ts` to include a new file copy operation for `CLAUDE.md`, supporting documentation during migration.<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-05T19:14:40Z",
+      "mergedAt": null,
+      "additions": 6158,
+      "deletions": 1266
+    },
+    {
+      "id": "PR_kwDOMT5cIs6ZDLkG",
+      "title": "1.0.5 develop merge",
+      "author": "ChristopherTrimboli",
+      "number": 4928,
+      "body": "This pull request introduces several changes across multiple files, focusing on improving plugin development workflows, refining message handling logic, and simplifying client-side configurations. Key updates include the introduction of a new utility for detecting local plugin development contexts, enhancements to the message bus service for better handling of direct messages, and the removal of redundant scripts in the client package.\r\n\r\n### Plugin Development Enhancements:\r\n* Added `plugin-context` utilities to detect local plugin development scenarios, ensure plugins are built before loading, and provide guidance when issues occur. These changes impact files like `packages/cli/src/utils/plugin-context.ts`, `install-plugin.ts`, and `load-plugin.ts`. [[1]](diffhunk://#diff-82c66107ee0ef273a03277a2536340f5ff1061780808d49e160ff641b80d1cd8R1-R142) [[2]](diffhunk://#diff-74a3576479d0da74bc7663b3f9e5af4ff702625b15832eae51be54ab9b21bcf8R8) [[3]](diffhunk://#diff-0cf79118603e21c1796db0c0a2d3f9946318d2ec59cb14eef71115ff5368f603L77-R109)\r\n* Updated `loadAndPreparePlugin` in `start.ts` to prioritize local development scenarios when loading plugins. [[1]](diffhunk://#diff-6858dc88bcb8c8d88063b185a5bddbe2709171731c56c401cbf793bf7ff5baa1R51-R71) [[2]](diffhunk://#diff-6858dc88bcb8c8d88063b185a5bddbe2709171731c56c401cbf793bf7ff5baa1R98)\r\n* Prevented self-installation of plugins in `installPlugin` to avoid accidental overwrites during development.\r\n\r\n### Message Handling Improvements:\r\n* Enhanced `MessageBusService` to validate UUIDs, handle direct message channels, and log detailed information for debugging purposes. This includes checks for agent participation in DM channels and fallback behavior when participant checks fail.\r\n* Added `validateUuid` import to `message.ts` for improved validation logic.\r\n\r\n### Client-Side Simplifications:\r\n* Removed the `version.sh` script and related references from `packages/client/package.json`, simplifying the build process. [[1]](diffhunk://#diff-8ef328a58a2bf7849f068b414807c673ff1d348e37d0df64299eeab7acb793fdL1-L28) [[2]](diffhunk://#diff-26d3d28d31824ef26252df77cca08d24faea8451cb8fd3ffee2000f9e496daa0L8-L27)\r\n* Updated `package.json` in the client package to streamline scripts and dependencies, such as replacing `vitest` test commands with coverage support and removing unnecessary dependencies. [[1]](diffhunk://#diff-26d3d28d31824ef26252df77cca08d24faea8451cb8fd3ffee2000f9e496daa0R72) [[2]](diffhunk://#diff-26d3d28d31824ef26252df77cca08d24faea8451cb8fd3ffee2000f9e496daa0R82) [[3]](diffhunk://#diff-26d3d28d31824ef26252df77cca08d24faea8451cb8fd3ffee2000f9e496daa0L98)\r\n* Added `fs` import to `vite.config.ts` for potential future use.\r\n\r\n### Other Notable Changes:\r\n* Modified the `copy-templates` script to exclude `node_modules` and `.git` directories during template copying.\r\n* Updated the Tauri app's `run` function to directly call `elizaos` instead of using `npx`.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-04T15:46:01Z",
+      "mergedAt": "2025-06-05T19:57:06Z",
+      "additions": 2338,
+      "deletions": 1197
+    },
+    {
+      "id": "PR_kwDOMT5cIs6ZI1vB",
+      "title": "github-comic-plugin",
+      "author": "Dexploarer",
+      "number": 4939,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-05T06:14:01Z",
+      "mergedAt": null,
+      "additions": 942,
+      "deletions": 9142
+    }
+  ],
+  "codeChanges": {
+    "additions": 4709,
+    "deletions": 2809,
+    "files": 82,
+    "commitCount": 58
+  },
+  "completedItems": [
+    {
+      "title": "chore: force bun in cli, add install docs",
+      "prNumber": 4937,
+      "type": "feature",
+      "body": ""
+    },
+    {
+      "title": "fix: ensureConnections order of op",
+      "prNumber": 4936,
+      "type": "bugfix",
+      "body": "## Fix: Foreign Key Constraint Violation in ensureConnections\r\n\r\n### Problem\r\nThe `ensureConnections` function was attempting to insert participants before ensuring the room exists, causing a foreign key constraint violation:\r\n\r\n```\r\n[2025-"
+    },
+    {
+      "title": "fix: agent cross interference loop",
+      "prNumber": 4935,
+      "type": "bugfix",
+      "body": "## Issue Summary\n\nFixed agent cross-chat interference in DM channels where multiple agents would respond to messages intended for a single agent. The root cause was incorrect metadata preservation causing `agent_response` messages to lose t"
+    },
+    {
+      "title": "1.0.5 develop merge",
+      "prNumber": 4928,
+      "type": "other",
+      "body": "This pull request introduces several changes across multiple files, focusing on improving plugin development workflows, refining message handling logic, and simplifying client-side configurations. Key updates include the introduction of a n"
+    },
+    {
+      "title": "fix: release ci versioning",
+      "prNumber": 4960,
+      "type": "bugfix",
+      "body": "Summary of the Fix:\r\nThe main issue was that the CI workflow was trying to publish packages without first updating their versions to match the release tag. Here's what I changed:\r\n\r\nExtract version from tag: Remove the 'v' prefix from the g"
+    },
+    {
+      "title": "Merge dev into main",
+      "prNumber": 4958,
+      "type": "other",
+      "body": "Merge dev into main"
+    },
+    {
+      "title": "remove faulty tests for now",
+      "prNumber": 4957,
+      "type": "tests",
+      "body": "This PR just comments out failing tests, we'll need to uncomment them at some point"
+    },
+    {
+      "title": "fix: right skip flag for plugins bats test",
+      "prNumber": 4956,
+      "type": "bugfix",
+      "body": ""
+    },
+    {
+      "title": "fix(bootstrap): ensure action callbacks reach users and improve shouldRespond logic",
+      "prNumber": 4954,
+      "type": "bugfix",
+      "body": "## Relates to\r\n\r\nResolves issue where MCP tool responses and other non-REPLY actions were generated but never sent to users.\r\n\r\n## Risks\r\n\r\n**Low** - This is a bug fix that ensures action callbacks are properly transmitted. The change is is"
+    },
+    {
+      "title": "fix: release versioning in client",
+      "prNumber": 4952,
+      "type": "bugfix",
+      "body": "This pull request introduces changes to the build and release process as well as enhancements to the versioning logic in the codebase. The most significant updates include modifying the `release` script in `package.json` to improve versioni"
+    },
+    {
+      "title": "fix: optimize plugin loading strategies and resolve core dependency conflicts",
+      "prNumber": 4949,
+      "type": "bugfix",
+      "body": "# Risks\r\n\r\n**Low** - These changes optimize existing functionality without breaking compatibility. Plugin loading still works for all plugin types, with improved performance and cleaner logs.\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n-"
+    },
+    {
+      "title": "Fix agent memory viewer not displaying memories",
+      "prNumber": 4948,
+      "type": "bugfix",
+      "body": "\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- **New Features**\n\t- Added support for filtering agent memories by room, allowing users to view memories specific to a selected room.\n\n"
+    },
+    {
+      "title": "fix: make group creation work",
+      "prNumber": 4946,
+      "type": "bugfix",
+      "body": "creates group and redirects to new group chat\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- **Refactor**\n  - Updated the `ChannelType` enum values and related string literals from l"
+    },
+    {
+      "title": "feat: plugins add env var prompting",
+      "prNumber": 4945,
+      "type": "feature",
+      "body": "<img width=\"718\" alt=\"Screenshot 2025-06-05 at 9 43 30 AM\" src=\"https://github.com/user-attachments/assets/991b4b60-dda7-469c-a60d-07bcf5b2f4a7\" />\r\n\r\nThis pull request enhances the plugin installation process in the CLI by adding support f"
+    },
+    {
+      "title": "fix: avoid infinite effect loop by guarding currentDmChannelId reset",
+      "prNumber": 4944,
+      "type": "bugfix",
+      "body": "This prevents the useEffect from retriggering itself due to setting currentDmChannelId: null while including it in the dependency array.\r\n\r\n![image](https://github.com/user-attachments/assets/db7032e7-2e51-400c-a2d2-77d202993e32)\r\n"
+    },
+    {
+      "title": "chore: auto install bun in CLI",
+      "prNumber": 4943,
+      "type": "other",
+      "body": "<img width=\"718\" alt=\"Screenshot 2025-06-05 at 7 13 31 AM\" src=\"https://github.com/user-attachments/assets/baeea5a9-8095-4af9-b9ad-a8dd0897cfb2\" />\r\n\r\nThis pull request introduces a new feature for the ElizaOS CLI: automatic installation of"
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 153.95032920617018,
+      "prScore": 128.7503292061702,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 147.24147677216288,
+      "prScore": 146.8034767721629,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 90.92164599535877,
+      "prScore": 75.48364599535877,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 70.8061991746053,
+      "prScore": 70.8061991746053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alpuga",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37851662?u=c913e7d534337d8d4f8c97a52d689d87ae50cff3&v=4",
+      "totalScore": 40.4257738965761,
+      "prScore": 40.4257738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 40.4257738965761,
+      "prScore": 40.4257738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "samarth30",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48334430?u=1fc119a6c2deb8cf60448b4c8961cb21dc69baeb&v=4",
+      "totalScore": 39.5437738965761,
+      "prScore": 39.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yungalgo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
+      "totalScore": 38.21976604069211,
+      "prScore": 38.019766040692105,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "HarshModi2005",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/142230924?u=64e337bbdb6b3aded5943b7e297759e7a3cfc0f0&v=4",
+      "totalScore": 33.5437738965761,
+      "prScore": 33.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tcm390",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/60634884?u=c6c41679b8322eaa0c81f72e0b4ed95e80f0ac16&v=4",
+      "totalScore": 21.586147180559944,
+      "prScore": 21.386147180559945,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "github-advanced-security",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "eeemmmmmm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/155267286?u=f7d609c472582d2c72ff5b592dddf98359459fc5&v=4",
+      "totalScore": 6.496437912434101,
+      "prScore": 6.296437912434101,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "davidjsonn",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/155117116?u=c0d37dc63f2fa62f48b5c54342917b17460af966&v=4",
+      "totalScore": 4.981718956217049,
+      "prScore": 4.981718956217049,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "affanmustafa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/69677074?u=7c8ded5622198b0b638af30a38d87b7b7d43ca59&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "imanngabriel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91194719?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "exitsimulation",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13287154?u=eaf07807399e16a2b75364f7588f1e6ca95011aa&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "HuzarO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16628522?u=458b109bc49f67c565ca2c83c1b600e1c171578e&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 20,
+  "mergedPRs": 16,
+  "newIssues": 3,
+  "closedIssues": 0,
+  "activeContributors": 19
+}
