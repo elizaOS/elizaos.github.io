@@ -9,6 +9,7 @@ import { isAddress as isEvmAddress } from "viem"; // For ETH address validation
 import { normalize } from "viem/ens";
 import { viemClient } from "@/lib/walletLinking/viem";
 import { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
+import { resolveSolDomain } from "@/lib/walletLinking/sns";
 
 interface WalletLinkFormProps {
   wallets: LinkedWallet[];
@@ -23,6 +24,10 @@ const SOL_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 // ENS name regex (name.eth format)
 // Matches names that end with .eth and contain valid characters
 const ENS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.eth$/;
+
+// SNS name regex (name.sol format)
+// Matches names that end with .sol and contain valid characters
+const SNS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.sol$/;
 
 export function WalletLinkForm({
   wallets = [],
@@ -80,11 +85,15 @@ export function WalletLinkForm({
     if (solAddress === "") {
       setIsSolValid(true);
       setSolAddressError("");
-    } else {
-      const isValid = SOL_ADDRESS_REGEX.test(solAddress);
-      setIsSolValid(isValid);
-      setSolAddressError(isValid ? "" : "Invalid Solana address format.");
+      return;
     }
+
+    const isSOLValid = SOL_ADDRESS_REGEX.test(solAddress);
+    const isSNSValid = SNS_NAME_REGEX.test(solAddress);
+    setIsSolValid(isSNSValid || isSOLValid);
+    setSolAddressError(
+      isSNSValid || isSOLValid ? "" : "Invalid Solana address or SNS name.",
+    );
   }, [solAddress]);
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
@@ -118,9 +127,21 @@ export function WalletLinkForm({
     }
 
     if (solAddress) {
+      const isSNSValid = SNS_NAME_REGEX.test(solAddress);
+      const address = isSNSValid
+        ? await resolveSolDomain(solAddress)
+        : solAddress;
+
+      // If the address is not found, set the error and return
+      if (!address) {
+        setSolAddressError("Invalid Solana address or SNS name.");
+        return;
+      }
+
       updatedWallets.push({
         chain: "solana",
-        address: solAddress,
+        address,
+        ...(isSNSValid && { snsName: solAddress }),
       });
     }
 
