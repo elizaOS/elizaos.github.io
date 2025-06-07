@@ -18,6 +18,9 @@ export const users = sqliteTable("users", {
   lastUpdated: text("last_updated")
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
+  ethAddress: text("eth_address"),
+  solAddress: text("sol_address"),
+  walletDataUpdatedAt: integer("wallet_data_updated_at"),
 });
 
 // Repositories being tracked

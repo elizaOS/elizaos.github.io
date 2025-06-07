@@ -40,6 +40,8 @@ export interface LeaderboardUser {
   totalLevel: number;
   avatarUrl?: string | null;
   allTags: { tagName: string; category: string | null; score: number }[];
+  ethAddress?: string;
+  solAddress?: string;
 }
 
 interface LeaderboardTab {

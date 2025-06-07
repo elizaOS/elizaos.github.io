@@ -14,7 +14,15 @@ import { SummaryCard, Summary } from "@/components/summary-card";
 import EthereumIcon from "@/components/icons/EthereumIcon";
 import SolanaIcon from "@/components/icons/SolanaIcon";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
-import { getUserWalletData } from "@/lib/walletLinking/getUserWalletAddresses";
+import { parseWalletLinkingDataFromReadme } from "@/lib/walletLinking/readmeUtils";
+import { decodeBase64 } from "@/lib/decode";
+import { GoldCheckmarkIcon } from "@/components/icons";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 export interface UserStats {
   totalPrs: number;
@@ -36,8 +44,6 @@ type UserProfileProps = {
   totalLevel: number;
   stats: UserStats;
   dailyActivity: UserActivityHeatmap[];
-  ethAddress?: string;
-  solAddress?: string;
 };
 
 export default function UserProfile({
@@ -58,30 +64,55 @@ export default function UserProfile({
   useEffect(() => {
     let isCancelled = false;
 
-    const fetchWalletData = async () => {
+    const fetchAndSetWalletData = async () => {
       try {
-        const walletData = await getUserWalletData(username);
-        if (walletData && !isCancelled) {
-          setEthAddress(
-            walletData.wallets.find((wallet) => wallet.chain === "ethereum")
-              ?.address,
-          );
-          setSolAddress(
-            walletData.wallets.find((wallet) => wallet.chain === "solana")
-              ?.address,
-          );
+        const readmeUrl = `https://api.github.com/repos/${username}/${username}/contents/README.md`;
+        const response = await fetch(readmeUrl, {
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+            "User-Agent": "Eliza-Leaderboard-App",
+          },
+        });
+
+        if (!response.ok) {
+          return;
         }
+
+        const readmeData = await response.json();
+        if (!readmeData.content) {
+          return;
+        }
+
+        const decodedReadmeText = decodeBase64(readmeData.content);
+        const walletData = parseWalletLinkingDataFromReadme(decodedReadmeText);
+
+        if (isCancelled || !walletData) {
+          setEthAddress(undefined);
+          setSolAddress(undefined);
+          return;
+        }
+
+        setEthAddress(
+          walletData.wallets.find((wallet) => wallet.chain === "ethereum")
+            ?.address,
+        );
+        setSolAddress(
+          walletData.wallets.find((wallet) => wallet.chain === "solana")
+            ?.address,
+        );
       } catch (error) {
         if (!isCancelled) {
           console.warn(
             `Failed to fetch GitHub wallet data for ${username}:`,
             error,
           );
+          setEthAddress(undefined);
+          setSolAddress(undefined);
         }
       }
     };
 
-    fetchWalletData();
+    fetchAndSetWalletData();
 
     return () => {
       isCancelled = true;
@@ -101,7 +132,21 @@ export default function UserProfile({
         <div className="flex-grow">
           <div className="flex flex-col gap-2">
             <h1 className="max-w-full text-lg font-bold sm:text-2xl">
-              {username}{" "}
+              {username}
+              {(ethAddress || solAddress) && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="ml-1 inline-block align-middle">
+                        <GoldCheckmarkIcon className="inline-block h-5 w-5" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Wallet linked</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
               <span className="text-primary">(level-{totalLevel})</span>
             </h1>
             <div className="flex flex-wrap items-center gap-3">
