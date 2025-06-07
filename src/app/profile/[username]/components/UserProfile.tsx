@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -14,7 +13,6 @@ import { SummaryCard, Summary } from "@/components/summary-card";
 import EthereumIcon from "@/components/icons/EthereumIcon";
 import SolanaIcon from "@/components/icons/SolanaIcon";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
-import { getUserWalletData } from "@/lib/walletLinking/getUserWalletAddresses";
 
 export interface UserStats {
   totalPrs: number;
@@ -51,43 +49,9 @@ export default function UserProfile({
   totalLevel,
   stats,
   dailyActivity,
+  ethAddress,
+  solAddress,
 }: UserProfileProps) {
-  const [ethAddress, setEthAddress] = useState<string | undefined>(undefined);
-  const [solAddress, setSolAddress] = useState<string | undefined>(undefined);
-
-  useEffect(() => {
-    let isCancelled = false;
-
-    const fetchWalletData = async () => {
-      try {
-        const walletData = await getUserWalletData(username);
-        if (walletData && !isCancelled) {
-          setEthAddress(
-            walletData.wallets.find((wallet) => wallet.chain === "ethereum")
-              ?.address,
-          );
-          setSolAddress(
-            walletData.wallets.find((wallet) => wallet.chain === "solana")
-              ?.address,
-          );
-        }
-      } catch (error) {
-        if (!isCancelled) {
-          console.warn(
-            `Failed to fetch GitHub wallet data for ${username}:`,
-            error,
-          );
-        }
-      }
-    };
-
-    fetchWalletData();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [username]);
-
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
       <div className="items-star flex flex-row gap-4">
