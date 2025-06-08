@@ -1,5 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Progress } from "@/components/ui/progress";
 import type { IntervalMetrics } from "@/app/[interval]/[[...date]]/queries";
 import {
   GitCommitVertical,
@@ -40,12 +42,14 @@ export function RightSidebar({ metrics }: RightSidebarProps) {
                 {codeChanges.commitCount} commits
               </span>
             </div>
-            <div className="h-2 overflow-hidden rounded-full bg-muted">
+            <div className="relative">
+              <Progress
+                value={additionPercentage}
+                className="h-2 bg-red-500/20"
+              />
               <div
-                className="h-full bg-gradient-to-r from-green-500 to-red-500"
-                style={{
-                  background: `linear-gradient(to right, #22c55e ${additionPercentage}%, #ef4444 ${additionPercentage}%)`,
-                }}
+                className="absolute inset-0 h-2 rounded-full bg-green-500"
+                style={{ width: `${additionPercentage}%` }}
               />
             </div>
             <div className="flex justify-between text-xs text-muted-foreground">
@@ -87,31 +91,33 @@ export function RightSidebar({ metrics }: RightSidebarProps) {
             </span>
           </div>
 
-          {/* Top Files Changed - Compact */}
+          {/* Top Files Changed - Scrollable */}
           {metrics.topFilesChanged && metrics.topFilesChanged.length > 0 && (
-            <div className="max-h-32 space-y-1.5 overflow-y-auto">
-              {metrics.topFilesChanged.slice(0, 6).map((file, index) => (
-                <div
-                  key={index}
-                  className="flex items-center justify-between text-xs"
-                >
-                  <span
-                    className="mr-2 flex-1 truncate font-mono"
-                    title={file.path}
+            <ScrollArea className="h-48">
+              <div className="space-y-1.5 pr-2">
+                {metrics.topFilesChanged.slice(0, 15).map((file, index) => (
+                  <div
+                    key={index}
+                    className="flex items-center justify-between text-xs"
                   >
-                    {file.path.split("/").pop() || file.path}
-                  </span>
-                  <div className="flex flex-shrink-0 items-center gap-1">
-                    <span className="min-w-0 text-green-600">
-                      +{file.additions}
+                    <span
+                      className="mr-2 flex-1 truncate font-mono"
+                      title={file.path}
+                    >
+                      {file.path.split("/").pop() || file.path}
                     </span>
-                    <span className="min-w-0 text-red-600">
-                      -{file.deletions}
-                    </span>
+                    <div className="flex flex-shrink-0 items-center gap-1">
+                      <span className="min-w-0 text-green-600">
+                        +{file.additions}
+                      </span>
+                      <span className="min-w-0 text-red-600">
+                        -{file.deletions}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </ScrollArea>
           )}
         </CardContent>
       </Card>

@@ -125,9 +125,9 @@ export default async function IntervalSummaryPage({ params }: PageProps) {
 
     return (
       <div className="min-h-screen bg-background">
-        <div className="container mx-auto px-4 py-6 md:px-6 lg:px-8">
+        <div className="mx-auto w-full px-4 py-4 sm:py-6 md:px-6 lg:px-8 xl:px-12 2xl:px-16">
           <div className="w-full max-w-none">
-            <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:gap-0">
+            <div className="mb-4 flex flex-col justify-between gap-3 sm:mb-6 sm:flex-row sm:gap-4 md:gap-0">
               <IntervalSelector
                 currentInterval={intervalType}
                 currentDate={targetDate}
@@ -141,21 +141,28 @@ export default async function IntervalSummaryPage({ params }: PageProps) {
             </div>
             <DateNavigation {...navigation} />
 
-            <div className="mt-8 grid grid-cols-1 gap-8 md:grid-cols-1 lg:grid-cols-[280px_1fr_340px] xl:grid-cols-[320px_1fr_380px]">
+            <div className="mt-8 grid grid-cols-1 gap-4 sm:gap-6 md:grid-cols-[300px_1fr] md:gap-8 lg:grid-cols-[280px_1fr_300px] xl:grid-cols-[320px_1fr_360px] 2xl:grid-cols-[360px_1fr_400px]">
               {/* LEFT SIDEBAR */}
-              <div className="space-y-6">
+              <div className="space-y-4 md:space-y-6">
                 <LeftSidebar metrics={metrics} />
               </div>
 
               {/* MAIN CONTENT */}
-              <div className="min-w-0">
+              <div className="min-w-0 md:order-last lg:order-none">
                 <MainContent
                   metrics={metrics}
                   summaryContent={summaryContent}
                 />
               </div>
 
-              {/* RIGHT SIDEBAR */}
+              {/* RIGHT SIDEBAR - Hidden on md, shown on lg+ */}
+              <div className="hidden space-y-4 lg:block lg:space-y-6">
+                <RightSidebar metrics={metrics} />
+              </div>
+            </div>
+
+            {/* RIGHT SIDEBAR CONTENT FOR TABLET (md) - Shown below main content */}
+            <div className="mt-8 block lg:hidden">
               <div className="space-y-6">
                 <RightSidebar metrics={metrics} />
               </div>
