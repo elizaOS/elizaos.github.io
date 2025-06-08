@@ -170,7 +170,7 @@ export function LeftSidebar({ metrics }: LeftSidebarProps) {
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1">
-              <ScrollArea className="h-64">
+              <ScrollArea className="max-h-64">
                 <div className="space-y-2 pr-2">
                   {metrics.topPullRequests.slice(0, 10).map((pr, index) => (
                     <div
@@ -243,7 +243,7 @@ export function LeftSidebar({ metrics }: LeftSidebarProps) {
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1">
-              <ScrollArea className="h-64">
+              <ScrollArea className="max-h-64">
                 <div className="space-y-2 pr-2">
                   {metrics.topIssues.slice(0, 10).map((issue, index) => (
                     <div

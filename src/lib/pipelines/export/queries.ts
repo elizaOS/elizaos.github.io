@@ -283,7 +283,7 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
-  // Get top files changed (by total changes: additions + deletions)
+  // Get all files changed (sorted by total changes: additions + deletions)
   const topFilesChanged = prFiles
     .map((file) => ({
       path: file.path,
@@ -292,8 +292,7 @@ export async function getProjectMetrics(params: QueryParams = {}) {
       totalChanges: (file.additions || 0) + (file.deletions || 0),
     }))
     .filter((file) => file.totalChanges > 0)
-    .sort((a, b) => b.totalChanges - a.totalChanges)
-    .slice(0, 10);
+    .sort((a, b) => b.totalChanges - a.totalChanges);
 
   // Get completed items (PRs merged in this period)
   const completedItems = mergedPRsThisPeriod.map((pr) => ({
