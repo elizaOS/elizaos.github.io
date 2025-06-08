@@ -16,11 +16,11 @@ import {
 import { UTCDate } from "@date-fns/utc";
 import { addDays } from "date-fns";
 import { DateNavigation } from "./components/DateNavigation";
-import { SummaryContent } from "./components/SummaryContent";
-import { StatCardsDisplay } from "./components/StatCardsDisplay";
-import { CodeChangesDisplay } from "./components/CodeChangesDisplay";
 import { LlmCopyButton } from "@/components/ui/llm-copy-button";
 import { IntervalSelector } from "./components/IntervalSelector";
+import { LeftSidebar } from "./components/LeftSidebar";
+import { MainContent } from "./components/MainContent";
+import { RightSidebar } from "./components/RightSidebar";
 
 interface PageProps {
   params: Promise<{
@@ -124,27 +124,43 @@ export default async function IntervalSummaryPage({ params }: PageProps) {
     );
 
     return (
-      <div className="container mx-auto px-6 py-8 md:px-8">
-        <div className="mx-auto max-w-4xl">
-          <div className="mb-4 flex flex-col justify-between sm:flex-row">
-            <IntervalSelector
-              currentInterval={intervalType}
-              currentDate={targetDate}
-            />
+      <div className="min-h-screen bg-background">
+        <div className="container mx-auto px-4 py-6 md:px-6 lg:px-8">
+          <div className="w-full max-w-none">
+            <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:gap-0">
+              <IntervalSelector
+                currentInterval={intervalType}
+                currentDate={targetDate}
+              />
 
-            <LlmCopyButton
-              metrics={metrics}
-              summaryContent={summaryContent}
-              className="self-end sm:self-start"
-            />
-          </div>
-          <DateNavigation {...navigation} />
+              <LlmCopyButton
+                metrics={metrics}
+                summaryContent={summaryContent}
+                className="self-end sm:self-start"
+              />
+            </div>
+            <DateNavigation {...navigation} />
 
-          <div className="mb-8 space-y-6">
-            <StatCardsDisplay metrics={metrics} />
-            <CodeChangesDisplay metrics={metrics} />
+            <div className="mt-8 grid grid-cols-1 gap-8 md:grid-cols-1 lg:grid-cols-[280px_1fr_340px] xl:grid-cols-[320px_1fr_380px]">
+              {/* LEFT SIDEBAR */}
+              <div className="space-y-6">
+                <LeftSidebar metrics={metrics} />
+              </div>
+
+              {/* MAIN CONTENT */}
+              <div className="min-w-0">
+                <MainContent
+                  metrics={metrics}
+                  summaryContent={summaryContent}
+                />
+              </div>
+
+              {/* RIGHT SIDEBAR */}
+              <div className="space-y-6">
+                <RightSidebar metrics={metrics} />
+              </div>
+            </div>
           </div>
-          <SummaryContent summaryContent={summaryContent} />
         </div>
       </div>
     );

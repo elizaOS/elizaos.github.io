@@ -283,6 +283,18 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
+  // Get top files changed (by total changes: additions + deletions)
+  const topFilesChanged = prFiles
+    .map((file) => ({
+      path: file.path,
+      additions: file.additions || 0,
+      deletions: file.deletions || 0,
+      totalChanges: (file.additions || 0) + (file.deletions || 0),
+    }))
+    .filter((file) => file.totalChanges > 0)
+    .sort((a, b) => b.totalChanges - a.totalChanges)
+    .slice(0, 10);
+
   // Get completed items (PRs merged in this period)
   const completedItems = mergedPRsThisPeriod.map((pr) => ({
     title: pr.title,
@@ -299,6 +311,7 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     topContributors,
     codeChanges,
     focusAreas,
+    topFilesChanged,
     completedItems,
   };
 }

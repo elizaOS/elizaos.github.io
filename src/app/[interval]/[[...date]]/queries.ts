@@ -180,6 +180,7 @@ export async function getMetricsForInterval(
     codeChanges: repoMetrics.codeChanges,
     topContributors: repoMetrics.topContributors,
     focusAreas: repoMetrics.focusAreas,
+    topFilesChanged: repoMetrics.topFilesChanged,
     topIssues,
     topPullRequests,
     detailedContributorSummaries, // Add the new field here

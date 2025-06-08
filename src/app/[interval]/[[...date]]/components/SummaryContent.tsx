@@ -29,7 +29,7 @@ const remarkRemoveFirstH1 = () => {
 
 // Custom H2 component to apply primary color
 const CustomH2 = (props: HTMLProps<HTMLHeadingElement>) => {
-  return <h2 className="lowercase" {...props} />;
+  return <h2 className="text-base font-semibold text-orange-500" {...props} />;
 };
 
 interface SummaryContentProps {
