@@ -22,6 +22,7 @@ export default function IssuesListModalContent({
             author={issue.author}
             number={issue.number}
             href={`https://github.com/${issue.repository}/issues/${issue.number}`}
+            allowTitleWrap={true}
             icon={
               issue.state === "closed" || issue.closedAt ? (
                 <CheckCircle className="h-4 w-4 text-green-500" />

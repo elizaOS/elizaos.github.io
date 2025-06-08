@@ -1,5 +1,3 @@
-"use client";
-
 import { StatCard } from "@/components/stat-card";
 import { CounterWithIcon } from "@/components/counter-with-icon";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
