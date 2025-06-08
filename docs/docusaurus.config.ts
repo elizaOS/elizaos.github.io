@@ -17,6 +17,7 @@ const config: Config = {
   organizationName: "elizaos", // Usually your GitHub org/user name.
   projectName: "elizaos.github.io", // Usually your repo name.
   trailingSlash: false,
+  deploymentBranch: "_data",
 
   onBrokenLinks: "throw",
   onBrokenMarkdownLinks: "warn",
@@ -85,6 +86,11 @@ const config: Config = {
           docId: "api/modules",
           position: "left",
           label: "API",
+        },
+        {
+          href: "/docs/demo",
+          label: "Demo",
+          position: "left",
         },
         {
           href: "https://elizaos.github.io/",
