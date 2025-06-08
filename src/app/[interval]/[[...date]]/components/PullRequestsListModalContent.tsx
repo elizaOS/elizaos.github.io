@@ -22,6 +22,7 @@ export default function PullRequestsListModalContent({
             className="px-4"
             number={pr.number}
             href={`https://github.com/${pr.repository}/pull/${pr.number}`}
+            allowTitleWrap={true}
             icon={
               pr.mergedAt ? (
                 <GitMerge className="h-4 w-4 text-purple-500" />

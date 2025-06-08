@@ -5,7 +5,7 @@ export function SummaryContentSkeleton({ className }: { className?: string }) {
   return (
     <div
       className={cn(
-        "prose prose-sm mx-auto mt-8 dark:prose-invert sm:prose lg:prose-lg xl:prose-xl",
+        "prose mt-8 w-full max-w-none dark:prose-invert",
         className,
       )}
     >
