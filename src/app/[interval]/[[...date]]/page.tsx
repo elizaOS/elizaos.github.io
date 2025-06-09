@@ -3,6 +3,7 @@ import {
   getLatestAvailableDate,
   getIntervalSummaryContent,
   parseIntervalDate,
+  getTimelineActivityData, // New import
 } from "./queries";
 import { notFound } from "next/navigation";
 import pipelineConfig from "@/../config/pipeline.config";
@@ -19,6 +20,7 @@ import { DateNavigation } from "./components/DateNavigation";
 import { SummaryContent } from "./components/SummaryContent";
 import { StatCardsDisplay } from "./components/StatCardsDisplay";
 import { CodeChangesDisplay } from "./components/CodeChangesDisplay";
+import { ContributorActivityTimeline } from "./components/ContributorActivityTimeline"; // New import
 import { LlmCopyButton } from "@/components/ui/llm-copy-button";
 import { IntervalSelector } from "./components/IntervalSelector";
 
@@ -122,6 +124,7 @@ export default async function IntervalSummaryPage({ params }: PageProps) {
       targetDate,
       intervalType,
     );
+    const timelineData = await getTimelineActivityData(targetDate, intervalType); // New data fetching
 
     return (
       <div className="container mx-auto px-6 py-8 md:px-8">
@@ -142,6 +145,7 @@ export default async function IntervalSummaryPage({ params }: PageProps) {
 
           <div className="mb-8 space-y-6">
             <StatCardsDisplay metrics={metrics} />
+            <ContributorActivityTimeline activityData={timelineData} /> {/* New component instance */}
             <CodeChangesDisplay metrics={metrics} />
           </div>
           <SummaryContent summaryContent={summaryContent} />
