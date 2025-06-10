@@ -1,5 +1,6 @@
 import type { Config } from "@docusaurus/types";
 import { themes as prismThemes } from "prism-react-renderer";
+import path from "path";
 
 const config: Config = {
   title: "ElizaOS",
@@ -67,6 +68,26 @@ const config: Config = {
         sidebar: {},
       },
     ],
+    function (_context, _options) {
+      return {
+        name: "webpack-configuration-plugin",
+        configureWebpack(_config, _isServer, _utils) {
+          return {
+            resolve: {
+              alias: {
+                "@main": path.resolve(__dirname, "../src"),
+                "@main-components": path.resolve(
+                  __dirname,
+                  "../src/components",
+                ),
+                "@main-lib": path.resolve(__dirname, "../src/lib"),
+                "@main-hooks": path.resolve(__dirname, "../src/hooks"),
+              },
+            },
+          };
+        },
+      };
+    },
   ],
 
   themeConfig: {
@@ -120,12 +141,8 @@ const config: Config = {
           title: "Community",
           items: [
             {
-              label: "Discord",
-              href: "https://discord.gg/your-invite",
-            },
-            {
               label: "Twitter",
-              href: "https://twitter.com/eliza_os",
+              href: "https://twitter.com/elizaos",
             },
           ],
         },
@@ -143,7 +160,12 @@ const config: Config = {
     },
     prism: {
       theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      darkTheme: prismThemes.vsDark,
+    },
+    colorMode: {
+      defaultMode: "light",
+      disableSwitch: false,
+      respectPrefersColorScheme: true,
     },
   },
 };
