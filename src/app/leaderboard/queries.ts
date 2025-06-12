@@ -82,16 +82,10 @@ export async function getLeaderboard(period: LeaderboardPeriod) {
     usersFromDb.map(async (user) => {
       try {
         const walletData = await getCachedUserWalletData(user.username);
-        const ethAddress = walletData?.wallets.find(
-          (w) => w.chain === "ethereum",
-        )?.address;
-        const solAddress = walletData?.wallets.find(
-          (w) => w.chain === "solana",
-        )?.address;
+        const linkedWallets = walletData?.wallets || [];
         return {
           ...user,
-          ethAddress: ethAddress || undefined,
-          solAddress: solAddress || undefined,
+          linkedWallets,
         };
       } catch (error) {
         console.warn(
@@ -100,8 +94,7 @@ export async function getLeaderboard(period: LeaderboardPeriod) {
         );
         return {
           ...user,
-          ethAddress: undefined,
-          solAddress: undefined,
+          linkedWallets: [],
         };
       }
     }),

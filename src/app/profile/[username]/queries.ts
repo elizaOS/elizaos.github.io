@@ -13,6 +13,7 @@ import {
   getUserActivityHeatmaps,
 } from "@/lib/scoring/queries";
 import { TagType } from "@/lib/scoring/types";
+import { getCachedUserWalletData } from "@/lib/walletLinking/getUserWalletAddresses";
 
 export async function getUserTags(username: string) {
   const tagSelectFields = {
@@ -152,6 +153,9 @@ export async function getUserProfile(username: string) {
     endDate,
   );
 
+  // Get wallet addresses
+  const walletData = await getCachedUserWalletData(user.username);
+
   return {
     username,
     score: userScore.totalScore,
@@ -171,5 +175,6 @@ export async function getUserProfile(username: string) {
     totalXp: tagsData.totalXp,
     totalLevel: tagsData.totalLevel,
     dailyActivity,
+    linkedWallets: walletData?.wallets || [],
   };
 }

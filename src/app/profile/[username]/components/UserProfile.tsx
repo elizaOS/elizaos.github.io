@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -11,11 +10,7 @@ import { formatCompactNumber } from "@/lib/format-number";
 import { DailyActivity } from "@/components/daily-activity";
 import { UserActivityHeatmap } from "@/lib/scoring/queries";
 import { SummaryCard, Summary } from "@/components/summary-card";
-import EthereumIcon from "@/components/icons/EthereumIcon";
-import SolanaIcon from "@/components/icons/SolanaIcon";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
-import { parseWalletLinkingDataFromReadme } from "@/lib/walletLinking/readmeUtils";
-import { decodeBase64 } from "@/lib/decode";
 import { GoldCheckmarkIcon } from "@/components/icons";
 import {
   Tooltip,
@@ -23,6 +18,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import type { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
+import { SUPPORTED_CHAINS } from "@/lib/walletLinking/chainUtils";
 
 export interface UserStats {
   totalPrs: number;
@@ -44,6 +41,7 @@ type UserProfileProps = {
   totalLevel: number;
   stats: UserStats;
   dailyActivity: UserActivityHeatmap[];
+  linkedWallets: LinkedWallet[];
 };
 
 export default function UserProfile({
@@ -57,68 +55,8 @@ export default function UserProfile({
   totalLevel,
   stats,
   dailyActivity,
+  linkedWallets,
 }: UserProfileProps) {
-  const [ethAddress, setEthAddress] = useState<string | undefined>(undefined);
-  const [solAddress, setSolAddress] = useState<string | undefined>(undefined);
-
-  useEffect(() => {
-    let isCancelled = false;
-
-    const fetchAndSetWalletData = async () => {
-      try {
-        const readmeUrl = `https://api.github.com/repos/${username}/${username}/contents/README.md`;
-        const response = await fetch(readmeUrl, {
-          headers: {
-            Accept: "application/vnd.github.v3+json",
-            "User-Agent": "Eliza-Leaderboard-App",
-          },
-        });
-
-        if (!response.ok) {
-          return;
-        }
-
-        const readmeData = await response.json();
-        if (!readmeData.content) {
-          return;
-        }
-
-        const decodedReadmeText = decodeBase64(readmeData.content);
-        const walletData = parseWalletLinkingDataFromReadme(decodedReadmeText);
-
-        if (isCancelled || !walletData) {
-          setEthAddress(undefined);
-          setSolAddress(undefined);
-          return;
-        }
-
-        setEthAddress(
-          walletData.wallets.find((wallet) => wallet.chain === "ethereum")
-            ?.address,
-        );
-        setSolAddress(
-          walletData.wallets.find((wallet) => wallet.chain === "solana")
-            ?.address,
-        );
-      } catch (error) {
-        if (!isCancelled) {
-          console.warn(
-            `Failed to fetch GitHub wallet data for ${username}:`,
-            error,
-          );
-          setEthAddress(undefined);
-          setSolAddress(undefined);
-        }
-      }
-    };
-
-    fetchAndSetWalletData();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [username]);
-
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
       <div className="items-star flex flex-row gap-4">
@@ -133,7 +71,7 @@ export default function UserProfile({
           <div className="flex flex-col gap-2">
             <h1 className="max-w-full text-lg font-bold sm:text-2xl">
               {username}
-              {(ethAddress || solAddress) && (
+              {linkedWallets.length > 0 && (
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -165,22 +103,21 @@ export default function UserProfile({
                 <span className="sr-only">View GitHub Profile</span>
               </a>
 
-              {ethAddress && (
-                <WalletAddressBadge
-                  address={ethAddress}
-                  icon={
-                    <EthereumIcon className="h-4 w-4 fill-muted-foreground" />
-                  }
-                  label="ETH"
-                />
-              )}
-              {solAddress && (
-                <WalletAddressBadge
-                  address={solAddress}
-                  icon={<SolanaIcon className="h-4 w-4" />}
-                  label="SOL"
-                />
-              )}
+              {linkedWallets.map((wallet, index) => {
+                const IconComponent = SUPPORTED_CHAINS[wallet.chain]?.icon;
+                return (
+                  <WalletAddressBadge
+                    key={index}
+                    address={wallet.address}
+                    icon={
+                      IconComponent ? (
+                        <IconComponent className="h-4 w-4" />
+                      ) : null
+                    }
+                    label={wallet.chain}
+                  />
+                );
+              })}
             </div>
           </div>
         </div>

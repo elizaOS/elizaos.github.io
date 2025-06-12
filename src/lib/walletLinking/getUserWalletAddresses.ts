@@ -5,8 +5,14 @@ import {
 } from "./readmeUtils";
 import { decodeBase64 } from "../decode";
 import { db } from "@/lib/data/db";
-import { users } from "@/lib/data/schema";
-import { eq } from "drizzle-orm";
+import { users, walletAddresses } from "@/lib/data/schema";
+import { eq, and } from "drizzle-orm";
+import {
+  getChainId,
+  getChainByChainId,
+  validateAddress,
+  SUPPORTED_CHAINS_NAMES,
+} from "@/lib/walletLinking/chainUtils";
 
 export interface WalletLinkingResponse {
   walletData: WalletLinkingData | null;
@@ -15,7 +21,7 @@ export interface WalletLinkingResponse {
   profileRepoExists: boolean;
 }
 
-const CACHE_DURATION_SECONDS = 24 * 60 * 60; // 24 hours
+const CACHE_DURATION_SECONDS = 12 * 60 * 60; // 12 hours
 
 /**
  * Fetches a user's profile README from GitHub and parses the wallet linking data.
@@ -29,31 +35,14 @@ async function fetchWalletDataFromGithub(
   username: string,
 ): Promise<WalletLinkingData | null> {
   try {
-    const readmeUrl = `https://api.github.com/repos/${username}/${username}/contents/README.md`;
-    // Add Accept header for better API interaction & User-Agent as good practice
-    const response = await fetch(readmeUrl, {
-      headers: {
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "Eliza-Leaderboard-App",
-      },
-    });
+    const readmeData = await githubService.getFileContent(
+      process.env.GITHUB_TOKEN!,
+      username,
+      username,
+      "README.md",
+    );
 
-    if (!response.ok) {
-      if (response.status === 404) {
-        // README not found, common case, not necessarily an error for wallet linking.
-        // console.log(`README.md not found for user ${username}. No wallet data to parse.`);
-        return null;
-      }
-      // Log other errors (rate limiting, server errors, etc.)
-      console.error(
-        `Error fetching README.md for ${username}. Status: ${response.status} ${response.statusText}`,
-      );
-      return null;
-    }
-
-    const readmeData = await response.json();
-    if (!readmeData.content) {
-      // console.log(`No content in README.md for user ${username}.`);
+    if (!readmeData?.content) {
       return null;
     }
     const decodedReadmeText = decodeBase64(readmeData.content);
@@ -79,65 +68,123 @@ export async function getCachedUserWalletData(
   username: string,
 ): Promise<WalletLinkingData | null> {
   try {
+    // Get user record to check wallet data update timestamp
     const userRecord = await db.query.users.findFirst({
       where: eq(users.username, username),
       columns: {
-        ethAddress: true,
-        solAddress: true,
         walletDataUpdatedAt: true,
       },
     });
 
-    if (
-      userRecord?.walletDataUpdatedAt &&
-      Date.now() / 1000 - userRecord.walletDataUpdatedAt <
-        CACHE_DURATION_SECONDS
-    ) {
-      // Cache is fresh
-      if (userRecord.ethAddress || userRecord.solAddress) {
-        const wallets = [];
-        if (userRecord.ethAddress) {
-          wallets.push({
-            chain: "ethereum",
-            address: userRecord.ethAddress,
-            source: "cache",
-          });
-        }
-        if (userRecord.solAddress) {
-          wallets.push({
-            chain: "solana",
-            address: userRecord.solAddress,
-            source: "cache",
-          });
-        }
-        if (wallets.length > 0) {
-          return {
-            wallets,
-            lastUpdated: userRecord.walletDataUpdatedAt.toString(),
-          };
-        }
-      }
-      // Fresh cache, and we know there are no addresses, or only null addresses were stored.
+    if (!userRecord) {
       return null;
     }
 
-    // Cache is stale or user record doesn't have walletDataUpdatedAt, fetch from GitHub
+    // Check if we have cached wallet data that's still fresh
+    if (
+      userRecord.walletDataUpdatedAt &&
+      Date.now() / 1000 - userRecord.walletDataUpdatedAt <
+        CACHE_DURATION_SECONDS
+    ) {
+      // Cache is fresh, get wallet addresses from walletAddresses table
+      const cachedWallets = await db.query.walletAddresses.findMany({
+        where: and(
+          eq(walletAddresses.userId, username),
+          eq(walletAddresses.isActive, true),
+        ),
+        columns: {
+          chainId: true,
+          accountAddress: true,
+        },
+      });
+
+      if (cachedWallets.length > 0) {
+        const wallets = cachedWallets.map((wallet) => ({
+          chain: getChainByChainId(wallet.chainId),
+          address: wallet.accountAddress,
+          source: "cache",
+        }));
+
+        return {
+          wallets,
+          lastUpdated: userRecord.walletDataUpdatedAt.toString(),
+        };
+      }
+
+      // Fresh cache, but no wallet addresses found
+      return null;
+    }
+
+    // Cache is stale or doesn't exist, fetch from GitHub
     const freshWalletData = await fetchWalletDataFromGithub(username);
 
-    const ethWallet = freshWalletData?.wallets.find(
-      (w) => w.chain === "ethereum",
-    );
-    const solWallet = freshWalletData?.wallets.find(
-      (w) => w.chain === "solana",
-    );
+    if (!freshWalletData?.wallets || freshWalletData.wallets.length === 0) {
+      // Update timestamp even if no wallets found to avoid repeated GitHub API calls
+      await db
+        .update(users)
+        .set({
+          walletDataUpdatedAt: Math.floor(Date.now() / 1000),
+        })
+        .where(eq(users.username, username));
 
-    // Attempt to update. If the user doesn't exist, this will do nothing.
-    // For a more robust solution, one might consider an upsert or ensuring user exists.
+      return null;
+    }
+
+    // Update the walletAddresses table with fresh data
+    // First, deactivate all existing wallet addresses for this user
+    await db
+      .update(walletAddresses)
+      .set({
+        isActive: false,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(walletAddresses.userId, username));
+
+    // Insert or reactivate wallet addresses
+    for (const wallet of freshWalletData.wallets) {
+      // Validate chain is supported and address is valid before DB operations
+      if (
+        !SUPPORTED_CHAINS_NAMES.includes(wallet.chain.toLowerCase()) ||
+        !validateAddress(wallet.address, wallet.chain)
+      ) {
+        continue;
+      }
+
+      // Check if this wallet already exists
+      const existingWallet = await db.query.walletAddresses.findFirst({
+        where: and(
+          eq(walletAddresses.userId, username),
+          eq(walletAddresses.chainId, getChainId(wallet.chain)),
+          eq(walletAddresses.accountAddress, wallet.address),
+        ),
+      });
+
+      if (existingWallet) {
+        // Reactivate existing wallet
+        await db
+          .update(walletAddresses)
+          .set({
+            isActive: true,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(walletAddresses.id, existingWallet.id));
+      } else {
+        // Insert new wallet address
+        await db.insert(walletAddresses).values({
+          userId: username,
+          chainId: getChainId(wallet.chain),
+          accountAddress: wallet.address,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Update user's wallet data timestamp
     await db
       .update(users)
       .set({
-        ethAddress: ethWallet?.address || null,
-        solAddress: solWallet?.address || null,
         walletDataUpdatedAt: Math.floor(Date.now() / 1000),
       })
       .where(eq(users.username, username));
@@ -145,7 +192,6 @@ export async function getCachedUserWalletData(
     return freshWalletData;
   } catch (error) {
     console.error(`Error in getCachedUserWalletData for ${username}:`, error);
-    // Fallback or error handling strategy. For now, return null.
     return null;
   }
 }

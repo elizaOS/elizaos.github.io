@@ -17,6 +17,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import { groupBy } from "@/lib/arrayHelpers";
 import { Button } from "@/components/ui/button";
+import { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
 
 export function LeaderboardFallback() {
   return (
@@ -40,8 +41,7 @@ export interface LeaderboardUser {
   totalLevel: number;
   avatarUrl?: string | null;
   allTags: { tagName: string; category: string | null; score: number }[];
-  ethAddress?: string;
-  solAddress?: string;
+  linkedWallets: LinkedWallet[];
 }
 
 interface LeaderboardTab {

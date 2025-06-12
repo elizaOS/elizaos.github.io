@@ -58,7 +58,7 @@ export function LeaderboardCard({
             <div className="flex min-w-0 flex-1 flex-col gap-1">
               <h3 className="truncate font-medium">
                 {user.username}
-                {(user.ethAddress || user.solAddress) && (
+                {user.linkedWallets.length > 0 && (
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger asChild>

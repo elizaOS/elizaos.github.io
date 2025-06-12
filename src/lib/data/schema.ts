@@ -18,10 +18,43 @@ export const users = sqliteTable("users", {
   lastUpdated: text("last_updated")
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
-  ethAddress: text("eth_address"),
-  solAddress: text("sol_address"),
   walletDataUpdatedAt: integer("wallet_data_updated_at"),
 });
+
+// Wallet addresses table - stores user wallet addresses across different chains
+export const walletAddresses = sqliteTable(
+  "wallet_addresses",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.username, { onDelete: "cascade" }),
+    chainId: text("chain_id", { length: 100 }).notNull(),
+    accountAddress: text("account_address", { length: 100 }).notNull(),
+    label: text("label", { length: 100 }),
+    isPrimary: integer("is_primary", { mode: "boolean" }).default(false),
+    isActive: integer("is_active", { mode: "boolean" }).default(true),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_wallet_addresses_user_id").on(table.userId),
+    index("idx_wallet_addresses_chain_id").on(table.chainId),
+    index("idx_wallet_addresses_address").on(table.accountAddress),
+    unique("unq_user_chain_address").on(
+      table.userId,
+      table.chainId,
+      table.accountAddress,
+    ),
+    uniqueIndex("unq_user_chain_primary")
+      .on(table.userId, table.chainId)
+      .where(sql`${table.isPrimary} = 1`),
+  ],
+);
 
 // Repositories being tracked
 export const repositories = sqliteTable("repositories", {
@@ -447,7 +480,18 @@ export const usersRelations = relations(users, ({ many }) => ({
   tagScores: many(userTagScores),
   dailySummaries: many(userSummaries),
   dailyScores: many(userDailyScores),
+  walletAddresses: many(walletAddresses),
 }));
+
+export const walletAddressesRelations = relations(
+  walletAddresses,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [walletAddresses.userId],
+      references: [users.username],
+    }),
+  }),
+);
 
 export const pullRequestRelations = relations(
   rawPullRequests,

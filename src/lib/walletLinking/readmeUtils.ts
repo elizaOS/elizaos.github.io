@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  SUPPORTED_CHAINS_NAMES,
+  validateAddress,
+} from "@/lib/walletLinking/chainUtils";
 
 export const LinkedWalletSchema = z.object({
   chain: z.string().min(1).toLowerCase(),
@@ -49,7 +53,17 @@ export function parseWalletLinkingDataFromReadme(
       return null;
     }
 
-    return result.data;
+    // Make sure to only return wallets for supported chains
+    const walletLinkingData: WalletLinkingData = {
+      lastUpdated: result.data.lastUpdated,
+      wallets: result.data.wallets.filter(
+        (wallet) =>
+          SUPPORTED_CHAINS_NAMES.includes(wallet.chain.toLowerCase()) &&
+          validateAddress(wallet.address, wallet.chain),
+      ),
+    };
+
+    return walletLinkingData;
   } catch (error) {
     console.error("Error parsing wallet linking data:", error);
     return null;
