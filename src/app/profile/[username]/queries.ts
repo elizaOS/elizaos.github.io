@@ -1,5 +1,6 @@
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/data/db";
+import { PullRequestData } from "@/lib/data/types";
 import {
   rawPullRequests,
   users,
@@ -199,5 +200,83 @@ export async function getUserProfile(
     totalXp: tagsData.totalXp,
     totalLevel: tagsData.totalLevel,
     dailyActivity,
+  };
+}
+
+export async function getUserPullRequests(
+  username: string,
+  status?: 'OPEN' | 'MERGED' | 'CLOSED',
+  page: number = 1,
+  pageSize: number = 10,
+): Promise<{ pullRequests: PullRequestData[]; totalCount: number }> {
+  const whereClauses = [eq(rawPullRequests.author, username)];
+
+  if (status) {
+    if (status === 'OPEN') {
+      whereClauses.push(eq(rawPullRequests.state, 'OPEN'));
+    } else if (status === 'MERGED') {
+      whereClauses.push(eq(rawPullRequests.merged, true));
+    } else if (status === 'CLOSED') {
+      whereClauses.push(
+        and(
+          eq(rawPullRequests.state, 'CLOSED'),
+          eq(rawPullRequests.merged, false),
+        ),
+      );
+    }
+  }
+
+  const dbQuery = db
+    .select({
+      id: rawPullRequests.id,
+      title: rawPullRequests.title,
+      url: rawPullRequests.html_url, // Assuming html_url is the correct field for the PR's web URL
+      createdAt: rawPullRequests.created_at,
+      author: rawPullRequests.author,
+      number: rawPullRequests.number,
+      state: rawPullRequests.state, // Needed to determine PullRequestData.status
+      merged: rawPullRequests.merged, // Needed to determine PullRequestData.status
+    })
+    .from(rawPullRequests)
+    .where(and(...whereClauses));
+
+  // Get total count before pagination
+  const totalCountResult = await db
+    .select({ count: count() })
+    .from(rawPullRequests)
+    .where(and(...whereClauses))
+    .get();
+
+  const totalCount = totalCountResult?.count || 0;
+
+  // Apply pagination and ordering
+  const results = await dbQuery
+    .orderBy(desc(rawPullRequests.created_at))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+
+  const pullRequests: PullRequestData[] = results.map((pr) => {
+    let derivedStatus: 'OPEN' | 'MERGED' | 'CLOSED' = 'OPEN';
+    if (pr.merged) {
+      derivedStatus = 'MERGED';
+    } else if (pr.state === 'CLOSED') {
+      derivedStatus = 'CLOSED';
+    } else if (pr.state === 'OPEN') {
+      derivedStatus = 'OPEN';
+    }
+    return {
+      id: pr.id, // Assuming rawPullRequests.id is a number. If it's a string, it needs conversion or type adjustment.
+      title: pr.title,
+      status: derivedStatus,
+      url: pr.url,
+      createdAt: pr.createdAt,
+      author: pr.author,
+      number: pr.number,
+    };
+  });
+
+  return {
+    pullRequests,
+    totalCount,
   };
 }

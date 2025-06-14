@@ -172,3 +172,13 @@ export interface DateRange {
   startDate?: string;
   endDate?: string;
 }
+
+export type PullRequestData = {
+  id: number;
+  title: string;
+  status: 'OPEN' | 'MERGED' | 'CLOSED';
+  url: string;
+  createdAt: string | Date;
+  author: string;
+  number: number;
+};

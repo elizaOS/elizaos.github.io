@@ -9,10 +9,13 @@ import { Github } from "lucide-react";
 import { formatCompactNumber } from "@/lib/format-number";
 import { DailyActivity } from "@/components/daily-activity";
 import { UserActivityHeatmap } from "@/lib/scoring/queries";
+// PullRequestData import will be removed as it's no longer directly used here
 import { SummaryCard, Summary } from "@/components/summary-card";
 import EthereumIcon from "@/components/icons/EthereumIcon";
 import SolanaIcon from "@/components/icons/SolanaIcon";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
+import { PullRequestList } from "./PullRequestList"; // Import the new component
+import { PullRequestData } from "@/lib/data/types"; // Keep for initial PRs if passed from page
 
 export interface UserStats {
   totalPrs: number;
@@ -36,6 +39,10 @@ type UserProfileProps = {
   dailyActivity: UserActivityHeatmap[];
   ethAddress?: string;
   solAddress?: string;
+  // pullRequests prop is removed, initial PRs and total will be passed to PullRequestList directly
+  initialPullRequests?: PullRequestData[]; // For initial load from page.tsx
+  totalInitialPullRequests?: number;      // For initial load from page.tsx
+  prPageSize?: number;                     // To pass to PullRequestList
 };
 
 export default function UserProfile({
@@ -51,6 +58,10 @@ export default function UserProfile({
   dailyActivity,
   ethAddress,
   solAddress,
+  // pullRequests, // Removed from here
+  initialPullRequests,
+  totalInitialPullRequests,
+  prPageSize,
 }: UserProfileProps) {
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
@@ -239,6 +250,14 @@ export default function UserProfile({
           </div>
         </div>
       </div>
+
+      {/* Add the PullRequestList section */}
+      <PullRequestList
+        username={username}
+        initialPullRequests={initialPullRequests || []}
+        totalInitialPullRequests={totalInitialPullRequests || 0}
+        pageSize={prPageSize}
+      />
     </div>
   );
 }
