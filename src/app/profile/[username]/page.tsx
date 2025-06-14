@@ -9,11 +9,16 @@ type ProfilePageProps = {
 };
 
 export async function generateStaticParams() {
+  const maxUsers = process.env.CI_MAX_USERS
+    ? parseInt(process.env.CI_MAX_USERS, 10)
+    : undefined;
+
   // Get all users directly from the database
   const allUsers = await db.query.users.findMany({
     columns: {
       username: true,
     },
+    limit: maxUsers,
   });
 
   return allUsers.map((user) => ({

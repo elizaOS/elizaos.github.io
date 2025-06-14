@@ -12,12 +12,16 @@ inputs:
     description: "Directory where diffable dump should be stored (for dump operation)"
     required: true
     default: "data/dump"
+  main_branch:
+    description: "The branch with the most up-to-date migrations"
+    required: false
+    default: "main"
 
 runs:
   using: "composite"
   steps:
     - name: Install uv
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@v1
 
     - name: Restore SQLite database from diffable dump
       if: inputs.operation == 'restore'
@@ -27,6 +31,8 @@ runs:
         # Check if dump directory exists
         DUMP_DIR='${{ inputs.dump_dir }}'
         TARGET_DB='${{ inputs.db_path }}'
+        MAIN_BRANCH='${{ inputs.main_branch }}'
+        MAIN_WORKTREE_DIR="./.main-worktree"
 
         if [ ! -d "$DUMP_DIR" ]; then
           echo "⚠️ Warning: Dump directory $DUMP_DIR does not exist or is empty"
@@ -34,29 +40,51 @@ runs:
           exit 0
         fi
 
-        # Create target directory if it doesn't exist
-        mkdir -p $(dirname $TARGET_DB)
-
         # Remove Drizzle migration tables from dump
         echo "🧹 Removing migration tables from dump..."
-        rm -f ${{ inputs.dump_dir }}/__drizzle_migrations*
+        rm -f $DUMP_DIR/__drizzle_migrations*
 
-        # Run db:migrate before restoring the database to ensure schema is up to date
-        echo "🔄 Running db:migrate to instantiate local database..."
-        bun run db:migrate || {
-          echo "❌ Failed to run migrations"
-          exit 1
-        }
-        echo "✅ Database migrations applied successfully"
+        # Setup worktree for main branch to get latest migrations
+        echo "🌳 Setting up worktree for $MAIN_BRANCH branch..."
+        git fetch origin $MAIN_BRANCH --depth=1
+        if [ -d "$MAIN_WORKTREE_DIR" ]; then
+          git worktree remove $MAIN_WORKTREE_DIR --force || rm -rf $MAIN_WORKTREE_DIR
+        fi
+        git worktree add $MAIN_WORKTREE_DIR origin/$MAIN_BRANCH
+
+        # Instantiate database from main branch migrations
+        echo "🔄 Instantiating database from '$MAIN_BRANCH' migrations..."
+        (
+          cd $MAIN_WORKTREE_DIR
+          echo "📦 Installing dependencies in worktree..."
+          bun install --frozen-lockfile
+          echo "🚀 Running db:migrate in worktree..."
+          bun run db:migrate
+        )
+
+        MAIN_WORKTREE_DB="$MAIN_WORKTREE_DIR/$TARGET_DB"
+        if [ ! -f "$MAIN_WORKTREE_DB" ]; then
+            echo "❌ Database file not found in main worktree at $MAIN_WORKTREE_DB after migrations."
+            exit 1
+        fi
+        echo "✅ Database instantiated from '$MAIN_BRANCH' migrations."
 
         # Load the database from the diffable dump
         echo "🔄 Restoring database from diffable dump..."
-        uv run uvx sqlite-diffable load $TARGET_DB $DUMP_DIR --replace
+        uv run uvx sqlite-diffable load $MAIN_WORKTREE_DB $DUMP_DIR --replace
+
+        # Copy the restored database to the final destination
+        echo "📋 Copying restored database to $TARGET_DB..."
+        mkdir -p $(dirname $TARGET_DB)
+        cp $MAIN_WORKTREE_DB $TARGET_DB
 
         # Verify the database was restored successfully
         echo "✅ Database restored to $TARGET_DB"
-        echo "📋 Checking database..."
         ls -la $(dirname $TARGET_DB)
+
+        # Cleanup worktree
+        echo "🧹 Cleaning up worktree..."
+        git worktree remove $MAIN_WORKTREE_DIR --force
 
         # Only run if sqlite3 is available
         if command -v sqlite3 &> /dev/null; then
@@ -85,7 +113,3 @@ runs:
         echo "✅ Database dumped to ${{ inputs.dump_dir }}"
         echo "📋 Checking dump directory..."
         ls -la ${{ inputs.dump_dir }}
-
-        # Remove Drizzle migration tables from dump
-        echo "🧹 Removing migration tables from dump..."
-        rm -f ${{ inputs.dump_dir }}/__drizzle_migrations*

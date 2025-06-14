@@ -17,7 +17,7 @@ export const getSelectedRepositories = createStep(
       configRepos,
     });
     for (const repo of configRepos) {
-      await registerRepository(repo.repoId);
+      await registerRepository(repo.owner, repo.name, repo.repoId);
     }
     // Fetch all repositories
     const repos = await db
@@ -38,7 +38,9 @@ export const getSelectedRepositories = createStep(
           return null;
         }
         return {
-          repoId: repo.repoId,
+          repoId: configRepo.repoId,
+          owner: configRepo.owner,
+          name: configRepo.name,
           defaultBranch: configRepo.defaultBranch,
         };
       })
@@ -51,15 +53,26 @@ export const getSelectedRepositories = createStep(
  * Register or update a repository in the database
  */
 
-export async function registerRepository(repoId: string) {
+export async function registerRepository(
+  owner: string,
+  name: string,
+  repoId: string,
+) {
   await db
     .insert(repositories)
     .values({
+      owner,
+      name,
       repoId,
       lastUpdated: new UTCDate().toISOString(),
     })
-    .onConflictDoNothing({
+    .onConflictDoUpdate({
       target: repositories.repoId,
+      set: {
+        owner,
+        name,
+        lastUpdated: new UTCDate().toISOString(),
+      },
     });
 
   return { repoId };
