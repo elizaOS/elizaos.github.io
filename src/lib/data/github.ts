@@ -6,6 +6,110 @@ import { RepositoryConfig } from "@/lib/pipelines/pipelineConfig";
 import { isNotNullOrUndefined } from "@/lib/typeHelpers";
 import { z } from "zod";
 
+const GitHubUserSchema = z.object({
+  login: z.string(),
+  id: z.number(),
+  node_id: z.string(),
+  avatar_url: z.string(),
+  gravatar_id: z.string().nullable(),
+  url: z.string(),
+  html_url: z.string(),
+  followers_url: z.string(),
+  following_url: z.string(),
+  gists_url: z.string(),
+  starred_url: z.string(),
+  subscriptions_url: z.string(),
+  organizations_url: z.string(),
+  repos_url: z.string(),
+  events_url: z.string(),
+  received_events_url: z.string(),
+  type: z.string(),
+  site_admin: z.boolean(),
+  name: z.string().nullable().optional(),
+  company: z.string().nullable().optional(),
+  blog: z.string().nullable().optional(),
+  location: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  hireable: z.boolean().nullable().optional(),
+  bio: z.string().nullable().optional(),
+  twitter_username: z.string().nullable().optional(),
+  public_repos: z.number(),
+  public_gists: z.number(),
+  followers: z.number(),
+  following: z.number(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  private_gists: z.number().optional(),
+  total_private_repos: z.number().optional(),
+  owned_private_repos: z.number().optional(),
+  disk_usage: z.number().optional(),
+  collaborators: z.number().optional(),
+  two_factor_authentication: z.boolean().optional(),
+  plan: z
+    .object({
+      name: z.string(),
+      space: z.number(),
+      collaborators: z.number(),
+      private_repos: z.number(),
+    })
+    .optional(),
+});
+export type GitHubUser = z.infer<typeof GitHubUserSchema>;
+
+const GitHubRepoOwnerSchema = z.object({
+  login: z.string(),
+  id: z.number(),
+});
+export type GitHubRepoOwner = z.infer<typeof GitHubRepoOwnerSchema>;
+
+const GitHubRepoSchema = z.object({
+  id: z.number(),
+  node_id: z.string(),
+  name: z.string(),
+  full_name: z.string(),
+  private: z.boolean(),
+  owner: GitHubRepoOwnerSchema,
+  html_url: z.string(),
+  description: z.string().nullable(),
+  fork: z.boolean(),
+  url: z.string(),
+  default_branch: z.string(),
+});
+export type GitHubRepo = z.infer<typeof GitHubRepoSchema>;
+
+const GitHubFileContentSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  sha: z.string(),
+  size: z.number(),
+  url: z.string(),
+  html_url: z.string(),
+  git_url: z.string(),
+  download_url: z.string().nullable(),
+  type: z.enum(["file", "dir", "symlink", "submodule"]),
+  content: z.string(), // Base64 encoded content
+  encoding: z.literal("base64"),
+  _links: z.object({
+    self: z.string(),
+    git: z.string(),
+    html: z.string(),
+  }),
+});
+export type GitHubFileContent = z.infer<typeof GitHubFileContentSchema>;
+
+const UpdateFileResponseSchema = z.object({
+  content: z.object({
+    name: z.string(),
+    path: z.string(),
+    sha: z.string(),
+  }),
+  commit: z.object({
+    sha: z.string(),
+    message: z.string(),
+  }),
+});
+export type UpdateFileResponse = z.infer<typeof UpdateFileResponseSchema>;
+
 interface FetchOptions {
   startDate?: string;
   endDate?: string;
@@ -115,15 +219,15 @@ export class GitHubClient {
     refillRate: 50 / 60000, // tokens per millisecond
   };
 
-  constructor(logger?: Logger) {
+  constructor(token: string, logger?: Logger) {
     this.logger =
       logger || createLogger({ minLevel: "info", nameSegments: ["GitHub"] });
 
-    const token = process.env.GITHUB_TOKEN;
-    if (!token) {
-      throw new Error("GITHUB_TOKEN environment variable is required");
+    const githubToken = token;
+    if (!githubToken) {
+      throw new Error("GitHub token is required");
     }
-    this.token = token;
+    this.token = githubToken;
 
     // Set up axios defaults
     axios.defaults.headers.common["Authorization"] = `Bearer ${this.token}`;
@@ -342,6 +446,63 @@ export class GitHubClient {
     }
 
     return allNodes;
+  }
+
+  async getAuthenticatedUser() {
+    const userData = await this.executeRequest("GET", "/user");
+    return GitHubUserSchema.parse(userData);
+  }
+
+  async getRepo(owner: string, repoName: string) {
+    const repoData = await this.executeRequest(
+      "GET",
+      `/repos/${owner}/${repoName}`,
+    );
+    if (!repoData) return null;
+    return GitHubRepoSchema.parse(repoData);
+  }
+
+  async createRepo(
+    repoName: string,
+    description: string,
+    autoInit: boolean = true,
+  ) {
+    const repoData = await this.executeRequest("POST", "/user/repos", {
+      name: repoName,
+      description: description,
+      auto_init: autoInit,
+      private: false,
+    });
+    return GitHubRepoSchema.parse(repoData);
+  }
+
+  async updateFile(
+    owner: string,
+    repoName: string,
+    filePath: string,
+    message: string,
+    content: string, // Plain text content
+    sha?: string,
+  ) {
+    const utf8Bytes = new TextEncoder().encode(content);
+    const binaryString = String.fromCharCode(...Array.from(utf8Bytes));
+    const encodedContent = btoa(binaryString);
+
+    const body: { message: string; content: string; sha?: string } = {
+      message,
+      content: encodedContent,
+    };
+
+    if (sha) {
+      body.sha = sha;
+    }
+
+    const responseData = await this.executeRequest(
+      "PUT",
+      `/repos/${owner}/${repoName}/contents/${filePath}`,
+      body,
+    );
+    return UpdateFileResponseSchema.parse(responseData);
   }
 
   async fetchPullRequests(
@@ -582,8 +743,10 @@ export class GitHubClient {
     }
   }
 
-  private async executeREST<T>(
+  private async executeRequest<T>(
+    method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH",
     endpoint: string,
+    body?: Record<string, unknown>,
     options: { headers?: Record<string, string> } = {},
   ): Promise<T> {
     await this.checkRateLimit();
@@ -599,7 +762,10 @@ export class GitHubClient {
               ? endpoint
               : `https://api.github.com${endpoint}`;
 
-            const response = await axios.get(url, {
+            const response = await axios({
+              method,
+              url,
+              data: body,
               headers: {
                 Authorization: `Bearer ${this.token}`,
                 Accept: "application/vnd.github.v3+json",
@@ -615,7 +781,11 @@ export class GitHubClient {
               concurrentRemaining: Math.floor(this.concurrentBucket.tokens),
             });
 
-            return response.data;
+            if (response.status === 204) {
+              return null as T;
+            }
+
+            return response.data as T;
           } catch (error) {
             const axiosError = error as AxiosError;
             if (axiosError.response) {
@@ -631,7 +801,7 @@ export class GitHubClient {
 
               if (status === 404) {
                 // For 404s, don't retry - just return null
-                return null;
+                return null as T;
               }
               this.logger.warn(`REST API Error`, {
                 data: axiosError.response.data,
@@ -692,28 +862,17 @@ export class GitHubClient {
     }
   }
 
-  async fetchFileContent(
-    owner: string,
-    repo: string,
-    path: string,
-  ): Promise<{ content: string; sha: string } | null> {
+  async fetchFileContent(owner: string, repo: string, path: string) {
     try {
       const endpoint = `/repos/${owner}/${repo}/contents/${path}`;
-      const response = await this.executeREST<{
-        content: string;
-        sha: string;
-        encoding: string;
-      }>(endpoint);
+      const response = await this.executeRequest("GET", endpoint);
 
       if (!response) {
         this.logger.warn(`File not found: ${owner}/${repo}/${path}`);
         return null;
       }
 
-      return {
-        content: response.content,
-        sha: response.sha,
-      };
+      return GitHubFileContentSchema.parse(response);
     } catch (error) {
       this.logger.error(
         `Failed to fetch file content for ${owner}/${repo}/${path}`,
@@ -723,5 +882,3 @@ export class GitHubClient {
     }
   }
 }
-
-export const githubClient = new GitHubClient();

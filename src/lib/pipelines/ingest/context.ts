@@ -1,5 +1,8 @@
 import { RepoPipelineContext } from "../types";
 import { GitHubClient } from "@/lib/data/github";
+import { Logger } from "@/lib/logger";
+import { PipelineConfig } from "../pipelineConfig";
+import { DateRange } from "@/lib/date-utils";
 
 /**
  * Context for ingestion pipeline operations
@@ -11,6 +14,15 @@ export interface IngestionPipelineContext extends RepoPipelineContext {
   force: boolean;
 }
 
+interface CreateIngestionContextOptions {
+  repoId: string | undefined;
+  logger: Logger;
+  config: PipelineConfig;
+  dateRange: DateRange;
+  force: boolean;
+  githubToken: string;
+}
+
 /**
  * Create a context for ingestion pipeline
  */
@@ -20,13 +32,14 @@ export function createIngestionContext({
   config,
   dateRange,
   force = false,
-}: Partial<IngestionPipelineContext>): IngestionPipelineContext {
+  githubToken,
+}: CreateIngestionContextOptions): IngestionPipelineContext {
   // Create a GitHub client with the provided logger or a child logger
   const githubLogger = logger?.child("GitHub");
-  const github = new GitHubClient(githubLogger);
+  const github = new GitHubClient(githubToken, githubLogger);
 
   return {
-    config: config!,
+    config,
     logger,
     github,
     repoId,

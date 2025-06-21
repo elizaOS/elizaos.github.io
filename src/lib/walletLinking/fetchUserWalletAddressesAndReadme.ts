@@ -1,5 +1,5 @@
 import { decodeBase64 } from "../decode";
-import * as githubService from "./githubService";
+import { GitHubClient } from "@/lib/data/github";
 import {
   parseWalletLinkingDataFromReadme,
   WalletLinkingData,
@@ -25,8 +25,9 @@ export async function fetchUserWalletAddressesAndReadme(
   username: string,
 ): Promise<WalletLinkingResponse> {
   try {
+    const githubClient = new GitHubClient(token);
     // Check if the profile repository exists
-    const repo = await githubService.getRepo(token, username, username);
+    const repo = await githubClient.getRepo(username, username);
     if (!repo) {
       return {
         walletData: null,
@@ -37,8 +38,7 @@ export async function fetchUserWalletAddressesAndReadme(
     }
 
     // If repo exists, attempt to get README.md
-    const fileData = await githubService.getFileContent(
-      token,
+    const fileData = await githubClient.fetchFileContent(
       username,
       username,
       "README.md",

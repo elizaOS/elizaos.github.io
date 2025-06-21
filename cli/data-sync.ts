@@ -163,7 +163,13 @@ function getLatestMigrationNumber(
   worktreeDir: string,
   logger: ReturnType<typeof createLogger>,
 ): number | undefined {
-  const journalPath = join(worktreeDir, "data", "dump", "_journal.json");
+  const journalPath = join(
+    worktreeDir,
+    "data",
+    "dump",
+    "meta",
+    "_journal.json",
+  );
   if (!existsSync(journalPath)) {
     logger.warn(
       `Journal file not found at ${journalPath}, cannot determine migration version of dump.`,
@@ -328,6 +334,15 @@ program
           if (existsSync(worktreeDbFile)) {
             unlinkSync(worktreeDbFile);
           }
+
+          logger.info("🧹 Removing migration tables from dump...");
+          const migrationFiles = glob.sync(
+            `${worktreeDumpDir}/__drizzle_migrations*`,
+          );
+          migrationFiles.forEach((file) => {
+            logger.debug(`Removing ${file}`);
+            unlinkSync(file);
+          });
 
           logger.info("Instantiating database with initial migrations...");
           const migrateCmd =

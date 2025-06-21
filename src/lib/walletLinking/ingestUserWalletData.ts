@@ -1,5 +1,5 @@
 import "server-only";
-import * as githubService from "./githubService";
+import { GitHubClient } from "@/lib/data/github";
 import {
   parseWalletLinkingDataFromReadme,
   WalletLinkingData,
@@ -17,6 +17,11 @@ import {
 
 const CACHE_DURATION_SECONDS = 12 * 60 * 60; // 12 hours
 
+if (!process.env.GITHUB_TOKEN) {
+  throw new Error("GITHUB_TOKEN is not set");
+}
+const githubClient = new GitHubClient(process.env.GITHUB_TOKEN);
+
 /**
  * Fetches a user's profile README from GitHub and parses the wallet linking data.
  * This is the core function for fetching data from GitHub without caching.
@@ -29,8 +34,7 @@ async function fetchWalletDataFromGithub(
   username: string,
 ): Promise<WalletLinkingData | null> {
   try {
-    const readmeData = await githubService.getFileContent(
-      process.env.GITHUB_TOKEN!,
+    const readmeData = await githubClient.fetchFileContent(
       username,
       username,
       "README.md",
