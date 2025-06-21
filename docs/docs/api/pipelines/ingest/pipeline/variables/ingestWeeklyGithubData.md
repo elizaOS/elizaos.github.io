@@ -1,0 +1,5 @@
+# Variable: ingestWeeklyGithubData
+
+> `const` **ingestWeeklyGithubData**: [`PipelineStep`](../../../types/type-aliases/PipelineStep.md)\<\{ `repository`: \{ `defaultBranch`: `string`; `repoId`: `string`; \}; \}, `object`[], [`IngestionPipelineContext`](../../context/interfaces/IngestionPipelineContext.md)\>
+
+Defined in: [src/lib/pipelines/ingest/pipeline.ts:115](https://github.com/elizaOS/elizaos.github.io/blob/4810f50019028b92f4f2a0ac31323fd787c7f288/src/lib/pipelines/ingest/pipeline.ts#L115)

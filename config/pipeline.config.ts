@@ -385,4 +385,4 @@ export default {
     Decentralization & Open Collaboration: AI systems should move beyond centralized control towards distributed intelligence and community-driven progress.
     `,
   },
-} as const satisfies PipelineConfig;
+} satisfies PipelineConfig;
