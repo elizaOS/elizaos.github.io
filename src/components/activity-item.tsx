@@ -12,6 +12,7 @@ interface ActivityItemProps {
   icon: React.ReactNode;
   metadata?: React.ReactNode;
   className?: string;
+  allowTitleWrap?: boolean;
 }
 
 export function ActivityItem({
@@ -23,6 +24,7 @@ export function ActivityItem({
   icon,
   metadata,
   className,
+  allowTitleWrap = false,
 }: ActivityItemProps) {
   return (
     <a
@@ -40,7 +42,14 @@ export function ActivityItem({
       </div>
       <div className="flex-1">
         <div className="flex items-center justify-between">
-          <h4 className="mr-2 line-clamp-1 font-medium">{title}</h4>
+          <h4
+            className={cn(
+              "mr-2 font-medium",
+              allowTitleWrap ? "break-words" : "line-clamp-1",
+            )}
+          >
+            {title}
+          </h4>
           <div className="flex-shrink-0">
             <ExternalLink className="h-4 w-4 text-muted-foreground" />
           </div>
