@@ -1,6 +1,3 @@
-import { Connection } from "@solana/web3.js";
-import { getDomainKeySync, NameRegistryState } from "@bonfida/spl-name-service";
-
 // Array of RPC endpoints to try in order
 const RPC_ENDPOINTS = [
   "https://api.mainnet-beta.solana.com", // Public Solana RPC
@@ -10,10 +7,13 @@ const RPC_ENDPOINTS = [
 
 /**
  * Gets the first working RPC endpoint by testing connectivity
+ * @param Connection - The Solana Connection class from dynamic import
  * @returns Promise<string> The first working RPC endpoint URL
  * @throws Will throw an error if no endpoints are accessible
  */
-async function getWorkingRpcEndpoint(): Promise<string> {
+async function getWorkingRpcEndpoint(
+  Connection: typeof import("@solana/web3.js").Connection,
+): Promise<string> {
   for (const endpoint of RPC_ENDPOINTS) {
     try {
       const connection = new Connection(endpoint, "confirmed");
@@ -35,9 +35,16 @@ async function getWorkingRpcEndpoint(): Promise<string> {
  * @returns A Promise that resolves to the PublicKey of the domain owner
  * @throws Will throw an error if the domain doesn't exist or if there's a network issue
  */
-export async function resolveSolDomain(domain: string) {
+export async function resolveSolDomain(domain: string): Promise<string | null> {
   try {
-    const workingEndpoint = await getWorkingRpcEndpoint();
+    // Import all Solana dependencies dynamically
+    const [{ Connection }, { getDomainKeySync, NameRegistryState }] =
+      await Promise.all([
+        import("@solana/web3.js"),
+        import("@bonfida/spl-name-service"),
+      ]);
+
+    const workingEndpoint = await getWorkingRpcEndpoint(Connection);
     const connection = new Connection(workingEndpoint);
 
     const { pubkey } = getDomainKeySync(domain);

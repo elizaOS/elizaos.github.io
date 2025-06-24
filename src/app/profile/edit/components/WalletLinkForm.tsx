@@ -5,9 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Loader2, Info, Shield, ArrowRight } from "lucide-react";
-import { isAddress as isEvmAddress } from "viem"; // For ETH address validation
-import { normalize } from "viem/ens";
-import { viemClient } from "@/lib/walletLinking/viem";
+import {
+  getViemClient,
+  isAddress as isEvmAddressAsync,
+  normalizeEns,
+} from "@/lib/walletLinking/viem";
 import { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
 import { resolveSolDomain } from "@/lib/walletLinking/sns";
 
@@ -51,19 +53,26 @@ export function WalletLinkForm({
     setEthAddress(ethWallet?.address || "");
     setSolAddress(solWallet?.address || "");
 
-    if (!ethWallet?.address || isEvmAddress(ethWallet.address)) {
-      setIsEthValid(true);
-      setEthAddressError("");
-    } else {
-      setIsEthValid(false);
-    }
+    // Validate initial addresses asynchronously
+    const validateInitialAddresses = async () => {
+      if (ethWallet?.address) {
+        const isValid = await isEvmAddressAsync(ethWallet.address);
+        setIsEthValid(isValid);
+        if (!isValid) {
+          setEthAddressError("Invalid Ethereum address");
+        }
+      }
 
-    if (!solWallet?.address || SOL_ADDRESS_REGEX.test(solWallet.address)) {
-      setIsSolValid(true);
-      setSolAddressError("");
-    } else {
-      setIsSolValid(false);
-    }
+      if (solWallet?.address) {
+        const isValid = SOL_ADDRESS_REGEX.test(solWallet.address);
+        setIsSolValid(isValid);
+        if (!isValid) {
+          setSolAddressError("Invalid Solana address");
+        }
+      }
+    };
+
+    validateInitialAddresses();
   }, [wallets]);
 
   useEffect(() => {
@@ -73,12 +82,16 @@ export function WalletLinkForm({
       return;
     }
 
-    const isEVMValid = isEvmAddress(ethAddress);
-    const isENSValid = ENS_NAME_REGEX.test(ethAddress);
-    setIsEthValid(isEVMValid || isENSValid);
-    setEthAddressError(
-      isEVMValid || isENSValid ? "" : "Invalid Ethereum address or ENS name.",
-    );
+    const validateEthAddress = async () => {
+      const isEVMValid = await isEvmAddressAsync(ethAddress);
+      const isENSValid = ENS_NAME_REGEX.test(ethAddress);
+      setIsEthValid(isEVMValid || isENSValid);
+      setEthAddressError(
+        isEVMValid || isENSValid ? "" : "Invalid Ethereum address or ENS name.",
+      );
+    };
+
+    validateEthAddress();
   }, [ethAddress]);
 
   useEffect(() => {
@@ -107,11 +120,13 @@ export function WalletLinkForm({
 
     if (ethAddress) {
       const isENSValid = ENS_NAME_REGEX.test(ethAddress);
-      const address = isENSValid
-        ? await viemClient.getEnsAddress({
-            name: normalize(ethAddress),
-          })
-        : ethAddress;
+      let address: string | null = ethAddress;
+
+      if (isENSValid) {
+        const viemClient = await getViemClient();
+        const normalizedName = await normalizeEns(ethAddress);
+        address = await viemClient.getEnsAddress({ name: normalizedName });
+      }
 
       // If the address is not found, set the error and return
       if (!address) {
