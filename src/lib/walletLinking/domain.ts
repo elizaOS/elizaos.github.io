@@ -1,4 +1,4 @@
-// Array of RPC endpoints to try in order
+// Array of solana RPC endpoints to try in order
 const RPC_ENDPOINTS = [
   "https://api.mainnet-beta.solana.com", // Public Solana RPC
   "https://solana-mainnet.g.alchemy.com/v2/lqe31XHZcBd-8FsgmYnHJ", // Alchemy endpoint, domain restricted to https://elizaos.github.io
@@ -11,7 +11,7 @@ const RPC_ENDPOINTS = [
  * @returns Promise<string> The first working RPC endpoint URL
  * @throws Will throw an error if no endpoints are accessible
  */
-async function getWorkingRpcEndpoint(
+async function getWorkingRpcEndpointForSolana(
   Connection: typeof import("@solana/web3.js").Connection,
 ): Promise<string> {
   for (const endpoint of RPC_ENDPOINTS) {
@@ -35,7 +35,7 @@ async function getWorkingRpcEndpoint(
  * @returns A Promise that resolves to the PublicKey of the domain owner
  * @throws Will throw an error if the domain doesn't exist or if there's a network issue
  */
-export async function resolveSolDomain(domain: string): Promise<string | null> {
+export async function resolveSnsDomain(domain: string): Promise<string | null> {
   try {
     // Import all Solana dependencies dynamically
     const [{ Connection }, { getDomainKeySync, NameRegistryState }] =
@@ -44,7 +44,7 @@ export async function resolveSolDomain(domain: string): Promise<string | null> {
         import("@bonfida/spl-name-service"),
       ]);
 
-    const workingEndpoint = await getWorkingRpcEndpoint(Connection);
+    const workingEndpoint = await getWorkingRpcEndpointForSolana(Connection);
     const connection = new Connection(workingEndpoint);
 
     const { pubkey } = getDomainKeySync(domain);
@@ -56,4 +56,46 @@ export async function resolveSolDomain(domain: string): Promise<string | null> {
     console.error(`Failed to resolve SNS domain ${domain}:`, error);
     return null;
   }
+}
+
+/**
+ * Resolves an Ethereum Name Service (ENS) domain to its owner's address.
+ * @param name The ENS domain name to resolve (e.g., "alice.eth")
+ * @returns A Promise that resolves to the Ethereum address of the domain owner
+ * @throws Will throw an error if the domain doesn't exist or if there's a network issue
+ */
+export async function resolveEnsDomain(name: string): Promise<string | null> {
+  try {
+    const { createPublicClient, http } = await import("viem");
+    const { normalize } = await import("viem/ens");
+    const { mainnet } = await import("viem/chains");
+
+    const viemClient = createPublicClient({
+      chain: mainnet,
+      transport: http(),
+    });
+
+    const normalizedName = await normalize(name);
+    const address = await viemClient.getEnsAddress({ name: normalizedName });
+    return address;
+  } catch (error) {
+    console.error(`Failed to resolve ENS domain ${name}:`, error);
+    return null;
+  }
+}
+
+// ENS name regex (name.eth format)
+// Matches names that end with .eth and contain valid characters
+const ENS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.eth$/;
+
+export function validateEnsFormat(name: string): boolean {
+  return ENS_NAME_REGEX.test(name);
+}
+
+// SNS name regex (name.sol format)
+// Matches names that end with .sol and contain valid characters
+const SNS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.sol$/;
+
+export function validateSnsFormat(name: string): boolean {
+  return SNS_NAME_REGEX.test(name);
 }

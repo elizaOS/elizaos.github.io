@@ -29,9 +29,9 @@ const WALLET_SECTION_END_MARKER = "WALLET-LINKING-END -->";
  * @param readmeContent The string content of the README file.
  * @returns The parsed and validated wallet linking data, or null if no valid data found.
  */
-export function parseWalletLinkingDataFromReadme(
+export async function parseWalletLinkingDataFromReadme(
   readmeContent: string,
-): WalletLinkingData | null {
+): Promise<WalletLinkingData | null> {
   const startIndex = readmeContent.indexOf(WALLET_SECTION_BEGIN_MARKER);
   const endIndex = readmeContent.indexOf(WALLET_SECTION_END_MARKER);
 
@@ -56,13 +56,23 @@ export function parseWalletLinkingDataFromReadme(
     }
 
     // Make sure to only return wallets for supported chains
+    const validWallets = [];
+    for (const wallet of result.data.wallets) {
+      const isChainSupported = SUPPORTED_CHAINS_NAMES.includes(
+        wallet.chain.toLowerCase(),
+      );
+      const isAddressValid = await validateAddress(
+        wallet.address,
+        wallet.chain,
+      );
+      if (isAddressValid && isChainSupported) {
+        validWallets.push(wallet);
+      }
+    }
+
     const walletLinkingData: WalletLinkingData = {
       lastUpdated: result.data.lastUpdated,
-      wallets: result.data.wallets.filter(
-        (wallet) =>
-          SUPPORTED_CHAINS_NAMES.includes(wallet.chain.toLowerCase()) &&
-          validateAddress(wallet.address, wallet.chain),
-      ),
+      wallets: validWallets,
     };
 
     return walletLinkingData;

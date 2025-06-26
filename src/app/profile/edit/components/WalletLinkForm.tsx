@@ -5,31 +5,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Loader2, Info, Shield, ArrowRight } from "lucide-react";
-import {
-  getViemClient,
-  isAddress as isEvmAddressAsync,
-  normalizeEns,
-} from "@/lib/walletLinking/viem";
 import { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
-import { resolveSolDomain } from "@/lib/walletLinking/sns";
+import { validateAddress } from "@/lib/walletLinking/chainUtils";
+import {
+  resolveSnsDomain,
+  resolveEnsDomain,
+  validateEnsFormat,
+  validateSnsFormat,
+} from "@/lib/walletLinking/domain";
 
 interface WalletLinkFormProps {
   wallets: LinkedWallet[];
   onSubmit: (wallets: LinkedWallet[]) => Promise<void>;
   isProcessing: boolean;
 }
-
-// Basic regex for Solana address (Base58, 32-44 chars)
-// For more robust validation, consider @solana/web3.js PublicKey.isOnCurve or similar
-const SOL_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-
-// ENS name regex (name.eth format)
-// Matches names that end with .eth and contain valid characters
-const ENS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.eth$/;
-
-// SNS name regex (name.sol format)
-// Matches names that end with .sol and contain valid characters
-const SNS_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.sol$/;
 
 export function WalletLinkForm({
   wallets = [],
@@ -56,7 +45,7 @@ export function WalletLinkForm({
     // Validate initial addresses asynchronously
     const validateInitialAddresses = async () => {
       if (ethWallet?.address) {
-        const isValid = await isEvmAddressAsync(ethWallet.address);
+        const isValid = await validateAddress(ethWallet.address, "ethereum");
         setIsEthValid(isValid);
         if (!isValid) {
           setEthAddressError("Invalid Ethereum address");
@@ -64,7 +53,7 @@ export function WalletLinkForm({
       }
 
       if (solWallet?.address) {
-        const isValid = SOL_ADDRESS_REGEX.test(solWallet.address);
+        const isValid = await validateAddress(solWallet.address, "solana");
         setIsSolValid(isValid);
         if (!isValid) {
           setSolAddressError("Invalid Solana address");
@@ -83,8 +72,8 @@ export function WalletLinkForm({
     }
 
     const validateEthAddress = async () => {
-      const isEVMValid = await isEvmAddressAsync(ethAddress);
-      const isENSValid = ENS_NAME_REGEX.test(ethAddress);
+      const isEVMValid = await validateAddress(ethAddress, "ethereum");
+      const isENSValid = validateEnsFormat(ethAddress);
       setIsEthValid(isEVMValid || isENSValid);
       setEthAddressError(
         isEVMValid || isENSValid ? "" : "Invalid Ethereum address or ENS name.",
@@ -101,12 +90,16 @@ export function WalletLinkForm({
       return;
     }
 
-    const isSOLValid = SOL_ADDRESS_REGEX.test(solAddress);
-    const isSNSValid = SNS_NAME_REGEX.test(solAddress);
-    setIsSolValid(isSNSValid || isSOLValid);
-    setSolAddressError(
-      isSNSValid || isSOLValid ? "" : "Invalid Solana address or SNS name.",
-    );
+    const validateSolAddress = async () => {
+      const isSOLValid = await validateAddress(solAddress, "solana");
+      const isSNSValid = validateSnsFormat(solAddress);
+      setIsSolValid(isSNSValid || isSOLValid);
+      setSolAddressError(
+        isSNSValid || isSOLValid ? "" : "Invalid Solana address or SNS name.",
+      );
+    };
+
+    validateSolAddress();
   }, [solAddress]);
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
@@ -119,14 +112,10 @@ export function WalletLinkForm({
     const updatedWallets: LinkedWallet[] = [];
 
     if (ethAddress) {
-      const isENSValid = ENS_NAME_REGEX.test(ethAddress);
-      let address: string | null = ethAddress;
-
-      if (isENSValid) {
-        const viemClient = await getViemClient();
-        const normalizedName = await normalizeEns(ethAddress);
-        address = await viemClient.getEnsAddress({ name: normalizedName });
-      }
+      const isENSValid = validateEnsFormat(ethAddress);
+      const address = isENSValid
+        ? await resolveEnsDomain(ethAddress)
+        : ethAddress;
 
       // If the address is not found, set the error and return
       if (!address) {
@@ -142,9 +131,9 @@ export function WalletLinkForm({
     }
 
     if (solAddress) {
-      const isSNSValid = SNS_NAME_REGEX.test(solAddress);
+      const isSNSValid = validateSnsFormat(solAddress);
       const address = isSNSValid
-        ? await resolveSolDomain(solAddress)
+        ? await resolveSnsDomain(solAddress)
         : solAddress;
 
       // If the address is not found, set the error and return

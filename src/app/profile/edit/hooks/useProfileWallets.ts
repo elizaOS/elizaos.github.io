@@ -60,7 +60,8 @@ export function useProfileWallets() {
       setReadmeContent(decodedReadmeText);
 
       // parse Readme content for Wallet data
-      const walletData = parseWalletLinkingDataFromReadme(decodedReadmeText);
+      const walletData =
+        await parseWalletLinkingDataFromReadme(decodedReadmeText);
       setWalletData(walletData);
     } catch (err: unknown) {
       console.error("Error in fetchProfileData:", err);
