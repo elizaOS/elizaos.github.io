@@ -29,7 +29,7 @@ const remarkRemoveFirstH1 = () => {
 
 // Custom H2 component to apply primary color
 const CustomH2 = (props: HTMLProps<HTMLHeadingElement>) => {
-  return <h2 className="lowercase" {...props} />;
+  return <h2 className="text-base font-semibold text-orange-500" {...props} />;
 };
 
 interface SummaryContentProps {
@@ -48,7 +48,7 @@ export function SummaryContent({
   return (
     <div
       className={cn(
-        "prose prose-sm mx-auto mt-8 dark:prose-invert sm:prose lg:prose-lg xl:prose-xl",
+        "prose mt-8 w-full max-w-none dark:prose-invert",
         className,
       )}
     >
