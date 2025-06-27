@@ -1,11 +1,16 @@
-import { Connection } from "@solana/web3.js";
-import { getDomainKeySync, NameRegistryState } from "@bonfida/spl-name-service";
-import { createPublicClient, http } from "viem";
+import { Connection, PublicKey } from "@solana/web3.js";
+import {
+  getDomainKeySync,
+  NameRegistryState,
+  reverseLookup,
+} from "@bonfida/spl-name-service";
+import { createPublicClient, http, type Address } from "viem";
 import { normalize } from "viem/ens";
 import { mainnet } from "viem/chains";
 
 // Array of solana RPC endpoints to try in order
 const RPC_ENDPOINTS = [
+  "https://solana-mainnet.g.alchemy.com/v2/FVvcC-pCJ3k6BIA5x58Fo",
   "https://api.mainnet-beta.solana.com", // Public Solana RPC
   process.env.NEXT_PUBLIC_ALCHEMY_SOLANA_URL || "", // Alchemy endpoint
   process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "", // Local/custom endpoint from environment
@@ -71,6 +76,39 @@ export async function resolveEnsDomain(name: string): Promise<string | null> {
     return address;
   } catch (error) {
     console.error(`Failed to resolve ENS domain ${name}:`, error);
+    return null;
+  }
+}
+
+export async function getSnsDomainForAddress(
+  address: string,
+): Promise<string | null> {
+  try {
+    const workingEndpoint = await getWorkingRpcEndpointForSolana();
+    const connection = new Connection(workingEndpoint);
+
+    const addressKey = new PublicKey(address);
+
+    const domainName = await reverseLookup(connection, addressKey);
+    return domainName;
+  } catch {
+    return null;
+  }
+}
+
+export async function getEnsDomainForAddress(
+  address: string,
+): Promise<string | null> {
+  try {
+    const viemClient = createPublicClient({
+      chain: mainnet,
+      transport: http(),
+    });
+    const ensName = await viemClient.getEnsName({
+      address: address as Address,
+    });
+    return ensName;
+  } catch {
     return null;
   }
 }
