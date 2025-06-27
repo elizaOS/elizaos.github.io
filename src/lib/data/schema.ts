@@ -31,6 +31,7 @@ export const walletAddresses = sqliteTable(
       .references(() => users.username, { onDelete: "cascade" }),
     chainId: text("chain_id", { length: 100 }).notNull(),
     accountAddress: text("account_address", { length: 100 }).notNull(),
+    domainName: text("domain_name", { length: 255 }),
     label: text("label", { length: 100 }),
     isPrimary: integer("is_primary", { mode: "boolean" }).default(false),
     isActive: integer("is_active", { mode: "boolean" }).default(true),
@@ -45,6 +46,7 @@ export const walletAddresses = sqliteTable(
     index("idx_wallet_addresses_user_id").on(table.userId),
     index("idx_wallet_addresses_chain_id").on(table.chainId),
     index("idx_wallet_addresses_address").on(table.accountAddress),
+    index("idx_wallet_addresses_domain_name").on(table.domainName),
     unique("unq_user_chain_address").on(
       table.userId,
       table.chainId,

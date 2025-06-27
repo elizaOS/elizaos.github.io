@@ -1,10 +1,13 @@
 import EthereumIcon from "@/components/icons/EthereumIcon";
 import SolanaIcon from "@/components/icons/SolanaIcon";
 import { isAddress } from "viem";
+import { PublicKey } from "@solana/web3.js";
+import { getEnsDomainForAddress, getSnsDomainForAddress } from "./domainUtils";
 
 interface ChainConfig {
   chainId: string;
   validator: (address: string) => boolean;
+  getPrimaryDomain: (address: string) => Promise<string | null>;
   icon: React.ElementType;
 }
 
@@ -21,13 +24,26 @@ interface ChainConfig {
 export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
   ethereum: {
     chainId: "eip155:1",
-    validator: (address: string) => isAddress(address),
+    validator: (address: string) => {
+      try {
+        return isAddress(address);
+      } catch {
+        return false;
+      }
+    },
+    getPrimaryDomain: getEnsDomainForAddress,
     icon: EthereumIcon,
   },
   solana: {
     chainId: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-    validator: (address: string) =>
-      /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address),
+    validator: (address: string) => {
+      try {
+        return PublicKey.isOnCurve(new PublicKey(address).toBytes());
+      } catch {
+        return false;
+      }
+    },
+    getPrimaryDomain: getSnsDomainForAddress,
     icon: SolanaIcon,
   },
 };
@@ -86,4 +102,22 @@ export function validateAddress(address: string, chain: string): boolean {
     return false;
   }
   return chainConfig.validator(address);
+}
+
+/**
+ * Get the primary domain name for a given wallet address and chain
+ * @param address The wallet address to get the primary domain for
+ * @param chain The blockchain name (e.g., "ethereum", "solana")
+ * @returns The primary domain if found, null otherwise
+ */
+export async function getPrimaryDomain(
+  address: string,
+  chain: string,
+): Promise<string | null> {
+  const chainConfig =
+    SUPPORTED_CHAINS[chain.toLowerCase() as keyof typeof SUPPORTED_CHAINS];
+  if (!chainConfig) {
+    return null;
+  }
+  return chainConfig.getPrimaryDomain(address);
 }
