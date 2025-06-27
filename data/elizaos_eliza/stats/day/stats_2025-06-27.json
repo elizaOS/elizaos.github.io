@@ -1,0 +1,212 @@
+{
+  "interval": {
+    "intervalStart": "2025-06-27T00:00:00.000Z",
+    "intervalEnd": "2025-06-28T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-06-27 to 2025-06-28, elizaos/eliza had 8 new PRs (7 merged), 0 new issues, and 11 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs69GL2k",
+      "title": "🔄 Migrate packages/client to leverage @elizaos/api-client",
+      "author": "wtfsayo",
+      "number": 5259,
+      "repository": "elizaos/eliza",
+      "body": "# 🔄 Migrate packages/client to leverage @elizaos/api-client\n\n## 📋 Summary\n\nWe have a new `@elizaos/api-client` package that provides a type-safe, service-oriented API client for ElizaOS. We need to migrate `packages/client` to heavily leverage this new package instead of its current custom API implementation. This migration will improve type safety, reduce code duplication, and provide better error handling.\n\n## 🎯 Goals\n\n- **Primary**: Replace the current monolithic API client (`src/lib/api.ts`) with `@elizaos/api-client`\n- **Secondary**: Maintain 100% backward compatibility during migration\n- **Tertiary**: Preserve existing React Query patterns and WebSocket integration\n- **Quality**: Improve type safety and reduce code duplication\n\n## 📊 Current State Analysis\n\n### Current Implementation\n- **Location**: `packages/client/src/lib/api.ts` (610+ lines of custom API code)\n- **Pattern**: Custom `fetcher` function with manual endpoint definitions\n- **Auth**: localStorage-based API key with `X-API-KEY` header\n- **Error Handling**: Custom error handling with status code mapping\n- **State Management**: React Query for caching and optimistic updates\n\n### Most Used API Endpoints\n1. **Agent Management**: `getAgents()`, `getAgent()`, `startAgent()`, `stopAgent()`\n2. **Messaging**: `getChannelMessages()`, `postMessageToChannel()`, `getServers()`\n3. **Memory/Logs**: `getAgentMemories()`, `getAgentLogs()`\n4. **Media**: `uploadAgentMedia()`, `ttsStream()`, `transcribeAudio()`\n\n### Integration Points\n- **React Query Hooks**: `hooks/use-query-hooks.ts` (complex polling and caching)\n- **WebSocket Manager**: `lib/socketio-manager.ts` (real-time updates)\n- **Connection Context**: `context/ConnectionContext.tsx` (connection state)\n- **File Upload**: `hooks/use-file-upload.ts` (media handling)\n\n## 🚀 Implementation Plan\n\n> ⚠️ **CRITICAL**: Work step by step through each phase. Do NOT skip steps or make assumptions about data shapes. Test thoroughly at each step to avoid pitfalls.\n\n### Phase 1: Foundation Setup\n**Estimated Impact**: Low Risk - Infrastructure only\n\n#### Step 1.1: Add Dependency\n\\`\\`\\`bash\n# In packages/client directory\nbun add @elizaos/api-client\n\\`\\`\\`\n\n#### Step 1.2: Create API Client Configuration\n**File**: `src/lib/api-client-config.ts`\n\\`\\`\\`typescript\nimport { ElizaClient, ApiClientConfig } from '@elizaos/api-client';\n\nexport function createApiClientConfig(): ApiClientConfig {\n  const getLocalStorageApiKey = () => \\`eliza-api-key-\\${window.location.origin}\\`;\n  const apiKey = localStorage.getItem(getLocalStorageApiKey());\n  \n  return {\n    baseUrl: window.location.origin,\n    apiKey: apiKey || undefined,\n    timeout: 30000,\n    headers: {\n      'Accept': 'application/json',\n    }\n  };\n}\n\nexport function createElizaClient(): ElizaClient {\n  return ElizaClient.create(createApiClientConfig());\n}\n\\`\\`\\`\n\n#### Step 1.3: Create Error Handling Bridge\n**File**: `src/lib/api-error-bridge.ts`\n\\`\\`\\`typescript\nimport { ApiError } from '@elizaos/api-client';\nimport { connectionStatusActions } from '../context/ConnectionContext';\n\nexport function handleApiError(error: unknown): never {\n  if (error instanceof ApiError) {\n    // Map new API errors to old error handling patterns\n    if (error.status === 401) {\n      connectionStatusActions.setUnauthorized(error.message);\n    }\n    // Add other status code mappings as needed\n    throw new Error(error.message);\n  }\n  throw error;\n}\n\\`\\`\\`\n\n#### Step 1.4: Create Migration Utilities\n**File**: `src/lib/migration-utils.ts`\n\\`\\`\\`typescript\nimport { apiClient as legacyClient } from './api';\nimport { createElizaClient } from './api-client-config';\n\n// Flag to control gradual migration\nconst MIGRATION_FLAGS = {\n  USE_NEW_AGENTS_API: false,\n  USE_NEW_MESSAGING_API: false,\n  USE_NEW_MEMORY_API: false,\n  USE_NEW_MEDIA_API: false,\n  USE_NEW_SYSTEM_API: false,\n};\n\nexport { MIGRATION_FLAGS };\n\n// Helper to gradually switch APIs\nexport function createHybridClient() {\n  const newClient = createElizaClient();\n  \n  return {\n    // Will be replaced service by service\n    agents: MIGRATION_FLAGS.USE_NEW_AGENTS_API ? newClient.agents : legacyClient,\n    messaging: MIGRATION_FLAGS.USE_NEW_MESSAGING_API ? newClient.messaging : legacyClient,\n    // ... other services\n  };\n}\n\\`\\`\\`\n\n### Phase 2: Core Infrastructure Migration\n**Estimated Impact**: Medium Risk - Core changes\n\n#### Step 2.1: Update Authentication Handling\n**File**: `src/context/ConnectionContext.tsx`\n- Update to work with both old and new API clients\n- Ensure API key changes are reflected in new client instances\n- Maintain existing connection status behaviors\n\n#### Step 2.2: Update Error Handling\n**Files**: `hooks/use-query-hooks.ts`, `hooks/use-agent-management.ts`\n- Import and use `handleApiError` from error bridge\n- Test that error messages and status codes work correctly\n- Ensure toast notifications still function properly\n\n#### Step 2.3: Test Infrastructure Changes\n- Verify that existing API calls still work\n- Check that error handling displays correctly\n- Ensure authentication flow is unchanged\n\n### Phase 3: Service-by-Service Migration\n**Estimated Impact**: High Risk - Feature changes\n\n> 🔥 **CRITICAL**: Migrate ONE service at a time. Test thoroughly before moving to the next service.\n\n#### Step 3.1: Migrate Agent Services (PRIORITY 1)\n**Impact**: High - Most used functionality\n\n**Files to Update**:\n- `hooks/use-query-hooks.ts` - `useAgents()`, `useAgent()`\n- `hooks/use-agent-management.ts` - Start/stop operations\n- `components/agent-*.tsx` - Components using agent APIs\n\n**Migration Steps**:\n1. **Update `useAgents()` hook**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.getAgents()\n   // NEW: elizaClient.agents.listAgents()\n   \\`\\`\\`\n   \n2. **Update agent operations**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.startAgent(agentId)\n   // NEW: elizaClient.agents.startAgent(agentId)\n   \\`\\`\\`\n\n3. **Verify data shapes match**:\n   - Check response structure: `{ agents: Agent[] }` vs `{ data: { agents: Agent[] } }`\n   - Update any response destructuring\n   - Test that agent cards display correctly\n\n4. **Test thoroughly**:\n   - Agent list loading and display\n   - Start/stop functionality\n   - Error states and loading states\n   - Real-time polling still works\n\n**Set Migration Flag**: `MIGRATION_FLAGS.USE_NEW_AGENTS_API = true`\n\n#### Step 3.2: Migrate Messaging Services (PRIORITY 2)\n**Impact**: High - Complex state management\n\n**Files to Update**:\n- `hooks/use-query-hooks.ts` - Message-related hooks\n- `components/chat.tsx` - Message display and sending\n- WebSocket integration for real-time messages\n\n**Migration Steps**:\n1. **Update channel and server operations**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.getServers()\n   // NEW: elizaClient.messaging.getServers() (if available)\n   \\`\\`\\`\n\n2. **Update message operations**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.getChannelMessages(channelId, options)\n   // NEW: elizaClient.messaging.getChannelMessages(channelId, options)\n   \\`\\`\\`\n\n3. **Carefully handle pagination**:\n   - Verify pagination parameters match\n   - Test infinite scroll functionality\n   - Ensure message ordering is preserved\n\n4. **Test WebSocket integration**:\n   - Verify real-time message updates still work\n   - Check that WebSocket events update React Query cache correctly\n   - Test channel subscription/unsubscription\n\n**Set Migration Flag**: `MIGRATION_FLAGS.USE_NEW_MESSAGING_API = true`\n\n#### Step 3.3: Migrate Memory Services (PRIORITY 3)\n**Impact**: Medium - Admin/debug features\n\n**Files to Update**:\n- Memory management components\n- Agent log viewers\n- Admin panels\n\n**Migration Steps**:\n1. **Update memory operations**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.getAgentMemories(agentId, channelId, tableName)\n   // NEW: elizaClient.memory.getAgentMemories(agentId, { channelId, tableName })\n   \\`\\`\\`\n\n2. **Test memory CRUD operations**:\n   - Reading agent memories\n   - Updating/deleting memories\n   - Memory search and filtering\n\n**Set Migration Flag**: `MIGRATION_FLAGS.USE_NEW_MEMORY_API = true`\n\n#### Step 3.4: Migrate Media/Audio Services (PRIORITY 4)\n**Impact**: Medium - File upload functionality\n\n**Files to Update**:\n- `hooks/use-file-upload.ts`\n- Audio recording components\n- TTS/transcription features\n\n**Migration Steps**:\n1. **Update media uploads**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.uploadAgentMedia(agentId, file)\n   // NEW: elizaClient.media.uploadAgentMedia(agentId, { file, filename: file.name })\n   \\`\\`\\`\n\n2. **Update audio services**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.ttsStream(agentId, text)\n   // NEW: elizaClient.audio.generateSpeech(agentId, { text })\n   \\`\\`\\`\n\n3. **Test file handling**:\n   - File upload progress\n   - Error handling for large files\n   - Audio playback functionality\n\n**Set Migration Flag**: `MIGRATION_FLAGS.USE_NEW_MEDIA_API = true`\n\n#### Step 3.5: Migrate System Services (PRIORITY 5)\n**Impact**: Low - Utility functions\n\n**Files to Update**:\n- Environment variable management\n- Server health checks\n- System configuration\n\n**Migration Steps**:\n1. **Update system operations**:\n   \\`\\`\\`typescript\n   // OLD: apiClient.ping()\n   // NEW: elizaClient.server.ping()\n   \\`\\`\\`\n\n2. **Test system functions**:\n   - Health checks\n   - Environment variable updates\n   - Server status monitoring\n\n**Set Migration Flag**: `MIGRATION_FLAGS.USE_NEW_SYSTEM_API = true`\n\n### Phase 4: Clean-up and Optimization\n**Estimated Impact**: Low Risk - Cleanup only\n\n#### Step 4.1: Remove Legacy Code\n- Delete `src/lib/api.ts` (old API client)\n- Remove `src/lib/migration-utils.ts`\n- Remove `src/lib/api-error-bridge.ts`\n- Clean up unused imports\n\n#### Step 4.2: Optimize Type Definitions\n- Update `src/types/index.ts` to use types from `@elizaos/api-client`\n- Remove duplicate type definitions\n- Ensure all components use consistent types\n\n#### Step 4.3: Update Documentation\n- Update README.md with new API usage\n- Add JSDoc comments for new patterns\n- Document migration changes\n\n#### Step 4.4: Performance Validation\n- Test application performance before/after migration\n- Verify that bundle size hasn't increased significantly\n- Check that all caching behaviors are preserved\n\n## 🧪 Testing Requirements\n\n### For Each Migration Step:\n1. **Unit Tests**: Verify individual API calls work correctly\n2. **Integration Tests**: Test component functionality end-to-end\n3. **Manual Testing**: Use the UI to verify all features work\n4. **Error Testing**: Trigger error conditions and verify handling\n5. **Performance Testing**: Check loading times and responsiveness\n\n### Critical Test Cases:\n- [ ] Agent list loads and displays correctly\n- [ ] Agent start/stop operations work with proper loading states\n- [ ] Message sending and receiving (including real-time updates)\n- [ ] File uploads (both agent and channel media)\n- [ ] Error states display properly with toast notifications\n- [ ] Authentication flow (login/logout/API key changes)\n- [ ] Offline/reconnection scenarios\n- [ ] Memory management operations\n- [ ] Audio features (TTS/transcription)\n\n## ⚠️ Important Warnings\n\n### Data Shape Pitfalls to Avoid:\n1. **Response Structure Changes**: Old API returns `{ data: T }`, new API might return `T` directly\n2. **Error Object Structure**: Old errors are custom, new errors use `ApiError` class\n3. **Authentication Headers**: Ensure API key header name consistency\n4. **Pagination Parameters**: Verify parameter names and structures match\n5. **File Upload Format**: Check FormData structure and field names\n\n### Critical Success Factors:\n- **Incremental Migration**: Never migrate multiple services at once\n- **Thorough Testing**: Test each step before proceeding\n- **Preserve UX**: Maintain existing loading states and error handling\n- **WebSocket Integration**: Ensure real-time features continue working\n- **Type Safety**: Maintain or improve existing type safety\n\n## 📋 Definition of Done\n\n- [ ] All API calls use `@elizaos/api-client`\n- [ ] No references to old `src/lib/api.ts` file\n- [ ] All existing functionality works identically to before\n- [ ] Error handling maintains same user experience\n- [ ] Performance is equivalent or better\n- [ ] Type safety is maintained or improved\n- [ ] WebSocket integration continues working\n- [ ] All tests pass (unit, integration, e2e)\n- [ ] Code review completed\n- [ ] Documentation updated\n\n## 🔗 Related Files\n\n### Key Files to Modify:\n- `packages/client/src/lib/api.ts` (replace)\n- `packages/client/src/hooks/use-query-hooks.ts` (update)\n- `packages/client/src/hooks/use-agent-management.ts` (update)\n- `packages/client/src/hooks/use-file-upload.ts` (update)\n- `packages/client/src/context/ConnectionContext.tsx` (update)\n- `packages/client/package.json` (add dependency)\n\n### Reference Files:\n- `packages/api-client/src/client.ts` (new API structure)\n- `packages/api-client/src/services/` (all service implementations)\n- `packages/api-client/src/types/` (type definitions)\n\n---\n\n**Next Actions**: Start with Phase 1, Step 1.1. Work methodically through each step, testing thoroughly before proceeding. Do not skip steps or make assumptions about data compatibility.",
+      "createdAt": "2025-06-24T15:56:16Z",
+      "closedAt": "2025-06-27T06:31:28Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6b18_q",
+      "title": "Feature/jules agent dev poc",
+      "author": "valentinuuiuiu",
+      "number": 5254,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-24T10:58:54Z",
+      "mergedAt": null,
+      "additions": 13813,
+      "deletions": 17780
+    },
+    {
+      "id": "PR_kwDOMT5cIs6caLkb",
+      "title": "feat: improve character plugin configurations + document",
+      "author": "wtfsayo",
+      "number": 5302,
+      "body": "## Description\n\nThis PR introduces significant improvements to character configurations and CLI functionality across the ElizaOS project.\n\n## Changes\n\n### Character Improvements\n- Enhanced character templates with improved plugin ordering\n- Updated Eliza character configuration with better structure\n- Improved project starter character templates\n\n### CLI Enhancements\n- Added comprehensive test coverage for character plugin integration\n- Updated CLI package dependencies\n- Enhanced CLI functionality and reliability\n\n### Testing\n- Added unit tests for character functionality\n- Implemented character plugin ordering tests\n- Enhanced test coverage across CLI commands\n\n## Files Changed\n- `AGENTS.md` - Updated agent documentation\n- `packages/cli/src/characters/eliza.ts` - Improved Eliza character config\n- `packages/cli/tests/` - Added comprehensive test coverage\n- `packages/project-starter/` - Enhanced starter templates\n- `packages/project-tee-starter/` - Updated tee starter template\n\n## Testing\nAll tests pass and new test coverage has been added to ensure reliability.\n\n## Type of Change\n- [x] New feature (non-breaking change which adds functionality)\n- [x] Bug fix (non-breaking change which fixes an issue)\n- [x] Enhancement (improvement to existing functionality)\n- [x] Tests (adding or updating tests)\n\n## Checklist\n- [x] Code follows the project's style guidelines\n- [x] Self-review of code has been performed\n- [x] Tests have been added/updated\n- [x] All tests pass\n- [x] Documentation has been updated where necessary",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-27T11:35:50Z",
+      "mergedAt": "2025-06-27T12:31:03Z",
+      "additions": 1760,
+      "deletions": 36
+    },
+    {
+      "id": "PR_kwDOMT5cIs6cE46v",
+      "title": "feat(rofl): fix build issues and add deployment config files for rofl…",
+      "author": "snobbee",
+      "number": 5277,
+      "body": "* new character file to enable all polygon plugins\r\n* fix zod related build issue\r\n* added `openai` plugin to agent file to address issue https://github.com/elizaOS/eliza/issues/5279\r\n\r\nto test set `.env` variables as follow:\r\n\r\n```\r\nOPENAI_API_KEY=XXX\r\nOPENAI_EMBEDDING_MODEL=text-embedding-3-small\r\n\r\n# alethea plugin required variables\r\nALETHEA_RPC_URL=https://placeholder.xyz\r\nPRIVATE_KEY=placeholder\r\nALETHEA_API_KEY=placeholder\r\nPOD_NFT_CONTRACT_ADDRESS=0x0123456789abcdef0123456789abcdef01234567\r\n\r\n# Required environment variables for @elizaos/plugin-polygon\r\nPOLYGON_PLUGINS_ENABLED=false\r\n# RPC Endpoints\r\nPOLYGON_RPC_URL=\"https://polygon-bor.publicnode.com\" # Replace with your actual Polygon PoS RPC URL (e.g., from Alchemy, Infura, QuickNode)\r\nETHEREUM_RPC_URL=\"https://ethereum-rpc.publicnode.com\" # Replace with your actual Ethereum Mainnet RPC URL\r\n\r\n\r\n# PolygonScan API Key (Optional but recommended for reliable gas estimates)\r\nPOLYGONSCAN_KEY=\"YourPolygonScanApiKeyToken\"\r\n\r\n# Future/Optional - Heimdall Endpoints (if needed for advanced staking interactions)\r\n# HEIMDALL_RPC_URL=\"\"\r\n# HEIMDALL_REST_URL=\"\"\r\n\r\nALCHEMY_API_KEY='XXXX'\r\nZKEVM_RPC_URL='https://polygonzkevm-mainnet.g.alchemy.com/v2/'\r\n\r\nHEIMDALL_RPC_URL=\"https://heimdall-api.polygon.technology\"\r\n```\r\n\r\nListing out actions from the UI\r\n\r\n<img width=\"813\" alt=\"image\" src=\"https://github.com/user-attachments/assets/d1abca36-1afc-4cec-8848-88405ee9a44a\" />\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-25T15:01:17Z",
+      "mergedAt": "2025-06-27T16:14:36Z",
+      "additions": 1690,
+      "deletions": 178
+    },
+    {
+      "id": "PR_kwDOMT5cIs6cbDtx",
+      "title": "Feature: Add ELIZA_UI_ENABLE environment variable to toggle Web UI availability",
+      "author": "bealers",
+      "number": 5304,
+      "body": "# Add ELIZA_UI_ENABLE environment variable to control web UI in production\r\n\r\n## Problem\r\n\r\nelizaOS currently serves the web UI to anyone who can reach the server. While there's `ELIZA_SERVER_AUTH_TOKEN` for API endpoints, the web interface itself is wide open. In production deployments, this creates an unnecessary attack surface.\r\n\r\n## Solution\r\n\r\nAdded `ELIZA_UI_ENABLE` environment variable with sensible defaults:\r\n- **Development**: UI enabled by default\r\n- **Production**: UI disabled by default\r\n- **Override**: Set `ELIZA_UI_ENABLE=true/false`\r\n\r\nWhen disabled, the web UI returns a standard HTTP 403 Forbidden error, but all API endpoints continue to work normally.\r\n\r\n## Implementation\r\n\r\n~20 lines in `packages/server/src/index.ts`:\r\n\r\n1. Check `NODE_ENV` and `ELIZA_UI_ENABLE` to determine UI status\r\n2. Conditionally serve static files only when UI is enabled\r\n3. Replace SPA fallback with 403 response when UI is disabled\r\n4. Update startup logging to clearly show UI status\r\n\r\n## Testing\r\n\r\n```bash\r\n# Development (UI enabled)\r\nbun start\r\n\r\n# Production (UI disabled)  \r\nNODE_ENV=production bun start\r\n\r\n# Force enable in production\r\nNODE_ENV=production ELIZA_UI_ENABLE=true bun start\r\n\r\n# Force disable in development\r\nELIZA_UI_ENABLE=false bun start\r\n```\r\n\r\nWhen UI is disabled:\r\n- `http://localhost:3000` → HTTP 403 Forbidden  \r\n- `http://localhost:3000/api/server/ping` → Still works fine\r\n\r\n## Test Coverage\r\n\r\nAdded tests:\r\n- **Unit tests**: Environment variable parsing and default behaviours (development vs production)\r\n- **Integration tests**: Server configuration impact and HTTP response handling\r\n- **Security validation**: API functionality preservation when UI disabled\r\n\r\n`bun test packages/server/src/__tests__/ui-disable-feature.test.ts`\r\n\r\n25 tests passing, including both new tests and existing functionality verification.\r\n\r\n## Justification\r\n\r\nI'm working on scripting prod deploys and wanted a straighforward way to shut the UI off, but keep API open. I've purposely kept the API authentication (`ELIZA_SERVER_AUTH_TOKEN`) separate from this UI disable feature to minimise any clashes. \r\n\r\n\r\n## ⚠️ Desktop App Compatibility\r\n\r\nAny remote deploy breaks the desktop anyway, as it's a wrapper to an iframe polling localhost:3000. \r\n\r\nIn future iterations of the desktop app, with the correct plumbing, it could:\r\n\r\n1. **Explicitly override**: `ELIZA_UI_ENABLE=true elizaos start`\r\n2. **Environment file**: Add `ELIZA_UI_ENABLE=true` to `.env`\r\n3. **Startup script**: Desktop app launcher can set the environment variable\r\n\r\n(I'd be happy to help with this!)\r\n\r\n## Backward compatibility\r\n\r\nShould be fully backward compatible - no breaking changes, development experience stays the same. Only affects deployments that explicitly set `NODE_ENV=production`.\r\n\r\n---\r\n\r\nDiscord: @bealers ",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-27T12:57:03Z",
+      "mergedAt": null,
+      "additions": 1456,
+      "deletions": 219
+    },
+    {
+      "id": "PR_kwDOMT5cIs6cRyDz",
+      "title": "fix: rollback-pr-5270",
+      "author": "yungalgo",
+      "number": 5297,
+      "body": "this is a rollback for pr 5270\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added new plugins as dependencies to the CLI and project starter packages, expanding available integrations.\n\n* **Bug Fixes**\n  * Improved error handling and logging for agent and plugin commands.\n  * Streamlined process cleanup in CLI tests for more reliable test runs.\n\n* **Documentation**\n  * Updated CLI and plugin documentation to reflect project-level (not character-level) plugin management.\n  * Simplified agent command documentation to focus on single-agent operations.\n  * Revised Quickstart and related docs to streamline setup and remove outdated character-centric instructions.\n\n* **Refactor**\n  * Simplified CLI commands to operate at the project level and removed support for managing plugins per character file.\n  * Unified agent commands to use a single-agent model and updated related options.\n  * Removed legacy utilities for character file parsing and validation.\n\n* **Chores**\n  * Cleaned up test scripts and workflow files, removing redundant cleanup steps and scripts.\n  * Updated TypeScript configuration for improved local development.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-26T18:12:34Z",
+      "mergedAt": "2025-06-27T04:54:40Z",
+      "additions": 642,
+      "deletions": 2052
+    }
+  ],
+  "codeChanges": {
+    "additions": 4209,
+    "deletions": 3206,
+    "files": 88,
+    "commitCount": 29
+  },
+  "completedItems": [
+    {
+      "title": "feat(rofl): fix build issues and add deployment config files for rofl…",
+      "prNumber": 5277,
+      "type": "feature",
+      "body": "* new character file to enable all polygon plugins\r\n* fix zod related build issue\r\n* added `openai` plugin to agent file to address issue https://github.com/elizaOS/eliza/issues/5279\r\n\r\nto test set `.env` variables as follow:\r\n\r\n```\r\nOPENAI"
+    },
+    {
+      "title": "fix: Dynamically resolves client path for static serving",
+      "prNumber": 5298,
+      "type": "bugfix",
+      "body": "```\r\nNotFoundError: Not Found\r\n    at createHttpError (/Users/cjft/.bun/install/global/node_modules/send/index.js:861:12)\r\n    at SendStream.error (/Users/cjft/.bun/install/global/node_modules/send/index.js:168:31)\r\n    at SendStream.pipe ("
+    },
+    {
+      "title": "fix: rollback-pr-5270",
+      "prNumber": 5297,
+      "type": "bugfix",
+      "body": "this is a rollback for pr 5270\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added new plugins as dependencies to the CLI and project starter packages, expandin"
+    },
+    {
+      "title": "fix: ensure CLI build depends on client build to prevent 'Client UI not available' errors",
+      "prNumber": 5307,
+      "type": "bugfix",
+      "body": "## Problem\n\nRecent deployments have been experiencing \"Client UI not available\" errors when accessing the frontend. This happens when the CLI package is built without the client package being built first, resulting in missing client dist fi"
+    },
+    {
+      "title": "feat: improve agent-log-viewer polling and default to live mode",
+      "prNumber": 5306,
+      "type": "feature",
+      "body": "## Changes\n\nThis PR improves the agent-log-viewer component with better performance and user experience:\n\n### 🚀 **Key Improvements**\n\n- **Increased polling interval**: Changed from 2 seconds to 5 seconds for better performance and reduced "
+    },
+    {
+      "title": "feat(cli): remove orphaned server directory",
+      "prNumber": 5305,
+      "type": "feature",
+      "body": "## Description\n\nThis PR removes the orphaned `packages/cli/src/server/` directory that contains legacy code which has been completely migrated to the `@elizaos/server` package.\n\n## Background\n\nDuring investigation, it was discovered that:\n-"
+    },
+    {
+      "title": "feat: improve character plugin configurations + document",
+      "prNumber": 5302,
+      "type": "feature",
+      "body": "## Description\n\nThis PR introduces significant improvements to character configurations and CLI functionality across the ElizaOS project.\n\n## Changes\n\n### Character Improvements\n- Enhanced character templates with improved plugin ordering\n-"
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 144.76905654966038,
+      "prScore": 144.3310565496604,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xtc23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129641996?v=4",
+      "totalScore": 66.0331834933915,
+      "prScore": 66.0331834933915,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bealers",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6403055?u=8c40778251e25b92cdee727056415b6c0d1bcdc5&v=4",
+      "totalScore": 28.18926433794566,
+      "prScore": 28.18926433794566,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "monilpat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 8,
+  "mergedPRs": 7,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 11
+}
