@@ -111,7 +111,7 @@ const ingestWalletAddresses = createStep(
           for (const wallet of freshWalletData.wallets) {
             if (
               !SUPPORTED_CHAINS_NAMES.includes(wallet.chain.toLowerCase()) ||
-              !(await validateAddress(wallet.address, wallet.chain))
+              !validateAddress(wallet.address, wallet.chain)
             ) {
               logger?.warn(
                 `Skipping invalid wallet for ${username}: ${wallet.address} on chain ${wallet.chain}`,

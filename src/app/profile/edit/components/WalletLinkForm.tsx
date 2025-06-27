@@ -12,7 +12,7 @@ import {
   resolveEnsDomain,
   validateEnsFormat,
   validateSnsFormat,
-} from "@/lib/walletLinking/domain";
+} from "@/lib/walletLinking/domainUtils";
 
 interface WalletLinkFormProps {
   wallets: LinkedWallet[];
@@ -45,7 +45,7 @@ export function WalletLinkForm({
     // Validate initial addresses asynchronously
     const validateInitialAddresses = async () => {
       if (ethWallet?.address) {
-        const isValid = await validateAddress(ethWallet.address, "ethereum");
+        const isValid = validateAddress(ethWallet.address, "ethereum");
         setIsEthValid(isValid);
         if (!isValid) {
           setEthAddressError("Invalid Ethereum address");
@@ -53,7 +53,7 @@ export function WalletLinkForm({
       }
 
       if (solWallet?.address) {
-        const isValid = await validateAddress(solWallet.address, "solana");
+        const isValid = validateAddress(solWallet.address, "solana");
         setIsSolValid(isValid);
         if (!isValid) {
           setSolAddressError("Invalid Solana address");
@@ -72,7 +72,7 @@ export function WalletLinkForm({
     }
 
     const validateEthAddress = async () => {
-      const isEVMValid = await validateAddress(ethAddress, "ethereum");
+      const isEVMValid = validateAddress(ethAddress, "ethereum");
       const isENSValid = validateEnsFormat(ethAddress);
       setIsEthValid(isEVMValid || isENSValid);
       setEthAddressError(
@@ -91,7 +91,7 @@ export function WalletLinkForm({
     }
 
     const validateSolAddress = async () => {
-      const isSOLValid = await validateAddress(solAddress, "solana");
+      const isSOLValid = validateAddress(solAddress, "solana");
       const isSNSValid = validateSnsFormat(solAddress);
       setIsSolValid(isSNSValid || isSOLValid);
       setSolAddressError(

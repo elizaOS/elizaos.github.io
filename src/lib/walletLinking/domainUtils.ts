@@ -1,7 +1,13 @@
+import { Connection } from "@solana/web3.js";
+import { getDomainKeySync, NameRegistryState } from "@bonfida/spl-name-service";
+import { createPublicClient, http } from "viem";
+import { normalize } from "viem/ens";
+import { mainnet } from "viem/chains";
+
 // Array of solana RPC endpoints to try in order
 const RPC_ENDPOINTS = [
   "https://api.mainnet-beta.solana.com", // Public Solana RPC
-  "https://solana-mainnet.g.alchemy.com/v2/lqe31XHZcBd-8FsgmYnHJ", // Alchemy endpoint, domain restricted to https://elizaos.github.io
+  process.env.NEXT_PUBLIC_ALCHEMY_SOLANA_URL || "", // Alchemy endpoint
   process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "", // Local/custom endpoint from environment
 ];
 
@@ -11,9 +17,7 @@ const RPC_ENDPOINTS = [
  * @returns Promise<string> The first working RPC endpoint URL
  * @throws Will throw an error if no endpoints are accessible
  */
-async function getWorkingRpcEndpointForSolana(
-  Connection: typeof import("@solana/web3.js").Connection,
-): Promise<string> {
+async function getWorkingRpcEndpointForSolana(): Promise<string> {
   for (const endpoint of RPC_ENDPOINTS) {
     try {
       const connection = new Connection(endpoint, "confirmed");
@@ -37,14 +41,7 @@ async function getWorkingRpcEndpointForSolana(
  */
 export async function resolveSnsDomain(domain: string): Promise<string | null> {
   try {
-    // Import all Solana dependencies dynamically
-    const [{ Connection }, { getDomainKeySync, NameRegistryState }] =
-      await Promise.all([
-        import("@solana/web3.js"),
-        import("@bonfida/spl-name-service"),
-      ]);
-
-    const workingEndpoint = await getWorkingRpcEndpointForSolana(Connection);
+    const workingEndpoint = await getWorkingRpcEndpointForSolana();
     const connection = new Connection(workingEndpoint);
 
     const { pubkey } = getDomainKeySync(domain);
@@ -66,10 +63,6 @@ export async function resolveSnsDomain(domain: string): Promise<string | null> {
  */
 export async function resolveEnsDomain(name: string): Promise<string | null> {
   try {
-    const { createPublicClient, http } = await import("viem");
-    const { normalize } = await import("viem/ens");
-    const { mainnet } = await import("viem/chains");
-
     const viemClient = createPublicClient({
       chain: mainnet,
       transport: http(),

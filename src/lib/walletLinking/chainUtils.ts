@@ -1,13 +1,11 @@
 import EthereumIcon from "@/components/icons/EthereumIcon";
 import SolanaIcon from "@/components/icons/SolanaIcon";
-
-// Module-level caches for imported validators to optimize repeated calls
-let viemValidator: ((address: string) => boolean) | null = null;
-let solanaValidator: ((address: string) => boolean) | null = null;
+import { isAddress } from "viem";
+import { PublicKey } from "@solana/web3.js";
 
 interface ChainConfig {
   chainId: string;
-  validator: (address: string) => Promise<boolean>;
+  validator: (address: string) => boolean;
   icon: React.ElementType;
 }
 
@@ -24,15 +22,9 @@ interface ChainConfig {
 export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
   ethereum: {
     chainId: "eip155:1",
-    validator: async (address: string) => {
-      // Use cached validator if available, otherwise import and cache
-      if (!viemValidator) {
-        const { isAddress } = await import("viem");
-        viemValidator = isAddress;
-      }
-
+    validator: (address: string) => {
       try {
-        return viemValidator(address);
+        return isAddress(address);
       } catch (error) {
         console.error(`Failed to validate Ethereum address ${address}:`, error);
         return false;
@@ -42,21 +34,9 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
   },
   solana: {
     chainId: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-    validator: async (address: string) => {
-      // Use cached validator if available, otherwise import and cache
-      if (!solanaValidator) {
-        const { PublicKey } = await import("@solana/web3.js");
-        solanaValidator = (addr: string) => {
-          try {
-            return PublicKey.isOnCurve(new PublicKey(addr).toBytes());
-          } catch {
-            return false;
-          }
-        };
-      }
-
+    validator: (address: string) => {
       try {
-        return solanaValidator(address);
+        return PublicKey.isOnCurve(new PublicKey(address).toBytes());
       } catch (error) {
         console.error(`Failed to validate Solana address ${address}:`, error);
         return false;
@@ -113,10 +93,7 @@ export function createAccountId(chainId: string, address: string): string {
  * @param chain The blockchain name (e.g., "ethereum", "solana")
  * @returns True if the address is valid for the chain, false otherwise
  */
-export async function validateAddress(
-  address: string,
-  chain: string,
-): Promise<boolean> {
+export function validateAddress(address: string, chain: string): boolean {
   const chainConfig =
     SUPPORTED_CHAINS[chain.toLowerCase() as keyof typeof SUPPORTED_CHAINS];
   if (!chainConfig) {

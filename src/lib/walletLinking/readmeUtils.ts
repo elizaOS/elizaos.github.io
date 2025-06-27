@@ -56,23 +56,13 @@ export async function parseWalletLinkingDataFromReadme(
     }
 
     // Make sure to only return wallets for supported chains
-    const validWallets = [];
-    for (const wallet of result.data.wallets) {
-      const isChainSupported = SUPPORTED_CHAINS_NAMES.includes(
-        wallet.chain.toLowerCase(),
-      );
-      const isAddressValid = await validateAddress(
-        wallet.address,
-        wallet.chain,
-      );
-      if (isAddressValid && isChainSupported) {
-        validWallets.push(wallet);
-      }
-    }
-
     const walletLinkingData: WalletLinkingData = {
       lastUpdated: result.data.lastUpdated,
-      wallets: validWallets,
+      wallets: result.data.wallets.filter(
+        (wallet) =>
+          SUPPORTED_CHAINS_NAMES.includes(wallet.chain.toLowerCase()) &&
+          validateAddress(wallet.address, wallet.chain),
+      ),
     };
 
     return walletLinkingData;
