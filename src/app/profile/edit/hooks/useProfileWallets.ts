@@ -13,6 +13,12 @@ import {
 } from "@/lib/walletLinking/readmeUtils";
 import { z } from "zod";
 import { decodeBase64 } from "@/lib/decode";
+import {
+  resolveSnsDomain,
+  resolveEnsDomain,
+  validateEnsFormat,
+  validateSnsFormat,
+} from "@/lib/walletLinking/domainUtils";
 
 export function useProfileWallets() {
   const router = useRouter();
@@ -27,6 +33,7 @@ export function useProfileWallets() {
   const [defaultBranch, setDefaultBranch] = useState<string>("main");
 
   const [pageLoading, setPageLoading] = useState(true);
+  const [isProcessingWallets, setIsProcessingWallets] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -124,6 +131,79 @@ export function useProfileWallets() {
     }
   }, [user]);
 
+  /**
+   * Processes form values and returns array of processed wallet objects
+   * with wallet addresses and/or domain names
+   */
+  const processWallets = useCallback(
+    async (
+      values: Record<string, string | undefined>,
+    ): Promise<LinkedWallet[]> => {
+      setIsProcessingWallets(true);
+      const wallets: LinkedWallet[] = [];
+
+      try {
+        for (const chainName of Object.keys(values)) {
+          const addressValue = values[chainName];
+
+          if (!addressValue?.trim()) {
+            continue;
+          }
+
+          // Determine if this is a domain name based on chain type
+          const isEns =
+            chainName === "ethereum" && validateEnsFormat(addressValue);
+          const isSns =
+            chainName === "solana" && validateSnsFormat(addressValue);
+          const isDomain = isEns || isSns;
+
+          let finalAddress = addressValue;
+          let ensName: string | undefined;
+          let snsName: string | undefined;
+
+          if (isDomain) {
+            // Domain address - resolve to actual address
+            const resolvedAddress = isEns
+              ? await resolveEnsDomain(addressValue)
+              : await resolveSnsDomain(addressValue);
+
+            if (!resolvedAddress) {
+              // Resolution failed - throw error with field information
+              const domainType = isEns ? "ENS" : "SNS";
+              const error = new Error(
+                `Failed to resolve ${domainType} name. Please check the domain.`,
+              ) as Error & { field: string };
+              error.field = chainName;
+              throw error;
+            }
+
+            finalAddress = resolvedAddress;
+            if (isEns) ensName = addressValue;
+            if (isSns) snsName = addressValue;
+          }
+
+          // Create wallet object
+          const wallet: LinkedWallet = {
+            chain: chainName,
+            address: finalAddress,
+            ...(ensName && { ensName }),
+            ...(snsName && { snsName }),
+          };
+
+          wallets.push(wallet);
+        }
+
+        return wallets;
+      } catch (error) {
+        // Re-throw errors (including ones with field property) for the component to handle
+        throw error;
+      } finally {
+        setIsProcessingWallets(false);
+      }
+    },
+    [],
+  );
+
   const handleGenerateWalletSection = useCallback(
     async (wallets: LinkedWallet[]) => {
       if (!user || !user.login) {
@@ -160,7 +240,7 @@ export function useProfileWallets() {
         setPageLoading(false);
       }
     },
-    [user, setError, setSuccessMessage, setPageLoading],
+    [user],
   );
 
   return {
@@ -171,12 +251,14 @@ export function useProfileWallets() {
     walletSection,
     walletData,
     pageLoading,
+    isProcessingWallets,
     error,
     successMessage,
     setError,
     setSuccessMessage,
     getWalletAddress,
     handleCreateProfileRepo,
+    processWallets,
     handleGenerateWalletSection,
     defaultBranch,
   };

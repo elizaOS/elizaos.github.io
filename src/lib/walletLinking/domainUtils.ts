@@ -22,10 +22,8 @@ async function getWorkingRpcEndpointForSolana(): Promise<string> {
     try {
       const connection = new Connection(endpoint, "confirmed");
       await connection.getLatestBlockhash(); // Test connectivity
-      console.log(`Using RPC endpoint: ${endpoint}`);
       return endpoint;
-    } catch (error) {
-      console.warn(`Failed to connect to RPC endpoint ${endpoint}:`, error);
+    } catch {
       continue; // Try next endpoint
     }
   }

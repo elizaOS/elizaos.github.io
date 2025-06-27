@@ -25,8 +25,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     validator: (address: string) => {
       try {
         return isAddress(address);
-      } catch (error) {
-        console.error(`Failed to validate Ethereum address ${address}:`, error);
+      } catch {
         return false;
       }
     },
@@ -37,8 +36,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     validator: (address: string) => {
       try {
         return PublicKey.isOnCurve(new PublicKey(address).toBytes());
-      } catch (error) {
-        console.error(`Failed to validate Solana address ${address}:`, error);
+      } catch {
         return false;
       }
     },
