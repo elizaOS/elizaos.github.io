@@ -27,9 +27,9 @@ const WALLET_SECTION_END_MARKER = "WALLET-LINKING-END -->";
  * @param readmeContent The string content of the README file.
  * @returns The parsed and validated wallet linking data, or null if no valid data found.
  */
-export async function parseWalletLinkingDataFromReadme(
+export function parseWalletLinkingDataFromReadme(
   readmeContent: string,
-): Promise<WalletLinkingData | null> {
+): WalletLinkingData | null {
   const startIndex = readmeContent.indexOf(WALLET_SECTION_BEGIN_MARKER);
   const endIndex = readmeContent.indexOf(WALLET_SECTION_END_MARKER);
 

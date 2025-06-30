@@ -37,9 +37,7 @@ export async function batchFetchWalletDataFromGithub(
       const result = fileContents[i];
 
       if (result.content) {
-        const walletData = await parseWalletLinkingDataFromReadme(
-          result.content,
-        );
+        const walletData = parseWalletLinkingDataFromReadme(result.content);
         results[username] = {
           walletData,
           profileRepoExists: true,
