@@ -1,18 +1,13 @@
-import { Suspense } from "react";
-import { Loader2 } from "lucide-react"; // For Suspense fallback
-import ProfileEditor from "./components/ProfileEditor"; // Adjusted path
+"use client";
+
+import dynamic from "next/dynamic";
+import ProfileEditorSkeleton from "./components/ProfileEditorSkeleton";
+
+const ProfileEditor = dynamic(() => import("./components/ProfileEditor"), {
+  loading: () => <ProfileEditorSkeleton />,
+  ssr: false,
+});
 
 export default function ProfileEditPage() {
-  return (
-    <Suspense
-      fallback={
-        // This fallback is for the client component itself if it suspends
-        <div className="flex min-h-screen items-center justify-center">
-          <Loader2 className="h-10 w-10 animate-spin text-primary" />
-        </div>
-      }
-    >
-      <ProfileEditor />
-    </Suspense>
-  );
+  return <ProfileEditor />;
 }

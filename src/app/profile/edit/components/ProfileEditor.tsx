@@ -22,11 +22,13 @@ export default function ProfileEditor() {
     profileRepoExists,
     walletData,
     pageLoading,
+    isProcessingWallets,
     error,
     successMessage,
     walletSection,
     readmeContent,
     handleCreateProfileRepo,
+    processWallets,
     handleGenerateWalletSection,
     defaultBranch,
   } = useProfileWallets();
@@ -98,8 +100,9 @@ export default function ProfileEditor() {
                 <>
                   <WalletLinkForm
                     wallets={walletData?.wallets || []}
+                    processWallets={processWallets}
                     onSubmit={handleGenerateWalletSection}
-                    isProcessing={pageLoading}
+                    isProcessing={isProcessingWallets}
                   />
                 </>
               )}

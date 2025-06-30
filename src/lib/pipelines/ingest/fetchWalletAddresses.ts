@@ -8,6 +8,7 @@ import {
   getChainId,
   SUPPORTED_CHAINS_NAMES,
   validateAddress,
+  getPrimaryDomain,
 } from "@/lib/walletLinking/chainUtils";
 import { batchFetchWalletDataFromGithub } from "../../walletLinking/fetchWalletDataFromGithub";
 import { chunk } from "@/lib/arrayHelpers";
@@ -94,6 +95,12 @@ const ingestWalletAddresses = createStep(
               continue;
             }
 
+            // Get the primary domain name for the wallet address
+            const primaryDomain = await getPrimaryDomain(
+              wallet.address,
+              wallet.chain,
+            );
+
             const existingWallet = await db.query.walletAddresses.findFirst({
               where: and(
                 eq(walletAddresses.userId, username),
@@ -108,6 +115,7 @@ const ingestWalletAddresses = createStep(
                 .set({
                   isActive: true,
                   updatedAt: new Date().toISOString(),
+                  domainName: primaryDomain,
                 })
                 .where(eq(walletAddresses.id, existingWallet.id));
               reactivatedCount++;
@@ -116,6 +124,7 @@ const ingestWalletAddresses = createStep(
                 userId: username,
                 chainId: getChainId(wallet.chain),
                 accountAddress: wallet.address,
+                domainName: primaryDomain,
                 isActive: true,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),

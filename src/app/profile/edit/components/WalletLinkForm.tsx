@@ -1,179 +1,206 @@
 "use client";
 
-import { useState, useEffect, FormEvent } from "react";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Loader2, Info, Shield, ArrowRight } from "lucide-react";
-import { isAddress } from "viem"; // For ETH address validation
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
+import { validateAddress } from "@/lib/walletLinking/chainUtils";
+import {
+  validateEnsFormat,
+  validateSnsFormat,
+} from "@/lib/walletLinking/domainUtils";
+
+// Zod schema for form validation
+const walletFormSchema = z.object({
+  ethereum: z
+    .string()
+    .optional()
+    .refine(
+      (value) => {
+        if (!value || value.trim() === "") return true;
+        const isEVMValid = validateAddress(value, "ethereum");
+        const isENSValid = validateEnsFormat(value);
+        return isEVMValid || isENSValid;
+      },
+      {
+        message: "Invalid Ethereum address or ENS name.",
+      },
+    ),
+  solana: z
+    .string()
+    .optional()
+    .refine(
+      (value) => {
+        if (!value || value.trim() === "") return true;
+        const isSOLValid = validateAddress(value, "solana");
+        const isSNSValid = validateSnsFormat(value);
+        return isSOLValid || isSNSValid;
+      },
+      {
+        message: "Invalid Solana address or SNS name.",
+      },
+    ),
+});
+
+type WalletFormValues = z.infer<typeof walletFormSchema>;
 
 interface WalletLinkFormProps {
   wallets: LinkedWallet[];
+  processWallets: (values: WalletFormValues) => Promise<LinkedWallet[]>;
   onSubmit: (wallets: LinkedWallet[]) => Promise<void>;
   isProcessing: boolean;
 }
 
-// Basic regex for Solana address (Base58, 32-44 chars)
-// For more robust validation, consider @solana/web3.js PublicKey.isOnCurve or similar
-const SOL_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-
 export function WalletLinkForm({
   wallets = [],
+  processWallets,
   onSubmit,
   isProcessing,
 }: WalletLinkFormProps) {
-  const [ethAddress, setEthAddress] = useState("");
-  const [solAddress, setSolAddress] = useState("");
-
-  const [ethAddressError, setEthAddressError] = useState("");
-  const [solAddressError, setSolAddressError] = useState("");
-
-  const [isEthValid, setIsEthValid] = useState(true);
-  const [isSolValid, setIsSolValid] = useState(true);
+  const form = useForm<WalletFormValues>({
+    resolver: zodResolver(walletFormSchema),
+    defaultValues: {
+      ethereum: "",
+      solana: "",
+    },
+    mode: "onChange",
+  });
 
   // Initialize form with existing wallet addresses
   useEffect(() => {
     const ethWallet = wallets.find((w) => w.chain === "ethereum");
     const solWallet = wallets.find((w) => w.chain === "solana");
 
-    setEthAddress(ethWallet?.address || "");
-    setSolAddress(solWallet?.address || "");
+    form.reset({
+      ethereum: ethWallet?.address || "",
+      solana: solWallet?.address || "",
+    });
+  }, [wallets, form]);
 
-    if (!ethWallet?.address || isAddress(ethWallet.address)) {
-      setIsEthValid(true);
-      setEthAddressError("");
-    } else {
-      setIsEthValid(false);
-    }
+  const handleFormSubmit = async (values: WalletFormValues) => {
+    try {
+      const processedWallets = await processWallets(values);
+      await onSubmit(processedWallets);
+    } catch (error) {
+      // Handle specific field errors from wallet processing
+      if (error instanceof Error && "field" in error) {
+        const fieldError = error as {
+          field: "ethereum" | "solana";
+          message: string;
+        };
+        form.setError(fieldError.field, { message: fieldError.message });
+        return;
+      }
 
-    if (!solWallet?.address || SOL_ADDRESS_REGEX.test(solWallet.address)) {
-      setIsSolValid(true);
-      setSolAddressError("");
-    } else {
-      setIsSolValid(false);
-    }
-  }, [wallets]);
-
-  useEffect(() => {
-    if (ethAddress === "") {
-      setIsEthValid(true);
-      setEthAddressError("");
-    } else {
-      const isValid = isAddress(ethAddress);
-      setIsEthValid(isValid);
-      setEthAddressError(isValid ? "" : "Invalid Ethereum address.");
-    }
-  }, [ethAddress]);
-
-  useEffect(() => {
-    if (solAddress === "") {
-      setIsSolValid(true);
-      setSolAddressError("");
-    } else {
-      const isValid = SOL_ADDRESS_REGEX.test(solAddress);
-      setIsSolValid(isValid);
-      setSolAddressError(isValid ? "" : "Invalid Solana address format.");
-    }
-  }, [solAddress]);
-
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    // Double check validity before submitting
-    if (!isEthValid || !isSolValid) {
-      return;
-    }
-
-    const updatedWallets: LinkedWallet[] = [];
-
-    if (ethAddress) {
-      updatedWallets.push({
-        chain: "ethereum",
-        address: ethAddress,
+      // Handle general errors
+      form.setError("root", {
+        message:
+          error instanceof Error
+            ? error.message
+            : "Failed to process wallet addresses. Please try again.",
       });
     }
-
-    if (solAddress) {
-      updatedWallets.push({
-        chain: "solana",
-        address: solAddress,
-      });
-    }
-
-    await onSubmit(updatedWallets);
   };
 
-  const hasValuesChanged =
-    ethAddress !==
-      (wallets.find((w) => w.chain === "ethereum")?.address || "") ||
-    solAddress !== (wallets.find((w) => w.chain === "solana")?.address || "");
+  // Button text logic (keep separate due to complexity)
   const canSubmit =
-    isEthValid && isSolValid && !isProcessing && hasValuesChanged;
-
+    form.formState.isValid && !isProcessing && form.formState.isDirty;
   const isUpdateOperation = wallets.length > 0;
-  const buttonTextBase = isUpdateOperation ? "Update" : "Save";
   const buttonText = isProcessing
-    ? `${buttonTextBase === "Update" ? "Updating" : "Saving"}...`
-    : `${buttonTextBase} Wallet Addresses`;
+    ? `${isUpdateOperation ? "Updating" : "Saving"}...`
+    : `${isUpdateOperation ? "Update" : "Save"} Wallet Addresses`;
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      <div className="space-y-2">
-        <Label htmlFor="ethAddress">Ethereum Address</Label>
-        <Input
-          id="ethAddress"
-          type="text"
-          value={ethAddress}
-          onChange={(e) => setEthAddress(e.target.value)}
-          placeholder="0x..."
-          disabled={isProcessing}
-          className={ethAddressError ? "border-destructive" : ""}
+    <Form {...form}>
+      <form
+        onSubmit={form.handleSubmit(handleFormSubmit)}
+        className="space-y-6"
+      >
+        <FormField
+          control={form.control}
+          name="ethereum"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Ethereum Address</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  placeholder="Your Ethereum address (e.g., 0x...) or ENS name (e.g., vitalik.eth)"
+                  disabled={isProcessing}
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
         />
-        {ethAddressError && (
-          <p className="text-sm text-destructive">{ethAddressError}</p>
-        )}
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="solAddress">Solana Address</Label>
-        <Input
-          id="solAddress"
-          type="text"
-          value={solAddress}
-          onChange={(e) => setSolAddress(e.target.value)}
-          placeholder="Your Solana address (e.g., So1...)"
-          disabled={isProcessing}
-          className={solAddressError ? "border-destructive" : ""}
-        />
-        {solAddressError && (
-          <p className="text-sm text-destructive">{solAddressError}</p>
-        )}
-      </div>
-      <Button type="submit" disabled={!canSubmit} className="w-full sm:w-auto">
-        {isProcessing ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        ) : null}
-        {buttonText}
-      </Button>
 
-      <div className="mt-4 rounded-lg border border-primary/20 bg-primary/5 p-3">
-        <div className="flex items-start space-x-2">
-          <Info className="mt-0.5 h-4 w-4 text-primary" />
-          <div className="space-y-1 text-xs">
-            <p className="text-foreground">
-              <span className="font-medium">Public addresses only:</span> Enter
-              your wallet addresses to link them to your GitHub profile.
-            </p>
-            <div className="flex items-center space-x-1 text-muted-foreground">
-              <Shield className="h-3 w-3" />
-              <span>Never share private keys or seed phrases</span>
-            </div>
-            <div className="flex items-center space-x-1 text-muted-foreground">
-              <ArrowRight className="h-3 w-3" />
-              <span>Submit to generate README comment for copying</span>
+        <FormField
+          control={form.control}
+          name="solana"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Solana Address</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  placeholder="Your Solana address (e.g., So1...) or SNS name (e.g., example.sol)"
+                  disabled={isProcessing}
+                />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        {form.formState.errors.root && (
+          <p className="text-sm text-destructive">
+            {form.formState.errors.root.message}
+          </p>
+        )}
+
+        <Button
+          type="submit"
+          disabled={!canSubmit}
+          className="w-full sm:w-auto"
+        >
+          {isProcessing ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : null}
+          {buttonText}
+        </Button>
+
+        <div className="mt-4 rounded-lg border border-primary/20 bg-primary/5 p-3">
+          <div className="flex items-start space-x-2">
+            <Info className="mt-0.5 h-4 w-4 text-primary" />
+            <div className="space-y-1 text-xs">
+              <p className="text-foreground">
+                <span className="font-medium">Public addresses only:</span>{" "}
+                Enter your wallet addresses to link them to your GitHub profile.
+              </p>
+              <div className="flex items-center space-x-1 text-muted-foreground">
+                <Shield className="h-3 w-3" />
+                <span>Never share private keys or seed phrases</span>
+              </div>
+              <div className="flex items-center space-x-1 text-muted-foreground">
+                <ArrowRight className="h-3 w-3" />
+                <span>Submit to generate README comment for copying</span>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </form>
+      </form>
+    </Form>
   );
 }
