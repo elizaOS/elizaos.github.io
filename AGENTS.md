@@ -2,6 +2,8 @@
 
 This document provides a comprehensive overview of the ElizaOS Contributor Analytics project, designed to guide both AI agents and human contributors. It covers the project's purpose, architecture, key components, and development workflows.
 
+**Agent Protocol**: When a plan is available (e.g., in the `plan/` directory), the agent MUST follow it step-by-step. After completing a task described in the plan, the agent MUST update the plan document to mark the task as complete (e.g., by checking a checkbox `[x]`). After a full phase of the plan is complete, the agent MUST commit the changes to the codebase before proceeding to the next phase. This ensures a clear record of progress and alignment with the project goals.
+
 ## 1. Project Overview
 
 This project is a sophisticated analytics and visualization platform for GitHub repositories. Its primary goal is to track, analyze, score, and summarize contributor activity, providing valuable insights into the development process.
@@ -115,3 +117,13 @@ To facilitate local development, the project includes a powerful data synchroniz
   # See all options
   bun run data:sync --help
   ```
+
+--
+
+# Typescript Rules
+
+- Dont cast to `any` type when you have a type error, instead think about the underlying issue causing the error and if/how you can update the related code to respect full typesafety.
+- Avoid manual type signatures on functions and vars whenever possible, always prefer to use inference.
+- Before declaring new Interfaces, search the codebase and types files to see if there's existing type definitions / zod schemas you can use
+- avoid adding comments to code that is self explanatory
+- For testing, use bun.sh test runner, and import from bun:test (https://bun.sh/docs/cli/test)

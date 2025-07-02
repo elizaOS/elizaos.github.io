@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, isNotNull } from "drizzle-orm";
 import { db } from "@/lib/data/db";
 import {
   users,
@@ -10,6 +10,7 @@ import {
   rawCommits,
   rawPullRequestFiles,
   userSummaries,
+  repoSummaries,
 } from "@/lib/data/schema";
 import {
   buildAreaMap,
@@ -18,6 +19,7 @@ import {
 import { UTCDate } from "@date-fns/utc";
 import { buildCommonWhereConditions } from "../queryHelpers";
 import { TimeInterval, toDateString } from "@/lib/date-utils";
+import { asc, lte } from "drizzle-orm";
 
 /**
  * Get metrics for a contributor within a time range
@@ -404,4 +406,122 @@ export async function getContributorSummariesForInterval(
     `[getContributorSummariesForInterval] Found ${summariesMap.size} summaries for ${usernames.length} requested users.`,
   );
   return summariesMap;
+}
+
+/**
+ * Get repository summaries for a given interval (e.g., all daily summaries for a week/month).
+ */
+export async function getRepoSummariesForInterval(
+  repoId: string,
+  interval: TimeInterval,
+): Promise<{ date: string; summary: string }[]> {
+  console.log(
+    `[getRepoSummariesForInterval] Fetching for repoId: ${repoId}, intervalType: day, from ${toDateString(interval.intervalStart)} to ${toDateString(interval.intervalEnd)}`,
+  );
+
+  const summaries = await db
+    .select({
+      date: repoSummaries.date,
+      summary: repoSummaries.summary,
+    })
+    .from(repoSummaries)
+    .where(
+      and(
+        eq(repoSummaries.repoId, repoId),
+        eq(repoSummaries.intervalType, "day"), // We fetch daily summaries for aggregation
+        // Date range for the weekly/monthly interval
+        ...buildCommonWhereConditions(
+          {
+            dateRange: {
+              startDate: toDateString(interval.intervalStart),
+              endDate: toDateString(interval.intervalEnd),
+            },
+          },
+          repoSummaries,
+          ["date"],
+        ),
+      ),
+    )
+    .orderBy(repoSummaries.date);
+
+  console.log(
+    `[getRepoSummariesForInterval] Found ${summaries.length} daily summaries for interval.`,
+  );
+
+  // Filter out any null summaries and ensure all summaries are strings
+  return summaries
+    .filter((s) => s.summary !== null && s.summary !== "")
+    .map((s) => ({
+      date: s.date,
+      summary: s.summary ?? "", // This is redundant due to filter but TypeScript needs it
+    }));
+}
+
+/**
+ * Get repositories with activity in a specific time interval
+ */
+export async function getActiveReposInInterval(
+  interval: TimeInterval,
+): Promise<string[]> {
+  const dateRange = {
+    startDate: toDateString(interval.intervalStart),
+    endDate: toDateString(interval.intervalEnd),
+  };
+
+  // Get repo IDs from PRs created, merged, or closed in the interval
+  const prRepoIds = await db
+    .selectDistinct({ repoId: rawPullRequests.repository })
+    .from(rawPullRequests)
+    .where(
+      and(
+        ...buildCommonWhereConditions({ dateRange }, rawPullRequests, [
+          "createdAt",
+          "mergedAt",
+          "closedAt",
+        ]),
+      ),
+    );
+
+  // Get repo IDs from issues created or closed in the interval
+  const issueRepoIds = await db
+    .selectDistinct({ repoId: rawIssues.repository })
+    .from(rawIssues)
+    .where(
+      and(
+        ...buildCommonWhereConditions({ dateRange }, rawIssues, [
+          "createdAt",
+          "closedAt",
+        ]),
+      ),
+    );
+
+  const activeRepoIds = new Set([
+    ...prRepoIds.map((r) => r.repoId),
+    ...issueRepoIds.map((r) => r.repoId),
+  ]);
+
+  return Array.from(activeRepoIds);
+}
+
+/**
+ * Get all repository summaries for a specific time interval
+ */
+export async function getAllRepoSummariesForInterval(
+  interval: TimeInterval,
+): Promise<{ repoId: string; summary: string }[]> {
+  const summaries = await db.query.repoSummaries.findMany({
+    where: and(
+      eq(repoSummaries.intervalType, interval.intervalType),
+      eq(repoSummaries.date, toDateString(interval.intervalStart)),
+      isNotNull(repoSummaries.summary),
+    ),
+    columns: {
+      repoId: true,
+      summary: true,
+    },
+  });
+
+  return summaries.filter((s): s is { repoId: string; summary: string } =>
+    Boolean(s.summary),
+  );
 }

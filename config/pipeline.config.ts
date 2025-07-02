@@ -23,14 +23,59 @@ export default {
       defaultBranch: "main",
     },
     {
+      owner: "elizaos",
+      name: "auto.fun",
+      defaultBranch: "develop",
+    },
+    {
+      owner: "elizaos",
+      name: "elizaos.github.io",
+      defaultBranch: "main",
+    },
+    {
       owner: "elizaos-plugins",
       name: "plugin-solana",
       defaultBranch: "1.x",
     },
     {
-      owner: "elizaos",
-      name: "auto.fun",
-      defaultBranch: "develop",
+      owner: "elizaos-plugins",
+      name: "plugin-knowledge",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "registry",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-twitter",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-auton8n",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-evm",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-coingecko",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-farcaster",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-mcp",
+      defaultBranch: "1.x",
     },
   ],
   walletAddresses: {
@@ -382,7 +427,7 @@ export default {
     enabled: true,
     defaultModel: "google/gemini-2.0-flash-001",
     models: {
-      day: process.env.SMALL_MODEL || "google/gemini-2.0-flash-001",
+      day: process.env.SMALL_MODEL || "google/gemini-2.5-flash-preview-05-20",
       week: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
       month: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
     },

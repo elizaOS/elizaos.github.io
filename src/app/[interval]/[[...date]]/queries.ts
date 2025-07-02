@@ -1,5 +1,5 @@
 import {
-  getProjectMetrics,
+  getRepoMetrics,
   getTopIssues,
   getTopPullRequests,
 } from "@/lib/pipelines/export/queries";
@@ -94,7 +94,7 @@ export async function getMetricsForInterval(
   const startDate = toDateString(interval.intervalStart);
   const endDate = toDateString(interval.intervalEnd);
 
-  const repoMetrics = await getProjectMetrics({
+  const repoMetrics = await getRepoMetrics({
     dateRange: {
       startDate,
       endDate,

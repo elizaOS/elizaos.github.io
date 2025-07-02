@@ -192,9 +192,13 @@ function formatContributorPrompt(
 Largest PR: ${prMetrics.largestPR.repository}#${prMetrics.largestPR.number} with +${prMetrics.largestPR.additions}/-${prMetrics.largestPR.deletions} lines`
       : "No merged PRs";
 
-  // Build the summary prompt
-  return `Summarize ${metrics.username}'s contributions ${timePeriod.timeFrame}:
+  return `You are an expert engineering manager writing a concise, single-paragraph performance summary for ${
+    metrics.username
+  } based on the data provided for the ${timePeriod.timeFrame}.
+Your goal is to synthesize their activity across all repositories into a holistic narrative. Prioritize the **impact** of the work over the volume of contributions. Do not invent or assume any information beyond what is provided.
 
+DATA:
+---
 PULL REQUESTS:
 - Merged: ${
     metrics.pullRequests.merged > 0
@@ -242,28 +246,28 @@ ${
     : "No code changes"
 }
 
-ACTIVITY PATTERN:
-- Active on ${metrics.activityPattern.daysActive} out of ${
-    metrics.activityPattern.totalDays
-  } days
-- Pattern: ${workPatternDescription}
-
 PRIMARY AREAS: ${topDirs.join(", ") || "N/A"}
+---
 
-Write a natural, factual summary that:
-1. Starts with "${metrics.username}: "
-2. Highlights the most significant contributions based on the data
-3. Emphasizes meaningful patterns (e.g., "focused on bug fixes in the UI", "major refactoring effort")
-4. Includes line counts for significant code changes
-5. Groups similar activities in the same repository together (e.g., "merged 3 PRs improving the frontend in elizaos/eliza")
-6. Uses repository names + PR/issue numbers when referring to specific contributions (e.g., "elizaos/eliza#123", "elizaos-plugins/plugin-A#45")
-7. Omits any activity type that shows "None" above
-8. Uses at most ${timePeriod.sentenceCount} sentences
-9. Varies sentence structure based on the actual work done
+INSTRUCTIONS:
+- Write a single, flowing paragraph of no more than ${
+    timePeriod.sentenceCount
+  } sentences, starting with "${metrics.username}: ".
+- Begin with a high-level summary of their main focus and area of impact (e.g., "focused on improving API performance").
+- Weave in their most impactful contributions, such as fixing critical bugs, implementing key features, or making significant refactors. Use the PR/issue number for reference (e.g., "resolved a critical performance issue in elizaos/api via PR #45").
+- Use quantitative data like line counts or review numbers only when they signal significant complexity or effort on an important task.
+- Conclude with a summary of their primary focus areas based on the code they touched.
+- If there is no activity, output only: "${metrics.username}: No activity ${
+    timePeriod.timeFrameShort
+  }."
 
-Example good summaries:
-"No activity ${timePeriod.timeFrameShort}."
-"Focused on UI improvements with 3 merged PRs (+2k/-500 lines), consistently active with daily commits."
-"Fixed 4 critical bugs in the authentication system (PRs #123, #124) and reviewed 7 PRs, primarily working on backend code."
-"Led documentation efforts with substantial contributions to the API docs (+1.2k lines), opened 3 issues for missing features, and provided 5 detailed code reviews."`;
+Example Summaries:
+- "${metrics.username}: No activity ${timePeriod.timeFrameShort}."
+- "${
+    metrics.username
+  }: Focused heavily on UI improvements across the project, merging 3 PRs in elizaos/eliza (+2k/-500 lines) that rebuilt the settings page, and also reviewed 5 PRs in elizaos-plugins/plugin-A."
+- "${
+    metrics.username
+  }: Drove a major backend refactor, landing a significant PR in elizaos/api (#45) with +1.5k lines of changes. They also triaged and fixed 2 critical bugs in elizaos/ingest (#99, #101), showing a focus on API stability."
+`;
 }

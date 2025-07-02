@@ -57,9 +57,29 @@ This document breaks down the implementation tasks for adding multi-repository s
   - [ ] Consider how `config/pipeline.config.ts` might be extended or if a new configuration mechanism/UI is needed for this.
   - [ ] Assess impact on `userTagScores` and `userDailyScores` if scores become more dynamic.
 - [ ] **Task 2.3: Refine AI Summary Generation for Multi-Repo/Org Contexts**
+
   - [ ] Evaluate if the `projectContext` in `config/pipeline.config.ts` for AI summaries needs to be dynamic (e.g., different context per org, or a broader context for org-level summaries).
   - [ ] Test AI summary quality when summarizing activities across multiple repositories within an organization.
   - [ ] Adapt summarization prompts or logic in `src/lib/pipelines/summarize/` as needed.
+
+- [ ] **Task 2.4: Implement Multi-Repo Project Summarization**
+  - **Goal:** Refactor the project summary pipeline to support aggregated summaries across all configured repositories. See `plan/multi-repo-summaries.md` for the full plan.
+  - [ ] **2.4.1: Refactor for Repo-Specific Summaries**
+    - [ ] Rename `aiProjectSummary.ts` -> `aiRepoSummary.ts` and `generateProjectSummary.ts` -> `generateRepoSummary.ts`.
+    - [ ] Update prompts and function names to reflect single-repo focus.
+    - [ ] Implement optimization to only process repos with activity in a given interval.
+  - [ ] **2.4.2: Implement Overall Daily Summary**
+    - [ ] Create `aiOverallSummary.ts` and `generateOverallSummary.ts` modules.
+    - [ ] Implement `getOverallProjectMetrics` to query data from all repos.
+    - [ ] Create and implement the prompt for detailed daily summaries, grouping raw data by repo.
+  - [ ] **2.4.3: Implement Overall Weekly/Monthly Summary**
+    - [ ] Implement logic to first run the `repoSummariesPipeline` to get individual summaries.
+    - [ ] Create and implement a prompt in `aiOverallSummary.ts` that synthesizes multiple repo summaries into a high-level overview.
+  - [ ] **2.4.4: Database & Integration**
+    - [ ] Add `overallSummaries` table to the database schema and create migrations.
+    - [ ] Add mutation for storing overall summaries.
+    - [ ] Update `summarize` pipeline entry point in `index.ts` and verify `cli/analyze-pipeline.ts` integration.
+    - [ ] Ensure overall summary markdown files are saved to a new location (e.g., `data/summaries/`).
 
 ## Phase 3: Advanced Funder UX and LLM Integration
 

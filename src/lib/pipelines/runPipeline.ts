@@ -13,8 +13,6 @@ export function runPipeline<
   input: TInput,
   context: TContext,
 ) {
-  // Add the config to the context
-
   context.logger?.info("Running pipeline");
 
   const startTime = Date.now();

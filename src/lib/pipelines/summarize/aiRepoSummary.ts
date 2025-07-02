@@ -9,10 +9,36 @@ import {
   getIntervalTypeTitle,
 } from "@/lib/date-utils";
 
+type IssueWithComments = RepositoryMetrics["issues"]["newIssues"][number];
+
+function formatIssueForPrompt(issue: IssueWithComments): string {
+  const comments =
+    issue.comments
+      ?.map(
+        (c) =>
+          `  - ${c.author || "unknown"} at ${c.createdAt}: ${c.body?.trim()}`,
+      )
+      .join("\n") || "";
+
+  let issueStr = `[#${issue.number}] ${issue.title} (created: ${
+    issue.createdAt
+  }${
+    issue.closedAt ? `, closed: ${issue.closedAt}` : ""
+  }). BODY: ${issue.body?.slice(0, 240)}`;
+
+  if (comments.length > 0) {
+    issueStr += `\nCOMMENTS (newest to oldest):\n${comments}`;
+  }
+
+  return issueStr;
+}
+
 export interface CompletedItem {
   title: string;
   prNumber: number;
   type: WorkItemType;
+  body?: string | null;
+  files?: string[];
 }
 
 export interface FocusArea {
@@ -47,7 +73,7 @@ export interface ContributorInfo {
   username: string;
 }
 
-export interface ProjectMetricsForSummary {
+export interface RepoMetricsForSummary {
   pullRequests: PullRequestMetrics;
   issues: IssueMetrics;
   uniqueContributors: number;
@@ -57,7 +83,7 @@ export interface ProjectMetricsForSummary {
   completedItems: CompletedItem[];
 }
 
-export async function generateProjectSummary(
+export async function generateRepoSummary(
   metrics: RepositoryMetrics,
   config: AISummaryConfig,
   dateInfo: { startDate: string },
@@ -86,7 +112,10 @@ export async function generateProjectSummary(
       model: config.models[intervalType],
     });
   } catch (error) {
-    console.error(`Error generating ${intervalType} project analysis:`, error);
+    console.error(
+      `Error generating ${intervalType} repository analysis:`,
+      error,
+    );
     return null;
   }
 }
@@ -123,7 +152,7 @@ function calculateMaxTokens(
 }
 
 /**
- * Format project metrics into a structured prompt for analysis based on interval type
+ * Format repository metrics into a structured prompt for analysis based on interval type
  */
 function formatAnalysisPrompt(
   metrics: RepositoryMetrics,
@@ -146,7 +175,8 @@ function formatAnalysisPrompt(
     metrics.completedItems
       .filter((item) => item.type === type)
       .map(
-        (item) => ` (PR #${item.prNumber}) ${item.title}. BODY: ${item.body}`,
+        (item) =>
+          ` (PR #${item.prNumber}) ${item.title}. BODY: ${item.body}. FILES: ${item.files?.join(", ")}`,
       )
       .join("\n- ") || "None";
 
@@ -157,8 +187,10 @@ function formatAnalysisPrompt(
   const completedDocs = formatCompletedItems("docs");
   const completedTests = formatCompletedItems("tests");
   const completedOtherWork = formatCompletedItems("other");
-  const newIssues = metrics.issues.newIssues;
-  const closedIssues = metrics.issues.closedIssues;
+  const newIssues = metrics.issues.newIssues || [];
+  const closedIssues = metrics.issues.closedIssues || [];
+  const updatedIssues = metrics.issues.updatedIssues || [];
+  const openPrs = metrics.pullRequests.newPRs?.filter((p) => !p.mergedAt) || [];
 
   return `
 BACKGROUND CONTEXT:
@@ -184,15 +216,25 @@ COMPLETED WORK:
   Most Active Development Areas:
   - ${topActiveAreas.join("\n- ")}
 
+NEWLY OPENED PULL REQUESTS:
+ - ${openPrs
+   .map(
+     (pr: { number: number; title: string }) => `[#${pr.number}] ${pr.title}`,
+   )
+   .join("\n- ")}
+
 NEW ISSUES:
-  - ${newIssues.map((issue) => `[#${issue.number}] ${issue.title}. BODY: ${issue.body?.slice(0, 240)}`).join("\n- ")}
+  - ${newIssues.map(formatIssueForPrompt).join("\n- ")}
 
 CLOSED ISSUES:
-  - ${closedIssues.map((issue) => `[#${issue.number}] ${issue.title}. BODY: ${issue.body?.slice(0, 240)}`).join("\n- ")}
+  - ${closedIssues.map(formatIssueForPrompt).join("\n- ")}
+
+ACTIVE ISSUES:
+  - ${updatedIssues.map(formatIssueForPrompt).join("\n- ")}
 
 Format the report with the following sections:
 
-# <Project Name> ${getIntervalTypeTitle(intervalType)} Update (${timeframeTitle})
+# ${metrics.repository} ${getIntervalTypeTitle(intervalType)} Update (${timeframeTitle})
 ## OVERVIEW 
   Provide a high-level summary (max 500 characters, min 40 characters) highlighting the overall progress and major achievements of the ${intervalType}.
 
@@ -202,6 +244,9 @@ Format the report with the following sections:
   and concisely describe the key changes and improvements in point form. Reference
    the PR numbers that are most relevant to each headline, formatted as a Markdown link (e.g. [#123](https://github.com/${metrics.repository}/pull/123)).
  
+## NEWLY OPENED PULL REQUESTS
+  Summarize the newly opened pull requests and their status / progress.
+
 ## CLOSED ISSUES
 
   Group related closed issues into  ${intervalType === "month" ? "6-9" : "2-4"} different headlines and concisely summarize them.
@@ -212,6 +257,10 @@ Format the report with the following sections:
   Group the new issues thematically into ${intervalType === "month" ? "6-9" : "2-4"} different headlines,
   and concisely describe the key challenges and problems in point form. Reference
   the issue numbers that are most relevant to each headline, formatted as a Markdown link (e.g. [#123](https://github.com/${metrics.repository}/issues/123)).
+
+## ACTIVE ISSUES
+
+   Analyze the discussions on the active issues and summarize the key points, challenges, and progress, focusing on the latest comments. Only include issues that have more than 3 comments.
 
  ${
    intervalType === "month"
@@ -228,4 +277,104 @@ GUIDELINES:
 - Ensure all information is organized into the specified sections for clarity.
 - Use markdown formatting for the report.
 `;
+}
+
+function formatAggregatedRepoSummaryPrompt(
+  repoId: string,
+  dailySummaries: { date: string; summary: string }[],
+  intervalType: IntervalType,
+  timeframeTitle: string,
+  config: AISummaryConfig,
+): string {
+  const summariesText = dailySummaries
+    .map((d) => `### Daily Report for ${d.date}\n${d.summary}`)
+    .join("\n\n---\n\n");
+
+  return `
+BACKGROUND CONTEXT:
+  Project: "${repoId}" - ${config.projectContext}
+  Your audience consists of contributors, maintainers, and users of this open-source project. They are technically savvy and interested in both high-level progress and specific technical details.
+
+TASK:
+Synthesize the following daily development reports from the timeframe "${timeframeTitle}" into a single, cohesive ${intervalType}ly summary. Your goal is to identify trends, group related work, and create a narrative of the project's progress. Do not simply list the daily entries.
+
+DAILY REPORTS (Input):
+---
+${summariesText}
+---
+
+REQUIRED OUTPUT FORMAT:
+
+# ${repoId} ${getIntervalTypeTitle(intervalType)} Report (${timeframeTitle})
+
+## 🚀 Highlights
+A concise, information-dense paragraph (3-5 sentences) summarizing the most significant achievements, challenges, and overall theme of the work done this ${intervalType}. This should be the "executive summary" that gives a full overview.
+
+## 🛠️ Key Developments
+This section should detail the concrete work completed. Analyze the "KEY TECHNICAL DEVELOPMENTS" and "Completed Work" sections from the daily reports.
+- Group related pull requests thematically under descriptive subheadings (e.g., "Authentication Service Refactor", "New Dashboard Widgets").
+- For each theme, provide a brief explanation of the goal and the outcome.
+- Mention the most impactful PRs by their number (e.g., [#123](https://github.com/${repoId}/pull/123)).
+- Distinguish between new features, bug fixes, performance improvements, and refactoring efforts.
+
+## 🐛 Issues & Triage
+Summarize the state of issues in the project. Review the "NEW ISSUES", "CLOSED ISSUES", and "ACTIVE ISSUES" sections from the daily reports.
+- **Closed Issues:** Group closed issues thematically. What key problems were resolved this ${intervalType}?
+- **New & Active Issues:** What are the most important new issues that were opened? Are there any ongoing discussions on active issues that are particularly noteworthy, controversial, or represent significant future work? Highlight potential blockers.
+
+## 💬 Community & Collaboration
+Based on the daily reports, describe the collaboration dynamics.
+- Were there any PRs or issues with a high degree of discussion or many reviews?
+- Is there evidence of new contributors, or significant collaboration between team members? (You may need to infer this if specific names appear frequently in the reports).
+- This section is for qualitative observations about the health and activity of the contributor community.
+
+GUIDELINES:
+- Synthesize, don't just aggregate. Find the story in the data.
+- Be factual and anchor your summary in the data from the daily reports.
+- Use clear, professional language appropriate for a technical audience.
+- Use Markdown for all formatting.
+`;
+}
+
+export async function generateAggregatedRepoSummary(
+  repoId: string,
+  dailySummaries: { date: string; summary: string }[],
+  config: AISummaryConfig,
+  dateInfo: { startDate: string },
+  intervalType: IntervalType,
+): Promise<string | null> {
+  const apiKey = config.apiKey;
+  if (!apiKey) {
+    throw new Error("No API key for AI summary generation");
+  }
+
+  if (dailySummaries.length === 0) {
+    return null;
+  }
+
+  try {
+    const date = new UTCDate(dateInfo.startDate);
+    const timeframeTitle = formatTimeframeTitle(date, intervalType);
+    const prompt = formatAggregatedRepoSummaryPrompt(
+      repoId,
+      dailySummaries,
+      intervalType,
+      timeframeTitle,
+      config,
+    );
+
+    const model =
+      config.models[intervalType === "month" ? "week" : intervalType];
+
+    return await callAIService(prompt, config, {
+      model: model,
+      maxTokens: config.max_tokens * 2, // allow more tokens for aggregation
+    });
+  } catch (error) {
+    console.error(
+      `Error generating aggregated ${intervalType} repository analysis:`,
+      error,
+    );
+    return null;
+  }
 }

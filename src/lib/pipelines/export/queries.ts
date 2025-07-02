@@ -167,7 +167,7 @@ export async function getTopContributors(params: QueryParams = {}, limit = 5) {
  * Get project metrics for a specific time interval
  */
 
-export async function getProjectMetrics(params: QueryParams = {}) {
+export async function getRepoMetrics(params: QueryParams = {}) {
   const { repository, dateRange } = params;
   const prCreatedConditions = buildCommonWhereConditions(
     params,
@@ -182,11 +182,17 @@ export async function getProjectMetrics(params: QueryParams = {}) {
   // Get PRs created in this period
   const createdPRs = await db.query.rawPullRequests.findMany({
     where: and(...prCreatedConditions),
+    with: {
+      files: true,
+    },
   });
 
   // Get PRs merged in this period
   const mergedPRsThisPeriod = await db.query.rawPullRequests.findMany({
     where: and(...prMergedConditions),
+    with: {
+      files: true,
+    },
   });
 
   const pullRequests = {
@@ -194,25 +200,67 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     mergedPRs: mergedPRsThisPeriod,
   };
 
-  const issueCreatedConditions = buildCommonWhereConditions(params, rawIssues, [
-    "createdAt",
-  ]);
-  // Get issues created in this period
-  const newIssues = await db.query.rawIssues.findMany({
-    where: and(...issueCreatedConditions),
-  });
-  const issueClosedConditions = buildCommonWhereConditions(params, rawIssues, [
-    "closedAt",
-  ]);
+  // --- Refactored Issue Fetching Logic ---
 
-  // Get issues closed in this period
-  const closedIssues = await db.query.rawIssues.findMany({
-    where: and(...issueClosedConditions),
-  });
+  // 1. Get IDs of all relevant issues
+  const newIssuesIds = await db
+    .select({ id: rawIssues.id })
+    .from(rawIssues)
+    .where(
+      and(...buildCommonWhereConditions(params, rawIssues, ["createdAt"])),
+    );
+
+  const closedIssuesIds = await db
+    .select({ id: rawIssues.id })
+    .from(rawIssues)
+    .where(and(...buildCommonWhereConditions(params, rawIssues, ["closedAt"])));
+
+  const updatedIssuesIds = await db
+    .selectDistinct({ id: issueComments.issueId })
+    .from(issueComments)
+    .where(
+      and(...buildCommonWhereConditions(params, issueComments, ["createdAt"])),
+    );
+
+  const newIdsSet = new Set(newIssuesIds.map((i) => i.id));
+  const closedIdsSet = new Set(closedIssuesIds.map((i) => i.id));
+  const updatedIdsSet = new Set(updatedIssuesIds.map((i) => i.id!));
+
+  const allIssueIds = [
+    ...new Set([...newIdsSet, ...closedIdsSet, ...updatedIdsSet]),
+  ];
+
+  const allIssues =
+    allIssueIds.length > 0
+      ? await db.query.rawIssues.findMany({
+          where: inArray(rawIssues.id, allIssueIds),
+          with: {
+            comments: {
+              orderBy: (comments, { desc }) => [desc(comments.createdAt)],
+            },
+          },
+        })
+      : [];
+
+  // 3. Categorize issues
+  const newIssues: typeof allIssues = [];
+  const closedIssues: typeof allIssues = [];
+  const updatedIssues: typeof allIssues = [];
+
+  for (const issue of allIssues) {
+    if (newIdsSet.has(issue.id)) {
+      newIssues.push(issue);
+    } else if (closedIdsSet.has(issue.id)) {
+      closedIssues.push(issue);
+    } else {
+      updatedIssues.push(issue);
+    }
+  }
 
   const issues = {
     newIssues,
     closedIssues,
+    updatedIssues,
   };
 
   // Get active contributors
@@ -288,6 +336,7 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     prNumber: pr.number,
     type: categorizeWorkItem(pr.title),
     body: pr.body?.slice(0, 240),
+    files: pr.files.map((f) => f.path),
   }));
 
   return {
@@ -301,4 +350,4 @@ export async function getProjectMetrics(params: QueryParams = {}) {
     completedItems,
   };
 }
-export type RepositoryMetrics = Awaited<ReturnType<typeof getProjectMetrics>>;
+export type RepositoryMetrics = Awaited<ReturnType<typeof getRepoMetrics>>;

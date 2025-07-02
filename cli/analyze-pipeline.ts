@@ -34,7 +34,7 @@ import chalk from "chalk";
 import { generateRepositoryStats } from "@/lib/pipelines/export";
 import { contributorsPipeline } from "@/lib/pipelines/contributors";
 import {
-  projectSummariesPipeline,
+  summarizationPipeline,
   contributorSummariesPipeline,
 } from "@/lib/pipelines/summarize";
 import { createContributorPipelineContext } from "@/lib/pipelines/contributors/context";
@@ -363,9 +363,13 @@ program
 
       // Run the appropriate pipeline based on summary type
       if (summaryType === "contributors") {
-        await runPipeline(contributorSummariesPipeline, undefined, context);
+        await runPipeline(contributorSummariesPipeline, {}, context);
       } else {
-        await runPipeline(projectSummariesPipeline, undefined, context);
+        await runPipeline(
+          summarizationPipeline,
+          { repoId: options.repository },
+          context,
+        );
       }
 
       rootLogger.info("\nSummary generation completed successfully!");

@@ -27,20 +27,22 @@ async function checkExistingSummary(
     ),
   });
 
-  return existingSummary !== undefined && existingSummary.summary !== "";
+  return !!existingSummary?.summary;
 }
 
 /**
- * Generate summaries for all active contributors in a repository for a specific time interval
+ * Generate a summary for a single active contributor for a specific time interval
  */
-const generateContributorSummariesForInterval = createStep(
-  "ContributorSummaries",
+const generateSummaryForContributor = createStep(
+  "GenerateContributorSummary",
   async (
     {
       interval,
-      repoId,
       username,
-    }: { interval: TimeInterval; repoId: string | undefined; username: string },
+    }: {
+      interval: TimeInterval;
+      username: string;
+    },
     context: SummarizerPipelineContext,
   ) => {
     const { logger, aiSummaryConfig, overwrite } = context;
@@ -50,32 +52,29 @@ const generateContributorSummariesForInterval = createStep(
       return null;
     }
 
-    // Query parameters for this interval
-    const dateRange = {
-      startDate: toDateString(interval.intervalStart),
-      endDate: toDateString(interval.intervalEnd),
-    };
+    const startDate = toDateString(interval.intervalStart);
 
     try {
-      // Check if summary already exists (skip if overwrite is true)
       if (!overwrite) {
         const summaryExists = await checkExistingSummary(
           username,
-          dateRange.startDate,
+          startDate,
           interval.intervalType,
         );
         if (summaryExists) {
           intervalLogger?.debug(
-            `${interval.intervalType} summary already exists for ${username} on ${dateRange.startDate}, skipping generation`,
+            `${interval.intervalType} summary already exists for ${username} on ${startDate}, skipping generation`,
           );
           return;
         }
       }
 
-      // Get metrics for this contributor
       const metrics = await getContributorMetrics({
         username,
-        dateRange,
+        dateRange: {
+          startDate: toDateString(interval.intervalStart),
+          endDate: toDateString(interval.intervalEnd),
+        },
       });
 
       const summary = await generateAISummaryForContributor(
@@ -86,28 +85,21 @@ const generateContributorSummariesForInterval = createStep(
 
       if (!summary) {
         intervalLogger?.debug(
-          `No activity for ${username} on ${dateRange.startDate}, skipping summary generation`,
+          `No activity for ${username} on ${startDate}, skipping summary generation`,
         );
         return;
       }
-      // Store summary in the database with interval type
       await storeDailySummary(
         username,
-        toDateString(interval.intervalStart),
+        startDate,
         summary,
         interval.intervalType,
       );
 
       intervalLogger?.info(
-        `Generated and stored ${dateRange.startDate} summary for ${username}`,
-        {
-          summary,
-        },
+        `Generated and stored ${interval.intervalType} summary for ${username} on ${startDate}`,
       );
-      return {
-        username,
-        summary,
-      };
+      return { username, summary };
     } catch (error) {
       intervalLogger?.error(`Error processing contributor ${username}`, {
         error: (error as Error).message,
@@ -116,47 +108,48 @@ const generateContributorSummariesForInterval = createStep(
   },
 );
 
-export const generateContributorSummaries = pipe(
+/**
+ * Generate summaries for all active contributors in a given time interval
+ */
+const generateAllContributorSummariesForInterval = pipe(
   getActiveContributorsInInterval,
-  ({ interval, repoId, contributors }) =>
+  ({ interval, contributors }) =>
     contributors.map((contributor) => ({
       interval,
-      repoId,
       username: contributor.username,
     })),
-  mapStep(generateContributorSummariesForInterval),
-  (results) => {
-    return results.filter(isNotNullOrUndefined);
-  },
+  mapStep(generateSummaryForContributor),
+  (results) => results.filter(isNotNullOrUndefined),
 );
+
 export const generateDailyContributorSummaries = pipe(
-  generateTimeIntervals<{ repoId: string }>("day"),
+  generateTimeIntervals("day"),
   (input, context: SummarizerPipelineContext) => {
     if (context.enabledIntervals.day) {
       return input;
     }
     return [];
   },
-  mapStep(generateContributorSummaries),
+  mapStep(generateAllContributorSummariesForInterval),
 );
 export const generateWeeklyContributorSummaries = pipe(
-  generateTimeIntervals<{ repoId: string }>("week"),
+  generateTimeIntervals("week"),
   (input, context: SummarizerPipelineContext) => {
     if (context.enabledIntervals.week) {
       return input;
     }
     return [];
   },
-  mapStep(generateContributorSummaries),
+  mapStep(generateAllContributorSummariesForInterval),
 );
 
 export const generateMonthlyContributorSummaries = pipe(
-  generateTimeIntervals<{ repoId: string }>("month"),
+  generateTimeIntervals("month"),
   (input, context: SummarizerPipelineContext) => {
     if (context.enabledIntervals.month) {
       return input;
     }
     return [];
   },
-  mapStep(generateContributorSummaries),
+  mapStep(generateAllContributorSummariesForInterval),
 );

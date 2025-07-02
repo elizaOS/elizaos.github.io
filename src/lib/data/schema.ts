@@ -345,6 +345,32 @@ export const repoSummaries = sqliteTable(
   ],
 );
 
+// Overall summaries for storing combined project analysis
+export const overallSummaries = sqliteTable(
+  "overall_summaries",
+  {
+    id: text("id").primaryKey(), // intervalType_date
+    intervalType: text("interval_type", {
+      enum: ["day", "week", "month"] as const,
+    })
+      .notNull()
+      .default("month"),
+    date: text("date").notNull(),
+    summary: text("summary").default(""),
+    lastUpdated: text("last_updated")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_overall_summaries_date").on(table.date),
+    // Unique constraint for interval type and date combination
+    uniqueIndex("idx_overall_summaries_unique_combo").on(
+      table.intervalType,
+      table.date,
+    ),
+  ],
+);
+
 export const tags = sqliteTable("tags", {
   name: text("name").primaryKey(),
   category: text("category").notNull(), // AREA, ROLE, TECH
