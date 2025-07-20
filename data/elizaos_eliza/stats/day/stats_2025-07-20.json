@@ -1,0 +1,103 @@
+{
+  "interval": {
+    "intervalStart": "2025-07-20T00:00:00.000Z",
+    "intervalEnd": "2025-07-21T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-07-20 to 2025-07-21, elizaos/eliza had 0 new PRs (1 merged), 2 new issues, and 5 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7BgVwo",
+      "title": "bring over docs to monorepo setup",
+      "author": "linear",
+      "number": 5638,
+      "repository": "elizaos/eliza",
+      "body": "",
+      "createdAt": "2025-07-20T16:09:19Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7BduHW",
+      "title": "feat(scenarios): Enhance LLM Judge with multi-level evaluation",
+      "author": "monilpat",
+      "number": 5637,
+      "repository": "elizaos/eliza",
+      "body": "#### **Description**\n\nCurrently, the `llm_judge` evaluator provides a binary `PASS`/`FAIL` outcome. This is effective for clear-cut cases but doesn't capture the nuance of Large Language Model (LLM) responses, which can often be partially correct, contain good information but have poor formatting, or be conceptually right but incomplete.\n\nThis ticket proposes an enhancement to the `llm_judge` evaluator to support a multi-level evaluation scale (e.g., `FAIL`, `PARTIAL PASS`, `PASS`). This will enable more granular and realistic testing of LLM behavior, providing more insightful feedback on an agent's performance. It allows scenario creators to define what constitutes a full pass versus a partial one, leading to more sophisticated agent evaluations.\n\n#### **Acceptance Criteria**\n\n1.  The `LLMJudgeEvaluationSchema` in `packages/cli/src/scenarios/schema.ts` is updated to allow the `expected` field to be an array of strings, representing the possible evaluation levels (e.g., `['FAIL', 'PARTIAL', 'PASS']`).\n2.  The `LLMJudgeEvaluator` in `packages/cli/src/scenarios/EvaluationEngine.ts` is refactored to instruct the LLM judge to respond with one of the provided evaluation levels.\n3.  The `EvaluationResult` interface is updated to include the specific `level` (e.g., 'PARTIAL') returned by an evaluator, in addition to the overall `success` boolean.\n4.  The `Reporter` class in `packages/cli/src/scenarios/Reporter.ts` is updated to display the evaluation level in its output, using distinct icons and colors for each level (e.g., ✅ PASS, 🟠 PARTIAL, ❌ FAIL).\n5.  The final `judgment` logic in `packages/cli/src/commands/scenario.ts` is enhanced to accommodate the new levels. For example, an `all_pass` strategy should require all evaluations to achieve the highest success level (e.g., 'PASS').\n6.  The process exit code logic remains `0` for an overall scenario pass and `1` for a fail, based on the final judgment.\n\n#### **Technical Approach**\n\n**1. Update Scenario Schema (`schema.ts`)**\n\nModify the `LLMJudgeEvaluationSchema` to accept an array of strings for the `expected` field. This array defines the custom evaluation scale for the judge. The system prompt for the LLM will be dynamically constructed from this array.\n\n```typescript\n// packages/cli/src/scenarios/schema.ts\n// ...\nconst LLMJudgeEvaluationSchema = BaseEvaluationSchema.extend({\n  type: z.literal('llm_judge'),\n  prompt: z.string(),\n  // Change from z.string() to z.array(z.string()) to define the evaluation scale.\n  // Default to a binary scale if not provided.\n  expected: z.array(z.string()).optional().default(['FAIL', 'PASS']),\n});\n// ...\n```\n\n**2. Refactor Evaluation Engine (`EvaluationEngine.ts`)**\n\nThe `LLMJudgeEvaluator` must be updated to pass the new evaluation scale to the LLM. The general `EvaluationResult` type will also be updated to include the `level`.\n\n```typescript\n// packages/cli/src/scenarios/EvaluationEngine.ts\n// ...\nexport interface EvaluationResult {\n    success: boolean; // True if not the lowest evaluation level\n    level: string;    // The specific outcome, e.g., 'PASS', 'FAIL', 'PARTIAL'\n    message: string;\n}\n\ninterface Evaluator {\n    // This method will now return the string level of the outcome.\n    evaluate(runtime: IAgentRuntime, result: ScenarioResult): Promise<string>;\n    getMessage(level: string): string;\n    // Helper to get the expected levels\n    getLevels(): string[];\n}\n\nclass LLMJudgeEvaluator implements Evaluator {\n    constructor(private prompt: string, private expected: string[]) {}\n\n    async evaluate(runtime: IAgentRuntime, result: ScenarioResult): Promise<string> {\n        const systemPrompt = `You are an AI assistant that judges the output of a command. Based on the prompt and the command output, respond with ONLY one of the following values: [${this.expected.join(', ')}].`;\n\n        const llmResult = await runtime.useModel('TEXT_LARGE', {\n            system: systemPrompt,\n            messages: [{\n                role: 'user',\n                content: `Prompt: ${this.prompt}\\nOutput: ${result.stdout}`\n            }]\n        });\n        \n        const response = llmResult.trim().toUpperCase();\n        // Validate the LLM's response against the expected levels.\n        if (this.expected.map(e => e.toUpperCase()).includes(response)) {\n            return response;\n        }\n        // Default to the first (lowest) level if the LLM's response is invalid.\n        return this.expected[0].toUpperCase();\n    }\n    \n    getLevels(): string[] {\n        return this.expected;\n    }\n    // ... getMessage remains similar ...\n}\n\nexport class EvaluationEngine {\n    // ...\n    async run(runtime: IAgentRuntime, result: ScenarioResult): Promise<EvaluationResult[]> {\n        const results: EvaluationResult[] = [];\n        for (const evaluator of this.evaluators) {\n            const level = await evaluator.evaluate(runtime, result);\n            const levels = evaluator.getLevels();\n            // \"Success\" is defined as any outcome that is not the lowest possible level.\n            const success = level !== levels[0].toUpperCase();\n            results.push({ success, level, message: evaluator.getMessage(level) });\n        }\n        return results;\n    }\n}\n```\n\n**3. Enhance Reporter (`Reporter.ts`)**\n\nUpdate the reporter to handle and display the new evaluation levels with distinct formatting.\n\n```typescript\n// packages/cli/src/scenarios/Reporter.ts\n// ...\n  public reportEvaluationResults(results: EvaluationResult[]) {\n    // ...\n    results.forEach(res => {\n      let status;\n      // Use a switch to handle different levels, with default for unknown levels.\n      switch(res.level.toUpperCase()) {\n        case 'PASS':\n          status = chalk.green('✅ PASS');\n          break;\n        case 'PARTIAL':\n        case 'PARTIAL PASS':\n          status = chalk.yellow('🟠 PARTIAL');\n          break;\n        case 'FAIL':\n        default:\n          status = chalk.red('❌ FAIL');\n          break;\n      }\n      console.log(`${status}: ${res.message}`);\n    });\n    // ...\n  }\n// ...\n```\n\n**4. Update Judgment Logic (`scenario.ts`)**\n\nThe logic for determining the final outcome must be updated to be aware of the different levels.\n\n```typescript\n// packages/cli/src/commands/scenario.ts\n// ...\n// --- JUDGMENT ---\nif (scenario.judgment?.pass?.all) {\n    // Strictest strategy: all evaluations must be the highest possible level.\n    finalStatus = evalResults.every(res => res.level === 'PASS'); // Assuming 'PASS' is the highest\n}\n// Potentially add new strategies here in the future, e.g., 'all_pass_or_partial'\n// ...\n```\n\n#### **Testing Strategy**\n\n1.  **Create a new scenario file**: `llm-judge-partial-pass.scenario.yaml`.\n2.  **Define a multi-level evaluation**:\n    ```yaml\n    # ...\n    evaluations:\n      - type: llm_judge\n        prompt: \"Respond with the capital of France in a complete sentence.\"\n        expected: ['FAIL', 'PARTIAL', 'PASS']\n    judgment:\n      pass:\n        all: true # This will require a 'PASS' result\n    ```\n3.  **Run with an input that yields a partial pass** (e.g., `input: \"echo 'Paris'\"`).\n    *   **Verify**: The reporter shows `🟠 PARTIAL`, the final status is `❌ FAIL`, and the exit code is `1`.\n4.  **Run with an input that yields a full pass** (e.g., `input: \"echo 'The capital of France is Paris.'\"`).\n    *   **Verify**: The reporter shows `✅ PASS`, the final status is `✅ PASS`, and the exit code is `0`.",
+      "createdAt": "2025-07-20T00:26:09Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6fpo0B",
+      "title": "Fix export in @elizaos/config",
+      "author": "lalalune",
+      "number": 5635,
+      "body": "Plugins that rely on this package will fail because the files are actually in src and need to be imported. Adding src to file output includes them in the npm package export. Doesn't happen locally since the files get included, but when they are published it fails.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-07-18T23:45:32Z",
+      "mergedAt": "2025-07-20T05:43:46Z",
+      "additions": 2,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 2,
+    "deletions": 1,
+    "files": 1,
+    "commitCount": 2
+  },
+  "completedItems": [
+    {
+      "title": "Fix export in @elizaos/config",
+      "prNumber": 5635,
+      "type": "bugfix",
+      "body": "Plugins that rely on this package will fail because the files are actually in src and need to be imported. Adding src to file output includes them in the npm package export. Doesn't happen locally since the files get included, but when they",
+      "files": [
+        "packages/config/package.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "monilpat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "linear",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/20150?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 1,
+  "newIssues": 2,
+  "closedIssues": 0,
+  "activeContributors": 5
+}
