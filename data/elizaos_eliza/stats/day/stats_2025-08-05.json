@@ -1,0 +1,139 @@
+{
+  "interval": {
+    "intervalStart": "2025-08-05T00:00:00.000Z",
+    "intervalEnd": "2025-08-06T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-08-05 to 2025-08-06, elizaos/eliza had 2 new PRs (0 merged), 2 new issues, and 4 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7ELgn4",
+      "title": "Calling `startAgent` from CLI command start - hangs early when `@elizaos/plugin-bootstrap` is omitted & hangs later when it is included",
+      "author": "monilpat",
+      "number": 5719,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`packages/cli/src/commands/start/actions/agent-start.ts` is exported and re-used in CLI commands with  \n\n```ts\nimport { startAgent } from '../commands/start';\n```\n\nWhen I call `startAgent` from `runtime-factory.ts` / `initializeAgent()`:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  [],                       // <-- intentionally no bootstrap plugin\n  { isTestMode: false }\n);\n```\n\ninitialization hangs almost immediately (before plugin dependency resolution).\n\nIf I add `@elizaos/plugin-bootstrap` back:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  ['@elizaos/plugin-bootstrap'],\n  { isTestMode: false }\n);\n```\n\ninitialization gets past early steps, loads **all** plugins, but then hangs right after the bootstrap plugin finishes loading.\n\n---\n\n**To Reproduce**\n\n1. Build the CLI (`cd packages/cli && bun x tsup`).\n2. From `packages/cli` run a scenario that relies on `initializeAgent`, e.g.:\n\n```bash\nbun run src/index.ts scenario run \\\n  src/commands/scenario/examples/e2b-test.scenario.yaml\n```\n\n3. Edit `runtime-factory.ts` ➜ `initializeAgent()` and comment the bootstrap plugin in the `character.plugins` array (lines 411-415).\n4. Re-run the same command – observe early hang.\n5. Re-enable the bootstrap plugin and re-run – observe later hang.\n\n---\n\n**Expected behavior**\n\n`startAgent` should finish initializing an agent regardless of whether `@elizaos/plugin-bootstrap` is present.  \nIf the bootstrap plugin is mandatory there should be a clear validation error, not a silent hang.\n\n---\n\n**Logs / Screenshots**\n\n<details>\n<summary>1️⃣ Hang without bootstrap plugin (early-stage)</summary>\n\n```\n[2025-08-04 02:47:47] INFO: [startAgent] Step 1 – Starting agent initialization\n[2025-08-04 02:47:47] INFO: [startAgent] Step 2 – Character ID set\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3 – Checking character secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3c – Character already has secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4 – Initializing plugin loading\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4a – SQL plugin loaded\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4b – Character plugins: [\"@elizaos/plugin-e2b\",\"@elizaos/plugin-openai\"]\n... nothing further – process hangs here ...\n```\n</details>\n\n<details>\n<summary>2️⃣ Hang with bootstrap plugin (late-stage)</summary>\n\n```\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 1 – Starting to load plugin: @elizaos/plugin-bootstrap\n[2025-08-04 02:52:47] SUCCESS: Successfully loaded plugin '@elizaos/plugin-bootstrap' using workspace dependency\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 4e – Found valid plugin export\n[2025-08-04 02:52:47] INFO: [startAgent] Step 5d – Successfully loaded plugin: bootstrap\n... no further output – runtime hangs right after this point ...\n```\n</details>\n\n---\n\n**Additional context**\n\n* The call site is `packages/cli/src/scenarios/runtime-factory.ts` → `initializeAgent()`.\n* `startAgent` is imported with  \n  `import { startAgent } from '../commands/start';`\n* Hangs occur both in **local** and **E2B** scenarios.\n* Database migrations complete successfully; the hang happens after plugin loading.\n* Removing *all* plugins except SQL reproduces the *early* hang; adding any plugin that has bootstrap as a dep reproduces the *late* hang.\n* The same code path works in commit `510b8aac2e0b20cc3d176093a58143c26e838e65` (July 25 commit) but fails from `d84963ef3d5f5cccfef461350175dc1bc9b77b58` onward.\n\nPlease review my branch and the file for the associated changes. I review the plugin loading stack trace loadAndPreparePlugin -> loadPluginModule -> strategy.tryImport (which is where it hangs \n\n```\n */\nconst importStrategies: ImportStrategy[] = [\n  // Try local development first - this is the most important for plugin testing\n  {\n    name: 'local development plugin',\n    tryImport: async (repository: string) => {\n      const context = detectPluginContext(repository);\n\n      if (context.isLocalDevelopment) {\n        logger.debug(`Detected local development for plugin: ${repository}`);\n\n        // Ensure the plugin is built\n        const isBuilt = await ensurePluginBuilt(context);\n        if (!isBuilt) {\n          provideLocalPluginGuidance(repository, context);\n          return null;\n        }\n\n        // Try to load from built output\n        if (context.localPath && existsSync(context.localPath)) {\n          logger.info(`Loading local development plugin: ${repository}`);\n          return tryImporting(context.localPath, 'local development plugin', repository);\n        }\n\n        // This shouldn't happen if ensurePluginBuilt succeeded, but handle it gracefully\n        logger.warn(`Plugin built but output not found at expected path: ${context.localPath}`);\n        provideLocalPluginGuidance(repository, context);\n        return null;\n      }\n\n      return null;\n    },\n  },\n  // Try workspace dependencies (for monorepo packages)\n  {\n    name: 'workspace dependency',\n    tryImport: async (repository: string) => {\n      if (repository.startsWith('@elizaos/plugin-')) {\n        // Try to find the plugin in the workspace\n        const pluginName = repository.replace('@elizaos/', '');\n        const workspacePath = path.resolve(process.cwd(), '..', pluginName, 'dist', 'index.js');\n        if (existsSync(workspacePath)) {\n          return tryImporting(workspacePath, 'workspace dependency', repository);\n        }\n      }\n      return null;\n    },\n  },\n  {\n    name: 'direct path',\n    tryImport: async (repository: string) => tryImporting(repository, 'direct path', repository),\n  },\n  {\n    name: 'local node_modules',\n    tryImport: async (repository: string) =>\n      tryImporting(resolveNodeModulesPath(repository), 'local node_modules', repository),\n  },\n  {\n    name: 'global node_modules',\n    tryImport: async (repository: string) => {\n      const globalPath = path.resolve(getGlobalNodeModulesPath(), repository);\n      if (!existsSync(path.dirname(globalPath))) {\n        logger.debug(\n          `Global node_modules directory not found at ${path.dirname(globalPath)}, skipping for ${repository}`\n        );\n        return null;\n      }\n      return tryImporting(globalPath, 'global node_modules', repository);\n    },\n  },\n  {\n    name: 'package.json entry',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (!packageJson) return null;\n\n      const entryPoint = packageJson.module || packageJson.main || DEFAULT_ENTRY_POINT;\n      return tryImporting(\n        resolveNodeModulesPath(repository, entryPoint),\n        `package.json entry (${entryPoint})`,\n        repository\n      );\n    },\n  },\n  {\n    name: 'common dist pattern',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (packageJson?.main === DEFAULT_ENTRY_POINT) return null;\n\n      return tryImporting(\n        resolveNodeModulesPath(repository, DEFAULT_ENTRY_POINT),\n        'common dist pattern',\n        repository\n      );\n    },\n  },\n];\n``` in load-plugin.ts  BRANCH in question: https://github.com/elizaOS/eliza/blob/scenarios-cli/packages/cli/src/scenarios/runtime-factory.ts\n\n\nbut startAgent is in develop and is having issues when its being called. ",
+      "createdAt": "2025-08-05T02:45:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs6_twyl",
+      "title": "Jimmy Agent",
+      "author": "borisudovicic",
+      "number": 5494,
+      "repository": "elizaos/eliza",
+      "body": "",
+      "createdAt": "2025-07-09T16:04:38Z",
+      "closedAt": "2025-08-05T13:53:25Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7Bl4ZM",
+      "title": "base agent -- clank tank",
+      "author": "linear",
+      "number": 5643,
+      "repository": "elizaos/eliza",
+      "body": "",
+      "createdAt": "2025-07-21T09:48:54Z",
+      "closedAt": "2025-08-05T13:53:26Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7ENLnL",
+      "title": "make sessions api available to `api-client` package",
+      "author": "linear",
+      "number": 5721,
+      "repository": "elizaos/eliza",
+      "body": "[https://github.com/elizaOS/eliza/pull/5717/](https://github.com/elizaOS/eliza/pull/5717/)",
+      "createdAt": "2025-08-05T06:37:47Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6iGwtK",
+      "title": "fix: Enable E2E testing for all starter templates",
+      "author": "yungalgo",
+      "number": 5720,
+      "body": "## Problem\r\n\r\nFollowing PR #5075 which enabled component testing, E2E tests were missing or broken across starter templates. This prevented developers from validating full integration scenarios and created an inconsistent testing experience.\r\n\r\n## Solution\r\n\r\nImplemented comprehensive E2E testing infrastructure across all 4 starter templates with standardized patterns and proper integration into the ElizaOS test runner.\r\n\r\n## Key Changes\r\n\r\n### Test Infrastructure (`packages/cli`)\r\n\r\n**TestRunner fixes:**\r\n- Fixed Pino logger binding errors by properly binding console methods\r\n- Improved test execution flow and error handling\r\n- Enhanced test discovery and module loading\r\n\r\n```typescript\r\n// Fixed logger bindings causing \"Cannot read properties of undefined\"\r\nglobal.console = {\r\n  ...originalConsole,\r\n  log: originalConsole.log.bind(originalConsole),\r\n  error: originalConsole.error.bind(originalConsole),\r\n  warn: originalConsole.warn.bind(originalConsole),\r\n  info: originalConsole.info.bind(originalConsole),\r\n  debug: originalConsole.debug.bind(originalConsole),\r\n};\r\n```\r\n\r\n### Plugin Templates\r\n\r\n#### `plugin-starter` (Full Plugin)\r\n- Renamed `starter-plugin.ts` → `plugin-starter.e2e.ts` for consistency\r\n- Removed deprecated `tests.ts` export file\r\n- Tests import directly via plugin: `import { StarterPluginTestSuite } from './__tests__/e2e/plugin-starter.e2e'`\r\n\r\n#### `plugin-quick-starter` (Quick Plugin) - **NEW**\r\n- Created comprehensive 319-line E2E test suite\r\n- Tests cover:\r\n  - Plugin initialization and registration\r\n  - Action execution (`QUICK_ACTION`)\r\n  - Provider functionality (`quickProvider`)\r\n  - Service lifecycle (`QuickService`)\r\n  - Error handling and edge cases\r\n\r\n```typescript\r\n// Example test structure\r\n{\r\n  name: 'should_execute_quick_action',\r\n  fn: async (runtime) => {\r\n    const handler = runtime.actions.get('QUICK_ACTION')?.handler;\r\n    const result = await handler(runtime, mockMessage, mockState, {}, mockCallback);\r\n    if (!result.success || result.text !== 'Hello world!') {\r\n      throw new Error('Action did not return expected result');\r\n    }\r\n  }\r\n}\r\n```\r\n\r\n### Project Templates\r\n\r\n#### `project-starter` (Standard Project)\r\n- Consolidated 3 separate E2E files into single 571-line comprehensive suite\r\n- Removed: `index.ts`, `natural-language.test.ts`, `project.test.ts`, `starter-plugin.test.ts`\r\n- Created unified test covering:\r\n  - Full conversation flows\r\n  - Plugin interactions\r\n  - Database operations\r\n  - Natural language processing\r\n\r\n#### `project-tee-starter` (TEE Project)\r\n- Restructured test organization: moved `__tests__/` into `src/__tests__/`\r\n- Consolidated E2E tests into single `project-tee-starter.e2e.ts`\r\n- Updated all import paths:\r\n  ```typescript\r\n  // Before\r\n  import { testUtils } from '../test-utils';\r\n  // After\r\n  import { testUtils } from './test-utils';\r\n  ```\r\n- Added TEE-specific tests for attestation and secure operations\r\n\r\n### Documentation Updates\r\n\r\nAdded comprehensive E2E testing documentation for each template:\r\n\r\n**Common testing approach:**\r\n```bash\r\n# Component tests (Bun native, fast, mocked)\r\nbun test\r\nelizaos test --type component\r\n\r\n# E2E tests (ElizaOS runner, real runtime)\r\nelizaos test --type e2e\r\n\r\n# All tests\r\nelizaos test\r\n```\r\n\r\n**Key documentation additions:**\r\n- Testing philosophy (component vs E2E)\r\n- Test structure and organization\r\n- How to write new tests\r\n- Integration with plugin system\r\n- Known issues and workarounds\r\n\r\n## Technical Details\r\n\r\n### E2E Test Integration Pattern\r\n```typescript\r\n// Plugin exports tests directly\r\nexport const myPlugin: Plugin = {\r\n  name: 'my-plugin',\r\n  actions: [...],\r\n  providers: [...],\r\n  services: [...],\r\n  tests: [MyPluginTestSuite], // Direct import, no intermediate file\r\n};\r\n```\r\n\r\n### Test Discovery Fix\r\n- Removed reliance on intermediate export files\r\n- Tests imported directly from E2E test files\r\n- Consistent naming: `{template-name}.e2e.ts`\r\n\r\n### File Structure (all templates now follow):\r\n```\r\nsrc/\r\n├── __tests__/\r\n│   ├── *.test.ts         # Component tests (Bun)\r\n│   └── e2e/\r\n│       ├── README.md     # E2E test documentation\r\n│       └── *.e2e.ts      # E2E test suites\r\n├── plugin.ts             # Plugin definition with tests array\r\n└── index.ts              # Main export\r\n```\r\n\r\n## Impact\r\n\r\n- ✅ All 4 starter templates now have working E2E tests\r\n- ✅ Consistent testing patterns across all templates\r\n- ✅ Fixed test runner issues preventing E2E execution\r\n- ✅ Comprehensive documentation for test development\r\n- ✅ ~1,931 lines added, ~1,127 lines removed (net improvement in test coverage)\r\n\r\n## Testing\r\n\r\nVerified all templates pass both test types:\r\n```bash\r\n# Each template tested with:\r\ncd packages/{template}\r\nbun test                    # ✅ Component tests pass\r\nelizaos test --type e2e     # ✅ E2E tests pass\r\nelizaos test                # ✅ All tests pass\r\n```\r\n\r\n## Breaking Changes\r\n\r\nNone. All changes are additive or improve existing broken functionality.\r\n\r\n## Related\r\n\r\n- Follows up #5075 (component test support)\r\n- Completes the testing infrastructure for starter templates\r\n- Enables reliable CI/CD for generated projects\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Introduced comprehensive end-to-end (E2E) test suites for plugin, project, and TEE starter templates, enabling full runtime and integration validation.\n  * Added E2E test documentation across packages, clarifying dual testing strategy and best practices.\n\n* **Bug Fixes**\n  * Improved error handling for TEE connection failures, treating more connection issues as non-critical warnings to support non-TEE test environments.\n\n* **Documentation**\n  * Expanded and restructured README files to provide detailed guidance on component and E2E testing, including directory structure, commands, and best practices.\n  * Added E2E test README files for clearer test organization and usage instructions.\n\n* **Refactor**\n  * Standardized test file organization and naming conventions for easier discovery and execution.\n  * Updated import paths and removed obsolete test export files to streamline test integration.\n\n* **Chores**\n  * Adjusted logger bindings and test runner logic for improved reliability and context preservation.\n  * Updated test assertions and fallback handling in component tests for consistency with new action/provider names.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-05T02:46:44Z",
+      "mergedAt": null,
+      "additions": 1962,
+      "deletions": 1161
+    },
+    {
+      "id": "PR_kwDOMT5cIs6iF-qU",
+      "title": "fix: support plugin-mysql",
+      "author": "odilitime",
+      "number": 5718,
+      "body": "# Risks\r\n\r\nLow, always ensures an adapter still\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\nallows mysql before forcing plugin-sql\r\n\r\nI had looked at reording plugins but figured out how to make the order of my plugins to be not important.\r\n\r\n## What kind of change is this?\r\n\r\nBug fixes (non-breaking change which fixes an issue)\r\n\r\n# Documentation changes needed?\r\n\r\nMy changes do not require a change to the project documentation.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-05T00:03:36Z",
+      "mergedAt": null,
+      "additions": 16,
+      "deletions": 2
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 23
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "yungalgo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
+      "totalScore": 43.9817738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 6.98021948958322,
+      "prScore": 6.78021948958322,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "monilpat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "linear",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/20150?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 0,
+  "newIssues": 2,
+  "closedIssues": 2,
+  "activeContributors": 4
+}

@@ -5,8 +5,20 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-08-03 to 2025-08-10, elizaos/eliza had 6 new PRs (5 merged), 7 new issues, and 8 active contributors.",
+  "overview": "From 2025-08-03 to 2025-08-10, elizaos/eliza had 8 new PRs (5 merged), 9 new issues, and 9 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7ELgn4",
+      "title": "Calling `startAgent` from CLI command start - hangs early when `@elizaos/plugin-bootstrap` is omitted & hangs later when it is included",
+      "author": "monilpat",
+      "number": 5719,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`packages/cli/src/commands/start/actions/agent-start.ts` is exported and re-used in CLI commands with  \n\n```ts\nimport { startAgent } from '../commands/start';\n```\n\nWhen I call `startAgent` from `runtime-factory.ts` / `initializeAgent()`:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  [],                       // <-- intentionally no bootstrap plugin\n  { isTestMode: false }\n);\n```\n\ninitialization hangs almost immediately (before plugin dependency resolution).\n\nIf I add `@elizaos/plugin-bootstrap` back:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  ['@elizaos/plugin-bootstrap'],\n  { isTestMode: false }\n);\n```\n\ninitialization gets past early steps, loads **all** plugins, but then hangs right after the bootstrap plugin finishes loading.\n\n---\n\n**To Reproduce**\n\n1. Build the CLI (`cd packages/cli && bun x tsup`).\n2. From `packages/cli` run a scenario that relies on `initializeAgent`, e.g.:\n\n```bash\nbun run src/index.ts scenario run \\\n  src/commands/scenario/examples/e2b-test.scenario.yaml\n```\n\n3. Edit `runtime-factory.ts` ➜ `initializeAgent()` and comment the bootstrap plugin in the `character.plugins` array (lines 411-415).\n4. Re-run the same command – observe early hang.\n5. Re-enable the bootstrap plugin and re-run – observe later hang.\n\n---\n\n**Expected behavior**\n\n`startAgent` should finish initializing an agent regardless of whether `@elizaos/plugin-bootstrap` is present.  \nIf the bootstrap plugin is mandatory there should be a clear validation error, not a silent hang.\n\n---\n\n**Logs / Screenshots**\n\n<details>\n<summary>1️⃣ Hang without bootstrap plugin (early-stage)</summary>\n\n```\n[2025-08-04 02:47:47] INFO: [startAgent] Step 1 – Starting agent initialization\n[2025-08-04 02:47:47] INFO: [startAgent] Step 2 – Character ID set\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3 – Checking character secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3c – Character already has secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4 – Initializing plugin loading\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4a – SQL plugin loaded\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4b – Character plugins: [\"@elizaos/plugin-e2b\",\"@elizaos/plugin-openai\"]\n... nothing further – process hangs here ...\n```\n</details>\n\n<details>\n<summary>2️⃣ Hang with bootstrap plugin (late-stage)</summary>\n\n```\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 1 – Starting to load plugin: @elizaos/plugin-bootstrap\n[2025-08-04 02:52:47] SUCCESS: Successfully loaded plugin '@elizaos/plugin-bootstrap' using workspace dependency\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 4e – Found valid plugin export\n[2025-08-04 02:52:47] INFO: [startAgent] Step 5d – Successfully loaded plugin: bootstrap\n... no further output – runtime hangs right after this point ...\n```\n</details>\n\n---\n\n**Additional context**\n\n* The call site is `packages/cli/src/scenarios/runtime-factory.ts` → `initializeAgent()`.\n* `startAgent` is imported with  \n  `import { startAgent } from '../commands/start';`\n* Hangs occur both in **local** and **E2B** scenarios.\n* Database migrations complete successfully; the hang happens after plugin loading.\n* Removing *all* plugins except SQL reproduces the *early* hang; adding any plugin that has bootstrap as a dep reproduces the *late* hang.\n* The same code path works in commit `510b8aac2e0b20cc3d176093a58143c26e838e65` (July 25 commit) but fails from `d84963ef3d5f5cccfef461350175dc1bc9b77b58` onward.\n\nPlease review my branch and the file for the associated changes. I review the plugin loading stack trace loadAndPreparePlugin -> loadPluginModule -> strategy.tryImport (which is where it hangs \n\n```\n */\nconst importStrategies: ImportStrategy[] = [\n  // Try local development first - this is the most important for plugin testing\n  {\n    name: 'local development plugin',\n    tryImport: async (repository: string) => {\n      const context = detectPluginContext(repository);\n\n      if (context.isLocalDevelopment) {\n        logger.debug(`Detected local development for plugin: ${repository}`);\n\n        // Ensure the plugin is built\n        const isBuilt = await ensurePluginBuilt(context);\n        if (!isBuilt) {\n          provideLocalPluginGuidance(repository, context);\n          return null;\n        }\n\n        // Try to load from built output\n        if (context.localPath && existsSync(context.localPath)) {\n          logger.info(`Loading local development plugin: ${repository}`);\n          return tryImporting(context.localPath, 'local development plugin', repository);\n        }\n\n        // This shouldn't happen if ensurePluginBuilt succeeded, but handle it gracefully\n        logger.warn(`Plugin built but output not found at expected path: ${context.localPath}`);\n        provideLocalPluginGuidance(repository, context);\n        return null;\n      }\n\n      return null;\n    },\n  },\n  // Try workspace dependencies (for monorepo packages)\n  {\n    name: 'workspace dependency',\n    tryImport: async (repository: string) => {\n      if (repository.startsWith('@elizaos/plugin-')) {\n        // Try to find the plugin in the workspace\n        const pluginName = repository.replace('@elizaos/', '');\n        const workspacePath = path.resolve(process.cwd(), '..', pluginName, 'dist', 'index.js');\n        if (existsSync(workspacePath)) {\n          return tryImporting(workspacePath, 'workspace dependency', repository);\n        }\n      }\n      return null;\n    },\n  },\n  {\n    name: 'direct path',\n    tryImport: async (repository: string) => tryImporting(repository, 'direct path', repository),\n  },\n  {\n    name: 'local node_modules',\n    tryImport: async (repository: string) =>\n      tryImporting(resolveNodeModulesPath(repository), 'local node_modules', repository),\n  },\n  {\n    name: 'global node_modules',\n    tryImport: async (repository: string) => {\n      const globalPath = path.resolve(getGlobalNodeModulesPath(), repository);\n      if (!existsSync(path.dirname(globalPath))) {\n        logger.debug(\n          `Global node_modules directory not found at ${path.dirname(globalPath)}, skipping for ${repository}`\n        );\n        return null;\n      }\n      return tryImporting(globalPath, 'global node_modules', repository);\n    },\n  },\n  {\n    name: 'package.json entry',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (!packageJson) return null;\n\n      const entryPoint = packageJson.module || packageJson.main || DEFAULT_ENTRY_POINT;\n      return tryImporting(\n        resolveNodeModulesPath(repository, entryPoint),\n        `package.json entry (${entryPoint})`,\n        repository\n      );\n    },\n  },\n  {\n    name: 'common dist pattern',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (packageJson?.main === DEFAULT_ENTRY_POINT) return null;\n\n      return tryImporting(\n        resolveNodeModulesPath(repository, DEFAULT_ENTRY_POINT),\n        'common dist pattern',\n        repository\n      );\n    },\n  },\n];\n``` in load-plugin.ts  BRANCH in question: https://github.com/elizaOS/eliza/blob/scenarios-cli/packages/cli/src/scenarios/runtime-factory.ts\n\n\nbut startAgent is in develop and is having issues when its being called. ",
+      "createdAt": "2025-08-05T02:45:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
     {
       "id": "I_kwDOMT5cIs6_cOOU",
       "title": "Set up rate limited Eliza hosted LLM and embedding endpoint",
@@ -16,6 +28,18 @@
       "body": "Agent can notify users once they have been rate limited and how to get an API key\n\n[LiteLLM](https://www.litellm.ai/)\n\nCan be hosted on railway with openrouter free models to proxy etc",
       "createdAt": "2025-07-08T09:54:52Z",
       "closedAt": "2025-08-04T15:39:00Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs6_twyl",
+      "title": "Jimmy Agent",
+      "author": "borisudovicic",
+      "number": 5494,
+      "repository": "elizaos/eliza",
+      "body": "",
+      "createdAt": "2025-07-09T16:04:38Z",
+      "closedAt": "2025-08-05T13:53:25Z",
       "state": "CLOSED",
       "commentCount": 0
     },
@@ -40,30 +64,6 @@
       "body": "",
       "createdAt": "2025-07-20T16:09:19Z",
       "closedAt": "2025-08-04T15:35:52Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs7Bl4vm",
-      "title": "morpho plugin",
-      "author": "linear",
-      "number": 5644,
-      "repository": "elizaos/eliza",
-      "body": "",
-      "createdAt": "2025-07-21T09:49:12Z",
-      "closedAt": "2025-08-04T15:35:42Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs7CVnDX",
-      "title": "Eddy - Devrel Agent Notes",
-      "author": "borisudovicic",
-      "number": 5676,
-      "repository": "elizaos/eliza",
-      "body": "The DevRel Agent should always provide the most up-to-date content from the documentation, even if updates were made as recently as yesterday.” The goal is to ensure that when I ask questions, the agent reflects the latest changes and doesn’t rely on outdated versions of the docs. My understanding is thats not possible just yet. If we add a new doc, it will be taken into consideration but not if an existing file/doc is changed.",
-      "createdAt": "2025-07-24T16:11:31Z",
-      "closedAt": "2025-08-04T15:35:45Z",
       "state": "CLOSED",
       "commentCount": 0
     }
@@ -134,7 +134,7 @@
     "additions": 5975,
     "deletions": 2181,
     "files": 81,
-    "commitCount": 46
+    "commitCount": 69
   },
   "completedItems": [
     {
@@ -279,6 +279,16 @@
       "summary": null
     },
     {
+      "username": "yungalgo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
+      "totalScore": 96.8655477931522,
+      "prScore": 87.0875477931522,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "ChristopherTrimboli",
       "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
       "totalScore": 56.85296593391779,
@@ -289,23 +299,23 @@
       "summary": null
     },
     {
-      "username": "yungalgo",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
-      "totalScore": 52.8837738965761,
-      "prScore": 43.5437738965761,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.33999999999999997,
+      "username": "linear",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/20150?v=4",
+      "totalScore": 16,
+      "prScore": 0,
+      "issueScore": 16,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "linear",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/20150?v=4",
-      "totalScore": 14,
-      "prScore": 0,
-      "issueScore": 14,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 15.98021948958322,
+      "prScore": 6.78021948958322,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -329,21 +339,21 @@
       "summary": null
     },
     {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 9,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "RolandOne",
       "avatarUrl": "https://avatars.githubusercontent.com/u/38446707?v=4",
       "totalScore": 5.909573590279972,
       "prScore": 5.909573590279972,
       "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "monilpat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -359,9 +369,9 @@
       "summary": null
     }
   ],
-  "newPRs": 6,
+  "newPRs": 8,
   "mergedPRs": 5,
-  "newIssues": 7,
-  "closedIssues": 10,
-  "activeContributors": 8
+  "newIssues": 9,
+  "closedIssues": 12,
+  "activeContributors": 9
 }
