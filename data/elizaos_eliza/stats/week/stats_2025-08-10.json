@@ -5,20 +5,223 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-08-10 to 2025-08-17, elizaos/eliza had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2025-08-10 to 2025-08-17, elizaos/eliza had 6 new PRs (7 merged), 2 new issues, and 5 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7FTvRT",
+      "title": "Critical: Plugin Publishing Fails with False Success Reports",
+      "author": "monilpat",
+      "number": 5754,
+      "repository": "elizaos/eliza",
+      "body": "## Issue Summary\nThe `elizaos publish --npm` command reports successful publishing but the plugin is not actually published to npm, despite showing success messages. The npm publish is failing with a 404 error, but the ElizaOS CLI incorrectly reports success.\n\n## Key Problems Identified\n\n### 1. Critical NPM Publishing Failure\n- **Error**: `npm error 404 Not Found - PUT https://registry.npmjs.org/@elizaos%2fplugin-polygon - Not found`\n- **Issue**: The package scope `@elizaos` doesn't exist on npm, preventing publishing\n- **Impact**: Package cannot be published to npm, but CLI reports success\n\n### 2. False Success Reporting\n- **Issue**: CLI reports `[√] Successfully published @elizaos/plugin-polygon@1.0.0 to npm`\n- **Reality**: npm publish failed with 404 error\n- **Impact**: Developers believe their plugin is published when it's not\n\n### 3. Registry Repository Mismatch\n- **Expected**: Should create PR against `https://github.com/elizaos-plugins/registry`\n- **Actual**: Still references old registry `https://github.com/elizaos/registry`\n- **Impact**: Plugin won't appear in the official ElizaOS registry\n\n## Steps to Reproduce\n\n```bash\n# Navigate to the plugin directory\ncd packages/plugin-polygon\n\n# Ensure you're on the correct branch with the changes\ngit checkout polygon\n\n# Run the publish command\nelizaos publish --npm\n\n# Verify the success message appears\n# [√] Successfully published @elizaos/plugin-polygon@1.0.0 to npm\n\n# Check if package actually exists on npm\nnpm view @elizaos/plugin-polygon@1.0.0\n# Result: 404 Not Found - '@elizaos/plugin-polygon@1.0.0' is not in this registry\n```\n\n## Technical Details\n\n### NPM Error Analysis\nThe npm logs show the root cause:\n```\nhttp fetch PUT 404 https://registry.npmjs.org/@elizaos%2fplugin-polygon 507ms\nerror 404 Not Found - PUT https://registry.npmjs.org/@elizaos%2fplugin-polygon - Not found\n```\n\nThis indicates that the `@elizaos` scope doesn't exist on npm, which is required for publishing scoped packages.\n\n### CLI Error Handling Failure\nThe ElizaOS CLI is not properly parsing npm error codes:\n- npm returns exit code 1 (failure)\n- CLI ignores the error and reports success\n- No validation that the package actually exists on npm\n\n## Expected Behavior\n1. CLI should detect npm publish failures (exit code 1)\n2. CLI should fail with clear error message when package scope doesn't exist\n3. CLI should validate that package actually exists on npm after publishing\n4. CLI should create PRs against the correct registry repository\n\n## Recommended Fixes\n\n### 1. Fix NPM Error Detection\n```typescript\n// In the publish command, check npm exit code\nconst npmResult = await exec('npm publish', { cwd: pluginDir });\nif (npmResult.exitCode !== 0) {\n  throw new Error(`NPM publish failed: ${npmResult.stderr}`);\n}\n```\n\n### 2. Add Package Scope Validation\n```typescript\n// Before publishing, check if scope exists\nconst scopeExists = await checkNpmScope('@elizaos');\nif (!scopeExists) {\n  throw new Error('Package scope @elizaos does not exist on npm. Contact npm support to create the scope.');\n}\n```\n\n### 3. Add Post-Publish Validation\n```typescript\n// After publishing, verify package exists\nconst packageExists = await checkPackageExists(packageName, version);\nif (!packageExists) {\n  throw new Error(`Package was not published successfully. Check npm logs for details.`);\n}\n```\n\n## Priority\n**Critical** - This completely blocks plugin publishing and creates false success reports.\n\n## Affected Components\n- `packages/cli/src/commands/publish.ts`\n- NPM publishing logic\n- Error handling and success reporting\n- Package scope validation\n- Registry repository configuration\n\n## Immediate Action Required\n1. **Create the `@elizaos` scope on npm** or use an existing scope\n2. Update CLI to properly detect and handle npm publish failures\n3. Add post-publish validation to ensure packages actually exist on npm\n4. Update registry repository configuration\n\n## Alternative Solutions\n1. **Use existing scope**: Change package name to `@monilpat/plugin-polygon`\n2. **Create organization scope**: Set up `@elizaos` organization on npm\n3. **Use unscoped package**: Publish as `elizaos-plugin-polygon`\n\nThis issue is critically blocking plugin developers from successfully publishing their work and needs immediate attention from the ElizaOS team.\n",
+      "createdAt": "2025-08-11T14:20:08Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7FLaT0",
+      "title": "Implement Runtime Method Mocking for Deterministic Agent Testing",
+      "author": "monilpat",
+      "number": 5749,
+      "repository": "elizaos/eliza",
+      "body": "### Problem Statement\nCurrently, ElizaOS scenario testing lacks the ability to mock internal agent runtime calls (particularly LLM interactions) when testing via the API client. This makes it difficult to create deterministic tests for agent behavior and workflows.\n\n### Current Limitations\n- Global function mocks only work for code executed in the same process\n- No way to intercept `runtime.useModel` calls from the bootstrap plugin\n- Agent behavior is non-deterministic due to real LLM calls\n- Difficult to test specific agent decision paths and responses\n\n### Why Different Approach Was Needed\n\nThe existing mocking system was designed for **code execution environments** (E2B sandbox and local `node -e` processes), where mocks are applied to the execution context. However, **agent testing** works differently:\n\n- **E2B/Local Execution**: Code runs in isolated processes/sandboxes where global mocks can be applied\n- **Agent Testing**: Agent runs as a service with API client interaction, requiring direct runtime method interception\n- **Architecture Gap**: The bootstrap plugin calls `runtime.useModel` internally, which can't be mocked through the execution environment approach\n\nThis architectural difference necessitated a new approach that directly intercepts runtime methods rather than relying on execution context mocking.\n\n### Proposed Solution: Runtime Method Mocking\n\nWe've implemented a new mocking approach that directly intercepts `IAgentRuntime` method calls:\n\n#### Key Components\n\n1. **MockEngine Enhancement**\n   - Added `runtimeMethodMocks` to support mocking runtime methods\n   - Priority system: `runtimeMethod` > `service` > `globalFunction`\n   - Direct method replacement on the runtime instance\n\n2. **Schema Updates**\n   - Extended `MockSchema` to include `runtimeMethod: z.string().optional()`\n   - Supports mocking any `IAgentRuntime` method (e.g., `useModel`, `getService`)\n\n3. **Conditional Matching**\n   - Matcher functions can inspect method arguments\n   - Example: `\"return args[1] && args[1].prompt && args[1].prompt.includes('should respond')\"`\n   - Supports complex conditional logic for when to apply mocks\n\n#### Usage Example\n\n```yaml\nsetup:\n  mocks:\n    - runtimeMethod: \"useModel\"\n      method: \"useModel\"\n      when:\n        matcher: \"return args[1] && args[1].prompt && args[1].prompt.includes('should respond')\"\n      response: \"<response><name>agent</name><reasoning>Mocked response</reasoning><action>RESPOND</action></response>\"\n```\n\n#### Benefits\n\n1. **Deterministic Testing**: Replace LLM calls with static responses\n2. **Full Workflow Testing**: Test complete agent decision flows\n3. **Conditional Mocking**: Apply mocks based on specific conditions\n4. **Runtime Integration**: Works seamlessly with existing agent architecture\n5. **Backward Compatibility**: Existing mocks continue to work\n\n#### Implementation Steps\n\n- MockEngine runtime method support\n- Schema updates for runtimeMethod mocks\n- Conditional matching with matcher functions\n- Integration with scenario runner\n- Basic useModel mocking working\n- Add support for mocking other runtime methods (getService, etc.)\n- Create comprehensive test scenarios\n- Add documentation and examples\n- Consider adding mock recording/replay capabilities\n\n### Technical Details\n\nThe implementation works by:\n1. Creating the `IAgentRuntime` instance in the scenario runner\n2. Applying mocks directly to the runtime object before agent initialization\n3. The bootstrap plugin receives the mocked runtime and uses the mocked methods\n4. Mocks are reverted after scenario completion\n\nThis approach provides the foundation for robust, deterministic agent testing while maintaining the existing architecture.",
+      "createdAt": "2025-08-11T00:08:49Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6bjrTf",
+      "title": "Next",
+      "author": "lalalune",
+      "number": 5242,
+      "body": "Roads? Where we're going, we don't need roads!",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-06-22T16:11:08Z",
+      "mergedAt": null,
+      "additions": 1367486,
+      "deletions": 69177
+    },
+    {
+      "id": "PR_kwDOMT5cIs6jBhZB",
+      "title": "feat: add EVM plugin and tools",
+      "author": "wtfsayo",
+      "number": 5752,
+      "body": "This pull request introduces a new EVM (Ethereum Virtual Machine) plugin, integrating wallet and blockchain tooling into the application. It adds a modular service for managing EVM chains and clients, several tools for interacting with wallets and tokens, and updates the main application to initialize and use these tools when a private key is provided. The changes are grouped below by theme.\r\n\r\n**EVM Plugin Implementation**\r\n\r\n* Added the `EVMService` singleton class in `services/index.ts` to manage EVM clients, chain configuration, and wallet initialization, supporting multiple chains and private key management.\r\n* Created tools for wallet and token operations: `getWalletAddress`, `getWalletBalance`, `getTokenBalance`, and `getEVMChains`, each exposing a typed and documented API for agent use. [[1]](diffhunk://#diff-e1cc64e72e760fcd6abb43875bb23467454be701262c5956359b002f7779db31R1-R21) [[2]](diffhunk://#diff-d4a4b475e04d621fe0a29bb3c16ed8bf86ed271be701116ecde2d78a0b8885deR1-R30) [[3]](diffhunk://#diff-e75f9b72cf42c4737b0a53c8e997a259af26c7f13bcf9b38ff36e903371430f3R1-R55) [[4]](diffhunk://#diff-5e0f2d1cf5ea5545068eccb1825093cc7a938c7ba2f542391726376a3a2b22b7R1-R49)\r\n* Exported all tools and the EVM service from the plugin entry point for external consumption.\r\n\r\n**Project Setup and Configuration**\r\n\r\n* Added `package.json` and `tsconfig.json` for the new plugin, specifying dependencies (`viem`, `zod`, etc.), build scripts, and TypeScript settings. [[1]](diffhunk://#diff-d3f83e69e38803d41e055612ff11506ba082953cbeadcae56a3bca418d30c54bR1-R26) [[2]](diffhunk://#diff-3af2426805243a2b3ebf4d3f1a7877df9ef4685384a163bd203f9e3ce6c534a1R1-R17)\r\n\r\n**Main Application Integration**\r\n\r\n* Imported EVM tools and service into the main application (`src/index.ts`).\r\n* On startup, if `WALLET_PRIVATE_KEY` is set, initialized the EVM service and registered the EVM tools for agent use.\r\n* Added example agent prompts to demonstrate EVM wallet address retrieval, chain listing, native balance fetching, and ERC20 token balance querying, with results logged to the console.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-11T11:09:57Z",
+      "mergedAt": "2025-08-11T16:02:10Z",
+      "additions": 446,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs6jG9KE",
+      "title": "feat: Add character type system with JesseXBT character and improve API consistency",
+      "author": "wtfsayo",
+      "number": 5756,
+      "body": "# Character Type System and Jesse Pollak Character Implementation\n\nThis PR introduces a comprehensive character type system using Zod validation and implements a new Jesse Pollak (jesseXBT) character focused on Base ecosystem support.\n\n## Key Changes\n\n### 🏗️ Character Type System (`lib/core/character.ts`)\n- **Complete Zod Schema Validation**: Robust runtime validation for character definitions\n- **TypeScript Type Safety**: Proper types with discriminated unions for complex data structures  \n- **Circular Reference Support**: Handles directory structures in knowledge base items\n- **Comprehensive Coverage**: Validation for all character properties including:\n  - UUID identifiers and usernames\n  - Bio arrays and message examples\n  - Knowledge base items (strings, directories, or path objects)\n  - Settings and secrets with flexible value types\n  - Style guides for different communication contexts\n  - Template systems for consistent responses\n\n### 👤 Jesse Pollak Character (`characters/jessexbt.json`)\n- **Base Ecosystem Expert**: Specialized character for Base Layer 2 development support\n- **Comprehensive Profile**: 126 lines of detailed character configuration\n- **Response Templates**: Pre-defined templates for Base documentation, ecosystem navigation\n- **Message Examples**: Natural conversation flows for Base-related queries\n- **System Integration**: Character system prompt applied to default agent\n\n### 🔧 API Improvements (`src/server.ts`)\n- **Character Loading**: Automatic character validation and loading on server startup\n- **System Prompt Integration**: Character system prompts properly applied to agents\n- **Tool Call Consistency**: Standardized tool argument handling (`toolCall.input` vs mixed approaches)\n- **Response Structure**: Cleaner finish reason handling using `result.finishReason`\n- **Error Handling**: Improved tool result processing and response formatting\n\n### 📦 Module Organization (`lib/core/index.ts`)\n- **Export Integration**: Character module and types properly exported from core\n- **Type Availability**: All character-related types accessible for external use\n\n## Benefits\n\n✅ **Type Safety**: Prevents runtime errors with comprehensive Zod validation  \n✅ **Extensibility**: Easy to add new characters with consistent schema  \n✅ **Specialization**: Jesse character provides expert Base ecosystem guidance  \n✅ **Developer Experience**: Better API consistency and error handling  \n✅ **Maintainability**: Clear separation of character data and validation logic  \n\n## Technical Details\n\n- **Schema Design**: Uses discriminated unions for knowledge base items to handle different data types safely\n- **Circular References**: Properly handles directory structures with `z.lazy()` for recursive schemas\n- **Validation Strategy**: Runtime validation with detailed error messages for debugging\n- **Character Integration**: Seamless loading and application of character data to AI agents\n\n## Files Changed\n- `lib/core/character.ts` (new file, 116 lines)\n- `characters/jessexbt.json` (new file, 126 lines) \n- `src/server.ts` (23 lines modified)\n- `lib/core/index.ts` (1 line added)\n\n**Total**: 258 additions, 8 deletions across 4 files\n\n## Backward Compatibility\n✅ All existing API endpoints remain functional  \n✅ No breaking changes to existing character loading  \n✅ Tool call improvements maintain compatibility  \n\n---\n\nThis PR establishes the foundation for a robust character system while providing immediate value through the specialized Jesse Pollak character for Base ecosystem support.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-11T18:40:30Z",
+      "mergedAt": "2025-08-11T19:25:47Z",
+      "additions": 258,
+      "deletions": 8
+    },
+    {
+      "id": "PR_kwDOMT5cIs6jDE1Y",
+      "title": "feat: add Hono server, refactor ElizaOS agent registry",
+      "author": "wtfsayo",
+      "number": 5753,
+      "body": "This pull request introduces significant improvements to the agent management system and adds a new HTTP server for interacting with agents via an OpenAI-compatible API. The changes refactor how agents are stored and accessed, update related usage throughout the codebase, and add new scripts and dependencies to support server functionality.\r\n\r\n**Agent Management Refactor:**\r\n\r\n- Refactored the `ElizaOS` class to use a `Map` (`agentsById`) for storing agents by ID, replacing the previous array-based approach. Added methods for adding agents with IDs, listing agent IDs, and retrieving agents by ID. This change enforces unique agent IDs and enables more efficient lookups. [[1]](diffhunk://#diff-d0617da286fa90850f3ce90590cfd646f6354f2bf9bd816782501c671abd72f9L6-R6) [[2]](diffhunk://#diff-d0617da286fa90850f3ce90590cfd646f6354f2bf9bd816782501c671abd72f9L15-R28)\r\n- Updated agent registration in `src/index.ts` to use the new `addAgent(agent, id)` method, assigning the default agent an explicit ID.\r\n\r\n**New HTTP Server and API:**\r\n\r\n- Added `src/server.ts`, which sets up a Hono-based HTTP server. The server exposes endpoints to list agents and to handle OpenAI-compatible chat completion requests, routing them to the appropriate agent by ID. It also initializes services and tools conditionally based on environment variables, mirroring the setup in `src/index.ts`.\r\n\r\n**Build and Scripts Updates:**\r\n\r\n- Updated `package.json` scripts to support building, starting, and developing the new server entrypoint (`src/server.ts`).\r\n- Added a new dependency on `hono` for the HTTP server.\r\n\r\n**Path Import Fixes:**\r\n\r\n- Fixed import paths in `src/index.ts` to use alias imports (`@/plugins/...`) instead of relative paths.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-11T13:18:29Z",
+      "mergedAt": "2025-08-11T16:09:15Z",
+      "additions": 156,
+      "deletions": 9
+    },
+    {
+      "id": "PR_kwDOMT5cIs6jAUtK",
+      "title": "chore(imports): use @/ alias and barrels; add Cursor rule",
+      "author": "wtfsayo",
+      "number": 5751,
+      "body": "- Converted relative imports to '@/'\n- Prefer barrels (e.g., '@/lib/core', '@/lib/db/schema')\n- Added Cursor rule: .cursor/rules/use-atslash-alias-imports.mdc\n- Verified build with Bun",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-11T09:24:17Z",
+      "mergedAt": "2025-08-11T09:57:26Z",
+      "additions": 116,
+      "deletions": 3
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 1114,
+    "deletions": 81,
+    "files": 24,
+    "commitCount": 13
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "completedItems": [
+    {
+      "title": "fix: (project-starter) replace mock.module with spyOn for consistent logger testing",
+      "prNumber": 5748,
+      "type": "bugfix",
+      "body": "## Description\r\n\r\nThis PR fixes failing component tests in the project-starter template by replacing `mock.module` with `spyOn` for logger mocking.\r\n\r\n## Problem\r\n\r\nThe project-starter template had 3 test files using `mock.module('@elizaos/",
+      "files": [
+        "packages/project-starter/src/__tests__/config.test.ts",
+        "packages/project-starter/src/__tests__/error-handling.test.ts",
+        "packages/project-starter/src/__tests__/events.test.ts"
+      ]
+    },
+    {
+      "title": "feat: Add character type system with JesseXBT character and improve API consistency",
+      "prNumber": 5756,
+      "type": "feature",
+      "body": "# Character Type System and Jesse Pollak Character Implementation\n\nThis PR introduces a comprehensive character type system using Zod validation and implements a new Jesse Pollak (jesseXBT) character focused on Base ecosystem support.\n\n## K",
+      "files": [
+        "characters/jessexbt.json",
+        "lib/core/character.ts",
+        "lib/core/index.ts",
+        "src/server.ts"
+      ]
+    },
+    {
+      "title": "feat: Add OpenAI-compliant tool calls visibility to chat completions",
+      "prNumber": 5755,
+      "type": "feature",
+      "body": "## Summary\n\nThis PR adds support for viewing intermediate tool calls and results in the chat completions API while maintaining full OpenAI API compliance.\n\n## Changes\n\n- **OpenAI API Compliance**: Default responses remain fully compliant wi",
+      "files": [
+        "src/server.ts"
+      ]
+    },
+    {
+      "title": "feat: add Hono server, refactor ElizaOS agent registry",
+      "prNumber": 5753,
+      "type": "feature",
+      "body": "This pull request introduces significant improvements to the agent management system and adds a new HTTP server for interacting with agents via an OpenAI-compatible API. The changes refactor how agents are stored and accessed, update relate",
+      "files": [
+        "bun.lock",
+        "lib/core/elizaos.ts",
+        "package.json",
+        "src/index.ts",
+        "src/server.ts"
+      ]
+    },
+    {
+      "title": "feat: add EVM plugin and tools",
+      "prNumber": 5752,
+      "type": "feature",
+      "body": "This pull request introduces a new EVM (Ethereum Virtual Machine) plugin, integrating wallet and blockchain tooling into the application. It adds a modular service for managing EVM chains and clients, several tools for interacting with wall",
+      "files": [
+        ".env.example",
+        "plugins/plugin-evm/bun.lock",
+        "plugins/plugin-evm/index.ts",
+        "plugins/plugin-evm/package.json",
+        "plugins/plugin-evm/services/index.ts",
+        "plugins/plugin-evm/tools/getEVMChains.ts",
+        "plugins/plugin-evm/tools/getTokenBalance.ts",
+        "plugins/plugin-evm/tools/getWalletAddress.ts",
+        "plugins/plugin-evm/tools/getWalletBalance.ts",
+        "plugins/plugin-evm/tsconfig.json",
+        "src/index.ts"
+      ]
+    },
+    {
+      "title": "chore(imports): use @/ alias and barrels; add Cursor rule",
+      "prNumber": 5751,
+      "type": "other",
+      "body": "- Converted relative imports to '@/'\n- Prefer barrels (e.g., '@/lib/core', '@/lib/db/schema')\n- Added Cursor rule: .cursor/rules/use-atslash-alias-imports.mdc\n- Verified build with Bun",
+      "files": [
+        ".cursor/rules/use-atslash-alias-imports.mdc",
+        "lib/core/elizaos.ts",
+        "lib/db/index.ts"
+      ]
+    },
+    {
+      "title": "revert: Use relative paths for imports",
+      "prNumber": 5750,
+      "type": "other",
+      "body": "## Description\nThis PR ensures consistent use of relative paths for imports throughout the project.\n\n## Changes\n- ✅ Reverted import in `src/index.ts` to use relative path `../lib/core`\n- ✅ Removed path aliases configuration from `tsconfig.j",
+      "files": [
+        "src/index.ts",
+        "tsconfig.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 236.43606445233044,
+      "prScore": 236.43606445233044,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 39.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 39.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "monilpat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 6,
+  "mergedPRs": 7,
+  "newIssues": 2,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 5
 }
