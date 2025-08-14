@@ -5,8 +5,32 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-08-10 to 2025-08-17, elizaos/eliza had 8 new PRs (7 merged), 16 new issues, and 14 active contributors.",
+  "overview": "From 2025-08-10 to 2025-08-17, elizaos/eliza had 11 new PRs (9 merged), 16 new issues, and 16 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7ELgn4",
+      "title": "Calling `startAgent` from CLI command start - hangs early when `@elizaos/plugin-bootstrap` is omitted & hangs later when it is included",
+      "author": "monilpat",
+      "number": 5719,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`packages/cli/src/commands/start/actions/agent-start.ts` is exported and re-used in CLI commands with  \n\n```ts\nimport { startAgent } from '../commands/start';\n```\n\nWhen I call `startAgent` from `runtime-factory.ts` / `initializeAgent()`:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  [],                       // <-- intentionally no bootstrap plugin\n  { isTestMode: false }\n);\n```\n\ninitialization hangs almost immediately (before plugin dependency resolution).\n\nIf I add `@elizaos/plugin-bootstrap` back:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  ['@elizaos/plugin-bootstrap'],\n  { isTestMode: false }\n);\n```\n\ninitialization gets past early steps, loads **all** plugins, but then hangs right after the bootstrap plugin finishes loading.\n\n---\n\n**To Reproduce**\n\n1. Build the CLI (`cd packages/cli && bun x tsup`).\n2. From `packages/cli` run a scenario that relies on `initializeAgent`, e.g.:\n\n```bash\nbun run src/index.ts scenario run \\\n  src/commands/scenario/examples/e2b-test.scenario.yaml\n```\n\n3. Edit `runtime-factory.ts` ➜ `initializeAgent()` and comment the bootstrap plugin in the `character.plugins` array (lines 411-415).\n4. Re-run the same command – observe early hang.\n5. Re-enable the bootstrap plugin and re-run – observe later hang.\n\n---\n\n**Expected behavior**\n\n`startAgent` should finish initializing an agent regardless of whether `@elizaos/plugin-bootstrap` is present.  \nIf the bootstrap plugin is mandatory there should be a clear validation error, not a silent hang.\n\n---\n\n**Logs / Screenshots**\n\n<details>\n<summary>1️⃣ Hang without bootstrap plugin (early-stage)</summary>\n\n```\n[2025-08-04 02:47:47] INFO: [startAgent] Step 1 – Starting agent initialization\n[2025-08-04 02:47:47] INFO: [startAgent] Step 2 – Character ID set\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3 – Checking character secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3c – Character already has secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4 – Initializing plugin loading\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4a – SQL plugin loaded\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4b – Character plugins: [\"@elizaos/plugin-e2b\",\"@elizaos/plugin-openai\"]\n... nothing further – process hangs here ...\n```\n</details>\n\n<details>\n<summary>2️⃣ Hang with bootstrap plugin (late-stage)</summary>\n\n```\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 1 – Starting to load plugin: @elizaos/plugin-bootstrap\n[2025-08-04 02:52:47] SUCCESS: Successfully loaded plugin '@elizaos/plugin-bootstrap' using workspace dependency\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 4e – Found valid plugin export\n[2025-08-04 02:52:47] INFO: [startAgent] Step 5d – Successfully loaded plugin: bootstrap\n... no further output – runtime hangs right after this point ...\n```\n</details>\n\n---\n\n**Additional context**\n\n* The call site is `packages/cli/src/scenarios/runtime-factory.ts` → `initializeAgent()`.\n* `startAgent` is imported with  \n  `import { startAgent } from '../commands/start';`\n* Hangs occur both in **local** and **E2B** scenarios.\n* Database migrations complete successfully; the hang happens after plugin loading.\n* Removing *all* plugins except SQL reproduces the *early* hang; adding any plugin that has bootstrap as a dep reproduces the *late* hang.\n* The same code path works in commit `510b8aac2e0b20cc3d176093a58143c26e838e65` (July 25 commit) but fails from `d84963ef3d5f5cccfef461350175dc1bc9b77b58` onward.\n\nPlease review my branch and the file for the associated changes. I review the plugin loading stack trace loadAndPreparePlugin -> loadPluginModule -> strategy.tryImport (which is where it hangs \n\n```\n */\nconst importStrategies: ImportStrategy[] = [\n  // Try local development first - this is the most important for plugin testing\n  {\n    name: 'local development plugin',\n    tryImport: async (repository: string) => {\n      const context = detectPluginContext(repository);\n\n      if (context.isLocalDevelopment) {\n        logger.debug(`Detected local development for plugin: ${repository}`);\n\n        // Ensure the plugin is built\n        const isBuilt = await ensurePluginBuilt(context);\n        if (!isBuilt) {\n          provideLocalPluginGuidance(repository, context);\n          return null;\n        }\n\n        // Try to load from built output\n        if (context.localPath && existsSync(context.localPath)) {\n          logger.info(`Loading local development plugin: ${repository}`);\n          return tryImporting(context.localPath, 'local development plugin', repository);\n        }\n\n        // This shouldn't happen if ensurePluginBuilt succeeded, but handle it gracefully\n        logger.warn(`Plugin built but output not found at expected path: ${context.localPath}`);\n        provideLocalPluginGuidance(repository, context);\n        return null;\n      }\n\n      return null;\n    },\n  },\n  // Try workspace dependencies (for monorepo packages)\n  {\n    name: 'workspace dependency',\n    tryImport: async (repository: string) => {\n      if (repository.startsWith('@elizaos/plugin-')) {\n        // Try to find the plugin in the workspace\n        const pluginName = repository.replace('@elizaos/', '');\n        const workspacePath = path.resolve(process.cwd(), '..', pluginName, 'dist', 'index.js');\n        if (existsSync(workspacePath)) {\n          return tryImporting(workspacePath, 'workspace dependency', repository);\n        }\n      }\n      return null;\n    },\n  },\n  {\n    name: 'direct path',\n    tryImport: async (repository: string) => tryImporting(repository, 'direct path', repository),\n  },\n  {\n    name: 'local node_modules',\n    tryImport: async (repository: string) =>\n      tryImporting(resolveNodeModulesPath(repository), 'local node_modules', repository),\n  },\n  {\n    name: 'global node_modules',\n    tryImport: async (repository: string) => {\n      const globalPath = path.resolve(getGlobalNodeModulesPath(), repository);\n      if (!existsSync(path.dirname(globalPath))) {\n        logger.debug(\n          `Global node_modules directory not found at ${path.dirname(globalPath)}, skipping for ${repository}`\n        );\n        return null;\n      }\n      return tryImporting(globalPath, 'global node_modules', repository);\n    },\n  },\n  {\n    name: 'package.json entry',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (!packageJson) return null;\n\n      const entryPoint = packageJson.module || packageJson.main || DEFAULT_ENTRY_POINT;\n      return tryImporting(\n        resolveNodeModulesPath(repository, entryPoint),\n        `package.json entry (${entryPoint})`,\n        repository\n      );\n    },\n  },\n  {\n    name: 'common dist pattern',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (packageJson?.main === DEFAULT_ENTRY_POINT) return null;\n\n      return tryImporting(\n        resolveNodeModulesPath(repository, DEFAULT_ENTRY_POINT),\n        'common dist pattern',\n        repository\n      );\n    },\n  },\n];\n``` in load-plugin.ts  BRANCH in question: https://github.com/elizaOS/eliza/blob/scenarios-cli/packages/cli/src/scenarios/runtime-factory.ts\n\n\nbut startAgent is in develop and is having issues when its being called. ",
+      "createdAt": "2025-08-05T02:45:31Z",
+      "closedAt": "2025-08-14T02:44:06Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs7EwwuN",
+      "title": "Eliza CLI failed to build project",
+      "author": "Kemystra",
+      "number": 5734,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nOn project creation, ElizaOS CLI fails with the following error:\n```\n◇  Failed to build project\nstdout: src/index.ts(7,25): error TS2345: Argument of type 'string' is not assignable to parameter of type 'undefined'.\nstderr: $ tsc --noEmit && vite build && tsup\n```\n\n**To Reproduce**\n\n- Install ElizaOS through `bun`\n```\nbun i -g @elizaos/cli\n```\n- Create new ElizaOS project\n```\nelizaos create abcde\n```\n\n**Expected behavior**\n\nProject built successfully\n\n**Screenshots**\n\n<img width=\"1095\" height=\"572\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/967dd6a2-0d70-4e2e-8019-85a2eab5f225\" />\n\n**Additional context**\n\nElizaOS CLI version: `1.3.2`\n",
+      "createdAt": "2025-08-07T16:14:00Z",
+      "closedAt": "2025-08-14T07:09:33Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDOMT5cIs7Eng6F",
       "title": "feat(scenarios): Implement natural language agent interaction and response validation",
@@ -42,30 +66,6 @@
       "closedAt": "2025-08-12T04:21:13Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs7FTvRT",
-      "title": "Critical: Plugin Publishing Fails with False Success Reports",
-      "author": "monilpat",
-      "number": 5754,
-      "repository": "elizaos/eliza",
-      "body": "## Issue Summary\nThe `elizaos publish --npm` command reports successful publishing but the plugin is not actually published to npm, despite showing success messages. The npm publish is failing with a 404 error, but the ElizaOS CLI incorrectly reports success.\n\n## Key Problems Identified\n\n### 1. Critical NPM Publishing Failure\n- **Error**: `npm error 404 Not Found - PUT https://registry.npmjs.org/@elizaos%2fplugin-polygon - Not found`\n- **Issue**: The package scope `@elizaos` doesn't exist on npm, preventing publishing\n- **Impact**: Package cannot be published to npm, but CLI reports success\n\n### 2. False Success Reporting\n- **Issue**: CLI reports `[√] Successfully published @elizaos/plugin-polygon@1.0.0 to npm`\n- **Reality**: npm publish failed with 404 error\n- **Impact**: Developers believe their plugin is published when it's not\n\n### 3. Registry Repository Mismatch\n- **Expected**: Should create PR against `https://github.com/elizaos-plugins/registry`\n- **Actual**: Still references old registry `https://github.com/elizaos/registry`\n- **Impact**: Plugin won't appear in the official ElizaOS registry\n\n## Steps to Reproduce\n\n```bash\n# Navigate to the plugin directory\ncd packages/plugin-polygon\n\n# Ensure you're on the correct branch with the changes\ngit checkout polygon\n\n# Run the publish command\nelizaos publish --npm\n\n# Verify the success message appears\n# [√] Successfully published @elizaos/plugin-polygon@1.0.0 to npm\n\n# Check if package actually exists on npm\nnpm view @elizaos/plugin-polygon@1.0.0\n# Result: 404 Not Found - '@elizaos/plugin-polygon@1.0.0' is not in this registry\n```\n\n## Technical Details\n\n### NPM Error Analysis\nThe npm logs show the root cause:\n```\nhttp fetch PUT 404 https://registry.npmjs.org/@elizaos%2fplugin-polygon 507ms\nerror 404 Not Found - PUT https://registry.npmjs.org/@elizaos%2fplugin-polygon - Not found\n```\n\nThis indicates that the `@elizaos` scope doesn't exist on npm, which is required for publishing scoped packages.\n\n### CLI Error Handling Failure\nThe ElizaOS CLI is not properly parsing npm error codes:\n- npm returns exit code 1 (failure)\n- CLI ignores the error and reports success\n- No validation that the package actually exists on npm\n\n## Expected Behavior\n1. CLI should detect npm publish failures (exit code 1)\n2. CLI should fail with clear error message when package scope doesn't exist\n3. CLI should validate that package actually exists on npm after publishing\n4. CLI should create PRs against the correct registry repository\n\n## Recommended Fixes\n\n### 1. Fix NPM Error Detection\n```typescript\n// In the publish command, check npm exit code\nconst npmResult = await exec('npm publish', { cwd: pluginDir });\nif (npmResult.exitCode !== 0) {\n  throw new Error(`NPM publish failed: ${npmResult.stderr}`);\n}\n```\n\n### 2. Add Package Scope Validation\n```typescript\n// Before publishing, check if scope exists\nconst scopeExists = await checkNpmScope('@elizaos');\nif (!scopeExists) {\n  throw new Error('Package scope @elizaos does not exist on npm. Contact npm support to create the scope.');\n}\n```\n\n### 3. Add Post-Publish Validation\n```typescript\n// After publishing, verify package exists\nconst packageExists = await checkPackageExists(packageName, version);\nif (!packageExists) {\n  throw new Error(`Package was not published successfully. Check npm logs for details.`);\n}\n```\n\n## Priority\n**Critical** - This completely blocks plugin publishing and creates false success reports.\n\n## Affected Components\n- `packages/cli/src/commands/publish.ts`\n- NPM publishing logic\n- Error handling and success reporting\n- Package scope validation\n- Registry repository configuration\n\n## Immediate Action Required\n1. **Create the `@elizaos` scope on npm** or use an existing scope\n2. Update CLI to properly detect and handle npm publish failures\n3. Add post-publish validation to ensure packages actually exist on npm\n4. Update registry repository configuration\n\n## Alternative Solutions\n1. **Use existing scope**: Change package name to `@monilpat/plugin-polygon`\n2. **Create organization scope**: Set up `@elizaos` organization on npm\n3. **Use unscoped package**: Publish as `elizaos-plugin-polygon`\n\nThis issue is critically blocking plugin developers from successfully publishing their work and needs immediate attention from the ElizaOS team.\n",
-      "createdAt": "2025-08-11T14:20:08Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs7ENLnL",
-      "title": "make sessions api available to `api-client` package",
-      "author": "linear",
-      "number": 5721,
-      "repository": "elizaos/eliza",
-      "body": "[https://github.com/elizaOS/eliza/pull/5717/](https://github.com/elizaOS/eliza/pull/5717/)",
-      "createdAt": "2025-08-05T06:37:47Z",
-      "closedAt": "2025-08-13T10:25:54Z",
-      "state": "CLOSED",
-      "commentCount": 0
     }
   ],
   "topPRs": [
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 1114,
-    "deletions": 81,
-    "files": 24,
-    "commitCount": 16
+    "additions": 1200,
+    "deletions": 145,
+    "files": 37,
+    "commitCount": 29
   },
   "completedItems": [
     {
@@ -221,17 +221,58 @@
         "src/index.ts",
         "tsconfig.json"
       ]
+    },
+    {
+      "title": "fix: resolve `elizaos publish` command issues with --test and --npm flags",
+      "prNumber": 5763,
+      "type": "bugfix",
+      "body": "This PR fixes two minor issues with the `elizaos publish` command:\r\n\r\n**1. Fix `elizaos publish --test` failing out of the box**\r\n\r\nWhen running `elizaos publish --test` OOTB, we get an error:\r\n```\r\n[2025-08-13 06:54:20] ERROR: Failed to up",
+      "files": [
+        "packages/cli/src/commands/publish/index.ts",
+        "packages/cli/src/commands/publish/types.ts",
+        "packages/cli/src/commands/publish/utils/metadata.ts",
+        "packages/cli/src/utils/github.ts"
+      ]
+    },
+    {
+      "title": "chore(ci): adjust release workflow and package metadata",
+      "prNumber": 5775,
+      "type": "other",
+      "body": "- Remove 'merge main to develop' step from  to avoid automatic branch merges in release job.\n- Minor metadata sync in various  files and .\n\nBase: develop\nHead: chore/release-workflow-tweaks",
+      "files": [
+        ".github/workflows/release.yaml",
+        "bun.lock",
+        "lerna.json",
+        "packages/api-client/package.json",
+        "packages/cli/package.json",
+        "packages/plugin-bootstrap/package.json",
+        "packages/plugin-dummy-services/package.json",
+        "packages/plugin-sql/package.json",
+        "packages/project-starter/src/__tests__/events.test.ts",
+        "packages/server/package.json",
+        "packages/test-utils/package.json"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "wtfsayo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
-      "totalScore": 317.35111401391566,
-      "prScore": 317.35111401391566,
+      "totalScore": 373.25968270042716,
+      "prScore": 367.0596827004272,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yungalgo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
+      "totalScore": 57.52973866189474,
+      "prScore": 56.98973866189474,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -241,16 +282,6 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 39.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "yungalgo",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
-      "totalScore": 30.026820912568606,
-      "prScore": 29.826820912568607,
-      "issueScore": 0,
-      "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
     },
@@ -285,6 +316,26 @@
       "summary": null
     },
     {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "HashWarlock",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64296537?u=1d8228a93c06c603e08d438677b3f736d6b1ab22&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "1BDO",
       "avatarUrl": "https://avatars.githubusercontent.com/u/210645034?v=4",
       "totalScore": 2,
@@ -295,9 +346,9 @@
       "summary": null
     }
   ],
-  "newPRs": 8,
-  "mergedPRs": 7,
+  "newPRs": 11,
+  "mergedPRs": 9,
   "newIssues": 16,
-  "closedIssues": 4,
-  "activeContributors": 14
+  "closedIssues": 7,
+  "activeContributors": 16
 }

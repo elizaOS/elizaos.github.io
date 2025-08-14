@@ -1,0 +1,195 @@
+{
+  "interval": {
+    "intervalStart": "2025-08-14T00:00:00.000Z",
+    "intervalEnd": "2025-08-15T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-08-14 to 2025-08-15, elizaos/eliza had 3 new PRs (2 merged), 0 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7ELgn4",
+      "title": "Calling `startAgent` from CLI command start - hangs early when `@elizaos/plugin-bootstrap` is omitted & hangs later when it is included",
+      "author": "monilpat",
+      "number": 5719,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`packages/cli/src/commands/start/actions/agent-start.ts` is exported and re-used in CLI commands with  \n\n```ts\nimport { startAgent } from '../commands/start';\n```\n\nWhen I call `startAgent` from `runtime-factory.ts` / `initializeAgent()`:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  [],                       // <-- intentionally no bootstrap plugin\n  { isTestMode: false }\n);\n```\n\ninitialization hangs almost immediately (before plugin dependency resolution).\n\nIf I add `@elizaos/plugin-bootstrap` back:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  ['@elizaos/plugin-bootstrap'],\n  { isTestMode: false }\n);\n```\n\ninitialization gets past early steps, loads **all** plugins, but then hangs right after the bootstrap plugin finishes loading.\n\n---\n\n**To Reproduce**\n\n1. Build the CLI (`cd packages/cli && bun x tsup`).\n2. From `packages/cli` run a scenario that relies on `initializeAgent`, e.g.:\n\n```bash\nbun run src/index.ts scenario run \\\n  src/commands/scenario/examples/e2b-test.scenario.yaml\n```\n\n3. Edit `runtime-factory.ts` ➜ `initializeAgent()` and comment the bootstrap plugin in the `character.plugins` array (lines 411-415).\n4. Re-run the same command – observe early hang.\n5. Re-enable the bootstrap plugin and re-run – observe later hang.\n\n---\n\n**Expected behavior**\n\n`startAgent` should finish initializing an agent regardless of whether `@elizaos/plugin-bootstrap` is present.  \nIf the bootstrap plugin is mandatory there should be a clear validation error, not a silent hang.\n\n---\n\n**Logs / Screenshots**\n\n<details>\n<summary>1️⃣ Hang without bootstrap plugin (early-stage)</summary>\n\n```\n[2025-08-04 02:47:47] INFO: [startAgent] Step 1 – Starting agent initialization\n[2025-08-04 02:47:47] INFO: [startAgent] Step 2 – Character ID set\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3 – Checking character secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3c – Character already has secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4 – Initializing plugin loading\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4a – SQL plugin loaded\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4b – Character plugins: [\"@elizaos/plugin-e2b\",\"@elizaos/plugin-openai\"]\n... nothing further – process hangs here ...\n```\n</details>\n\n<details>\n<summary>2️⃣ Hang with bootstrap plugin (late-stage)</summary>\n\n```\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 1 – Starting to load plugin: @elizaos/plugin-bootstrap\n[2025-08-04 02:52:47] SUCCESS: Successfully loaded plugin '@elizaos/plugin-bootstrap' using workspace dependency\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 4e – Found valid plugin export\n[2025-08-04 02:52:47] INFO: [startAgent] Step 5d – Successfully loaded plugin: bootstrap\n... no further output – runtime hangs right after this point ...\n```\n</details>\n\n---\n\n**Additional context**\n\n* The call site is `packages/cli/src/scenarios/runtime-factory.ts` → `initializeAgent()`.\n* `startAgent` is imported with  \n  `import { startAgent } from '../commands/start';`\n* Hangs occur both in **local** and **E2B** scenarios.\n* Database migrations complete successfully; the hang happens after plugin loading.\n* Removing *all* plugins except SQL reproduces the *early* hang; adding any plugin that has bootstrap as a dep reproduces the *late* hang.\n* The same code path works in commit `510b8aac2e0b20cc3d176093a58143c26e838e65` (July 25 commit) but fails from `d84963ef3d5f5cccfef461350175dc1bc9b77b58` onward.\n\nPlease review my branch and the file for the associated changes. I review the plugin loading stack trace loadAndPreparePlugin -> loadPluginModule -> strategy.tryImport (which is where it hangs \n\n```\n */\nconst importStrategies: ImportStrategy[] = [\n  // Try local development first - this is the most important for plugin testing\n  {\n    name: 'local development plugin',\n    tryImport: async (repository: string) => {\n      const context = detectPluginContext(repository);\n\n      if (context.isLocalDevelopment) {\n        logger.debug(`Detected local development for plugin: ${repository}`);\n\n        // Ensure the plugin is built\n        const isBuilt = await ensurePluginBuilt(context);\n        if (!isBuilt) {\n          provideLocalPluginGuidance(repository, context);\n          return null;\n        }\n\n        // Try to load from built output\n        if (context.localPath && existsSync(context.localPath)) {\n          logger.info(`Loading local development plugin: ${repository}`);\n          return tryImporting(context.localPath, 'local development plugin', repository);\n        }\n\n        // This shouldn't happen if ensurePluginBuilt succeeded, but handle it gracefully\n        logger.warn(`Plugin built but output not found at expected path: ${context.localPath}`);\n        provideLocalPluginGuidance(repository, context);\n        return null;\n      }\n\n      return null;\n    },\n  },\n  // Try workspace dependencies (for monorepo packages)\n  {\n    name: 'workspace dependency',\n    tryImport: async (repository: string) => {\n      if (repository.startsWith('@elizaos/plugin-')) {\n        // Try to find the plugin in the workspace\n        const pluginName = repository.replace('@elizaos/', '');\n        const workspacePath = path.resolve(process.cwd(), '..', pluginName, 'dist', 'index.js');\n        if (existsSync(workspacePath)) {\n          return tryImporting(workspacePath, 'workspace dependency', repository);\n        }\n      }\n      return null;\n    },\n  },\n  {\n    name: 'direct path',\n    tryImport: async (repository: string) => tryImporting(repository, 'direct path', repository),\n  },\n  {\n    name: 'local node_modules',\n    tryImport: async (repository: string) =>\n      tryImporting(resolveNodeModulesPath(repository), 'local node_modules', repository),\n  },\n  {\n    name: 'global node_modules',\n    tryImport: async (repository: string) => {\n      const globalPath = path.resolve(getGlobalNodeModulesPath(), repository);\n      if (!existsSync(path.dirname(globalPath))) {\n        logger.debug(\n          `Global node_modules directory not found at ${path.dirname(globalPath)}, skipping for ${repository}`\n        );\n        return null;\n      }\n      return tryImporting(globalPath, 'global node_modules', repository);\n    },\n  },\n  {\n    name: 'package.json entry',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (!packageJson) return null;\n\n      const entryPoint = packageJson.module || packageJson.main || DEFAULT_ENTRY_POINT;\n      return tryImporting(\n        resolveNodeModulesPath(repository, entryPoint),\n        `package.json entry (${entryPoint})`,\n        repository\n      );\n    },\n  },\n  {\n    name: 'common dist pattern',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (packageJson?.main === DEFAULT_ENTRY_POINT) return null;\n\n      return tryImporting(\n        resolveNodeModulesPath(repository, DEFAULT_ENTRY_POINT),\n        'common dist pattern',\n        repository\n      );\n    },\n  },\n];\n``` in load-plugin.ts  BRANCH in question: https://github.com/elizaOS/eliza/blob/scenarios-cli/packages/cli/src/scenarios/runtime-factory.ts\n\n\nbut startAgent is in develop and is having issues when its being called. ",
+      "createdAt": "2025-08-05T02:45:31Z",
+      "closedAt": "2025-08-14T02:44:06Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs7EwwuN",
+      "title": "Eliza CLI failed to build project",
+      "author": "Kemystra",
+      "number": 5734,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nOn project creation, ElizaOS CLI fails with the following error:\n```\n◇  Failed to build project\nstdout: src/index.ts(7,25): error TS2345: Argument of type 'string' is not assignable to parameter of type 'undefined'.\nstderr: $ tsc --noEmit && vite build && tsup\n```\n\n**To Reproduce**\n\n- Install ElizaOS through `bun`\n```\nbun i -g @elizaos/cli\n```\n- Create new ElizaOS project\n```\nelizaos create abcde\n```\n\n**Expected behavior**\n\nProject built successfully\n\n**Screenshots**\n\n<img width=\"1095\" height=\"572\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/967dd6a2-0d70-4e2e-8019-85a2eab5f225\" />\n\n**Additional context**\n\nElizaOS CLI version: `1.3.2`\n",
+      "createdAt": "2025-08-07T16:14:00Z",
+      "closedAt": "2025-08-14T07:09:33Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs7FcF7u",
+      "title": "feat(scenarios): Add Execution Time Evaluator",
+      "author": "monilpat",
+      "number": 5757,
+      "repository": "elizaos/eliza",
+      "body": "# feat(scenarios): Add Execution Time Evaluator\n\nLinks: [Issue #5726](https://github.com/elizaOS/eliza/issues/5726)\n\n## Summary\nAdd an evaluator that measures per-step execution duration and asserts against bounds (max/min/target). This is foundational for performance benchmarking and simple SLAs.\n\n## Goals\n- Measure execution duration for each `run` step\n- Expose timing data to evaluations\n- Evaluate against `max_duration_ms`, optional `min_duration_ms`, and optional `target_duration_ms`\n\n## Acceptance Criteria\n1. New evaluator type `execution_time` supported by scenarios\n2. Duration recorded for both Local and E2B environments\n3. Evaluator passes when duration <= `max_duration_ms` (and >= `min_duration_ms` if provided)\n4. Detailed message includes actual duration\n5. Unit tests and example scenario added\n\n## Schema Changes\nEdit `packages/cli/src/commands/scenario/src/schema.ts` to add:\n\n```ts\nconst ExecutionTimeEvaluationSchema = BaseEvaluationSchema.extend({\n  type: z.literal('execution_time'),\n  max_duration_ms: z.number(),\n  min_duration_ms: z.number().optional(),\n  target_duration_ms: z.number().optional(),\n});\n\n// Add to union\n// ... EvaluationSchema = z.discriminatedUnion('type', [\n//   ...,\n//   ExecutionTimeEvaluationSchema,\n// ]);\n```\n\n## Runtime/Providers Changes\nAdd timing capture to `ExecutionResult` and both environment providers.\n\nEdit `packages/cli/src/commands/scenario/src/providers.ts`:\n\n```ts\nexport interface ExecutionResult {\n  exitCode: number;\n  stdout: string;\n  stderr: string;\n  files: Record<string, string>;\n  startedAtMs?: number; // epoch ms\n  endedAtMs?: number;   // epoch ms\n  durationMs?: number;  // derived convenience\n}\n```\n\nInstrument `LocalEnvironmentProvider.run` and `E2BEnvironmentProvider.run` to set `startedAtMs`, `endedAtMs`, `durationMs` around each step execution.\n\n## EvaluationEngine Changes\nAdd a new evaluator implementation:\n\n```ts\n// type: execution_time\nclass ExecutionTimeEvaluator implements Evaluator {\n  async evaluate(params: EvaluationSchema, runResult: ExecutionResult): Promise<EvaluationResult> {\n    if (params.type !== 'execution_time') throw new Error('Mismatched evaluator');\n    const duration = runResult.durationMs ?? ((runResult as any).endedAtMs - (runResult as any).startedAtMs);\n    if (duration == null || Number.isNaN(duration)) {\n      return { success: false, message: 'No timing information available for this step' };\n    }\n    const tooSlow = duration > params.max_duration_ms;\n    const tooFast = params.min_duration_ms != null && duration < params.min_duration_ms;\n    const success = !tooSlow && !tooFast;\n    return {\n      success,\n      message: `Execution time ${duration}ms (min=${params.min_duration_ms ?? '-'}, target=${params.target_duration_ms ?? '-'}, max=${params.max_duration_ms})`,\n    };\n  }\n}\n```\n\nRegister in `EvaluationEngine` constructor:\n\n```ts\nthis.register('execution_time', new ExecutionTimeEvaluator());\n```\n\n## Example Scenario Snippet\n\n```yaml\nevaluations:\n  - type: execution_time\n    max_duration_ms: 5000\n    min_duration_ms: 50\n    target_duration_ms: 1000\n```\n\n## Tests\n- Unit tests for evaluator with mocked `ExecutionResult` values\n- Integration tests for Local/E2B providers to ensure timing fields are present\n\n## Risks and Mitigations\n- Clock skew: use single-process monotonic where feasible (Date.now is acceptable low-lift). For E2B, measure from the orchestrator around the call boundary.\n- Missing timing fields: evaluator should fail gracefully with a clear message.\n\n## Rollout\n1. Schema + providers timing fields\n2. Evaluator registration and implementation\n3. Tests and example docs\n4. Follow-ups: percentile/throughput aggregations in separate tickets\n\n\n",
+      "createdAt": "2025-08-12T04:27:12Z",
+      "closedAt": "2025-08-14T02:43:34Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6jp0Sx",
+      "title": "chore(ci): adjust release workflow and package metadata",
+      "author": "wtfsayo",
+      "number": 5775,
+      "body": "- Remove 'merge main to develop' step from  to avoid automatic branch merges in release job.\n- Minor metadata sync in various  files and .\n\nBase: develop\nHead: chore/release-workflow-tweaks",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-14T10:03:49Z",
+      "mergedAt": "2025-08-14T11:35:44Z",
+      "additions": 63,
+      "deletions": 61
+    },
+    {
+      "id": "PR_kwDOMT5cIs6jLjXe",
+      "title": "build: update checkout action to v5",
+      "author": "rejected-l",
+      "number": 5762,
+      "body": "Bumps checkout to v5 for future-proofing against Node 24 runner updates. Requires runner v2.327.1+. Workflows compile the same.\n\nMore info: https://github.com/actions/checkout/releases/tag/v5.0.0",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-12T05:29:45Z",
+      "mergedAt": null,
+      "additions": 41,
+      "deletions": 41
+    },
+    {
+      "id": "PR_kwDOMT5cIs6joUWf",
+      "title": "fix: fix: phala CLI argument handling and tee starter docker build",
+      "author": "yungalgo",
+      "number": 5773,
+      "body": "## Description\r\n\r\nThis PR fixes two minor issues preventing the tee command from working as intended:\r\n\r\n### 1. Phala CLI Wrapper Argument Handling\r\n\r\nThe ElizaOS wrapper for the Phala CLI was not correctly capturing arguments, causing commands like `elizaos tee phala cvms create --image ...` to fail with \"error: too many arguments for 'phala'. Expected 0 arguments but got X.\"\r\n\r\n**Root Cause**: The wrapper's action handler was accessing `command.args` which was undefined. Commander.js requires specific configuration to capture variadic arguments. i think we probably wrote this before we had commander.\r\n\r\n**Fix**: Added proper variadic argument handling:\r\n```typescript\r\n.allowExcessArguments(true)\r\n.argument('[args...]', 'All arguments to pass to Phala CLI')\r\n.action(async (...commandArgs) => {\r\n    const args = Array.isArray(commandArgs[0]) ? commandArgs[0] : [];\r\n    // ... rest of handler\r\n})\r\n```\r\n\r\n### 2. TEE Starter Project Docker Build Failure\r\n\r\nThe project-tee-starter template was importing test files in production code, causing Docker builds to fail.\r\n\r\n**Root Cause**: The `index.ts` was importing `ProjectTeeStarterTestSuite` from the `__tests__` directory, which is typically excluded in production builds.\r\n\r\n**Fix**: Removed the test import and replaced the `tests` export with the proper `plugins` export:\r\n```diff\r\n- import ProjectTeeStarterTestSuite from './__tests__/e2e/project-tee-starter.e2e';\r\n...\r\n- tests: [ProjectTeeStarterTestSuite], // Export tests from ProjectAgent\r\n+ plugins: [teeStarterPlugin], // Add any additional plugins here\r\n```\r\n\r\n## Testing\r\n\r\n### Phala CLI Testing\r\n```bash\r\n# All commands now work correctly:\r\nelizaos tee phala --help\r\nelizaos tee phala status\r\nelizaos tee phala auth login <key>\r\nelizaos tee phala cvms create --image yungalgorithm/my-lil-agent:latest -e .env\r\n```\r\n\r\n### TEE Starter Build Testing\r\n```bash\r\n# Docker builds now complete successfully\r\ncd packages/project-tee-starter\r\ndocker build -t test-tee-starter .\r\n```\r\n\r\n## Impact\r\n\r\n- Users can now use all Phala CLI commands through the ElizaOS wrapper\r\n- TEE starter projects can be built and deployed via Docker\r\n- No breaking changes to existing functionality\r\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Phala CLI command now accepts variadic/excess arguments and forwards them, enabling full access to all underlying options.\n  * Starter project adopts a plugin-based extension model; a TEE starter plugin is enabled by default.\n\n* **Refactor**\n  * Unified CLI logging with consistent info, warning, and error messages, plus clearer run/failure hints.\n\n* **Chores**\n  * Maintains existing behavior and exit handling; no breaking changes expected for typical workflows.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-14T07:48:29Z",
+      "mergedAt": null,
+      "additions": 31,
+      "deletions": 20
+    },
+    {
+      "id": "PR_kwDOMT5cIs6joaWa",
+      "title": "fix: correct comma placement when adding entries to registry index.json",
+      "author": "yungalgo",
+      "number": 5774,
+      "body": "## Description\r\n\r\n### Problem\r\nThe `elizaos publish` command incorrectly handled commas when adding new plugin entries to the registry's `index.json` file:\r\n- Did not add a comma to the previously last entry\r\n- Incorrectly added a comma to the new entry when it became the last entry\r\n\r\nThis resulted in invalid JSON:\r\n```json\r\n\"@elizaos/plugin-action-bench\": \"github:elizaos-plugins/plugin-action-bench\"\r\n\"plugin-fal-ai\": \"github:yungalgo/plugin-fal-ai\",\r\n```\r\n\r\n### Solution\r\nModified the insertion logic in `publishToGitHub` function to:\r\n1. Detect if inserting before the closing `}` brace (last entry position)\r\n2. When inserting as last entry:\r\n   - Add comma to the previous entry if it doesn't have one\r\n   - Remove comma from the new entry\r\n3. When inserting in the middle: keep comma on new entry\r\n\r\n### Result\r\nProduces valid JSON:\r\n```json\r\n\"@elizaos/plugin-action-bench\": \"github:elizaos-plugins/plugin-action-bench\",\r\n\"plugin-fal-ai\": \"github:yungalgo/plugin-fal-ai\"\r\n```\r\n\r\n### Changes\r\n- `packages/cli/src/utils/publisher.ts`: Updated comma handling logic in lines 444-470\r\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Resolved an issue where the last item added during publishing could produce invalid JSON due to misplaced commas.\n  * Improved handling of comma placement when inserting the final entry in the index to ensure consistently valid JSON.\n  * Prevents intermittent publish failures and parsing errors caused by trailing comma mistakes.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-14T07:58:40Z",
+      "mergedAt": null,
+      "additions": 30,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDOMT5cIs6jbBJc",
+      "title": "fix: resolve `elizaos publish` command issues with --test and --npm flags",
+      "author": "yungalgo",
+      "number": 5763,
+      "body": "This PR fixes two minor issues with the `elizaos publish` command:\r\n\r\n**1. Fix `elizaos publish --test` failing out of the box**\r\n\r\nWhen running `elizaos publish --test` OOTB, we get an error:\r\n```\r\n[2025-08-13 06:54:20] ERROR: Failed to update file: 404 Not Found\r\n[2025-08-13 06:54:20] ERROR: Repository or path not found: yungalgo/registry/test-files/.gitkeep/\r\n```\r\n\r\n**Root cause**: The `ensureDirectory` function was incorrectly passing parameters to `updateFile`. It was passing the full repository string (e.g., `\"username/repo\"`) as a single parameter, but `updateFile` expects separate `owner` and `repo` parameters.\r\n\r\n**Fix**: Split the repository string into owner and repo components before calling `updateFile`.\r\n\r\n**2. Remove GitHub repository references when using `--npm` flag**\r\n\r\nWhen running `elizaos publish --npm`, we publish to npm only (skipping GitHub repo creation), but the package.json still included repository and bugs URLs pointing to a non-existent GitHub repository. This shows up on the npm package page as broken links.\r\n\r\n**Root cause**: The publish flow was setting repository placeholders regardless of the --npm flag.\r\n\r\n**Fix**: \r\n- Delete `repository` and `bugs` fields from package.json when `--npm` flag is used\r\n- Make the `repository` field optional in `PackageMetadata` interface\r\n- Only include repository in metadata when it actually exists\r\n\r\n## Testing\r\n\r\n- ✅ Tested `elizaos publish --test` - now completes successfully\r\n- ✅ Tested `elizaos publish --npm` - package.json no longer includes phantom GitHub URLs\r\n- ✅ Verified no regressions in standard `elizaos publish` flow\r\n\r\n## Changes\r\n\r\n- `packages/cli/src/utils/github.ts`: Fixed parameter passing in `ensureDirectory`\r\n- `packages/cli/src/commands/publish/index.ts`: Added logic to remove repository/bugs fields for npm-only publishing\r\n- `packages/cli/src/commands/publish/utils/metadata.ts`: Made repository field conditional\r\n- `packages/cli/src/commands/publish/types.ts`: Made repository field optional in interface\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-13T07:28:44Z",
+      "mergedAt": "2025-08-14T15:23:45Z",
+      "additions": 23,
+      "deletions": 3
+    }
+  ],
+  "codeChanges": {
+    "additions": 86,
+    "deletions": 64,
+    "files": 15,
+    "commitCount": 13
+  },
+  "completedItems": [
+    {
+      "title": "fix: resolve `elizaos publish` command issues with --test and --npm flags",
+      "prNumber": 5763,
+      "type": "bugfix",
+      "body": "This PR fixes two minor issues with the `elizaos publish` command:\r\n\r\n**1. Fix `elizaos publish --test` failing out of the box**\r\n\r\nWhen running `elizaos publish --test` OOTB, we get an error:\r\n```\r\n[2025-08-13 06:54:20] ERROR: Failed to up",
+      "files": [
+        "packages/cli/src/commands/publish/index.ts",
+        "packages/cli/src/commands/publish/types.ts",
+        "packages/cli/src/commands/publish/utils/metadata.ts",
+        "packages/cli/src/utils/github.ts"
+      ]
+    },
+    {
+      "title": "chore(ci): adjust release workflow and package metadata",
+      "prNumber": 5775,
+      "type": "other",
+      "body": "- Remove 'merge main to develop' step from  to avoid automatic branch merges in release job.\n- Minor metadata sync in various  files and .\n\nBase: develop\nHead: chore/release-workflow-tweaks",
+      "files": [
+        ".github/workflows/release.yaml",
+        "bun.lock",
+        "lerna.json",
+        "packages/api-client/package.json",
+        "packages/cli/package.json",
+        "packages/plugin-bootstrap/package.json",
+        "packages/plugin-dummy-services/package.json",
+        "packages/plugin-sql/package.json",
+        "packages/project-starter/src/__tests__/events.test.ts",
+        "packages/server/package.json",
+        "packages/test-utils/package.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 55.908568686511515,
+      "prScore": 49.70856868651151,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yungalgo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
+      "totalScore": 27.502917749326134,
+      "prScore": 27.162917749326134,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "HashWarlock",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64296537?u=1d8228a93c06c603e08d438677b3f736d6b1ab22&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 3,
+  "activeContributors": 7
+}

@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-08-01 to 2025-09-01, elizaos/eliza had 40 new PRs (33 merged), 36 new issues, and 24 active contributors.",
+  "overview": "From 2025-08-01 to 2025-09-01, elizaos/eliza had 43 new PRs (35 merged), 36 new issues, and 25 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7ELgn4",
@@ -15,9 +15,21 @@
       "repository": "elizaos/eliza",
       "body": "**Describe the bug**\n\n`packages/cli/src/commands/start/actions/agent-start.ts` is exported and re-used in CLI commands with  \n\n```ts\nimport { startAgent } from '../commands/start';\n```\n\nWhen I call `startAgent` from `runtime-factory.ts` / `initializeAgent()`:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  [],                       // <-- intentionally no bootstrap plugin\n  { isTestMode: false }\n);\n```\n\ninitialization hangs almost immediately (before plugin dependency resolution).\n\nIf I add `@elizaos/plugin-bootstrap` back:\n\n```ts\nconst runtime = await startAgent(\n  encryptedCharacter(character),\n  server,\n  undefined,\n  ['@elizaos/plugin-bootstrap'],\n  { isTestMode: false }\n);\n```\n\ninitialization gets past early steps, loads **all** plugins, but then hangs right after the bootstrap plugin finishes loading.\n\n---\n\n**To Reproduce**\n\n1. Build the CLI (`cd packages/cli && bun x tsup`).\n2. From `packages/cli` run a scenario that relies on `initializeAgent`, e.g.:\n\n```bash\nbun run src/index.ts scenario run \\\n  src/commands/scenario/examples/e2b-test.scenario.yaml\n```\n\n3. Edit `runtime-factory.ts` ➜ `initializeAgent()` and comment the bootstrap plugin in the `character.plugins` array (lines 411-415).\n4. Re-run the same command – observe early hang.\n5. Re-enable the bootstrap plugin and re-run – observe later hang.\n\n---\n\n**Expected behavior**\n\n`startAgent` should finish initializing an agent regardless of whether `@elizaos/plugin-bootstrap` is present.  \nIf the bootstrap plugin is mandatory there should be a clear validation error, not a silent hang.\n\n---\n\n**Logs / Screenshots**\n\n<details>\n<summary>1️⃣ Hang without bootstrap plugin (early-stage)</summary>\n\n```\n[2025-08-04 02:47:47] INFO: [startAgent] Step 1 – Starting agent initialization\n[2025-08-04 02:47:47] INFO: [startAgent] Step 2 – Character ID set\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3 – Checking character secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 3c – Character already has secrets\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4 – Initializing plugin loading\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4a – SQL plugin loaded\n[2025-08-04 02:47:47] INFO: [startAgent] Step 4b – Character plugins: [\"@elizaos/plugin-e2b\",\"@elizaos/plugin-openai\"]\n... nothing further – process hangs here ...\n```\n</details>\n\n<details>\n<summary>2️⃣ Hang with bootstrap plugin (late-stage)</summary>\n\n```\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 1 – Starting to load plugin: @elizaos/plugin-bootstrap\n[2025-08-04 02:52:47] SUCCESS: Successfully loaded plugin '@elizaos/plugin-bootstrap' using workspace dependency\n[2025-08-04 02:52:47] INFO: [loadAndPreparePlugin] Step 4e – Found valid plugin export\n[2025-08-04 02:52:47] INFO: [startAgent] Step 5d – Successfully loaded plugin: bootstrap\n... no further output – runtime hangs right after this point ...\n```\n</details>\n\n---\n\n**Additional context**\n\n* The call site is `packages/cli/src/scenarios/runtime-factory.ts` → `initializeAgent()`.\n* `startAgent` is imported with  \n  `import { startAgent } from '../commands/start';`\n* Hangs occur both in **local** and **E2B** scenarios.\n* Database migrations complete successfully; the hang happens after plugin loading.\n* Removing *all* plugins except SQL reproduces the *early* hang; adding any plugin that has bootstrap as a dep reproduces the *late* hang.\n* The same code path works in commit `510b8aac2e0b20cc3d176093a58143c26e838e65` (July 25 commit) but fails from `d84963ef3d5f5cccfef461350175dc1bc9b77b58` onward.\n\nPlease review my branch and the file for the associated changes. I review the plugin loading stack trace loadAndPreparePlugin -> loadPluginModule -> strategy.tryImport (which is where it hangs \n\n```\n */\nconst importStrategies: ImportStrategy[] = [\n  // Try local development first - this is the most important for plugin testing\n  {\n    name: 'local development plugin',\n    tryImport: async (repository: string) => {\n      const context = detectPluginContext(repository);\n\n      if (context.isLocalDevelopment) {\n        logger.debug(`Detected local development for plugin: ${repository}`);\n\n        // Ensure the plugin is built\n        const isBuilt = await ensurePluginBuilt(context);\n        if (!isBuilt) {\n          provideLocalPluginGuidance(repository, context);\n          return null;\n        }\n\n        // Try to load from built output\n        if (context.localPath && existsSync(context.localPath)) {\n          logger.info(`Loading local development plugin: ${repository}`);\n          return tryImporting(context.localPath, 'local development plugin', repository);\n        }\n\n        // This shouldn't happen if ensurePluginBuilt succeeded, but handle it gracefully\n        logger.warn(`Plugin built but output not found at expected path: ${context.localPath}`);\n        provideLocalPluginGuidance(repository, context);\n        return null;\n      }\n\n      return null;\n    },\n  },\n  // Try workspace dependencies (for monorepo packages)\n  {\n    name: 'workspace dependency',\n    tryImport: async (repository: string) => {\n      if (repository.startsWith('@elizaos/plugin-')) {\n        // Try to find the plugin in the workspace\n        const pluginName = repository.replace('@elizaos/', '');\n        const workspacePath = path.resolve(process.cwd(), '..', pluginName, 'dist', 'index.js');\n        if (existsSync(workspacePath)) {\n          return tryImporting(workspacePath, 'workspace dependency', repository);\n        }\n      }\n      return null;\n    },\n  },\n  {\n    name: 'direct path',\n    tryImport: async (repository: string) => tryImporting(repository, 'direct path', repository),\n  },\n  {\n    name: 'local node_modules',\n    tryImport: async (repository: string) =>\n      tryImporting(resolveNodeModulesPath(repository), 'local node_modules', repository),\n  },\n  {\n    name: 'global node_modules',\n    tryImport: async (repository: string) => {\n      const globalPath = path.resolve(getGlobalNodeModulesPath(), repository);\n      if (!existsSync(path.dirname(globalPath))) {\n        logger.debug(\n          `Global node_modules directory not found at ${path.dirname(globalPath)}, skipping for ${repository}`\n        );\n        return null;\n      }\n      return tryImporting(globalPath, 'global node_modules', repository);\n    },\n  },\n  {\n    name: 'package.json entry',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (!packageJson) return null;\n\n      const entryPoint = packageJson.module || packageJson.main || DEFAULT_ENTRY_POINT;\n      return tryImporting(\n        resolveNodeModulesPath(repository, entryPoint),\n        `package.json entry (${entryPoint})`,\n        repository\n      );\n    },\n  },\n  {\n    name: 'common dist pattern',\n    tryImport: async (repository: string) => {\n      const packageJson = await readPackageJson(repository);\n      if (packageJson?.main === DEFAULT_ENTRY_POINT) return null;\n\n      return tryImporting(\n        resolveNodeModulesPath(repository, DEFAULT_ENTRY_POINT),\n        'common dist pattern',\n        repository\n      );\n    },\n  },\n];\n``` in load-plugin.ts  BRANCH in question: https://github.com/elizaOS/eliza/blob/scenarios-cli/packages/cli/src/scenarios/runtime-factory.ts\n\n\nbut startAgent is in develop and is having issues when its being called. ",
       "createdAt": "2025-08-05T02:45:31Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 4
+      "closedAt": "2025-08-14T02:44:06Z",
+      "state": "CLOSED",
+      "commentCount": 5
+    },
+    {
+      "id": "I_kwDOMT5cIs7EwwuN",
+      "title": "Eliza CLI failed to build project",
+      "author": "Kemystra",
+      "number": 5734,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nOn project creation, ElizaOS CLI fails with the following error:\n```\n◇  Failed to build project\nstdout: src/index.ts(7,25): error TS2345: Argument of type 'string' is not assignable to parameter of type 'undefined'.\nstderr: $ tsc --noEmit && vite build && tsup\n```\n\n**To Reproduce**\n\n- Install ElizaOS through `bun`\n```\nbun i -g @elizaos/cli\n```\n- Create new ElizaOS project\n```\nelizaos create abcde\n```\n\n**Expected behavior**\n\nProject built successfully\n\n**Screenshots**\n\n<img width=\"1095\" height=\"572\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/967dd6a2-0d70-4e2e-8019-85a2eab5f225\" />\n\n**Additional context**\n\nElizaOS CLI version: `1.3.2`\n",
+      "createdAt": "2025-08-07T16:14:00Z",
+      "closedAt": "2025-08-14T07:09:33Z",
+      "state": "CLOSED",
+      "commentCount": 3
     },
     {
       "id": "I_kwDOMT5cIs7Engk3",
@@ -30,18 +42,6 @@
       "closedAt": "2025-08-12T04:21:45Z",
       "state": "CLOSED",
       "commentCount": 3
-    },
-    {
-      "id": "I_kwDOMT5cIs7EwwuN",
-      "title": "Eliza CLI failed to build project",
-      "author": "Kemystra",
-      "number": 5734,
-      "repository": "elizaos/eliza",
-      "body": "**Describe the bug**\n\nOn project creation, ElizaOS CLI fails with the following error:\n```\n◇  Failed to build project\nstdout: src/index.ts(7,25): error TS2345: Argument of type 'string' is not assignable to parameter of type 'undefined'.\nstderr: $ tsc --noEmit && vite build && tsup\n```\n\n**To Reproduce**\n\n- Install ElizaOS through `bun`\n```\nbun i -g @elizaos/cli\n```\n- Create new ElizaOS project\n```\nelizaos create abcde\n```\n\n**Expected behavior**\n\nProject built successfully\n\n**Screenshots**\n\n<img width=\"1095\" height=\"572\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/967dd6a2-0d70-4e2e-8019-85a2eab5f225\" />\n\n**Additional context**\n\nElizaOS CLI version: `1.3.2`\n",
-      "createdAt": "2025-08-07T16:14:00Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 2
     },
     {
       "id": "I_kwDOMT5cIs7Eng6F",
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 13724,
-    "deletions": 26199,
-    "files": 269,
-    "commitCount": 204
+    "additions": 13810,
+    "deletions": 26263,
+    "files": 273,
+    "commitCount": 217
   },
   "completedItems": [
     {
@@ -866,17 +866,48 @@
         "src/index.ts",
         "tsconfig.json"
       ]
+    },
+    {
+      "title": "fix: resolve `elizaos publish` command issues with --test and --npm flags",
+      "prNumber": 5763,
+      "type": "bugfix",
+      "body": "This PR fixes two minor issues with the `elizaos publish` command:\r\n\r\n**1. Fix `elizaos publish --test` failing out of the box**\r\n\r\nWhen running `elizaos publish --test` OOTB, we get an error:\r\n```\r\n[2025-08-13 06:54:20] ERROR: Failed to up",
+      "files": [
+        "packages/cli/src/commands/publish/index.ts",
+        "packages/cli/src/commands/publish/types.ts",
+        "packages/cli/src/commands/publish/utils/metadata.ts",
+        "packages/cli/src/utils/github.ts"
+      ]
+    },
+    {
+      "title": "chore(ci): adjust release workflow and package metadata",
+      "prNumber": 5775,
+      "type": "other",
+      "body": "- Remove 'merge main to develop' step from  to avoid automatic branch merges in release job.\n- Minor metadata sync in various  files and .\n\nBase: develop\nHead: chore/release-workflow-tweaks",
+      "files": [
+        ".github/workflows/release.yaml",
+        "bun.lock",
+        "lerna.json",
+        "packages/api-client/package.json",
+        "packages/cli/package.json",
+        "packages/plugin-bootstrap/package.json",
+        "packages/plugin-dummy-services/package.json",
+        "packages/plugin-sql/package.json",
+        "packages/project-starter/src/__tests__/events.test.ts",
+        "packages/server/package.json",
+        "packages/test-utils/package.json"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "wtfsayo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
-      "totalScore": 1163.0417534873613,
-      "prScore": 1152.1017534873613,
+      "totalScore": 1218.9503221738728,
+      "prScore": 1201.810322173873,
       "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.94,
+      "reviewScore": 16,
+      "commentScore": 1.1400000000000001,
       "summary": "wtfsayo: This month, wtfsayo focused on improving the build process and developer experience for the elizaos/eliza repository. They landed a significant build optimization in PR #5701, which also added markdown rendering support and removed nearly 3,500 lines of code. Additionally, they improved the developer workflow by auto-installing the CLI via PR #5702 and removed obsolete documentation and workflow files. Their work was concentrated on feature development and refactoring, primarily modifying configuration and code files."
     },
     {
@@ -890,24 +921,24 @@
       "summary": "ChristopherTrimboli: Focused on developing a new sessions API, opening a significant pull request in elizaos/eliza (#5704). This work involved substantial changes, modifying 13 files with over 1500 lines of new code and tests. This effort was primarily focused on new feature development and also included one peer review."
     },
     {
-      "username": "0xbbjoker",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
-      "totalScore": 146.18592386044378,
-      "prScore": 135.98592386044376,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.2,
-      "summary": "0xbbjoker: Focused on repository maintenance and bug fixes this month, with their most impactful contribution being a significant cleanup that removed over 12,600 lines of unused specs in `elizaos/eliza#5724`. They also addressed logger compatibility issues by merging a fix in `elizaos-plugins/plugin-knowledge#38` and supported the team with two code reviews. This activity shows a primary focus on bugfix work, with the majority of changes concentrated in test files."
-    },
-    {
       "username": "yungalgo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
-      "totalScore": 143.31689099292257,
-      "prScore": 132.99889099292255,
+      "totalScore": 170.8198087422487,
+      "prScore": 160.1618087422487,
       "issueScore": 0,
       "reviewScore": 9,
-      "commentScore": 1.3179999999999998,
+      "commentScore": 1.658,
       "summary": "yungalgo: Focused on improving test components this month, opening a significant pull request in elizaos/eliza (#5705) to address a fix. This work-in-progress contains substantial changes (+2097/-635 lines) across 31 files, reflecting their 19 commits on the topic. Based on their code changes, their activity shows a primary focus on tests, bugfixes, and other related work."
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 151.38592386044377,
+      "prScore": 135.98592386044376,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.4,
+      "summary": "0xbbjoker: Focused on repository maintenance and bug fixes this month, with their most impactful contribution being a significant cleanup that removed over 12,600 lines of unused specs in `elizaos/eliza#5724`. They also addressed logger compatibility issues by merging a fix in `elizaos-plugins/plugin-knowledge#38` and supported the team with two code reviews. This activity shows a primary focus on bugfix work, with the majority of changes concentrated in test files."
     },
     {
       "username": "alex-nax",
@@ -1020,6 +1051,16 @@
       "summary": "RolandOne: This month, RolandOne opened a pull request to add a new plugin to the registry (elizaos-plugins/registry#195), which involved a single-line addition to a configuration file."
     },
     {
+      "username": "HashWarlock",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64296537?u=1d8228a93c06c603e08d438677b3f736d6b1ab22&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "samarth30",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48334430?u=1fc119a6c2deb8cf60448b4c8961cb21dc69baeb&v=4",
       "totalScore": 4,
@@ -1090,9 +1131,9 @@
       "summary": null
     }
   ],
-  "newPRs": 40,
-  "mergedPRs": 33,
+  "newPRs": 43,
+  "mergedPRs": 35,
   "newIssues": 36,
-  "closedIssues": 21,
-  "activeContributors": 24
+  "closedIssues": 24,
+  "activeContributors": 25
 }
