@@ -33,6 +33,11 @@ export default {
       defaultBranch: "main",
     },
     {
+      owner: "elizaos",
+      name: "docs",
+      defaultBranch: "main",
+    },
+    {
       owner: "elizaos-plugins",
       name: "plugin-solana",
       defaultBranch: "1.x",
@@ -102,6 +107,7 @@ export default {
     "graphite-app",
     "google-labs-jules[bot]",
     "cursor",
+    "claude",
   ],
 
   // Scoring rules - controls how different contribution types are valued
