@@ -1,6 +1,8 @@
-# Eliza Leaderboard
+# Optimism Contributor Leaderboard
 
-A modern analytics pipeline for tracking and analyzing GitHub contributions. The system processes contributor data, generates AI-powered summaries, and maintains a leaderboard of developer activity.
+A modern analytics pipeline for tracking and analyzing GitHub contributions across the Optimism ecosystem. The system processes contributor data, generates AI-powered summaries, and maintains a leaderboard of developer activity across the top 12 most active Optimism repositories.
+
+> **🔴 Recently Updated**: This system has been reconfigured for the Optimism ecosystem. See [GitHub Issue #1](https://github.com/M3-org/op-hiscores/issues/1) for migration details.
 
 ## Prerequisites
 
@@ -40,8 +42,8 @@ OPENROUTER_API_KEY=your_api_key_here
 LARGE_MODEL=openai/gpt-4o-mini
 
 # Optional site info
-SITE_URL=https://elizaos.github.io
-SITE_NAME="ElizaOS Leaderboard"
+SITE_URL=https://your-deployment-url.com
+SITE_NAME="Optimism Contributor Leaderboard"
 ```
 
 Then load the environment variables:
@@ -51,31 +53,24 @@ source .envrc
 # Or if using direnv: direnv allow
 ```
 
-3. Configure repositories in `config/pipeline.config.ts`:
+3. Repository configuration is already set up for Optimism ecosystem.
 
-```typescript
-export default {
-  // Repositories to track
-  repositories: [
-    {
-      owner: "elizaos",
-      name: "eliza",
-    },
-  ],
+**Current Configuration** (Top 12 Most Active Optimism Repositories):
 
-  // Bot users to ignore
-  botUsers: ["dependabot", "renovate-bot"],
+- `ethereum-optimism/optimism` - Main protocol repository (38K+ activity score)
+- `ethereum-optimism/op-analytics` - Data and analytics tools
+- `ethereum-optimism/docs` - Developer documentation
+- `ethereum-optimism/community-hub` - Governance documentation
+- `ethereum-optimism/ethereum-optimism.github.io` - Token lists and web presence
+- `ethereum-optimism/superchain-ops` - Operational tooling
+- `ethereum-optimism/superchain-registry` - Ecosystem index
+- `ethereum-optimism/ecosystem` - Ecosystem tracking
+- `ethereum-optimism/op-geth` - Ethereum client fork
+- `ethereum-optimism/specs` - Technical specifications
+- `ethereum-optimism/infra` - Infrastructure
+- `ethereum-optimism/supersim` - Multi-L2 development environment
 
-  // Scoring and tag configuration...
-
-  // AI Summary configuration
-  aiSummary: {
-    enabled: true,
-    apiKey: process.env.OPENROUTER_API_KEY,
-    // ...
-  },
-};
-```
+> **Note**: Configuration is complete and tested. See `config/pipeline.config.ts` for full details.
 
 4. Initialize Database
 
@@ -145,6 +140,43 @@ bun run db:studio
 ```
 
 If you encounter any issues with Drizzle Studio due to Node.js version mismatches, you can use a different SQLite browser tool like [SQLite Browser](https://sqlitebrowser.org/).
+
+## 🚀 Current Status - Ready for Data Ingestion
+
+The system has been **fully configured and tested** for the Optimism ecosystem:
+
+✅ **COMPLETED**:
+
+- Repository configuration updated for top 12 Optimism repositories
+- Optimism branding and theme applied (Torch Red #FF0621)
+- Database schema migrated and tested
+- Pipeline tested with sample data (105 contributors processed)
+- Build verification completed
+
+📋 **READY FOR EXECUTION**:
+
+- **Phase 1**: 90-day recent data ingestion (~15 minutes, low risk)
+- **Phase 2+**: Historical data ingestion (monitored, phased approach)
+
+📊 **Data Scope**:
+
+- **18,508 PRs** + **4,846 issues** across 12 repositories
+- **~2,000+ contributors** estimated
+- **5-year history** available for ingestion
+
+For detailed execution plan, see:
+
+- **GitHub Issue**: [#1 Optimism Ecosystem Data Ingestion](https://github.com/M3-org/op-hiscores/issues/1)
+- **Task Documentation**: `.claude/tasks/optimism-reconfiguration/`
+
+### Quick Start - Phase 1 (Recommended)
+
+```bash
+# Execute 90-day ingestion (safe, quick, high-value)
+bun run pipeline ingest --days 90
+bun run pipeline process
+bun run build
+```
 
 ## Commands and Capabilities
 

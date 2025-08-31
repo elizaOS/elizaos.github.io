@@ -208,7 +208,7 @@ export function Navigation() {
         <div className="flex items-center gap-6">
           <Button variant="none" size={"none"} asChild>
             <Link href="/" className="transition-opacity hover:opacity-80">
-              <h1 className="text-xl font-bold">ElizaOS</h1>
+              <h1 className="text-xl font-bold">Optimism</h1>
             </Link>
           </Button>
           <div className="hidden items-center gap-2 sm:flex">

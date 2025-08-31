@@ -14,68 +14,68 @@ if (!openrouterApiKey) {
  * the affected areas of the codebase.
  */
 export default {
-  contributionStartDate: "2024-10-15",
-  // Repositories to track
+  contributionStartDate: "2024-01-01",
+  // Top 12 most active Optimism repositories based on GitHub activity analysis
   repositories: [
     {
-      owner: "elizaos",
-      name: "eliza",
-      defaultBranch: "main",
-    },
-    {
-      owner: "elizaos",
-      name: "auto.fun",
+      owner: "ethereum-optimism",
+      name: "optimism",
       defaultBranch: "develop",
     },
     {
-      owner: "elizaos",
-      name: "elizaos.github.io",
+      owner: "ethereum-optimism",
+      name: "op-analytics",
       defaultBranch: "main",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-solana",
-      defaultBranch: "1.x",
-    },
-    {
-      owner: "elizaos-plugins",
-      name: "plugin-knowledge",
-      defaultBranch: "1.x",
-    },
-    {
-      owner: "elizaos-plugins",
-      name: "registry",
+      owner: "ethereum-optimism",
+      name: "docs",
       defaultBranch: "main",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-twitter",
-      defaultBranch: "1.x",
+      owner: "ethereum-optimism",
+      name: "community-hub",
+      defaultBranch: "main",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-auton8n",
-      defaultBranch: "1.x",
+      owner: "ethereum-optimism",
+      name: "ethereum-optimism.github.io",
+      defaultBranch: "master",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-evm",
-      defaultBranch: "1.x",
+      owner: "ethereum-optimism",
+      name: "superchain-ops",
+      defaultBranch: "main",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-coingecko",
-      defaultBranch: "1.x",
+      owner: "ethereum-optimism",
+      name: "superchain-registry",
+      defaultBranch: "main",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-farcaster",
-      defaultBranch: "1.x",
+      owner: "ethereum-optimism",
+      name: "ecosystem",
+      defaultBranch: "main",
     },
     {
-      owner: "elizaos-plugins",
-      name: "plugin-mcp",
-      defaultBranch: "1.x",
+      owner: "ethereum-optimism",
+      name: "op-geth",
+      defaultBranch: "optimism",
+    },
+    {
+      owner: "ethereum-optimism",
+      name: "specs",
+      defaultBranch: "main",
+    },
+    {
+      owner: "ethereum-optimism",
+      name: "infra",
+      defaultBranch: "main",
+    },
+    {
+      owner: "ethereum-optimism",
+      name: "supersim",
+      defaultBranch: "main",
     },
   ],
   walletAddresses: {
@@ -436,12 +436,21 @@ export default {
     endpoint: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openrouterApiKey || "",
     projectContext: `
-     We are ElizaOS. Our mission is to develop an extensible, modular, open-source AI agent framework that thrives across both Web2 and Web3 ecosystems. We see AI agents as the key stepping stones toward AGI, enabling increasingly autonomous and capable systems.
+     We are Optimism, scaling Ethereum through Layer 2 technology. Our mission is to build the infrastructure that powers a more accessible, scalable, and sustainable blockchain ecosystem through optimistic rollup technology and innovative governance models.
 
-  Core Philosophy
-    Autonomy & Adaptability: Agents should learn, reason, and adapt across diverse tasks without human intervention.
-    Modularity & Composability: AI architectures should be modular, allowing for iterative improvements and robust scalability.
-    Decentralization & Open Collaboration: AI systems should move beyond centralized control towards distributed intelligence and community-driven progress.
+  Core Focus Areas:
+    OP Stack Development: Building and maintaining the foundational technology that powers Optimism and the broader Superchain ecosystem.
+    Superchain Ecosystem: Growing a network of interoperable L2 chains that share security, tooling, and governance.
+    Developer Experience: Creating comprehensive documentation, tools, and infrastructure to enable builders.
+    Community Governance: Fostering decentralized decision-making through the Optimism Collective and public goods funding.
+    Public Goods Funding: Supporting projects that benefit the entire Ethereum ecosystem through RetroPGF and other mechanisms.
+    
+  Technical Priorities:
+    - Protocol security and decentralization
+    - Cross-chain interoperability within the Superchain
+    - Developer tooling and documentation
+    - Governance innovation and community coordination
+    - Sustainable funding models for public goods
     `,
   },
 } as const satisfies PipelineConfig;
