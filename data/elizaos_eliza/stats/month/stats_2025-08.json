@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-08-01 to 2025-09-01, elizaos/eliza had 90 new PRs (74 merged), 59 new issues, and 35 active contributors.",
+  "overview": "From 2025-08-01 to 2025-09-01, elizaos/eliza had 95 new PRs (76 merged), 60 new issues, and 36 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7ELgn4",
@@ -44,6 +44,18 @@
       "commentCount": 3
     },
     {
+      "id": "I_kwDOMT5cIs7HaHnG",
+      "title": "Image Generation not working in Discord",
+      "author": "harperaa",
+      "number": 5809,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nGenerated images not appearing in discord, it shows in the webui, but not in discord.\n\n**To Reproduce**\n\nAsk to create an image, it says here it is, and describes it, but does not show up in discord.\n\nI see this in logs on webui. Executed action: GENERATE_IMAGE\n\n**Expected behavior**\n\nImage in discord.\n\n**Screenshots**\n\nIf I am missing some permission or config needed, please let me know.  Again, it works in webui, but not in discord.",
+      "createdAt": "2025-08-22T13:33:19Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
       "id": "I_kwDOMT5cIs7Eng6F",
       "title": "feat(scenarios): Implement natural language agent interaction and response validation",
       "author": "monilpat",
@@ -52,18 +64,6 @@
       "body": "# feat(scenarios): Implement natural language agent interaction and response validation\n\n## Description\n\nThis ticket enables scenarios to test agent behavior through natural language interactions rather than direct code execution. This allows testing of agent reasoning, decision-making, and response generation in realistic conversation contexts with proper evaluation of agent responses.\n\n## Acceptance Criteria\n\n1. Scenario `run` blocks support `input` field for natural language prompts to agents\n2. Agent responses are captured and available for evaluation (text, thoughts, actions)\n3. Evaluators can access both agent response text and execution context\n4. Support for multi-turn conversations in scenarios\n5. Agent responses include thought process and action decisions\n6. Integration with existing evaluation engine for response validation\n7. Support for conversation context across multiple steps\n8. Agent response timing and performance metrics\n\n## Technical Approach\n\n### 1. Enhanced Run Step Schema\n```typescript\n// packages/cli/src/scenarios/schema.ts\nconst RunStepSchema = z.object({\n  name: z.string().optional(),\n  // Natural language input to agent\n  input: z.string().optional(),\n  // Direct code execution (existing)\n  lang: z.string().optional(),\n  code: z.string().optional(),\n  // Agent interaction specific\n  agent_context: z.object({\n    conversation_id: z.string().optional(),\n    user_id: z.string().optional(),\n    room_id: z.string().optional(),\n  }).optional(),\n  evaluations: z.array(EvaluationSchema),\n});\n```\n\n### 2. Agent Interaction Engine\n```typescript\n// packages/cli/src/scenarios/agent-interaction.ts\nexport class AgentInteractionEngine {\n  constructor(private runtime: IAgentRuntime) {}\n\n  async interactWithAgent(input: string, context?: AgentContext): Promise<AgentResponse> {\n    // Create message for agent\n    const message: Memory = {\n      entityId: context?.user_id || 'scenario-user',\n      roomId: context?.room_id || 'scenario-room',\n      content: {\n        type: 'text',\n        text: input,\n      },\n      metadata: {\n        type: 'message',\n        conversationId: context?.conversation_id,\n      },\n    };\n\n    // Send to agent and capture response\n    const startTime = Date.now();\n    const response = await this.runtime.processMessage(message);\n    const endTime = Date.now();\n\n    return {\n      text: response.text,\n      thoughts: response.thoughts,\n      actions: response.actions,\n      timing: {\n        startTime,\n        endTime,\n        duration: endTime - startTime,\n      },\n      context: {\n        conversationId: context?.conversation_id,\n        messageId: message.id,\n      },\n    };\n  }\n}\n```\n\n### 3. Enhanced Execution Result\n```typescript\n// packages/cli/src/scenarios/providers.ts\nexport interface ExecutionResult {\n  exitCode: number;\n  stdout: string;\n  stderr: string;\n  files: Record<string, string>;\n  // New: Agent interaction results\n  agentResponse?: AgentResponse;\n  conversationHistory?: AgentResponse[];\n}\n```\n\n## Test Scenario\n\nCreate `agent-interaction-test.scenario.yaml`:\n```yaml\nname: \"Agent Interaction Test\"\ndescription: \"Tests natural language interaction with agents\"\n\nplugins:\n  - \"@elizaos/plugin-github\"\n  - \"@elizaos/plugin-evm\"\n\nenvironment:\n  type: e2b\n\nsetup:\n  mocks:\n    - service: \"github-service\"\n      method: \"searchIssues\"\n      response:\n        - title: \"Implement Dark Mode\"\n          number: 123\n          state: \"open\"\n          labels: [\"feature\", \"ui\"]\n    - service: \"evm-service\"\n      method: \"getBalancesForAddress\"\n      response:\n        - chain: \"ethereum\"\n          balances:\n            - symbol: \"ETH\"\n              amount: \"2.5\"\n\nrun:\n  - name: \"Ask agent about roadmap\"\n    input: \"What new features are you planning to add?\"\n    agent_context:\n      conversation_id: \"roadmap-conversation\"\n      user_id: \"test-user\"\n    evaluations:\n      - type: \"trajectory_contains_action\"\n        action: \"github-service.searchIssues\"\n        description: \"Verify agent searched for issues\"\n      \n      - type: \"string_contains\"\n        value: \"Dark Mode\"\n        description: \"Verify agent mentioned the mocked issue\"\n      \n      - type: \"llm_judge\"\n        prompt: \"Did the agent provide a helpful and coherent response about new features?\"\n        expected: \"yes\"\n        description: \"Verify agent response quality\"\n\n  - name: \"Ask agent about wallet\"\n    input: \"What's my current wallet balance?\"\n    agent_context:\n      conversation_id: \"wallet-conversation\"\n      user_id: \"test-user\"\n    evaluations:\n      - type: \"trajectory_contains_action\"\n        action: \"evm-service.getBalancesForAddress\"\n        description: \"Verify agent checked wallet balance\"\n      \n      - type: \"string_contains\"\n        value: \"2.5 ETH\"\n        description: \"Verify agent reported the correct balance\"\n      \n      - type: \"llm_judge\"\n        prompt: \"Did the agent clearly explain the wallet balance information?\"\n        expected: \"yes\"\n\n  - name: \"Multi-turn conversation\"\n    input: \"Can you help me with both my wallet and roadmap?\"\n    agent_context:\n      conversation_id: \"multi-turn-conversation\"\n      user_id: \"test-user\"\n    evaluations:\n      - type: \"trajectory_contains_action\"\n        action: \"evm-service.getBalancesForAddress\"\n      - type: \"trajectory_contains_action\"\n        action: \"github-service.searchIssues\"\n      - type: \"string_contains\"\n        value: \"ETH\"\n      - type: \"string_contains\"\n        value: \"Dark Mode\"\n      - type: \"llm_judge\"\n        prompt: \"Did the agent address both wallet and roadmap questions comprehensively?\"\n        expected: \"yes\"\n\njudgment:\n  strategy: all_pass\n```\n\n## Testing Strategy\n\n1. **Single Turn**: Test basic agent interaction and response\n2. **Multi-turn**: Test conversation context across steps\n3. **Action Tracking**: Verify agent uses appropriate actions\n4. **Response Quality**: Test LLM judge evaluation of responses\n5. **Performance**: Test response timing and metrics\n6. **Error Handling**: Test agent behavior with invalid inputs\n\n## Dependencies\n\n- Requires plugin system integration (Ticket 1)\n- Builds on advanced mocking system (Ticket 2)\n- Integrates with existing evaluation engine\n- Depends on agent runtime message processing",
       "createdAt": "2025-08-07T02:49:34Z",
       "closedAt": "2025-08-12T04:21:31Z",
-      "state": "CLOSED",
-      "commentCount": 2
-    },
-    {
-      "id": "I_kwDOMT5cIs7EngKo",
-      "title": "feat(scenarios): Implement plugin specification and dynamic loading",
-      "author": "monilpat",
-      "number": 5725,
-      "repository": "elizaos/eliza",
-      "body": "# feat(scenarios): Implement plugin specification and dynamic loading\n\n## Description\n\nThis ticket implements plugin specification in scenario YAML files, allowing scenarios to declare which plugins are required for testing. This enables testing of agent behaviors that depend on specific plugins like `@elizaos/plugin-github` or `@elizaos/plugin-evm`. The system will dynamically load specified plugins during scenario execution and make their actions, providers, and services available to the agent.\n\n## Acceptance Criteria\n\n1. Scenario YAML supports a `plugins` array at the root level with string plugin names\n2. The `initializeAgent()` function respects scenario plugin specifications and loads them via `startAgent()`\n3. Plugin loading follows the same dependency resolution and error handling as the main CLI\n4. Scenarios can specify both string plugin names (`@elizaos/plugin-github`) and direct plugin objects\n5. Plugin loading errors are clearly reported with actionable guidance\n6. Default plugins (bootstrap, sql) are automatically included unless explicitly excluded via `exclude_defaults: true`\n7. Plugin conflicts are detected and reported during scenario validation\n8. Plugin initialization errors don't crash the scenario but are reported in results\n\n## Technical Approach\n\n### 1. Update Scenario Schema\n```typescript\n// packages/cli/src/scenarios/schema.ts\nconst ScenarioSchema = z.object({\n  name: z.string(),\n  description: z.string(),\n  plugins: z.array(z.string()).optional(), // e.g., [\"@elizaos/plugin-github\"]\n  exclude_defaults: z.boolean().optional(), // exclude bootstrap/sql\n  environment: EnvironmentSchema,\n  setup: SetupSchema.optional(),\n  run: z.array(RunStepSchema),\n  judgment: JudgmentSchema,\n});\n```\n\n### 2. Enhance Runtime Factory\n```typescript\n// packages/cli/src/scenarios/runtime-factory.ts\nexport async function initializeAgent(scenario: Scenario): Promise<IAgentRuntime> {\n  const character: Character = {\n    name: 'scenario-runner',\n    id: stringToUuid('scenario-runner'),\n    bio: 'A minimal character for running scenarios',\n    plugins: scenario.plugins || []\n  };\n\n  // Load default plugins unless excluded\n  if (!scenario.exclude_defaults) {\n    character.plugins.push('@elizaos/plugin-bootstrap', '@elizaos/plugin-sql');\n  }\n\n  const runtime = await startAgent(\n    encryptedCharacter(character),\n    server,\n    undefined,\n    character.plugins,\n    { isTestMode: true }\n  );\n\n  return runtime;\n}\n```\n\n### 3. Plugin Validation\n```typescript\n// packages/cli/src/scenarios/plugin-validator.ts\nexport async function validateScenarioPlugins(scenario: Scenario): Promise<ValidationResult[]> {\n  const results: ValidationResult[] = [];\n  \n  for (const pluginName of scenario.plugins || []) {\n    try {\n      const plugin = await loadAndPreparePlugin(pluginName);\n      if (!plugin) {\n        results.push({\n          type: 'error',\n          message: `Plugin '${pluginName}' could not be loaded`,\n          suggestion: 'Check if plugin is installed or built correctly'\n        });\n      }\n    } catch (error) {\n      results.push({\n        type: 'error', \n        message: `Failed to validate plugin '${pluginName}': ${error.message}`,\n        suggestion: 'Verify plugin dependencies and configuration'\n      });\n    }\n  }\n  \n  return results;\n}\n```\n\n## Test Scenario\n\nCreate `plugin-integration-test.scenario.yaml`:\n```yaml\nname: \"Plugin Integration Test\"\ndescription: \"Tests loading and using plugins specified in scenario YAML\"\n\nplugins:\n  - \"@elizaos/plugin-github\"\n  - \"@elizaos/plugin-evm\"\n\nenvironment:\n  type: e2b\n\nsetup:\n  mocks:\n    - service: \"github-service\"\n      method: \"searchIssues\"\n      response:\n        - title: \"Test Issue\"\n          number: 123\n          state: \"open\"\n    - service: \"evm-service\"\n      method: \"getBalancesForAddress\"\n      response:\n        - chain: \"ethereum\"\n          balances:\n            - symbol: \"ETH\"\n              amount: \"1.23\"\n\nrun:\n  - name: \"Test GitHub plugin actions\"\n    input: \"Search for issues with label 'bug'\"\n    evaluations:\n      - type: \"trajectory_contains_action\"\n        action: \"github-service.searchIssues\"\n        description: \"Verify GitHub plugin action was executed\"\n      \n      - type: \"string_contains\"\n        value: \"Test Issue\"\n        description: \"Verify agent found the mocked issue\"\n\n  - name: \"Test EVM plugin actions\"\n    input: \"What's my wallet balance?\"\n    evaluations:\n      - type: \"trajectory_contains_action\"\n        action: \"evm-service.getBalancesForAddress\"\n        description: \"Verify EVM plugin action was executed\"\n      \n      - type: \"string_contains\"\n        value: \"1.23 ETH\"\n        description: \"Verify agent reported the mocked balance\"\n\njudgment:\n  strategy: all_pass\n```\n\n## Testing Strategy\n\n1. **Plugin Loading Test**: Verify plugins load without errors\n2. **Action Availability Test**: Confirm agent can use plugin actions\n3. **Error Handling Test**: Test with non-existent plugin\n4. **Default Plugin Test**: Verify bootstrap/sql are included by default\n5. **Exclusion Test**: Test `exclude_defaults: true` behavior\n\n## Dependencies\n\n- Fixes the `startAgent` hanging issue (#5719) to enable plugin testing\n- Builds on existing `loadAndPreparePlugin` functionality\n- Integrates with current scenario execution flow ",
-      "createdAt": "2025-08-07T02:48:08Z",
-      "closedAt": "2025-08-12T04:21:13Z",
       "state": "CLOSED",
       "commentCount": 2
     }
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 61347,
-    "deletions": 45663,
-    "files": 542,
-    "commitCount": 612
+    "additions": 61644,
+    "deletions": 46724,
+    "files": 546,
+    "commitCount": 629
   },
   "completedItems": [
     {
@@ -1704,6 +1704,20 @@
       ]
     },
     {
+      "title": "fix(core): fix TypeScript declarations in npm package",
+      "prNumber": 5848,
+      "type": "bugfix",
+      "body": "# Relates to\r\n\r\n  TypeScript declarations build optimization.\r\n\r\n  # Risks\r\n\r\n  **Low risk** - Configuration changes only, no functional code changes.\r\n\r\n  # Background\r\n\r\n  ## What does this PR do?\r\n\r\n  Optimizes the TypeScript build confi",
+      "files": [
+        "bun.lock",
+        "packages/core/build.ts",
+        "packages/core/package.json",
+        "packages/core/tsconfig.browser.json",
+        "packages/core/tsconfig.declarations.json",
+        "packages/core/tsconfig.json"
+      ]
+    },
+    {
       "title": "fix: core types output",
       "prNumber": 5847,
       "type": "bugfix",
@@ -1714,26 +1728,42 @@
         "packages/core/package.json",
         "packages/core/tsconfig.build.json"
       ]
+    },
+    {
+      "title": "fix: CLI NPM Deployment Path Resolution Issue",
+      "prNumber": 5852,
+      "type": "bugfix",
+      "body": "## 🐛 Fix: NPM Deployment Path Resolution Issue\r\n\r\n### Problem\r\nWhen the CLI is published to NPM and installed globally (e.g., `bun i -g @elizaos/cli`), it fails with the error:\r\n```\r\nCannot find module '/home/runner/work/eliza/eliza/packag",
+      "files": [
+        "bun.lock",
+        "packages/cli/build.ts",
+        "packages/cli/package.json",
+        "packages/cli/src/utils/copy-template.ts",
+        "packages/cli/src/utils/display-banner.ts",
+        "packages/cli/src/utils/user-environment.ts",
+        "packages/core/build.ts",
+        "packages/core/package.json"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "wtfsayo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
-      "totalScore": 1906.008437360646,
-      "prScore": 1856.950437360646,
+      "totalScore": 1988.002886294777,
+      "prScore": 1938.744886294777,
       "issueScore": 0,
       "reviewScore": 46,
-      "commentScore": 3.058,
+      "commentScore": 3.258,
       "summary": "wtfsayo: This month, wtfsayo focused on improving the build process and developer experience for the elizaos/eliza repository. They landed a significant build optimization in PR #5701, which also added markdown rendering support and removed nearly 3,500 lines of code. Additionally, they improved the developer workflow by auto-installing the CLI via PR #5702 and removed obsolete documentation and workflow files. Their work was concentrated on feature development and refactoring, primarily modifying configuration and code files."
     },
     {
       "username": "ChristopherTrimboli",
       "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
-      "totalScore": 570.4477835425977,
-      "prScore": 468.89378354259765,
+      "totalScore": 637.5799711951328,
+      "prScore": 526.0259711951328,
       "issueScore": 0,
-      "reviewScore": 99.5,
+      "reviewScore": 109.5,
       "commentScore": 2.054,
       "summary": "ChristopherTrimboli: Focused on developing a new sessions API, opening a significant pull request in elizaos/eliza (#5704). This work involved substantial changes, modifying 13 files with over 1500 lines of new code and tests. This effort was primarily focused on new feature development and also included one peer review."
     },
@@ -1760,8 +1790,8 @@
     {
       "username": "yungalgo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
-      "totalScore": 210.54947294994395,
-      "prScore": 199.49147294994395,
+      "totalScore": 224.89446343404268,
+      "prScore": 213.83646343404268,
       "issueScore": 0,
       "reviewScore": 9,
       "commentScore": 2.058,
@@ -2038,6 +2068,16 @@
       "summary": "ashuxshimra: This month, ashuxshimra proposed the addition of a new Token Metrics Plugin by opening issue #202 in the elizaos-plugins/registry. They also made a substantial commit with over 3,000 lines of code changes across 4 files, indicating significant work in progress."
     },
     {
+      "username": "MagdiejamesNYC",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44060696?v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "znahas",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4540248?v=4",
       "totalScore": 2,
@@ -2088,9 +2128,9 @@
       "summary": "LinuxIsCool: No activity this month."
     }
   ],
-  "newPRs": 90,
-  "mergedPRs": 74,
-  "newIssues": 59,
+  "newPRs": 95,
+  "mergedPRs": 76,
+  "newIssues": 60,
   "closedIssues": 42,
-  "activeContributors": 35
+  "activeContributors": 36
 }
