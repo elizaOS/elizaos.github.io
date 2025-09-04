@@ -59,6 +59,20 @@ GitHub Contributor Analytics Generator for tracking, analyzing, and visualizing 
 - `bun run pipeline summarize -t contributors` - Generate contributor summaries
 - `bun run pipeline summarize -t overall` - Generate overall summaries
 
+## Automation Scripts
+
+### Daily Automation
+
+- `./scripts/daily-automation.sh` - Continuous daily pipeline automation (24-hour loop)
+- Runs complete sequence: ingest → process → export → summarize (all types)
+- Perfect for local development or simple server deployments
+
+### Utility Scripts
+
+- `./scripts/verify-data.sh` - Data quality verification and gap analysis
+- `./scripts/fetch_github.py` - GitHub organization metrics collection
+- See `scripts/README.md` for detailed documentation
+
 ## Code Style
 
 - Next.js 15 app router with TypeScript and Tailwind CSS
