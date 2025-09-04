@@ -184,28 +184,33 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
 
     if (
       options?.adaptiveConcurrency &&
-      (context as { github?: { getConcurrencyManager?: () => unknown } }).github
+      "github" in context &&
+      context.github &&
+      typeof context.github === "object" &&
+      "getConcurrencyManager" in context.github &&
+      typeof context.github.getConcurrencyManager === "function"
     ) {
-      const githubClient = (
-        context as {
-          github: {
-            getConcurrencyManager: () => {
-              getCurrentLevel: () => number;
-              shouldReduceLoad: () => boolean;
-              maxLevel: number;
-            };
-          };
-        }
-      ).github;
-      if (typeof githubClient.getConcurrencyManager === "function") {
-        const concurrencyManager = githubClient.getConcurrencyManager();
+      const concurrencyManager = context.github.getConcurrencyManager();
+      if (
+        concurrencyManager &&
+        typeof concurrencyManager === "object" &&
+        "getCurrentLevel" in concurrencyManager &&
+        typeof concurrencyManager.getCurrentLevel === "function"
+      ) {
         concurrency = concurrencyManager.getCurrentLevel();
 
         context.logger?.info(
           `Using adaptive concurrency level: ${concurrency}`,
           {
-            shouldReduceLoad: concurrencyManager.shouldReduceLoad(),
-            maxLevel: concurrencyManager.maxLevel,
+            shouldReduceLoad:
+              "shouldReduceLoad" in concurrencyManager &&
+              typeof concurrencyManager.shouldReduceLoad === "function"
+                ? concurrencyManager.shouldReduceLoad()
+                : undefined,
+            maxLevel:
+              "maxLevel" in concurrencyManager
+                ? concurrencyManager.maxLevel
+                : undefined,
           },
         );
       }
