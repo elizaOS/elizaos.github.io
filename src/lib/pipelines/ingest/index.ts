@@ -15,7 +15,10 @@ export const ingestPipeline = pipe(
       repository: { repoId, owner, name, defaultBranch },
     }));
   }),
-  mapStep(ingestWeeklyGithubData),
+  mapStep(ingestWeeklyGithubData, {
+    adaptiveConcurrency: true,
+    defaultConcurrency: 3,
+  }),
   createStep("Log Project Summaries", (results, context) => {
     for (const result of results) {
       const intervals = result.intervals;

@@ -15,7 +15,7 @@ if (!openrouterApiKey) {
  */
 export default {
   contributionStartDate: "2024-01-01",
-  // Top 12 most active Optimism repositories based on GitHub activity analysis
+  // Top 14 most active Optimism repositories based on GitHub activity analysis
   repositories: [
     {
       owner: "ethereum-optimism",
@@ -75,6 +75,16 @@ export default {
     {
       owner: "ethereum-optimism",
       name: "supersim",
+      defaultBranch: "main",
+    },
+    {
+      owner: "ethereum-optimism",
+      name: "design-docs",
+      defaultBranch: "main",
+    },
+    {
+      owner: "ethereum-optimism",
+      name: "Retro-Funding",
       defaultBranch: "main",
     },
   ],
@@ -432,7 +442,7 @@ export default {
       month: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
     },
     temperature: 0.1,
-    max_tokens: 2000,
+    max_tokens: 2400,
     endpoint: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openrouterApiKey || "",
     projectContext: `
