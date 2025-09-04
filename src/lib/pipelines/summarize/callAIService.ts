@@ -22,7 +22,7 @@ export async function callAIService(
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.apiKey}`,
         "HTTP-Referer": process.env.SITE_URL || "https://elizaos.github.io",
-        "X-Title": process.env.SITE_NAME || "ElizaOS Leaderboard",
+        "X-Title": process.env.SITE_NAME || "Optimism Contributor Leaderboard",
       },
       body: JSON.stringify({
         model,
