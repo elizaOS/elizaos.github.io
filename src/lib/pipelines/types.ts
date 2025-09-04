@@ -165,10 +165,11 @@ export function sequence<TContext extends BasePipelineContext>(
 }
 
 /**
- * Map a pipeline step over an array of inputs
+ * Map a pipeline step over an array of inputs with adaptive concurrency
  */
 export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
   operation: PipelineStep<TInput, TOutput, TContext>,
+  options?: { adaptiveConcurrency?: boolean; defaultConcurrency?: number },
 ): PipelineStep<TInput[], TOutput[], TContext> {
   return async (inputs, context) => {
     if (!Array.isArray(inputs)) {
@@ -178,11 +179,60 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
       return [];
     }
 
-    const results = await pMap(inputs, (item) => operation(item, context), {
-      concurrency: 5,
-    });
+    // Get concurrency level from context if available and adaptive concurrency is enabled
+    let concurrency = options?.defaultConcurrency || 5;
 
-    return results;
+    if (
+      options?.adaptiveConcurrency &&
+      (context as { github?: { getConcurrencyManager?: () => unknown } }).github
+    ) {
+      const githubClient = (
+        context as {
+          github: {
+            getConcurrencyManager: () => {
+              getCurrentLevel: () => number;
+              shouldReduceLoad: () => boolean;
+              maxLevel: number;
+            };
+          };
+        }
+      ).github;
+      if (typeof githubClient.getConcurrencyManager === "function") {
+        const concurrencyManager = githubClient.getConcurrencyManager();
+        concurrency = concurrencyManager.getCurrentLevel();
+
+        context.logger?.info(
+          `Using adaptive concurrency level: ${concurrency}`,
+          {
+            shouldReduceLoad: concurrencyManager.shouldReduceLoad(),
+            maxLevel: concurrencyManager.maxLevel,
+          },
+        );
+      }
+    }
+
+    const results = await pMap(
+      inputs,
+      async (item, index) => {
+        // Check for graceful shutdown before processing each item
+        if (
+          global.process &&
+          (global.process as { gracefulShutdown?: boolean }).gracefulShutdown
+        ) {
+          context.logger?.warn(
+            `Graceful shutdown requested. Skipping remaining items after ${index}/${inputs.length}`,
+          );
+          throw new Error("GRACEFUL_SHUTDOWN");
+        }
+        return await operation(item, context);
+      },
+      {
+        concurrency: Math.max(1, concurrency), // Ensure at least 1 concurrent operation
+        stopOnError: false, // Continue processing other items even if one fails
+      },
+    );
+
+    return results.filter((r) => r !== null); // Filter out any null results from interrupted operations
   };
 }
 
