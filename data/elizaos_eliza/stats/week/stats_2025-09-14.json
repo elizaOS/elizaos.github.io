@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-09-14 to 2025-09-21, elizaos/eliza had 9 new PRs (7 merged), 2 new issues, and 10 active contributors.",
+  "overview": "From 2025-09-14 to 2025-09-21, elizaos/eliza had 10 new PRs (10 merged), 2 new issues, and 10 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7K1ixs",
@@ -65,7 +65,7 @@
       "body": "## Overview\n\nThis PR addresses Windows CI flakiness by implementing comprehensive improvements to the dev command tests and fixing process management issues that were causing test failures on Windows in CI environments.\n\n## Root Cause Analysis\n\nThe original issues were multi-faceted:\n1. **Process Management**: Windows handles process termination differently than Unix systems, leading to hanging processes\n2. **Port Conflicts**: Tests weren't properly cleaning up ports between runs\n3. **Stream Handling**: Overlapping stdout/stderr reads were causing race conditions\n4. **Test Environment**: Missing proper test mode flags and non-interactive settings\n\n## Changes Made\n\n### 1. Enhanced Process Management (`packages/cli/tests/commands/dev.test.ts`)\n- **Cross-platform process termination**: Added `killProcessCrossPlatform()` helper that uses appropriate termination methods for Windows vs Unix\n- **AbortController integration**: Processes now use AbortSignal for clean termination\n- **Comprehensive cleanup**: Added `cleanupDevProcess()` helper that handles Windows-specific cleanup (taskkill) and Unix graceful termination\n- **Process tracking**: All spawned processes are tracked and cleaned up properly\n\n### 2. Improved Stream Handling\n- **Concurrent safe readers**: Replaced tight polling loops with proper ReadableStream readers\n- **Output capture helper**: Added `captureProcessOutput()` that safely handles both stdout and stderr\n- **Early termination**: Process cleanup happens immediately after getting required output to prevent child process spawning\n\n### 3. Windows CI Compatibility\n- **Conditional test skipping**: Tests that spawn server processes are now skipped on Windows CI (`process.platform === 'win32' && process.env.CI === 'true'`) to prevent flaky failures\n- **Reduced timeouts**: Shortened wait times for CI stability (500ms instead of 2000ms+)\n- **Better error handling**: Improved error messages and cleanup on test failures\n\n### 4. Dev Server Improvements (`packages/cli/src/commands/dev/actions/dev-server.ts`)\n- **Standalone mode detection**: Added proper detection for non-ElizaOS directories\n- **Conditional backend startup**: Backend server only starts in project/plugin/monorepo contexts, not in standalone mode\n- **Improved logging**: Better status messages for different modes\n- **Port handling**: Enhanced port availability checking and conflict resolution\n\n### 5. Test Infrastructure Updates\n- **Environment variables**: Added `ELIZA_TEST_MODE` and `ELIZA_NONINTERACTIVE` for deterministic behavior\n- **Database isolation**: Each test gets its own PGLite database directory\n- **Memory leak prevention**: Proper cleanup of temp directories and processes\n\n### 6. SQL Plugin Test Fixes (`packages/plugin-sql/src/__tests__/`)\n- **Entity ID conflicts**: Fixed test conflicts by using unique entity IDs per test\n- **Missing metadata**: Added required metadata fields to prevent validation errors\n- **Foreign key constraints**: Ensured entities are created before memories that reference them\n\n## Test Results\n\n- **Local Windows**: All tests pass consistently\n- **CI Environment**: Windows CI tests are appropriately skipped to prevent flaky failures while maintaining local test coverage\n- **Cross-platform**: Unix/macOS tests continue to run with full coverage\n\n## Technical Details\n\nThe solution maintains the original test assertions and functionality while adding robust process management that works across platforms. The conditional skipping in CI is a pragmatic approach that prevents flaky failures without losing test coverage during local development.\n\nKey technical improvements:\n- AbortController-based process termination\n- Platform-specific cleanup strategies\n- Proper stream lifecycle management\n- Enhanced error handling and logging\n- Isolated test environments\n\nThis ensures reliable CI runs while maintaining comprehensive test coverage during development.\n",
       "repository": "elizaos/eliza",
       "createdAt": "2025-09-16T16:02:09Z",
-      "mergedAt": null,
+      "mergedAt": "2025-09-17T00:28:39Z",
       "additions": 468,
       "deletions": 442
     },
@@ -77,9 +77,21 @@
       "body": "## Summary\n\nThis PR fixes the CLI update checker to respect distribution channels, ensuring users only see updates within their current channel (latest/stable, alpha, or beta).\n\n## Problem\n- Users on stable versions were being prompted to \"update\" to alpha/beta versions\n- Example: User on 1.5.8 (stable) was prompted to update to 1.5.9-alpha.1\n- This could lead users to inadvertently install pre-release versions when they want to stay on stable\n\n## Solution\n- Added channel-aware version checking that filters updates by distribution channel\n- Refactored duplicate code into a shared utility function (`getVersionChannel`)\n- Supports three channels: `latest` (stable), `alpha`, and `beta`\n\n## Changes\n- Created `packages/cli/src/utils/version-channel.ts` - Shared utility for channel detection\n- Updated `display-banner.ts` - Banner notifications respect channels\n- Updated `publish/utils/version-check.ts` - Publish command respects channels  \n- Updated `update/actions/cli-update.ts` - Update command respects channels\n\n## Testing\n- Stable version users will only see stable updates\n- Alpha version users will only see alpha updates\n- Beta version users will only see beta updates\n\n## Impact\n- Prevents stable users from accidentally installing pre-release versions\n- Better UX for users who want to stay on their chosen release channel\n- Follows DRY principle with shared utility",
       "repository": "elizaos/eliza",
       "createdAt": "2025-09-16T12:40:29Z",
-      "mergedAt": null,
+      "mergedAt": "2025-09-17T02:45:55Z",
       "additions": 272,
       "deletions": 48
+    },
+    {
+      "id": "PR_kwDOMT5cIs6pKY0d",
+      "title": "fix: release fixes",
+      "author": "ChristopherTrimboli",
+      "number": 5985,
+      "body": "### PR Summary\n\nFixes client bundling, dev-loop restarts, and DB runtime mode; enforces TS type-check failures to stop builds. Improves build ordering so the web UI is always shipped with the server.\n\n### Changes\n\n- Client UI bundling\n  - Server now bundles client assets reliably:\n    - Copies from `packages/client/dist` if present, else falls back to `node_modules/@elizaos/client/dist`.\n    - Files: `packages/server/build.ts`\n  - Build order enforced so client builds before server:\n    - Added task and dependency in `turbo.json`:\n      - `@elizaos/client#build` defined\n      - `@elizaos/server#build.dependsOn` includes `@elizaos/client#build`\n- Dev stability (fix “death loop”)\n  - Debounce and watcher tuning to prevent rebuild storms:\n    - `packages/cli/src/commands/dev/utils/file-watcher.ts`\n  - Guard against concurrent rebuilds:\n    - `packages/cli/src/commands/dev/actions/dev-server.ts`\n- Node DB runtime (PGLite)\n  - Force Node mode when starting via CLI to avoid WASM init in Node:\n    - `packages/cli/src/commands/start/index.ts` sets `PGLITE_WASM_MODE=node` if not set\n- Build failure on TypeScript errors\n  - Declaration generation now fails builds on TS errors (shared util):\n    - `eliza/build-utils.ts` `generateDts` throws on error by default\n- Packaging/housekeeping\n  - Removed redundant root script `build:ordered`:\n    - `package.json`\n  - Ensure server can resolve client during build:\n    - `packages/server/package.json` devDependency `@elizaos/client: workspace:*`\n\n### Impact\n\n- Server NPM package always includes the web UI under `dist/client`.\n- `elizaos dev` no longer respawns endlessly on rapid changes.\n- CLI/server always run PGLite in Node mode; browser remains WASM.\n- Any TypeScript type errors will stop the package build (local and CI).\n\n### Testing\n\n- Monorepo build: `bun run build` (Turbo ensures client→server order).\n- Manual start: `elizaos start` (UI available; no watcher loop).\n- Type errors verified to fail build via `generateDts` path.\n\n### Migration Notes\n\n- No breaking API changes.\n- If projects relied on continuing builds despite TS errors, builds will now fail until errors are fixed.\n\n### Files Touched (key)\n\n- `packages/server/build.ts`, `packages/server/package.json`\n- `packages/cli/src/commands/dev/utils/file-watcher.ts`\n- `packages/cli/src/commands/dev/actions/dev-server.ts`\n- `packages/cli/src/commands/start/index.ts`\n- `eliza/build-utils.ts`\n- `turbo.json`\n- `package.json` (root)\n\n- Ensured the server now bundles the client, stabilized dev restarts, forced Node DB mode for CLI/server, and made TS errors fail builds. Build order is enforced via `turbo.json`.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-09-17T22:04:19Z",
+      "mergedAt": "2025-09-17T22:21:33Z",
+      "additions": 112,
+      "deletions": 74
     },
     {
       "id": "PR_kwDOMT5cIs6oyZEu",
@@ -92,25 +104,13 @@
       "mergedAt": "2025-09-16T12:15:49Z",
       "additions": 69,
       "deletions": 20
-    },
-    {
-      "id": "PR_kwDOMT5cIs6o5auN",
-      "title": "feat(ci): add concurrency control to Claude code review workflow",
-      "author": "wtfsayo",
-      "number": 5983,
-      "body": "## Summary\n\nAdds concurrency control to the Claude code review workflow to automatically cancel previous runs when new commits are pushed to a PR.\n\n## Changes\n\n- Added  configuration to \n- Set  to cancel outdated reviews\n- Uses PR number or branch ref to group concurrent runs\n\n## Benefits\n\n- **Resource Efficiency**: Prevents multiple Claude code reviews from running simultaneously on the same PR\n- **Faster Feedback**: New commits immediately cancel outdated Claude reviews and start fresh ones  \n- **Cost Savings**: Avoids wasting API credits on outdated code reviews\n- **Consistency**: Matches the concurrency behavior of all other CI workflows in the repository\n\n## Testing\n\n- Workflow configuration follows the same pattern as other CI workflows\n- Will be tested when PR receives new commits\n\nCloses: N/A (workflow improvement)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2025-09-16T16:05:58Z",
-      "mergedAt": null,
-      "additions": 36,
-      "deletions": 31
     }
   ],
   "codeChanges": {
-    "additions": 848,
-    "deletions": 147,
-    "files": 28,
-    "commitCount": 81
+    "additions": 1700,
+    "deletions": 711,
+    "files": 46,
+    "commitCount": 118
   },
   "completedItems": [
     {
@@ -170,12 +170,40 @@
       ]
     },
     {
+      "title": "fix(cli): comprehensive Windows CI test improvements and dev command enhancements",
+      "prNumber": 5982,
+      "type": "bugfix",
+      "body": "## Overview\n\nThis PR addresses Windows CI flakiness by implementing comprehensive improvements to the dev command tests and fixing process management issues that were causing test failures on Windows in CI environments.\n\n## Root Cause Analy",
+      "files": [
+        "packages/cli/src/commands/dev/actions/dev-server.ts",
+        "packages/cli/src/commands/update/index.ts",
+        "packages/cli/tests/commands/dev.test.ts",
+        "packages/cli/tests/commands/update.test.ts",
+        "packages/plugin-sql/src/__tests__/integration/base-comprehensive.test.ts",
+        "packages/plugin-sql/src/__tests__/integration/memory.test.ts",
+        "packages/plugin-sql/src/base.ts"
+      ]
+    },
+    {
       "title": "fix(cli): remove quotes from file paths in Windows tests",
       "prNumber": 5981,
       "type": "bugfix",
       "body": "## Problem\n\nThe Windows tests in the CI pipeline are failing due to incorrect handling of file paths with quotes. The issue was identified in the GitHub Actions run: https://github.com/elizaOS/eliza/actions/runs/17766711070/job/50491852008?",
       "files": [
         "packages/cli/tests/commands/agent.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cli): respect distribution channel when checking for updates",
+      "prNumber": 5980,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis PR fixes the CLI update checker to respect distribution channels, ensuring users only see updates within their current channel (latest/stable, alpha, or beta).\n\n## Problem\n- Users on stable versions were being prompted to \"",
+      "files": [
+        "packages/cli/src/commands/publish/utils/version-check.ts",
+        "packages/cli/src/commands/update/actions/cli-update.ts",
+        "packages/cli/src/utils/__tests__/version-channel.test.ts",
+        "packages/cli/src/utils/display-banner.ts",
+        "packages/cli/src/utils/version-channel.ts"
       ]
     },
     {
@@ -199,6 +227,23 @@
         "packages/cli/src/commands/start/actions/agent-start.ts",
         "packages/plugin-sql/src/index.node.ts"
       ]
+    },
+    {
+      "title": "fix: release fixes",
+      "prNumber": 5985,
+      "type": "bugfix",
+      "body": "### PR Summary\n\nFixes client bundling, dev-loop restarts, and DB runtime mode; enforces TS type-check failures to stop builds. Improves build ordering so the web UI is always shipped with the server.\n\n### Changes\n\n- Client UI bundling\n  - S",
+      "files": [
+        "build-utils.ts",
+        "bun.lock",
+        "packages/cli/src/commands/dev/actions/dev-server.ts",
+        "packages/cli/src/commands/dev/utils/file-watcher.ts",
+        "packages/cli/src/commands/start/index.ts",
+        "packages/cli/src/utils/copy-template.ts",
+        "packages/server/build.ts",
+        "packages/server/package.json",
+        "turbo.json"
+      ]
     }
   ],
   "topContributors": [
@@ -213,6 +258,16 @@
       "summary": null
     },
     {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 132.95728018309288,
+      "prScore": 122.95728018309288,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "tcm390",
       "avatarUrl": "https://avatars.githubusercontent.com/u/60634884?u=c6c41679b8322eaa0c81f72e0b4ed95e80f0ac16&v=4",
       "totalScore": 93.61171703686216,
@@ -223,23 +278,13 @@
       "summary": null
     },
     {
-      "username": "ChristopherTrimboli",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
-      "totalScore": 71.50029140724723,
-      "prScore": 66.50029140724723,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 26.724437912434098,
+      "totalScore": 27.1624379124341,
       "prScore": 25.7464379124341,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.978,
+      "commentScore": 1.416,
       "summary": null
     },
     {
@@ -294,7 +339,7 @@
     },
     {
       "username": "borisudovicic",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=27713fbe603baae91ef519990facbacd6c23e93d&v=4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
       "totalScore": 2,
       "prScore": 0,
       "issueScore": 2,
@@ -313,8 +358,8 @@
       "summary": null
     }
   ],
-  "newPRs": 9,
-  "mergedPRs": 7,
+  "newPRs": 10,
+  "mergedPRs": 10,
   "newIssues": 2,
   "closedIssues": 1,
   "activeContributors": 10
