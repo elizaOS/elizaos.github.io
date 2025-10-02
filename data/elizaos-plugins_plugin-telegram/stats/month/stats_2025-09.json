@@ -1,0 +1,427 @@
+{
+  "interval": {
+    "intervalStart": "2025-09-01T00:00:00.000Z",
+    "intervalEnd": "2025-10-01T00:00:00.000Z",
+    "intervalType": "month"
+  },
+  "repository": "elizaos-plugins/plugin-telegram",
+  "overview": "From 2025-09-01 to 2025-10-01, elizaos-plugins/plugin-telegram had 1 new PRs (1 merged), 2 new issues, and 14 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOOtl_Us7Ny7p3",
+      "title": "Support inline keyboard callback buttons alongside existing URL/Login buttons.",
+      "author": "o-ray-o",
+      "number": 14,
+      "repository": "elizaos-plugins/plugin-telegram",
+      "body": "In https://docs.elizaos.ai/plugin-registry/platform/telegram/complete-documentation , there is this portion that covers inline keyboards and how to utilise plugin-telegram to create them. \n\n```// Simple button layout\nconst keyboard = {\n  inline_keyboard: [[\n    { text: \"Option 1\", callback_data: \"opt_1\" },\n    { text: \"Option 2\", callback_data: \"opt_2\" }\n  ], [\n    { text: \"Cancel\", callback_data: \"cancel\" }\n  ]]\n};\n```\n\nHowever, going through https://github.com/elizaos-plugins/plugin-telegram/blob/1.x/src/utils.ts\nreveals \n```\n/**\n * Converts Eliza buttons into Telegram buttons\n * @param {Button[]} buttons - The buttons from Eliza content\n * @returns {InlineKeyboardButton[]} Array of Telegram buttons\n */\nexport function convertToTelegramButtons(buttons?: Button[] | null): InlineKeyboardButton[] {\n  if (!buttons) return [];\n  return buttons.map((button: Button) => {\n    switch (button.kind) {\n      case 'login':\n        return Markup.button.login(button.text, button.url);\n      case 'url':\n        return Markup.button.url(button.text, button.url);\n    }\n  });\n}\n```\nwhich means that the functionality in the documentation was not actually implemented \n",
+      "createdAt": "2025-09-25T09:01:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOOtl_Us7NBl9D",
+      "title": "Fix: /start command not reaching runtime due to middleware bypass",
+      "author": "amirmabhout",
+      "number": 13,
+      "repository": "elizaos-plugins/plugin-telegram",
+      "body": "## Problem Description\n\n  When a user opens a Telegram bot for the first time and clicks the default `/start` button, the runtime does not receive any events, preventing the bot from responding to\n  new users.\n\n  ## Root Cause\n\n  The `/start` command is being handled separately via `bot.start()` method which bypasses the middleware chain. This causes:\n  - The authorization middleware to be skipped\n  - The chat and entity setup middleware to be skipped\n  - No proper `MESSAGE_RECEIVED` event being emitted to the runtime\n\n  ## Solution\n\n  Remove the separate `/start` handler and let `/start` commands flow through the normal message processing pipeline like any other message.\n\n  ## Code Change\n\n  In `src/service.ts`, line 169-176, change from:\n\n  ```typescript\n  private async initializeBot(): Promise<void> {\n    this.bot?.start((ctx) => {\n      this.runtime.emitEvent([TelegramEventTypes.SLASH_START], {\n        // we don't need this\n        ctx,\n      });\n    });\n    this.bot?.launch({\n      dropPendingUpdates: true,\n      allowedUpdates: ['message', 'message_reaction'],\n    });\n\n  To:\n\n  private async initializeBot(): Promise<void> {\n    // Remove the separate /start handler to let it flow through normal message processing\n    // This ensures /start commands go through middleware and proper initialization\n    this.bot?.launch({\n      dropPendingUpdates: true,\n      allowedUpdates: ['message', 'message_reaction'],\n    });\n\n  Impact\n\n  This fix ensures that when new users click /start:\n  1. The command goes through authorization middleware\n  2. The chat and entity middleware creates the world, room, and entities\n  3. The message handler creates proper memory and emits MESSAGE_RECEIVED event\n  4. The runtime and plugins can properly respond to the new user\n\n  Testing\n\n  After this change:\n  - New users clicking /start will receive responses from the bot\n  - The /start command will be treated as a regular text message \"/start\"\n  - All middleware will process the command properly\n  - The runtime will receive the expected MESSAGE_RECEIVED event",
+      "createdAt": "2025-09-22T08:28:07Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOtl_Us6qeLty",
+      "title": "feat(telegram): add inline callback buttons to utils and types; docs+…",
+      "author": "o-ray-o",
+      "number": 15,
+      "body": "# Add Callback Button Support for Interactive Menus\r\n\r\n## Summary\r\nThis PR adds support for Telegram callback buttons, enabling interactive menus that update in place without message spam. This feature allows developers to create rich, interactive experiences with navigation flows, confirmation dialogs, and dynamic content updates.\r\n\r\n## Motivation\r\nPreviously, the plugin only supported URL and login buttons which open external links. There was no way to create interactive menus or handle button clicks within the chat itself. This limitation prevented developers from building engaging bot experiences with:\r\n- Multi-level menus\r\n- Confirmation dialogs  \r\n- Settings panels\r\n- Interactive forms\r\n\r\n## Changes\r\n\r\n### 1. Type System Updates\r\n- **Extended `Button` type** (`src/types.ts`): Added discriminated union variant for callback buttons with `kind: 'callback'` and `callback_data` field\r\n- **Enhanced `TelegramContent` interface**: Added optional `callback_data` field to track button press data\r\n\r\n### 2. Core Functionality\r\n- **Button Conversion** (`src/utils.ts`): Updated `convertToTelegramButtons()` to handle callback buttons using `Markup.button.callback()`\r\n- **Callback Query Handler** (`src/messageManager.ts`): Implemented `handleCallbackQuery()` method that:\r\n  - Acknowledges callback queries immediately for better UX\r\n  - Processes callback data as messages through the runtime\r\n  - Supports editing original messages in place\r\n  - Creates proper Memory objects for action processing\r\n\r\n### 3. Service Integration\r\n- **Updated Service** (`src/service.ts`):\r\n  - Added `'callback_query'` to `allowedUpdates` in bot launch config\r\n  - Registered callback query event handler\r\n  - Integrated with existing middleware pipeline\r\n\r\n### 4. Documentation & Examples\r\n- **Comprehensive Examples** (`examples/callbackMenuAction.ts`):\r\n  - Interactive menu system with navigation\r\n  - Confirmation dialog pattern\r\n  - Demonstrates edit-in-place functionality\r\n- **README Updates**: Added detailed documentation on button types, usage patterns, and best practices\r\n\r\n### 5. Test Coverage\r\n- **Unit Tests** (`__tests__/utils.test.ts`): Added 8 new test cases for callback button conversion\r\n\r\n## Testing\r\n\r\n### Test Suite Results\r\n```bash\r\npnpm run test\r\n\r\n✓ __tests__/telegramClient.test.ts  (1 test) 3ms\r\n✓ __tests__/utils.test.ts  (26 tests) 63ms  \r\n✓ __tests__/messageManager.test.ts  (6 tests) 27ms\r\n\r\nTest Files  3 passed (3)\r\n     Tests  33 passed (33)\r\n```\r\n\r\n### Unit Tests Added\r\n```typescript\r\n✅ convertToTelegramButtons\r\n  ✓ should handle empty button array\r\n  ✓ should handle null buttons\r\n  ✓ should handle undefined buttons\r\n  ✓ should convert URL button correctly\r\n  ✓ should convert login button correctly\r\n  ✓ should convert callback button correctly\r\n  ✓ should handle mixed button types\r\n  ✓ should handle buttons with emoji in text\r\n  ✓ should handle callback data with special characters\r\n```\r\n\r\n### Build Verification\r\n```bash\r\npnpm run build\r\n✓ ESM Build success\r\n✓ DTS Build success\r\n✓ TypeScript compilation passed (npx tsc --noEmit)\r\n```\r\n\r\n### Manual Testing Checklist\r\n- [x] Callback buttons render correctly in Telegram chat\r\n- [x] Button clicks trigger callback queries\r\n- [x] Messages update in place without creating new messages\r\n- [x] Navigation between menu levels works\r\n- [x] Callback queries are acknowledged (no loading spinner stuck)\r\n- [x] Actions can process callback_data from button presses\r\n- [x] Error handling works when callback processing fails\r\n\r\n### Compliance Verification\r\n- [x] **TypeScript Linting** (per `.cursor/linter.mdc`):\r\n  - No `any` types in new code\r\n  - Proper type definitions and type guards\r\n  - Follows ElizaOS patterns\r\n- [x] **Error Logging** (per `.cursor/logger.mdc`):\r\n  - Uses `logger` from @elizaos/core\r\n  - Provides error context\r\n  - No sensitive data logging\r\n\r\n## Usage Example\r\n\r\n```typescript\r\n// Define an interactive menu action\r\nexport const menuAction: Action = {\r\n  name: 'INTERACTIVE_MENU',\r\n  \r\n  validate: async (_runtime, message) => {\r\n    const content = message.content as TelegramContent;\r\n    return content.text === '/menu' || \r\n           content.callback_data?.startsWith('menu_');\r\n  },\r\n  \r\n  handler: async (runtime, message, _state, _options, callback) => {\r\n    const content = message.content as TelegramContent;\r\n    \r\n    if (content.callback_data === 'menu_settings') {\r\n      // Edit message with settings submenu\r\n      await callback({\r\n        text: '⚙️ Settings',\r\n        buttons: [\r\n          { kind: 'callback', text: '🔔 Notifications', callback_data: 'menu_notif' },\r\n          { kind: 'callback', text: '⬅️ Back', callback_data: 'menu_main' }\r\n        ]\r\n      });\r\n    } else {\r\n      // Show main menu\r\n      await callback({\r\n        text: '📱 Main Menu',\r\n        buttons: [\r\n          { kind: 'callback', text: '⚙️ Settings', callback_data: 'menu_settings' }\r\n        ]\r\n      });\r\n    }\r\n    return true;\r\n  }\r\n};\r\n```\r\n\r\n## Breaking Changes\r\nNone. This feature is fully backward compatible:\r\n- Existing URL and login buttons continue to work unchanged\r\n- No changes to existing APIs\r\n- Optional feature that developers can adopt incrementally\r\n\r\n## Migration Guide\r\nNo migration needed. To use callback buttons, simply add buttons with `kind: 'callback'`:\r\n\r\n```typescript\r\n// Before (still works)\r\n{ kind: 'url', text: 'Website', url: 'https://example.com' }\r\n\r\n// New callback button option\r\n{ kind: 'callback', text: 'Click Me', callback_data: 'action_1' }\r\n```\r\n\r\n## Future Enhancements\r\n- [ ] Add support for callback query answers with alerts/notifications\r\n- [ ] Implement inline query support\r\n- [ ] Add button layout helpers (rows/columns)\r\n- [ ] Support for updating specific buttons without full message edit\r\n\r\n## Related Issues\r\n- Implements feature request for interactive menus\r\n- Enables rich user interactions without external URLs\r\n- Improves UX by reducing message spam\r\n\r\n## Checklist\r\n- [x] Code follows project style guidelines\r\n- [x] Tests have been added/updated\r\n- [x] Documentation has been updated\r\n- [x] Changes are backward compatible\r\n- [x] TypeScript types are properly defined\r\n- [x] Error handling follows project patterns\r\n- [x] Examples demonstrate the feature\r\n- [x] Build passes without errors\r\n- [x] All tests pass\r\n\r\n## Screenshots/Demo\r\nThe implementation enables creating interactive experiences like:\r\n- Multi-level navigation menus\r\n- Settings panels with submenus  \r\n- Confirmation dialogs\r\n- Dynamic content that updates in place\r\n\r\nSee `examples/callbackMenuAction.ts` for a complete working demonstration.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- New Features\n  - Added support for Telegram callback buttons and interactive menus, including handling callback queries and in-place message updates.\n  - Expanded button options (URL, Login, Callback) with optional callback data in message content.\n- Documentation\n  - Expanded README with button types, inline menu patterns, login flow, best practices, and full examples.\n- Tests\n  - Added comprehensive tests for converting buttons, covering URL, Login, Callback, mixed inputs, and edge cases.\n- Chores\n  - Updated .gitignore to exclude .cursor (retains .turbo).\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-telegram",
+      "createdAt": "2025-09-25T10:04:07Z",
+      "mergedAt": null,
+      "additions": 3793,
+      "deletions": 18
+    },
+    {
+      "id": "PR_kwDOOtl_Us6iajuF",
+      "title": "feat: enhance message processing with document handling and summary generation",
+      "author": "Neysixx",
+      "number": 11,
+      "body": "- Added `processDocument` method to handle various document types, including PDFs and text files.\r\n- Implemented centralized document processing based on MIME type.\r\n- Updated `processMessage` to integrate document processing and summary extraction.\r\n- Enhanced logging for document processing and error handling.\r\n\r\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\r\n## Summary by CodeRabbit\r\n\r\n* **New Features**\r\n  * Added support for processing documents (PDF, plain text, CSV, JSON) in Telegram messages, with automatic extraction of titles, descriptions, and content previews.\r\n  * Enhanced message handling to include attachments with detailed metadata and summaries.\r\n  * Introduced text cleaning utility to remove null characters from message content.\r\n\r\n* **Bug Fixes**\r\n  * Improved filtering to exclude non-image files (such as PDFs) from image processing.\r\n\r\n* **Refactor**\r\n  * Unified content and attachment extraction for messages, streamlining processing and improving consistency.\r\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-telegram",
+      "createdAt": "2025-08-06T15:52:42Z",
+      "mergedAt": "2025-09-22T09:08:08Z",
+      "additions": 1137,
+      "deletions": 25
+    }
+  ],
+  "codeChanges": {
+    "additions": 1137,
+    "deletions": 25,
+    "files": 3,
+    "commitCount": 2
+  },
+  "completedItems": [
+    {
+      "title": "feat: enhance message processing with document handling and summary generation",
+      "prNumber": 11,
+      "type": "feature",
+      "body": "- Added `processDocument` method to handle various document types, including PDFs and text files.\r\n- Implemented centralized document processing based on MIME type.\r\n- Updated `processMessage` to integrate document processing and summary ex",
+      "files": [
+        "bun.lock",
+        "src/messageManager.ts",
+        "src/utils.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 1350.3967271681715,
+      "prScore": 1325.1087271681715,
+      "issueScore": 0,
+      "reviewScore": 20.5,
+      "commentScore": 4.787999999999999,
+      "summary": "wtfsayo: Focused on enhancing the command-line experience and bolstering project stability this month. They delivered a significant new feature by adding a standalone CLI chat interface with an improved user experience (elizaos/eliza#5879). They also established a new testing workflow for the alpha CLI in a large refactor (elizaos/eliza#5873) and fixed a key semantic versioning bug in the plugin registry (elizaos-plugins/registry#214). This work reflects a primary focus on bug fixes, testing improvements, and configuration management."
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 682.5715980398744,
+      "prScore": 626.4715980398744,
+      "issueScore": 0,
+      "reviewScore": 55.5,
+      "commentScore": 0.6000000000000001,
+      "summary": "ChristopherTrimboli: Focused on improving the development and release infrastructure for the `elizaos/eliza` repository this month. He established a new alpha NPM release workflow (#5863) and subsequently unified the release process for all NPM packages (#5877). Christopher also delivered significant developer experience enhancements in a large PR (#5881, +1104/-327 lines) that improved the dev CLI, cleaned up logging, and optimized file watching. His work primarily involved changes to code and configuration files, reflecting his focus on tooling and build systems."
+    },
+    {
+      "username": "tcm390",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/60634884?u=c6c41679b8322eaa0c81f72e0b4ed95e80f0ac16&v=4",
+      "totalScore": 542.9191979117043,
+      "prScore": 532.7191979117042,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": "tcm390: Focused on enhancing user experience and stability within the `elizaos/eliza` repository, merging three pull requests. Their most impactful contribution was implementing a new feature to display action results in the chat UI (elizaos/eliza#5865), a significant effort adding nearly 1200 lines of code. They also enabled image generation for Discord (elizaos/eliza#5861) and fixed an unhandled promise bug (elizaos/eliza#5870), demonstrating a clear focus on feature work and bug fixes."
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 354.18446859983163,
+      "prScore": 311.37646859983164,
+      "issueScore": 0,
+      "reviewScore": 38.5,
+      "commentScore": 4.308,
+      "summary": "standujar: Focused on improving the stability and developer experience of the `elizaos/eliza` repository, merging three targeted bug fixes. Their most impactful work included resolving a CLI port detection issue (#5876) and adding `SERVER_HOST` support to the dev command (#5883). In addition to actively reviewing 5 PRs and commenting on 11 issues, they have a significant refactoring effort in progress to centralize business logic (#5864). This month's contributions were primarily centered on bug fixes and refactoring, with a healthy balance of code and test file modifications."
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 202.44864087250028,
+      "prScore": 160.23264087250027,
+      "issueScore": 0,
+      "reviewScore": 40,
+      "commentScore": 2.2159999999999997,
+      "summary": "0xbbjoker focused on expanding the plugin ecosystem by opening pull requests to add a new Sourcegraph plugin to the registry (elizaos-plugins/registry#216, #215). They also supported the team through collaboration, providing 4 approvals and 2 comments on other pull requests. Their work this month centered on configuration changes within the plugin registry."
+    },
+    {
+      "username": "yungalgo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113615973?u=92e0f29f7e2fbb8ce46ed13c51f692ca803de02d&v=4",
+      "totalScore": 164.93465414835248,
+      "prScore": 137.7346541483525,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0.2,
+      "summary": "yungalgo: Focused on core project infrastructure and packaging, merging a significant fix in `elizaos/eliza#5882` to scope npm package fields for registry entries (+8532/-499 lines). They also improved the developer experience by adding Docker files to the project starter in `elizaos/eliza#5858` and submitted 11 new plugins to the `elizaos-plugins/registry`. This work shows a primary focus on configuration files and core project code, complemented by providing feedback on 6 pull requests."
+    },
+    {
+      "username": "borisudovicic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
+      "totalScore": 100,
+      "prScore": 0,
+      "issueScore": 100,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "borisudovicic: Focused on identifying and documenting work within the elizaos/eliza repository by creating four issues. Their contributions included proposals for a CLI refactor (elizaos/eliza#5860) and a new observability GUI (elizaos/eliza#5868). They also reported a broken logger (elizaos/eliza#5886) and managed an issue related to moving to core pure (elizaos/eliza#5766)."
+    },
+    {
+      "username": "DevGruGold",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/181147699?u=4258e430ad766ca1d11778ab9e7d91ecfa0e110c&v=4",
+      "totalScore": 81.28954779315221,
+      "prScore": 80.8515477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": "DevGruGold: Focused on bugfix work in the elizaos/eliza repository, opening two pull requests (#5891, #5892). They contributed to development discussions with 3 comments on pull requests. Their single commit this period modified documentation and test files."
+    },
+    {
+      "username": "wookosh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/120273332?u=493e01d0863a55ed139425760447079b96ef931d&v=4",
+      "totalScore": 42.40160788330364,
+      "prScore": 42.40160788330364,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "wookosh: Focused on resolving a bug in the logging system this month. They merged a single pull request in elizaos/eliza (#5885) to fix an issue where the JSON log format was not working correctly. This contribution involved changes of +347/-1 lines. Based on the files modified, their work was split between implementing the fix and adding corresponding tests."
+    },
+    {
+      "username": "o-ray-o",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/61679842?u=09b33611d65981f1436d29f49f8e24215e779f4e&v=4",
+      "totalScore": 42.08939650691849,
+      "prScore": 40.08939650691849,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "K1mc4n",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/156217571?u=cc94e7743c591f36eaf958d88befa855348bba9d&v=4",
+      "totalScore": 40.4257738965761,
+      "prScore": 40.4257738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "K1mc4n: No activity this month."
+    },
+    {
+      "username": "jonathanprozzi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9438776?u=25b5a5b22cfe26724ee1ebd869c378fc65196987&v=4",
+      "totalScore": 37.40307004804858,
+      "prScore": 37.06307004804858,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": "jonathanprozzi: Focused on enhancing observability by opening a pull request to add Sentry Node telemetry support in the elizaos/eliza repository (#5867). They also participated in pull request discussions with 2 comments."
+    },
+    {
+      "username": "linear",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/20150?v=4",
+      "totalScore": 34.2,
+      "prScore": 0,
+      "issueScore": 34,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": "linear: Focused on project planning, coordination, and identifying necessary fixes within the elizaos/eliza repository. They created 18 issues to drive progress, notably identifying critical CI test failures (#5715, #5714) that were blocking development. Their planning efforts also included scoping a major new feature for dynamic prompting (#5819) and coordinating the creation of numerous new plugins."
+    },
+    {
+      "username": "Lexpeartha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43365376?u=612e09b9512edda4717a1cb7d61f163a0289be1a&v=4",
+      "totalScore": 33.5437738965761,
+      "prScore": 33.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "Lexpeartha: Focused on asset sanitization within the elizaos/eliza repository this month. They opened a pull request to address an issue with dkg assets (elizaos/eliza#5902). This work remains open and has not yet been merged."
+    },
+    {
+      "username": "MozirDmitriy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/193700874?v=4",
+      "totalScore": 20.630306144334053,
+      "prScore": 20.630306144334053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "MozirDmitriy: This month, MozirDmitriy's contributions were focused on documentation maintenance. They merged one pull request in the elizaos/eliza repository (#5866) to fix a broken path. This work involved a minor change to documentation files."
+    },
+    {
+      "username": "monilpat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 19.314,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 1.3139999999999998,
+      "summary": "monilpat: Undertook a significant local refactoring effort, evidenced by 23 commits modifying 241 files with substantial changes (+8627/-9623 lines). While this work has not yet been opened as a pull request, they actively participated in code reviews by providing 12 comments across 4 different PRs. This activity indicates a primary focus on large-scale refactoring and other related work."
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 14.140735902799728,
+      "prScore": 9.640735902799728,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": "odilitime: Focused on a small code improvement in the elizaos-plugins/plugin-twitter repository this month. They opened a pull request (elizaos-plugins/plugin-twitter#42) to refactor a small piece of logic, which modified 4 files. Additionally, they contributed to one issue discussion."
+    },
+    {
+      "username": "letreturn",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/225555304?u=1b0ad304df879de49cb0a252baa64da6e55f4630&v=4",
+      "totalScore": 12.788674030744707,
+      "prScore": 12.788674030744707,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "letreturn: This month's activity consisted of opening a single pull request (elizaos/eliza#6009) to fix a typo in a comment. There were no other contributions across issues, reviews, or merged pull requests."
+    },
+    {
+      "username": "SergiuTomus",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/40544351?v=4",
+      "totalScore": 12.200573590279971,
+      "prScore": 12.200573590279971,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "SergiuTomus: This month's activity was focused on expanding the plugin ecosystem by opening a pull request to add `plugin-beacon` to the registry (elizaos-plugins/registry#233). This contribution consisted of a single-line modification to a configuration file."
+    },
+    {
+      "username": "digitalsimboja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32062279?u=11064631ad3e24d807602060c6a444827aaf9b32&v=4",
+      "totalScore": 10.560780823064825,
+      "prScore": 8.360780823064824,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": "digitalsimboja: Focused on improving the stability of the `eliza` runtime this month. They identified and reported an unhandled exception (#6003), and subsequently opened a pull request (#6007) to address the issue. This work aims to ensure agent creation handles potential errors more gracefully."
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 9.876,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.8759999999999999,
+      "summary": "claude: Focused on providing feedback across pull requests this month. They were highly engaged in code review discussions, leaving 109 comments and conducting 2 formal reviews."
+    },
+    {
+      "username": "1BDO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/210645034?v=4",
+      "totalScore": 7.699147180559946,
+      "prScore": 7.159147180559946,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.54,
+      "summary": "1BDO: This month, 1BDO's main contribution was opening a pull request to add the `plugin-delta` to the registry (elizaos-plugins/registry#218). They also participated in discussions by commenting on four issues. Their work this period involved minor changes to configuration files."
+    },
+    {
+      "username": "wpoulin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18474228?u=8e3c0cf8967fed66e93e55394fd798a3a79b0cff&v=4",
+      "totalScore": 6.796147180559945,
+      "prScore": 6.796147180559945,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "wpoulin: Contributed to the plugin ecosystem this month by adding the `plugin-octav` to the registry via PR elizaos-plugins/registry#230. This work consisted of a minor configuration file update."
+    },
+    {
+      "username": "HongThaiPham",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/8998403?u=574f5eecccf6ff08dbe63c3632d806762d642019&v=4",
+      "totalScore": 5.246573590279973,
+      "prScore": 5.246573590279973,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "HongThaiPham: This month's activity was centered on expanding the plugin ecosystem by opening a pull request to add a new plugin to the registry (elizaos-plugins/registry#231). This contribution consisted of a single-line configuration change."
+    },
+    {
+      "username": "viktorking7",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/140458814?u=9822a819c8ca631b27e2507dac20c9298e85b52b&v=4",
+      "totalScore": 4.654306144334055,
+      "prScore": 4.654306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "viktorking7 contributed a documentation fix this month, opening a pull request to correct a typo (elizaos/eliza#6000). Their work was focused entirely on documentation."
+    },
+    {
+      "username": "shuhaib112",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211030292?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": "shuhaib112: No activity this month."
+    },
+    {
+      "username": "github-advanced-security",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": "github-advanced-security: No activity this month."
+    },
+    {
+      "username": "DarrenZal",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3492713?u=f8a48af1a6c53497aff9a9b440d74dfa25669f22&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "DarrenZal: This month, DarrenZal's contribution was focused on product ideation within the `elizaos/eliza` project. They proposed a new feature by opening an issue to add native web fetching capabilities for agents (elizaos/eliza#5889)."
+    },
+    {
+      "username": "harperaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1330944?v=4",
+      "totalScore": 2.638,
+      "prScore": 0,
+      "issueScore": 2.2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": "harperaa: Focused on quality assurance for the elizaos/eliza repository this month by identifying and reporting several bugs. They created issues for broken image generation (#5809), direct messaging failures (#5810), and a dependency issue causing plugin failures (#5995), all of which were subsequently closed."
+    },
+    {
+      "username": "thedotmack",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/683968?u=7163be2e8345b6a03cf8bd9bcc55025e73e4601b&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "thedotmack: This month, their contribution focused on improving product usability by identifying a significant documentation gap in the elizaos/eliza repository. They opened an issue (elizaos/eliza#5857) to report that the Web UI dashboard was completely undocumented for users."
+    },
+    {
+      "username": "objp2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/189950592?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "objp2: Focused on planning a new feature this month, opening an issue to propose a Matrix Platform Integration for the elizaos/eliza repository (#5862)."
+    },
+    {
+      "username": "anyaachan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/53533713?u=c8fa43d0ca83d3c51bbc17328e0a8f817cda7d57&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "anyaachan: This month, anyaachan's activity was focused on identifying performance issues. They reported a problem with excessive PostgreSQL requests originating from the Farcaster plugin in issue elizaos-plugins/plugin-farcaster#8."
+    },
+    {
+      "username": "amirmabhout",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/90555973?u=79a7fd12aaf8bb25bb9b25a8dc7624ddd75a9b3a&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "TensorNull",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129579691?u=fef786d866afd3d3a36397da036641c65906f3f2&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "TensorNull: Contributed to product direction this month by opening a feature request in elizaos/eliza (#5973) to add support for the CometAPI provider."
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 1,
+  "newIssues": 2,
+  "closedIssues": 0,
+  "activeContributors": 14
+}

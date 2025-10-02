@@ -1,0 +1,227 @@
+{
+  "interval": {
+    "intervalStart": "2025-09-21T00:00:00.000Z",
+    "intervalEnd": "2025-09-28T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos-plugins/plugin-telegram",
+  "overview": "From 2025-09-21 to 2025-09-28, elizaos-plugins/plugin-telegram had 1 new PRs (1 merged), 2 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOOtl_Us7Ny7p3",
+      "title": "Support inline keyboard callback buttons alongside existing URL/Login buttons.",
+      "author": "o-ray-o",
+      "number": 14,
+      "repository": "elizaos-plugins/plugin-telegram",
+      "body": "In https://docs.elizaos.ai/plugin-registry/platform/telegram/complete-documentation , there is this portion that covers inline keyboards and how to utilise plugin-telegram to create them. \n\n```// Simple button layout\nconst keyboard = {\n  inline_keyboard: [[\n    { text: \"Option 1\", callback_data: \"opt_1\" },\n    { text: \"Option 2\", callback_data: \"opt_2\" }\n  ], [\n    { text: \"Cancel\", callback_data: \"cancel\" }\n  ]]\n};\n```\n\nHowever, going through https://github.com/elizaos-plugins/plugin-telegram/blob/1.x/src/utils.ts\nreveals \n```\n/**\n * Converts Eliza buttons into Telegram buttons\n * @param {Button[]} buttons - The buttons from Eliza content\n * @returns {InlineKeyboardButton[]} Array of Telegram buttons\n */\nexport function convertToTelegramButtons(buttons?: Button[] | null): InlineKeyboardButton[] {\n  if (!buttons) return [];\n  return buttons.map((button: Button) => {\n    switch (button.kind) {\n      case 'login':\n        return Markup.button.login(button.text, button.url);\n      case 'url':\n        return Markup.button.url(button.text, button.url);\n    }\n  });\n}\n```\nwhich means that the functionality in the documentation was not actually implemented \n",
+      "createdAt": "2025-09-25T09:01:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOOtl_Us7NBl9D",
+      "title": "Fix: /start command not reaching runtime due to middleware bypass",
+      "author": "amirmabhout",
+      "number": 13,
+      "repository": "elizaos-plugins/plugin-telegram",
+      "body": "## Problem Description\n\n  When a user opens a Telegram bot for the first time and clicks the default `/start` button, the runtime does not receive any events, preventing the bot from responding to\n  new users.\n\n  ## Root Cause\n\n  The `/start` command is being handled separately via `bot.start()` method which bypasses the middleware chain. This causes:\n  - The authorization middleware to be skipped\n  - The chat and entity setup middleware to be skipped\n  - No proper `MESSAGE_RECEIVED` event being emitted to the runtime\n\n  ## Solution\n\n  Remove the separate `/start` handler and let `/start` commands flow through the normal message processing pipeline like any other message.\n\n  ## Code Change\n\n  In `src/service.ts`, line 169-176, change from:\n\n  ```typescript\n  private async initializeBot(): Promise<void> {\n    this.bot?.start((ctx) => {\n      this.runtime.emitEvent([TelegramEventTypes.SLASH_START], {\n        // we don't need this\n        ctx,\n      });\n    });\n    this.bot?.launch({\n      dropPendingUpdates: true,\n      allowedUpdates: ['message', 'message_reaction'],\n    });\n\n  To:\n\n  private async initializeBot(): Promise<void> {\n    // Remove the separate /start handler to let it flow through normal message processing\n    // This ensures /start commands go through middleware and proper initialization\n    this.bot?.launch({\n      dropPendingUpdates: true,\n      allowedUpdates: ['message', 'message_reaction'],\n    });\n\n  Impact\n\n  This fix ensures that when new users click /start:\n  1. The command goes through authorization middleware\n  2. The chat and entity middleware creates the world, room, and entities\n  3. The message handler creates proper memory and emits MESSAGE_RECEIVED event\n  4. The runtime and plugins can properly respond to the new user\n\n  Testing\n\n  After this change:\n  - New users clicking /start will receive responses from the bot\n  - The /start command will be treated as a regular text message \"/start\"\n  - All middleware will process the command properly\n  - The runtime will receive the expected MESSAGE_RECEIVED event",
+      "createdAt": "2025-09-22T08:28:07Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOtl_Us6qeLty",
+      "title": "feat(telegram): add inline callback buttons to utils and types; docs+…",
+      "author": "o-ray-o",
+      "number": 15,
+      "body": "# Add Callback Button Support for Interactive Menus\r\n\r\n## Summary\r\nThis PR adds support for Telegram callback buttons, enabling interactive menus that update in place without message spam. This feature allows developers to create rich, interactive experiences with navigation flows, confirmation dialogs, and dynamic content updates.\r\n\r\n## Motivation\r\nPreviously, the plugin only supported URL and login buttons which open external links. There was no way to create interactive menus or handle button clicks within the chat itself. This limitation prevented developers from building engaging bot experiences with:\r\n- Multi-level menus\r\n- Confirmation dialogs  \r\n- Settings panels\r\n- Interactive forms\r\n\r\n## Changes\r\n\r\n### 1. Type System Updates\r\n- **Extended `Button` type** (`src/types.ts`): Added discriminated union variant for callback buttons with `kind: 'callback'` and `callback_data` field\r\n- **Enhanced `TelegramContent` interface**: Added optional `callback_data` field to track button press data\r\n\r\n### 2. Core Functionality\r\n- **Button Conversion** (`src/utils.ts`): Updated `convertToTelegramButtons()` to handle callback buttons using `Markup.button.callback()`\r\n- **Callback Query Handler** (`src/messageManager.ts`): Implemented `handleCallbackQuery()` method that:\r\n  - Acknowledges callback queries immediately for better UX\r\n  - Processes callback data as messages through the runtime\r\n  - Supports editing original messages in place\r\n  - Creates proper Memory objects for action processing\r\n\r\n### 3. Service Integration\r\n- **Updated Service** (`src/service.ts`):\r\n  - Added `'callback_query'` to `allowedUpdates` in bot launch config\r\n  - Registered callback query event handler\r\n  - Integrated with existing middleware pipeline\r\n\r\n### 4. Documentation & Examples\r\n- **Comprehensive Examples** (`examples/callbackMenuAction.ts`):\r\n  - Interactive menu system with navigation\r\n  - Confirmation dialog pattern\r\n  - Demonstrates edit-in-place functionality\r\n- **README Updates**: Added detailed documentation on button types, usage patterns, and best practices\r\n\r\n### 5. Test Coverage\r\n- **Unit Tests** (`__tests__/utils.test.ts`): Added 8 new test cases for callback button conversion\r\n\r\n## Testing\r\n\r\n### Test Suite Results\r\n```bash\r\npnpm run test\r\n\r\n✓ __tests__/telegramClient.test.ts  (1 test) 3ms\r\n✓ __tests__/utils.test.ts  (26 tests) 63ms  \r\n✓ __tests__/messageManager.test.ts  (6 tests) 27ms\r\n\r\nTest Files  3 passed (3)\r\n     Tests  33 passed (33)\r\n```\r\n\r\n### Unit Tests Added\r\n```typescript\r\n✅ convertToTelegramButtons\r\n  ✓ should handle empty button array\r\n  ✓ should handle null buttons\r\n  ✓ should handle undefined buttons\r\n  ✓ should convert URL button correctly\r\n  ✓ should convert login button correctly\r\n  ✓ should convert callback button correctly\r\n  ✓ should handle mixed button types\r\n  ✓ should handle buttons with emoji in text\r\n  ✓ should handle callback data with special characters\r\n```\r\n\r\n### Build Verification\r\n```bash\r\npnpm run build\r\n✓ ESM Build success\r\n✓ DTS Build success\r\n✓ TypeScript compilation passed (npx tsc --noEmit)\r\n```\r\n\r\n### Manual Testing Checklist\r\n- [x] Callback buttons render correctly in Telegram chat\r\n- [x] Button clicks trigger callback queries\r\n- [x] Messages update in place without creating new messages\r\n- [x] Navigation between menu levels works\r\n- [x] Callback queries are acknowledged (no loading spinner stuck)\r\n- [x] Actions can process callback_data from button presses\r\n- [x] Error handling works when callback processing fails\r\n\r\n### Compliance Verification\r\n- [x] **TypeScript Linting** (per `.cursor/linter.mdc`):\r\n  - No `any` types in new code\r\n  - Proper type definitions and type guards\r\n  - Follows ElizaOS patterns\r\n- [x] **Error Logging** (per `.cursor/logger.mdc`):\r\n  - Uses `logger` from @elizaos/core\r\n  - Provides error context\r\n  - No sensitive data logging\r\n\r\n## Usage Example\r\n\r\n```typescript\r\n// Define an interactive menu action\r\nexport const menuAction: Action = {\r\n  name: 'INTERACTIVE_MENU',\r\n  \r\n  validate: async (_runtime, message) => {\r\n    const content = message.content as TelegramContent;\r\n    return content.text === '/menu' || \r\n           content.callback_data?.startsWith('menu_');\r\n  },\r\n  \r\n  handler: async (runtime, message, _state, _options, callback) => {\r\n    const content = message.content as TelegramContent;\r\n    \r\n    if (content.callback_data === 'menu_settings') {\r\n      // Edit message with settings submenu\r\n      await callback({\r\n        text: '⚙️ Settings',\r\n        buttons: [\r\n          { kind: 'callback', text: '🔔 Notifications', callback_data: 'menu_notif' },\r\n          { kind: 'callback', text: '⬅️ Back', callback_data: 'menu_main' }\r\n        ]\r\n      });\r\n    } else {\r\n      // Show main menu\r\n      await callback({\r\n        text: '📱 Main Menu',\r\n        buttons: [\r\n          { kind: 'callback', text: '⚙️ Settings', callback_data: 'menu_settings' }\r\n        ]\r\n      });\r\n    }\r\n    return true;\r\n  }\r\n};\r\n```\r\n\r\n## Breaking Changes\r\nNone. This feature is fully backward compatible:\r\n- Existing URL and login buttons continue to work unchanged\r\n- No changes to existing APIs\r\n- Optional feature that developers can adopt incrementally\r\n\r\n## Migration Guide\r\nNo migration needed. To use callback buttons, simply add buttons with `kind: 'callback'`:\r\n\r\n```typescript\r\n// Before (still works)\r\n{ kind: 'url', text: 'Website', url: 'https://example.com' }\r\n\r\n// New callback button option\r\n{ kind: 'callback', text: 'Click Me', callback_data: 'action_1' }\r\n```\r\n\r\n## Future Enhancements\r\n- [ ] Add support for callback query answers with alerts/notifications\r\n- [ ] Implement inline query support\r\n- [ ] Add button layout helpers (rows/columns)\r\n- [ ] Support for updating specific buttons without full message edit\r\n\r\n## Related Issues\r\n- Implements feature request for interactive menus\r\n- Enables rich user interactions without external URLs\r\n- Improves UX by reducing message spam\r\n\r\n## Checklist\r\n- [x] Code follows project style guidelines\r\n- [x] Tests have been added/updated\r\n- [x] Documentation has been updated\r\n- [x] Changes are backward compatible\r\n- [x] TypeScript types are properly defined\r\n- [x] Error handling follows project patterns\r\n- [x] Examples demonstrate the feature\r\n- [x] Build passes without errors\r\n- [x] All tests pass\r\n\r\n## Screenshots/Demo\r\nThe implementation enables creating interactive experiences like:\r\n- Multi-level navigation menus\r\n- Settings panels with submenus  \r\n- Confirmation dialogs\r\n- Dynamic content that updates in place\r\n\r\nSee `examples/callbackMenuAction.ts` for a complete working demonstration.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- New Features\n  - Added support for Telegram callback buttons and interactive menus, including handling callback queries and in-place message updates.\n  - Expanded button options (URL, Login, Callback) with optional callback data in message content.\n- Documentation\n  - Expanded README with button types, inline menu patterns, login flow, best practices, and full examples.\n- Tests\n  - Added comprehensive tests for converting buttons, covering URL, Login, Callback, mixed inputs, and edge cases.\n- Chores\n  - Updated .gitignore to exclude .cursor (retains .turbo).\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-telegram",
+      "createdAt": "2025-09-25T10:04:07Z",
+      "mergedAt": null,
+      "additions": 3793,
+      "deletions": 18
+    },
+    {
+      "id": "PR_kwDOOtl_Us6iajuF",
+      "title": "feat: enhance message processing with document handling and summary generation",
+      "author": "Neysixx",
+      "number": 11,
+      "body": "- Added `processDocument` method to handle various document types, including PDFs and text files.\r\n- Implemented centralized document processing based on MIME type.\r\n- Updated `processMessage` to integrate document processing and summary extraction.\r\n- Enhanced logging for document processing and error handling.\r\n\r\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\r\n## Summary by CodeRabbit\r\n\r\n* **New Features**\r\n  * Added support for processing documents (PDF, plain text, CSV, JSON) in Telegram messages, with automatic extraction of titles, descriptions, and content previews.\r\n  * Enhanced message handling to include attachments with detailed metadata and summaries.\r\n  * Introduced text cleaning utility to remove null characters from message content.\r\n\r\n* **Bug Fixes**\r\n  * Improved filtering to exclude non-image files (such as PDFs) from image processing.\r\n\r\n* **Refactor**\r\n  * Unified content and attachment extraction for messages, streamlining processing and improving consistency.\r\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-telegram",
+      "createdAt": "2025-08-06T15:52:42Z",
+      "mergedAt": "2025-09-22T09:08:08Z",
+      "additions": 1137,
+      "deletions": 25
+    }
+  ],
+  "codeChanges": {
+    "additions": 1137,
+    "deletions": 25,
+    "files": 3,
+    "commitCount": 2
+  },
+  "completedItems": [
+    {
+      "title": "feat: enhance message processing with document handling and summary generation",
+      "prNumber": 11,
+      "type": "feature",
+      "body": "- Added `processDocument` method to handle various document types, including PDFs and text files.\r\n- Implemented centralized document processing based on MIME type.\r\n- Updated `processMessage` to integrate document processing and summary ex",
+      "files": [
+        "bun.lock",
+        "src/messageManager.ts",
+        "src/utils.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 241.75273944238825,
+      "prScore": 241.41273944238824,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "tcm390",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/60634884?u=c6c41679b8322eaa0c81f72e0b4ed95e80f0ac16&v=4",
+      "totalScore": 108.08541592379541,
+      "prScore": 103.08541592379541,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 75.19018381650308,
+      "prScore": 69.99018381650308,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 54.3590014005278,
+      "prScore": 34.3590014005278,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 48.83868863078344,
+      "prScore": 38.400688630783435,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "o-ray-o",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/61679842?u=09b33611d65981f1436d29f49f8e24215e779f4e&v=4",
+      "totalScore": 42.08939650691849,
+      "prScore": 40.08939650691849,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "letreturn",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/225555304?u=1b0ad304df879de49cb0a252baa64da6e55f4630&v=4",
+      "totalScore": 12.788674030744707,
+      "prScore": 12.788674030744707,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "SergiuTomus",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/40544351?v=4",
+      "totalScore": 12.200573590279971,
+      "prScore": 12.200573590279971,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digitalsimboja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32062279?u=11064631ad3e24d807602060c6a444827aaf9b32&v=4",
+      "totalScore": 10.560780823064825,
+      "prScore": 8.360780823064824,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "HongThaiPham",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/8998403?u=574f5eecccf6ff08dbe63c3632d806762d642019&v=4",
+      "totalScore": 5.246573590279973,
+      "prScore": 5.246573590279973,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "viktorking7",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/140458814?u=9822a819c8ca631b27e2507dac20c9298e85b52b&v=4",
+      "totalScore": 4.654306144334055,
+      "prScore": 4.654306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "harperaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1330944?v=4",
+      "totalScore": 2.638,
+      "prScore": 0,
+      "issueScore": 2.2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "borisudovicic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "amirmabhout",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/90555973?u=79a7fd12aaf8bb25bb9b25a8dc7624ddd75a9b3a&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 1,
+  "newIssues": 2,
+  "closedIssues": 0,
+  "activeContributors": 8
+}
