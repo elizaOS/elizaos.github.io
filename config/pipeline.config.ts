@@ -107,6 +107,16 @@ export default {
       name: "plugin-anthropic",
       defaultBranch: "1.x",
     },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-relay",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-email",
+      defaultBranch: "1.x",
+    },
   ],
   walletAddresses: {
     enabled: true,
