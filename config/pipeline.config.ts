@@ -117,6 +117,16 @@ export default {
       name: "plugin-email",
       defaultBranch: "1.x",
     },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-ollama",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-pdf",
+      defaultBranch: "1.x",
+    },
   ],
   walletAddresses: {
     enabled: true,
