@@ -77,6 +77,26 @@ export default {
       name: "plugin-mcp",
       defaultBranch: "1.x",
     },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-autocoder",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-discord",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-telegram",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-openrouter",
+      defaultBranch: "1.x",
+    },
   ],
   walletAddresses: {
     enabled: true,
