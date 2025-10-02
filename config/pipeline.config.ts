@@ -97,6 +97,16 @@ export default {
       name: "plugin-openrouter",
       defaultBranch: "1.x",
     },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-openai",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-anthropic",
+      defaultBranch: "1.x",
+    },
   ],
   walletAddresses: {
     enabled: true,
