@@ -141,7 +141,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       );
       authUrl.searchParams.append(
         "redirect_uri",
-        `${window.location.origin}/auth/callback`,
+        `${window.location.origin}/leaderboard/auth/callback`,
       );
       authUrl.searchParams.append("scope", "read:user");
       authUrl.searchParams.append("state", state);
