@@ -209,7 +209,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       await fetchUserData(accessToken);
       console.log("Fetching user data somplete", { accessToken });
       // Redirect to the home page or another appropriate page
-      window.location.href = "/";
+      window.location.href = "/leaderboard";
     } catch (error) {
       console.error("Error in auth callback:", error);
       setError(
