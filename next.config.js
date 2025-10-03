@@ -1,8 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "export",
-  basePath: "/elizaos.github.io",
-  assetPrefix: "/elizaos.github.io",
+  basePath: "/leaderboard",
+  assetPrefix: "/leaderboard",
   images: {
     unoptimized: true, // Required for static export
   },

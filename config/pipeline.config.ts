@@ -19,7 +19,7 @@ export default {
   repositories: [
     {
       owner: "Sendo-labs",
-      name: "elizaos.github.io",
+      name: "leaderboard",
       defaultBranch: "main",
     },
   ],
