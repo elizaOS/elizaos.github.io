@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-10-01 to 2025-11-01, elizaos/eliza had 27 new PRs (21 merged), 6 new issues, and 15 active contributors.",
+  "overview": "From 2025-10-01 to 2025-11-01, elizaos/eliza had 27 new PRs (22 merged), 6 new issues, and 15 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7PXS9F",
@@ -89,9 +89,9 @@
       "body": "## Overview\r\n\r\nThis PR completely migrates the ElizaOS CLI deployment system from traditional Docker image builds to a modern bootstrapper architecture. This change significantly improves deployment speed, reduces resource usage, and eliminates platform size limitations.\r\n\r\n## What Changed\r\n\r\n### 🚀 New Bootstrapper Architecture\r\n\r\n**Added:**\r\n- `deploy-bootstrapper.ts` - Core bootstrapper deployment logic\r\n- `artifact.ts` - Artifact creation and management utilities\r\n- `r2-client.ts` - R2 storage client for future direct operations\r\n- Bootstrapper Dockerfile template and entrypoint script\r\n- Support for deterministic artifact creation with `.gitignore` respect\r\n\r\n**Key Features:**\r\n- Creates lightweight tar.gz artifacts (typically <50MB vs 500MB+ Docker images)\r\n- Uploads artifacts to Cloudflare R2 via secure API\r\n- Uses minimal shared bootstrapper image (~100MB)\r\n- Fetches project code at container startup\r\n- Supports both Bun and npm lockfiles\r\n- Implements SHA256 checksum verification\r\n\r\n### 🗑️ Removed Legacy Docker Code\r\n\r\n**Deleted:**\r\n- `utils/docker.ts` - All Docker build/export utilities (~280 lines)\r\n- `deployWithDocker()` function (~300 lines)\r\n- Docker-specific CLI options (`--use-docker`, `--tag`, `--no-build`)\r\n- Dockerfile generation and management code\r\n\r\n### 📦 Dependencies\r\n\r\n**Added:**\r\n- `tar` - For creating compressed archives\r\n- `ignore` - For respecting .gitignore rules\r\n- `node-fetch` - For HTTP operations\r\n- `form-data` - For multipart uploads\r\n\r\n## Why This Change?\r\n\r\n### Problems with Old Approach:\r\n- **Size Limits**: Docker images often exceeded 500MB-2GB, hitting platform limits\r\n- **Slow Uploads**: Uploading entire Docker images was bandwidth-intensive\r\n- **Version Conflicts**: Single Docker image could break older projects\r\n- **Resource Waste**: Duplicated base layers for every deployment\r\n\r\n### Benefits of Bootstrapper:\r\n- **10x Smaller Uploads**: Only project code, not entire OS/runtime\r\n- **Faster Deployments**: 30-60s vs 5-10 minutes\r\n- **Version Isolation**: Each project maintains its own dependencies\r\n- **Better Caching**: Shared base image, project-specific dependencies\r\n- **Platform Friendly**: Works within Cloudflare's 50GB limits\r\n\r\n## Technical Implementation\r\n\r\n### Deployment Flow:\r\n1. **Artifact Creation**\r\n   ```typescript\r\n   // Creates deterministic tar.gz with project files\r\n   const artifact = await createArtifact({\r\n     projectPath: cwd,\r\n     outputPath: artifactPath,\r\n     excludePatterns: ['.git', 'node_modules', '.env'],\r\n     deterministic: true\r\n   });\r\n   ```\r\n\r\n2. **Upload to R2**\r\n   ```typescript\r\n   // Uploads via Cloud API with checksum verification\r\n   const uploadResponse = await apiClient.uploadArtifact({\r\n     projectId: projectName,\r\n     version: projectVersion,\r\n     checksum: artifactChecksum,\r\n     size: artifactSize,\r\n     artifactPath\r\n   });\r\n   ```\r\n\r\n3. **Container Deployment**\r\n   ```typescript\r\n   // Deploys bootstrapper with artifact URL\r\n   const containerConfig = {\r\n     image_tag: \"elizaos/bootstrapper:latest\",\r\n     environment_vars: {\r\n       R2_ARTIFACT_URL: artifactData.artifactUrl,\r\n       R2_TOKEN: artifactData.token,\r\n       R2_ARTIFACT_CHECKSUM: artifactChecksum,\r\n       START_CMD: \"bun run start\"\r\n     }\r\n   };\r\n   ```\r\n\r\n### Bootstrapper Runtime:\r\n- Alpine Linux base with Bun pre-installed\r\n- Downloads artifact using one-time scoped token\r\n- Verifies SHA256 checksum\r\n- Extracts project files\r\n- Installs dependencies from lockfile\r\n- Executes START_CMD\r\n\r\n## Breaking Changes\r\n\r\n⚠️ **Removed CLI Options:**\r\n- `--use-docker` - No longer supported\r\n- `--tag` - Not applicable to bootstrapper\r\n- `--no-build` - Build happens in container\r\n- `--dockerfile` - Bootstrapper uses standard image\r\n\r\n**Migration Guide:**\r\n```bash\r\n# Old (no longer works)\r\nelizaos deploy --use-docker --tag my-image:v1\r\n\r\n# New (default behavior)\r\nelizaos deploy\r\n\r\n# With existing artifact\r\nelizaos deploy --skip-artifact --artifact-path ./dist/artifact.tar.gz\r\n```\r\n\r\n## Testing\r\n\r\n### Manual Testing:\r\n- ✅ Deployed sample project with bootstrapper\r\n- ✅ Verified artifact creation and upload\r\n- ✅ Confirmed container starts and runs correctly\r\n- ✅ Tested with both Bun and npm projects\r\n- ✅ Validated checksum verification\r\n- ✅ Tested artifact cleanup (keeps last 3)\r\n\r\n### Performance Comparison:\r\n| Metric | Docker Mode | Bootstrapper |\r\n|--------|------------|--------------|\r\n| Artifact Size | 500MB-2GB | 10-50MB |\r\n| Upload Time | 2-10 min | 10-30 sec |\r\n| Total Deploy Time | 5-15 min | 1-2 min |\r\n| Storage Used | 2GB/deploy | 50MB/deploy |\r\n\r\n   // Uploads via Cloud API with checksum verification\r\n   const uploadResponse = await apiClient.uploadArtifact({\r\n     projectId: projectName,\r\n     version: projectVersion,\r\n     checksum: artifactChecksum,\r\n     size: artifactSize,\r\n     artifactPath\r\n   });nged\r\n\r\n### 🚀 New Artifact Management System\r\n\r\n**Added Endpoints:**\r\n- `POST /api/v1/artifacts/upload` - Request presigned URL and upload artifacts\r\n- `GET /api/v1/artifacts` - List project artifacts\r\n\r\n**Database Changes:**\r\n- New `artifacts` table with organization/project/version tracking\r\n- Unique constraint on version per project\r\n- Indexes for efficient querying\r\n\r\n**Key Features:**\r\n- Presigned S3 URLs for direct R2 uploads\r\n- SHA256 checksum verification\r\n- 10MB artifact size limit (configurable)\r\n- Artifact metadata storage (Eliza version, Node version, etc.)\r\n- One-time scoped token generation for secure retrieval\r\n\r\n### 🔄 Container Route Updates\r\n\r\n**Modified:**\r\n- Added bootstrapper fields to container schema\r\n- Default to bootstrapper mode (`use_bootstrapper: true`)\r\n- Store artifact metadata in container record\r\n- Pass bootstrapper config to Cloudflare deployment\r\n\r\n**Schema Changes:**\r\n```typescript\r\nconst createContainerSchema = z.object({\r\n  name: z.string(),\r\n  port: z.number(),\r\n  environment_vars: z.record(z.string()),\r\n  \r\n  // New bootstrapper fields\r\n  use_bootstrapper: z.boolean().default(true),\r\n  artifact_url: z.string().optional(),\r\n  artifact_checksum: z.string().optional(),\r\n  image_tag: z.string().default(\"elizaos/bootstrapper:latest\")\r\n});\r\n```\r\n\r\n### 🗑️ Deprecated Legacy Endpoints\r\n\r\n**Marked as Deprecated:**\r\n- `POST /api/v1/containers/upload-image` - Docker image upload\r\n- `CloudflareService.uploadImage()` - Docker upload method\r\n\r\nThese remain functional with deprecation warnings for backward compatibility.\r\n\r\n## Technical Implementation\r\n\r\n### Artifact Upload Flow:\r\n\r\n1. **Request Upload URL**\r\n   ```typescript\r\n   // Client requests presigned URL\r\n   POST /api/v1/artifacts/upload\r\n   {\r\n     projectId: \"my-project\",\r\n     version: \"1.0.0\",\r\n     checksum: \"sha256...\",\r\n     size: 1048576\r\n   }\r\n   ```\r\n\r\n2. **Generate Presigned URL**\r\n   ```typescript\r\n   // Server creates S3 presigned URL for R2\r\n   const putCommand = new PutObjectCommand({\r\n     Bucket: process.env.R2_BUCKET_NAME,\r\n     Key: `artifacts/${org}/${project}/${version}/${id}.tar.gz`,\r\n     ContentType: 'application/gzip',\r\n     ContentLength: size,\r\n     ChecksumSHA256: checksum\r\n   });\r\n   \r\n   const uploadUrl = await getSignedUrl(r2Client, putCommand, {\r\n     expiresIn: 600 // 10 minutes\r\n   });\r\n   ```\r\n\r\n3. **Store Metadata**\r\n   ```typescript\r\n   // Save artifact record\r\n   await db.insert(artifacts).values({\r\n     id: artifactId,\r\n     organization_id: user.organization_id,\r\n     project_id: projectId,\r\n     version,\r\n     checksum,\r\n     size,\r\n     r2_key,\r\n     r2_url: publicUrl,\r\n     metadata,\r\n     created_by: user.id\r\n   });\r\n   ```\r\n\r\n### Container Deployment:\r\n\r\n```typescript\r\n// Deploy with bootstrapper configuration\r\nconst deployment = await cloudflare.deployContainer({\r\n  name: config.name,\r\n  imageTag: \"elizaos/bootstrapper:latest\",\r\n  port: config.port,\r\n  environmentVars: {\r\n    ...config.environment_vars,\r\n    R2_ARTIFACT_URL: config.artifact_url,\r\n    R2_TOKEN: generatedToken,\r\n    R2_ARTIFACT_CHECKSUM: config.artifact_checksum\r\n  }\r\n});\r\n```\r\n\r\n## Database Migration\r\n\r\n```sql\r\n-- 0006_add_artifacts_table.sql\r\nCREATE TABLE IF NOT EXISTS artifacts (\r\n  id TEXT PRIMARY KEY,\r\n  organization_id TEXT NOT NULL,\r\n  project_id TEXT NOT NULL,\r\n  version TEXT NOT NULL,\r\n  checksum TEXT NOT NULL,\r\n  size INTEGER NOT NULL,\r\n  r2_key TEXT NOT NULL,\r\n  r2_url TEXT NOT NULL,\r\n  metadata JSONB DEFAULT '{}',\r\n  created_by TEXT NOT NULL,\r\n  created_at TIMESTAMP DEFAULT NOW() NOT NULL\r\n);\r\n\r\nCREATE INDEX idx_artifacts_org_project ON artifacts(organization_id, project_id);\r\nCREATE INDEX idx_artifacts_project_version ON artifacts(project_id, version);\r\nCREATE UNIQUE INDEX uniq_artifact_version ON artifacts(organization_id, project_id, version);\r\n```\r\n\r\n## Environment Variables\r\n\r\n**New Required Variables:**\r\n```bash\r\n# R2 Storage Configuration\r\nR2_ACCOUNT_ID=your_cloudflare_account_id\r\nR2_ACCESS_KEY_ID=your_r2_access_key\r\nR2_SECRET_ACCESS_KEY=your_r2_secret_key\r\nR2_BUCKET_NAME=elizaos-artifacts\r\nR2_PUBLIC_DOMAIN=artifacts.elizacloud.ai  # Optional custom domain\r\n```\r\n\r\n## Security Considerations\r\n\r\n- ✅ Presigned URLs expire after 10 minutes\r\n- ✅ One-time tokens for artifact retrieval\r\n- ✅ SHA256 checksum verification on upload and download\r\n- ✅ Organization-scoped artifact isolation\r\n- ✅ Size limits to prevent abuse (10MB default)\r\n\r\n## Performance Impact\r\n\r\n### Metrics:\r\n| Operation | Old (Docker) | New (Bootstrapper) |\r\n|-----------|-------------|-------------------|\r\n| Upload Size | 500MB-2GB | 10-50MB |\r\n| API Processing | 30-60s | <1s |\r\n| Storage Cost | High | 95% reduction |\r\n| Network Usage | High | 90% reduction |\r\n\r\n### Load Testing:\r\n- Handled 100 concurrent artifact uploads\r\n- Average upload time: 5 seconds\r\n- No performance degradation observed\r\n\r\n## Breaking Changes\r\n\r\n⚠️ **Default Behavior Change:**\r\n- Containers now default to bootstrapper mode\r\n- `use_bootstrapper` defaults to `true` instead of `false`\r\n\r\n**Backward Compatibility:**\r\n- Legacy Docker endpoints remain functional with warnings\r\n- Existing containers continue to work\r\n- Gradual migration path available\r\n\r\n## Testing\r\n\r\n- ✅ Artifact upload with checksum validation\r\n- ✅ Presigned URL generation and expiry\r\n- ✅ Container deployment with bootstrapper\r\n- ✅ Legacy endpoint deprecation warnings\r\n- ✅ Database migration rollback tested\r\n- ✅ R2 connectivity and error handling\r\n",
       "repository": "elizaos/eliza",
       "createdAt": "2025-10-11T15:13:37Z",
-      "mergedAt": null,
-      "additions": 2273,
-      "deletions": 131
+      "mergedAt": "2025-10-12T22:19:46Z",
+      "additions": 2170,
+      "deletions": 135
     },
     {
       "id": "PR_kwDOMT5cIs6sMtSD",
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 5596,
-    "deletions": 4120,
-    "files": 117,
-    "commitCount": 155
+    "additions": 8182,
+    "deletions": 4255,
+    "files": 129,
+    "commitCount": 165
   },
   "completedItems": [
     {
@@ -426,6 +426,29 @@
       ]
     },
     {
+      "title": "elizaos deploy r2 artifacts style",
+      "prNumber": 6058,
+      "type": "other",
+      "body": "## Overview\r\n\r\nThis PR completely migrates the ElizaOS CLI deployment system from traditional Docker image builds to a modern bootstrapper architecture. This change significantly improves deployment speed, reduces resource usage, and elimin",
+      "files": [
+        "Dockerfile",
+        "bun.lock",
+        "packages/cli/Dockerfile",
+        "packages/cli/package.json",
+        "packages/cli/src/commands/deploy/README.md",
+        "packages/cli/src/commands/deploy/actions/deploy-bootstrapper.ts",
+        "packages/cli/src/commands/deploy/actions/deploy.ts",
+        "packages/cli/src/commands/deploy/index.ts",
+        "packages/cli/src/commands/deploy/types.ts",
+        "packages/cli/src/commands/deploy/utils/api-client.ts",
+        "packages/cli/src/commands/deploy/utils/artifact.ts",
+        "packages/cli/src/commands/deploy/utils/r2-client.ts",
+        "packages/cli/src/index.ts",
+        "packages/core/src/index.ts",
+        "packages/test-utils/src/mocks/runtime.ts"
+      ]
+    },
+    {
       "title": "fix: remove AgentManager references in e2e test infrastructure",
       "prNumber": 6056,
       "type": "bugfix",
@@ -440,24 +463,24 @@
   ],
   "topContributors": [
     {
-      "username": "standujar",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 396.9263177175857,
-      "prScore": 372.1103177175857,
-      "issueScore": 0,
-      "reviewScore": 23,
-      "commentScore": 1.8159999999999998,
-      "summary": "standujar: Focused on significant refactoring of core components, introducing a new `mentionContext` interface in `elizaos/eliza#6030` which simplified the codebase (+520/-681 lines) and improved response logic. This core change was then propagated to dependent plugins like in `elizaos-plugins/plugin-discord#19`. They also fixed a bug in `elizaos-plugins/plugin-openrouter#15` related to AI SDK v5 tool results extraction. Their activity shows a primary focus on refactoring, bug fixes, and widespread configuration updates."
-    },
-    {
       "username": "0xbbjoker",
       "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
-      "totalScore": 335.87130705758307,
-      "prScore": 309.551307057583,
+      "totalScore": 420.91799110321443,
+      "prScore": 394.59799110321444,
       "issueScore": 0,
       "reviewScore": 24.5,
       "commentScore": 1.8199999999999998,
       "summary": "0xbbjoker: This month, 0xbbjoker focused on enhancing plugin functionality and improving code maintainability within the `elizaos/eliza` repository. They delivered a key feature by adding an offset parameter for memory retrieval in the SQL plugin (elizaos/eliza#6032), a substantial change of +516/-209 lines. Additionally, they improved codebase health by removing 289 lines of unused code in a separate refactoring effort (elizaos/eliza#6029). Their work shows a dual focus on feature development and code quality, and they also supported the team through code review and comments."
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 402.1263177175857,
+      "prScore": 372.1103177175857,
+      "issueScore": 0,
+      "reviewScore": 28,
+      "commentScore": 2.016,
+      "summary": "standujar: Focused on significant refactoring of core components, introducing a new `mentionContext` interface in `elizaos/eliza#6030` which simplified the codebase (+520/-681 lines) and improved response logic. This core change was then propagated to dependent plugins like in `elizaos-plugins/plugin-discord#19`. They also fixed a bug in `elizaos-plugins/plugin-openrouter#15` related to AI SDK v5 tool results extraction. Their activity shows a primary focus on refactoring, bug fixes, and widespread configuration updates."
     },
     {
       "username": "wtfsayo",
@@ -472,11 +495,11 @@
     {
       "username": "ChristopherTrimboli",
       "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
-      "totalScore": 93.33317040349459,
+      "totalScore": 93.6731704034946,
       "prScore": 83.63317040349459,
       "issueScore": 0,
       "reviewScore": 9.5,
-      "commentScore": 0.2,
+      "commentScore": 0.54,
       "summary": "ChristopherTrimboli: No activity this month."
     },
     {
@@ -551,7 +574,7 @@
     }
   ],
   "newPRs": 27,
-  "mergedPRs": 21,
+  "mergedPRs": 22,
   "newIssues": 6,
   "closedIssues": 31,
   "activeContributors": 15
