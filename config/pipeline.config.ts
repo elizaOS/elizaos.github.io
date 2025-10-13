@@ -27,6 +27,11 @@ export default {
       name: "plugin-cryptoscore",
       defaultBranch: "main",
     },
+    {
+      owner: "Sendo-labs",
+      name: "frontend",
+      defaultBranch: "main",
+    },
   ],
   walletAddresses: {
     enabled: true,
