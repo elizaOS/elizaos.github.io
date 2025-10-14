@@ -207,7 +207,13 @@ export function Navigation() {
       <div className="container mx-auto flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-6">
           <Button variant="none" size={"none"} asChild>
-            <Link href="/" className="transition-opacity hover:opacity-80">
+            <Link
+              href="/"
+              className="flex items-center gap-2 transition-opacity hover:opacity-80"
+            >
+              <span className="text-xl" aria-label="Optimism Logo">
+                🔴
+              </span>
               <h1 className="text-xl font-bold">Optimism</h1>
             </Link>
           </Button>

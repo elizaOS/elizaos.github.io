@@ -55,7 +55,7 @@ source .envrc
 
 3. Repository configuration is already set up for Optimism ecosystem.
 
-**Current Configuration** (Top 12 Most Active Optimism Repositories):
+**Current Configuration** (14 Most Active Optimism Repositories):
 
 - `ethereum-optimism/optimism` - Main protocol repository (38K+ activity score)
 - `ethereum-optimism/op-analytics` - Data and analytics tools
@@ -69,6 +69,8 @@ source .envrc
 - `ethereum-optimism/specs` - Technical specifications
 - `ethereum-optimism/infra` - Infrastructure
 - `ethereum-optimism/supersim` - Multi-L2 development environment
+- `ethereum-optimism/design-docs` - Design documentation and proposals
+- `ethereum-optimism/Retro-Funding` - Retroactive public goods funding
 
 > **Note**: Configuration is complete and tested. See `config/pipeline.config.ts` for full details.
 
@@ -320,6 +322,19 @@ bun run build
 bunx serve@latest out
 ```
 
+## Automation Options
+
+### Local Automation
+
+For simple local or server deployments without GitHub Actions:
+
+```bash
+# Continuous daily automation (runs every 24 hours)
+./scripts/daily-automation.sh
+```
+
+This script runs the complete pipeline sequence (`ingest → process → export → summarize`) continuously. Perfect for development environments or simple server setups. See `scripts/README.md` for more automation utilities.
+
 ## CI/CD and Data Management
 
 The project uses GitHub Actions for automated data processing, summary generation, and deployment. The system maintains separate branches for code and data to optimize Git history management.
@@ -537,6 +552,10 @@ bun run pipeline ingest -d 10 -v
 ├── config/             # Configuration files
 │   └── pipeline.config.ts  # TypeScript pipeline configuration
 ├── drizzle/            # Database migration files
+├── scripts/            # Utility scripts (see scripts/README.md)
+│   ├── daily-automation.sh    # Continuous daily pipeline automation
+│   ├── verify-data.sh         # Data quality verification
+│   └── fetch_github.py        # GitHub metrics collection
 ├── src/
 │   ├── app/            # Next.js app router pages
 │   ├── components/     # React components
