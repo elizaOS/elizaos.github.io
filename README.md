@@ -23,6 +23,19 @@ A modern analytics pipeline for tracking and analyzing GitHub contributions acro
 - Daily, weekly, and monthly reports
 - Smart contributor scoring system
 
+## Wallet Linking (Optional Feature)
+
+Contributors can optionally link their Ethereum and Solana wallet addresses to their GitHub profiles. When configured, users can authenticate via GitHub OAuth and store wallet addresses in their profile README.
+
+**Setup:** See [`auth-worker/README.md`](auth-worker/README.md) for Cloudflare Worker deployment and OAuth configuration.
+
+**Required secrets (if enabling):**
+
+- `NEXT_PUBLIC_GITHUB_CLIENT_ID` - GitHub OAuth App Client ID
+- `NEXT_PUBLIC_AUTH_WORKER_URL` - Deployed Cloudflare Worker URL
+
+**Note:** The leaderboard works perfectly fine without this feature. It's purely additive.
+
 ## Setup
 
 1. Install dependencies:
@@ -44,6 +57,10 @@ LARGE_MODEL=openai/gpt-4o-mini
 # Optional site info
 SITE_URL=https://your-deployment-url.com
 SITE_NAME="Optimism Contributor Leaderboard"
+
+# Optional: For wallet linking feature
+NEXT_PUBLIC_GITHUB_CLIENT_ID=
+NEXT_PUBLIC_AUTH_WORKER_URL=
 ```
 
 Then load the environment variables:
