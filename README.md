@@ -405,6 +405,53 @@ This architecture ensures:
 - Simplified deployment with automatic data restoration
 - Effective collaboration without data conflict issues
 
+## Deploying Your Own Instance
+
+### GitHub Pages Configuration
+
+This project is configured to deploy to GitHub Pages with automatic base path detection. If you fork this repository:
+
+1. **Update `next.config.js`** - Change the `basePath` to match your repository name:
+
+   ```javascript
+   basePath: "/your-repo-name", // Replace with your actual repo name
+   ```
+
+2. **Enable GitHub Pages**:
+
+   - Go to repository Settings → Pages
+   - Source: "GitHub Actions"
+   - Save
+
+3. **Add Required Secrets** (Settings → Secrets and variables → Actions):
+
+   - `OPENROUTER_API_KEY` - Required for AI summary generation
+   - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking
+   - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking
+
+4. **Enable Workflows**:
+
+   - Go to Actions tab
+   - Enable workflows if prompted
+   - Manually trigger "Run Pipelines" to generate initial data
+
+5. **Access Your Site**:
+   - After successful deployment: `https://your-username.github.io/your-repo-name/`
+
+### Deployment Architecture
+
+The site automatically deploys via GitHub Actions:
+
+- **Data Generation**: `run-pipelines.yml` runs daily at 23:00 UTC
+  - Stores data in `_data` branch (SQLite dumps, stats, summaries)
+  - Never commits large binary files to main branch
+- **Site Build**: `deploy.yml` triggers on push to main or after pipeline runs
+  - Restores data from `_data` branch
+  - Builds Next.js static site
+  - Deploys to GitHub Pages
+
+**Note**: If deploying to a custom domain or different base path, update `basePath` in `next.config.js` accordingly.
+
 ## Development
 
 ### Taskmaster for AI-Assisted Development
