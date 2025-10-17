@@ -343,6 +343,65 @@ This architecture ensures:
 
 ## Development
 
+## Deploying Your Own Instance
+
+### GitHub Pages Configuration
+
+This project deploys to the root of elizaos.github.io. If you fork this repository to deploy to a subdirectory (e.g., `username.github.io/repo-name`):
+
+1. **Update `next.config.js`** - Add `basePath` to match your repository name:
+
+   ```javascript
+   const nextConfig = {
+     output: "export",
+     basePath: "/repo-name", // Add this line - replace with your repo name
+     images: {
+       unoptimized: true,
+     },
+     typescript: {
+       tsconfigPath: "tsconfig.nextjs.json",
+     },
+   };
+   ```
+
+2. **Enable GitHub Pages**:
+
+   - Go to repository Settings → Pages
+   - Source: "GitHub Actions"
+   - Save
+
+3. **Add Required Secrets** (Settings → Secrets and variables → Actions):
+
+   - `OPENROUTER_API_KEY` - Required for AI summary generation
+   - `GITHUB_TOKEN` - Automatically provided by GitHub Actions
+   - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking feature
+   - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking feature
+
+4. **Enable Workflows**:
+
+   - Go to Actions tab
+   - Enable workflows if prompted
+   - Manually trigger "Run Pipelines" to generate initial data
+
+5. **Access Your Site**:
+   - Root deployment: `https://your-org.github.io/`
+   - Subdirectory deployment: `https://your-username.github.io/repo-name/`
+
+### Deployment Architecture
+
+The site automatically deploys via GitHub Actions:
+
+- **Data Generation**: `run-pipelines.yml` runs daily at 23:00 UTC
+  - Ingests GitHub data, processes contributions, generates summaries
+  - Stores data in `_data` branch (SQLite dumps, stats files, summaries)
+  - Never commits large binary files to main branch
+- **Site Build**: `deploy.yml` triggers on push to main or after pipeline runs
+  - Restores data from `_data` branch
+  - Builds Next.js static site
+  - Deploys to GitHub Pages
+
+**Note**: If deploying to a custom domain, update `basePath` in `next.config.js` accordingly (may need to remove it entirely for root domains).
+
 ### Taskmaster for AI-Assisted Development
 
 The project is set up to work with [Taskmaster](https://github.com/eyaltoledano/claude-task-master), an AI-powered task management tool. You can use it directly via the `task-master` command-line interface (CLI) or through its MCP server for integration with development environments like Cursor.
