@@ -1,0 +1,171 @@
+{
+  "interval": {
+    "intervalStart": "2025-10-17T00:00:00.000Z",
+    "intervalEnd": "2025-10-18T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/elizaos.github.io",
+  "overview": "From 2025-10-17 to 2025-10-18, elizaos/elizaos.github.io had 2 new PRs (1 merged), 4 new issues, and 2 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDONNAI987SQv6G",
+      "title": "Enhancement: Add API cost estimation to ingestion pipeline",
+      "author": "madjin",
+      "number": 156,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "# Enhancement: Add API cost estimation to ingestion pipeline\n\n## Context\nRunning `bun run pipeline ingest` with large date ranges can unexpectedly consume thousands of GitHub API calls, potentially hitting rate limits:\n- **Authenticated users**: 5,000 requests/hour\n- **GitHub Apps**: 15,000 requests/hour\n\nThis is especially problematic for:\n- Historical data ingestion (e.g., `--after 2024-01-01` on 20+ repos)\n- First-time project setup\n- Large active repositories with thousands of PRs/issues\n\n### Real-world example:\n- **23 repositories** × **52 weeks** × **~6 API calls per week** = **~7,176 API calls**\n- **Outcome**: Rate limit exhaustion, 1-2 hour wait, failed ingestion\n\nUsers need visibility into API cost before committing to large ingestions.\n\n## Proposal\nAdd `--estimate-only` flag and automatic pre-flight cost estimation that shows:\n- Estimated API call count\n- Risk level (LOW/MEDIUM/HIGH)\n- Estimated duration\n- Warning for HIGH risk operations\n\n## Implementation\n\n### Add cost estimation function to `cli/analyze-pipeline.ts`:\n\n```typescript\n// Simple API cost estimation helper\nfunction estimateApiCalls(\n  repositories: { owner: string; name: string }[],\n  intervalCount: number,\n): { total: number; risk: string; duration: number } {\n  const baseCallsPerRepo = intervalCount * 6; // ~6 calls per interval (PRs, issues, commits)\n  const total = repositories.length * baseCallsPerRepo;\n\n  const risk = total > 2000 ? \"HIGH\" : total > 500 ? \"MEDIUM\" : \"LOW\";\n  const duration = Math.ceil(total / 60); // ~60 calls per minute with rate limiting\n\n  return { total, risk, duration };\n}\n```\n\n### Add CLI flag to ingest command:\n\n```typescript\nprogram\n  .command(\"ingest\")\n  // ... existing options\n  .option(\n    \"--estimate-only\",\n    \"Show API cost estimation without executing ingestion\",\n    false,\n  )\n```\n\n### Add estimation logic before execution:\n\n```typescript\n// Calculate date range and intervals\nconst repositories = options.repository\n  ? pipelineConfig.repositories.filter(\n      (r) => `${r.owner}/${r.name}` === options.repository,\n    )\n  : pipelineConfig.repositories;\n\nconst daysDiff =\n  dateRange.endDate && dateRange.startDate\n    ? Math.ceil(\n        (new Date(dateRange.endDate).getTime() -\n          new Date(dateRange.startDate).getTime()) /\n          (1000 * 60 * 60 * 24),\n      )\n    : parseInt(options.days || \"7\");\nconst intervalCount = Math.ceil(daysDiff / 7); // Weekly intervals\n\nconst estimate = estimateApiCalls(repositories, intervalCount);\n\nrootLogger.info(`📊 Cost Estimation:`, {\n  repositories: repositories.length,\n  intervals: intervalCount,\n  estimatedApiCalls: estimate.total,\n  riskLevel: estimate.risk,\n  estimatedDuration: `${estimate.duration} minutes`,\n});\n\n// Handle estimate-only mode\nif (options.estimateOnly) {\n  console.log(`\\n📋 INGESTION ESTIMATE`);\n  console.log(`Repositories: ${repositories.length}`);\n  console.log(`Time intervals: ${intervalCount}`);\n  console.log(`Estimated API calls: ${estimate.total}`);\n  console.log(`Risk level: ${estimate.risk}`);\n  console.log(`Estimated duration: ${estimate.duration} minutes`);\n\n  if (estimate.risk === \"HIGH\") {\n    console.log(\n      `\\n⚠️  HIGH RISK: Consider using smaller date ranges or --repository flag`,\n    );\n  }\n  return;\n}\n\n// Warn on high-risk operations\nif (estimate.risk === \"HIGH\") {\n  rootLogger.warn(\n    `⚠️  High API usage detected (${estimate.total} calls). Monitor rate limits closely.`,\n  );\n}\n```\n\n## Benefits\n- ✅ Prevents accidental rate limit exhaustion\n- ✅ Better planning for large ingestions\n- ✅ User can test with `--estimate-only` before committing\n- ✅ Helpful for debugging and capacity planning\n- ✅ No behavior change for existing commands (estimation is informational)\n\n## Trade-offs\n- Estimation is approximate (actual calls may vary by ±20%)\n- Adds ~65 lines of code total (11-line function + 1-line option + ~50 lines logic)\n- Risk thresholds are somewhat arbitrary (can be tuned based on team preferences)\n\n## Usage Examples\n\n### Check cost before running:\n```bash\n$ bun run pipeline ingest --after 2024-01-01 --estimate-only\n\n📋 INGESTION ESTIMATE\nRepositories: 23\nTime intervals: 52\nEstimated API calls: 7,176\nRisk level: HIGH\nEstimated duration: 120 minutes\n\n⚠️  HIGH RISK: Consider using smaller date ranges or --repository flag\n```\n\n### Automatic estimation shown on every ingest:\n```bash\n$ bun run pipeline ingest --after 2024-01-01\n\n📊 Cost Estimation: {\n  repositories: 23,\n  intervals: 52,\n  estimatedApiCalls: 7176,\n  riskLevel: 'HIGH',\n  estimatedDuration: '120 minutes'\n}\n⚠️  High API usage detected (7176 calls). Monitor rate limits closely.\n\nStarting ingestion...\n```\n\n### Test single repo first:\n```bash\n$ bun run pipeline ingest --after 2024-01-01 --repository elizaos/eliza --estimate-only\n\n📋 INGESTION ESTIMATE\nRepositories: 1\nTime intervals: 52\nEstimated API calls: 312\nRisk level: MEDIUM\nEstimated duration: 6 minutes\n```\n\n## Testing\nTested with various scenarios in https://github.com/M3-org/op-hiscores:\n- ✅ Prevented 3 rate limit exhaustion scenarios during development\n- ✅ Accurate within 15% of actual API calls in 10+ test runs\n- ✅ Helped split large ingestions into manageable chunks\n\n## Files Modified\n- `cli/analyze-pipeline.ts` (~65 lines total: function + flag + logic)\n\n## References\n- Rate limiting best practices: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api\n- Original implementation: M3-org/op-hiscores post-fork commits\n",
+      "createdAt": "2025-10-17T21:22:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDONNAI987SQvKZ",
+      "title": "Enhancement: Add graceful shutdown to CLI pipeline",
+      "author": "madjin",
+      "number": 155,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "# Enhancement: Add graceful shutdown to CLI pipeline\n\n## Context\nLong-running ingestion pipelines (historical data ingestion spanning months) can take hours, especially for large active repositories. Currently, pressing Ctrl+C immediately terminates the process, losing all in-progress work.\n\nThis is common when:\n- Ingesting historical data for the first time\n- Running large date range imports (e.g., `--after 2024-01-01`)\n- Processing multiple large repositories\n- Debugging or testing ingestion locally\n\n## Proposal\nAdd graceful shutdown handling that:\n1. **First Ctrl+C**: Completes current operation, saves progress, then exits cleanly\n2. **Second Ctrl+C**: Force exits immediately if user needs to stop now\n3. Shows clear messaging about shutdown state\n4. Allows resuming with same command (pipeline skips already-processed data)\n\n## Implementation\n\n### Add to `cli/analyze-pipeline.ts` (before program definition):\n\n```typescript\n// Graceful shutdown handler\nlet gracefulShutdown = false;\nprocess.on(\"SIGINT\", () => {\n  if (!gracefulShutdown) {\n    gracefulShutdown = true;\n    (global.process as { gracefulShutdown?: boolean }).gracefulShutdown = true;\n    console.log(\n      \"\\n⚠️  Graceful shutdown initiated... Current operations will complete.\",\n    );\n    console.log(\"Press Ctrl+C again to force exit.\");\n  } else {\n    console.log(\"\\n🔴 Force exit requested.\");\n    process.exit(1);\n  }\n});\n```\n\n### Update ingest command execution (in ingest action handler):\n\n```typescript\ntry {\n  await ingestPipeline(undefined, context);\n\n  if (gracefulShutdown) {\n    rootLogger.warn(\n      \"⚠️  Ingestion interrupted but current operations completed successfully!\",\n    );\n    rootLogger.info(\n      \"💡 You can resume by running the same command again - the pipeline will skip already processed data.\",\n    );\n  } else {\n    rootLogger.info(\"✅ Ingestion completed successfully!\");\n  }\n} catch (error: unknown) {\n  if (String(error).includes(\"GRACEFUL_SHUTDOWN\")) {\n    rootLogger.warn(\n      \"⚠️  Ingestion gracefully interrupted. Progress has been saved.\",\n    );\n    rootLogger.info(\"💡 Resume by running the same command again.\");\n    return;\n  }\n  throw error;\n}\n```\n\n### Update `src/lib/pipelines/types.ts` mapStep to respect shutdown:\n\n```typescript\nconst results = await pMap(\n  inputs,\n  async (item, index) => {\n    // Check for graceful shutdown before processing each item\n    if (\n      global.process &&\n      (global.process as { gracefulShutdown?: boolean }).gracefulShutdown\n    ) {\n      context.logger?.warn(\n        `Graceful shutdown requested. Skipping remaining items after ${index}/${inputs.length}`,\n      );\n      throw new Error(\"GRACEFUL_SHUTDOWN\");\n    }\n    return await operation(item, context);\n  },\n  {\n    concurrency: Math.max(1, concurrency),\n    stopOnError: false, // Continue processing other items even if one fails\n  },\n);\n\nreturn results.filter((r) => r !== null); // Filter out any null results from interrupted operations\n```\n\n## Benefits\n- ✅ Better UX for long-running operations (common in this project)\n- ✅ No lost work on interruption - current operation completes\n- ✅ Clear user feedback about shutdown state\n- ✅ Resume capability - just re-run the same command\n- ✅ Safety valve with double Ctrl+C for immediate exit\n\n## Trade-offs\n- Uses global state (`gracefulShutdown` flag on process object)\n- Adds ~30-40 lines of code\n- Slight complexity in pipeline execution flow\n\n## User Experience\n\n### Before (current behavior):\n```bash\n$ bun run pipeline ingest --after 2024-01-01\nFetching data for ethereum-optimism/optimism...\n^C [Process killed immediately, no progress saved]\n```\n\n### After (with graceful shutdown):\n```bash\n$ bun run pipeline ingest --after 2024-01-01\nFetching data for ethereum-optimism/optimism...\n^C\n⚠️  Graceful shutdown initiated... Current operations will complete.\nPress Ctrl+C again to force exit.\n⚠️  Ingestion interrupted but current operations completed successfully!\n💡 You can resume by running the same command again - the pipeline will skip already processed data.\n\n$ bun run pipeline ingest --after 2024-01-01\n[Resumes from where it left off]\n```\n\n## Testing\nTested extensively with multi-hour ingestions in: https://github.com/M3-org/op-hiscores\n- Graceful shutdown during PR ingestion ✅\n- Graceful shutdown during issue ingestion ✅\n- Resume capability verified ✅\n- Force exit (double Ctrl+C) verified ✅\n\n## Files Modified\n- `cli/analyze-pipeline.ts` (~20 lines added)\n- `src/lib/pipelines/types.ts` (~15 lines modified)\n\n## References\n- Original implementation: M3-org/op-hiscores commit range post-fork\n- Used successfully for 14 repository ingestions spanning 18K+ PRs\n",
+      "createdAt": "2025-10-17T21:21:34Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDONNAI987SQu15",
+      "title": "Docs: Add deployment guide for forks",
+      "author": "madjin",
+      "number": 154,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "# Docs: Add deployment guide for forks\n\n## Problem\nThe README doesn't document how to fork and deploy this project to GitHub Pages. Critical information missing:\n- How to configure `basePath` for subdirectory deployments (e.g., `username.github.io/repo-name`)\n- GitHub Pages setup steps\n- Required GitHub Actions secrets beyond basic token\n- Deployment architecture explanation\n\nCurrently, users who fork this repo and try to deploy to a subdirectory (the default for non-organization repos) get 404 errors for all assets because Next.js tries to load from root path instead of the subdirectory path.\n\n## Solution\nAdd new \"Deploying Your Own Instance\" section to README after \"CI/CD and Data Management\" section.\n\n### Content to add:\n\n```markdown\n## Deploying Your Own Instance\n\n### GitHub Pages Configuration\n\nThis project deploys to the root of elizaos.github.io. If you fork this repository to deploy to a subdirectory (e.g., `username.github.io/repo-name`):\n\n1. **Update `next.config.js`** - Add `basePath` to match your repository name:\n   ```javascript\n   const nextConfig = {\n     output: \"export\",\n     basePath: \"/repo-name\",  // Add this line - replace with your repo name\n     images: {\n       unoptimized: true,\n     },\n     typescript: {\n       tsconfigPath: \"tsconfig.nextjs.json\",\n     },\n   };\n   ```\n\n2. **Enable GitHub Pages**:\n   - Go to repository Settings → Pages\n   - Source: \"GitHub Actions\"\n   - Save\n\n3. **Add Required Secrets** (Settings → Secrets and variables → Actions):\n   - `OPENROUTER_API_KEY` - Required for AI summary generation\n   - `GITHUB_TOKEN` - Automatically provided by GitHub Actions\n   - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking feature\n   - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking feature\n\n4. **Enable Workflows**:\n   - Go to Actions tab\n   - Enable workflows if prompted\n   - Manually trigger \"Run Pipelines\" to generate initial data\n\n5. **Access Your Site**:\n   - Root deployment: `https://your-org.github.io/`\n   - Subdirectory deployment: `https://your-username.github.io/repo-name/`\n\n### Deployment Architecture\n\nThe site automatically deploys via GitHub Actions:\n- **Data Generation**: `run-pipelines.yml` runs daily at 23:00 UTC\n  - Ingests GitHub data, processes contributions, generates summaries\n  - Stores data in `_data` branch (SQLite dumps, stats files, summaries)\n  - Never commits large binary files to main branch\n- **Site Build**: `deploy.yml` triggers on push to main or after pipeline runs\n  - Restores data from `_data` branch\n  - Builds Next.js static site\n  - Deploys to GitHub Pages\n\n**Note**: If deploying to a custom domain, update `basePath` in `next.config.js` accordingly (may need to remove it entirely for root domains).\n```\n\n## Impact\n- ✅ Clear fork deployment instructions\n- ✅ Prevents common 404 errors for subdirectory deployments\n- ✅ Documents all required secrets in one place\n- ✅ Explains deployment architecture for new contributors\n\n## Testing\nDocumentation tested in subdirectory fork deployment: https://m3-org.github.io/op-hiscores/\nWorks correctly with basePath configuration.\n\n## Implementation Notes\n- Single file change: `README.md`\n- Insert after \"CI/CD and Data Management\" section (after line ~344, before \"## Development\")\n- No code changes required\n- Clarifies that basePath is only needed for subdirectory deployments\n- Explains the difference between organization/user root deploys vs subdirectory deploys\n",
+      "createdAt": "2025-10-17T21:21:08Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDONNAI987SQtsp",
+      "title": "Bug: Deploy workflow hardcodes single repository path",
+      "author": "madjin",
+      "number": 153,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "# Bug: Deploy workflow hardcodes single repository path\n\n## Problem\nThe deploy workflow `.github/workflows/deploy.yml` line 68 hardcodes `elizaos_eliza` when copying stats files:\n\n```yaml\n- name: Get yesterday's date and copy stats\n  run: |\n    cp data/elizaos_eliza/stats/day/stats_$(date -d \"yesterday\" +'%Y-%m-%d').json data/elizaos_eliza/stats/day/stats.json\n```\n\n**Impact**: Only 1 of 23 tracked repositories gets its stats copied. The other 22 repositories (all the `elizaos-plugins_*` repos, `elizaos_auto.fun`, `elizaos_elizaos.github.io`, and `elizaos_docs`) have stale `stats.json` files.\n\n**Current tracked repositories** (from config):\n- elizaos/eliza ✅ (currently working)\n- elizaos/auto.fun ❌\n- elizaos/elizaos.github.io ❌\n- elizaos/docs ❌\n- elizaos-plugins/* (19 repos) ❌\n\n## Root Cause\nThe workflow was likely created when only one repository was tracked, and never updated for the multi-repo expansion.\n\n## Solution\nReplace hardcoded path with dynamic loop over all repository directories:\n\n```yaml\n- name: Copy yesterday's stats for all tracked repositories\n  run: |\n    YESTERDAY=$(date -d \"yesterday\" +'%Y-%m-%d')\n    echo \"Processing stats for date: ${YESTERDAY}\"\n\n    # Find all repository directories and copy stats files\n    # Pattern matches owner_repo format, excluding dump/ and summaries/\n    for repo_dir in data/*/; do\n      repo_name=$(basename \"$repo_dir\")\n\n      # Skip non-repository directories\n      if [[ \"$repo_name\" == \"dump\" || \"$repo_name\" == \"summaries\" ]]; then\n        continue\n      fi\n\n      stats_file=\"${repo_dir}stats/day/stats_${YESTERDAY}.json\"\n      target_file=\"${repo_dir}stats/day/stats.json\"\n\n      if [ -f \"$stats_file\" ]; then\n        cp \"$stats_file\" \"$target_file\"\n        echo \"Copied stats for ${repo_name}\"\n      else\n        echo \"Warning: No stats file found for ${repo_name} on ${YESTERDAY}\"\n      fi\n    done\n\n    echo \"Stats copy complete\"\n```\n\n## Impact\n- ✅ Works with all 23 repositories\n- ✅ Future-proof - no need to update when repos are added/removed\n- ✅ Better error visibility with per-repo status messages\n- ✅ Skips non-repository directories (`dump`, `summaries`)\n- ✅ Backward compatible - existing single-repo setups continue working\n\n## Verification\nChecked current `_data` branch structure:\n```bash\n$ gh api 'repos/elizaOS/elizaos.github.io/git/trees/_data?recursive=1' \\\n  --jq '.tree[] | select(.path | test(\"^data/[^/]+$\")) | .path'\n\ndata/dump                                    # Skip (not a repo)\ndata/elizaos-plugins_plugin-anthropic        # ✅ Will be processed\ndata/elizaos-plugins_plugin-autocoder        # ✅ Will be processed\n... (19 more plugin repos)\ndata/elizaos_auto.fun                        # ✅ Will be processed\ndata/elizaos_eliza                           # ✅ Already working\ndata/elizaos_elizaos.github.io               # ✅ Will be processed\ndata/elizaos_docs                            # ✅ Will be processed\ndata/summaries                               # Skip (not a repo)\n```\n\nAll repository directories follow `owner_repo` naming convention and have `stats/day/` subdirectories.\n\n## Testing\nTested with similar multi-repo setup (14 repositories) in fork: https://github.com/M3-org/op-hiscores\n- Production deployment: https://m3-org.github.io/op-hiscores/\n- All 14 repos successfully processed\n- See commit: 72e8955 (adapted for Optimism repos, same pattern)\n\n## Implementation Notes\n- **Single file change**: `.github/workflows/deploy.yml` (lines 68-69 → 68-88)\n- **No breaking changes**: Existing behavior preserved for `elizaos_eliza`\n- **Handles edge cases**: Skips `dump` and `summaries` directories\n- **Clear logging**: Shows which repos succeeded/failed\n- **Safe failure mode**: Warning logged but workflow continues if stats missing\n\n## Alternative Considered\nCould use a more targeted glob pattern like `data/*_*/` to match only `owner_repo` format, but the explicit skip logic is clearer and more maintainable.\n",
+      "createdAt": "2025-10-17T21:19:33Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDONNAI986uZDUF",
+      "title": "docs: add deployment guide for forks",
+      "author": "madjin",
+      "number": 158,
+      "body": "## Summary\n\nFixes #154\n\nAdd comprehensive deployment guide for users forking this repository to deploy their own instance.\n\n## Problem\nThe README lacks documentation on:\n- How to configure `basePath` for subdirectory deployments\n- GitHub Pages setup steps\n- Required GitHub Actions secrets\n- Deployment architecture\n\nUsers forking the repo get 404 errors for all assets because Next.js tries to load from root path instead of subdirectory path.\n\n## Solution\nAdded new \"Deploying Your Own Instance\" section after \"CI/CD and Data Management\" section with:\n\n1. **basePath Configuration**: Clear instructions on when and how to add basePath to `next.config.js`\n2. **GitHub Pages Setup**: Step-by-step enable instructions\n3. **Required Secrets**: Complete list of secrets needed for Actions\n4. **Workflow Enablement**: How to enable and trigger workflows\n5. **Deployment Architecture**: Explains how `run-pipelines.yml` and `deploy.yml` work together\n\n## Changes\n- `README.md`: Added 54 lines of deployment documentation (inserted after line 344)\n\n## Key Clarifications\n- **Root deployment** (elizaos.github.io): No basePath needed\n- **Subdirectory deployment** (username.github.io/repo-name): basePath required\n- Explains organization vs personal account deployment differences\n\n## Testing\n✅ Documentation validated against production fork deployment: https://m3-org.github.io/op-hiscores/\n✅ basePath configuration tested and working\n\n## Impact\n- ✅ Clear fork deployment instructions\n- ✅ Prevents common 404 errors\n- ✅ Documents all required secrets in one place\n- ✅ Better onboarding for contributors",
+      "repository": "elizaos/elizaos.github.io",
+      "createdAt": "2025-10-17T21:40:48Z",
+      "mergedAt": null,
+      "additions": 59,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDONNAI986uY78G",
+      "title": "fix: dynamically copy stats for all tracked repositories",
+      "author": "madjin",
+      "number": 157,
+      "body": "## Summary\n\nFixes #153 \n\nReplace hardcoded `elizaos_eliza` path with dynamic loop to copy stats files for all 23 tracked repositories.\n\n## Problem\nCurrently only 1 of 23 repositories gets its stats copied. The workflow hardcodes `data/elizaos_eliza/stats/...` at line 68, leaving 22 other repositories with stale `stats.json` files.\n\n## Solution\n- Loop through `data/*/` directories dynamically\n- Skip non-repository directories (`dump`, `summaries`)\n- Add per-repository status logging\n- Graceful handling if stats file is missing\n\n## Changes\n- `.github/workflows/deploy.yml`: Replace 2 lines with 27-line dynamic loop\n\n## Testing\n✅ Tested with 14 repositories in production fork: https://m3-org.github.io/op-hiscores/\n✅ All repository stats successfully copied\n✅ Non-repo directories properly skipped\n\n## Verification\nVerified against current `_data` branch structure:\n- 23 repository directories found\n- All follow `owner_repo` naming convention\n- All have `stats/day/` subdirectories\n\n## Impact\n- ✅ Works with all 23 repositories\n- ✅ Future-proof (no hardcoded repo names)\n- ✅ Backward compatible\n- ✅ Better debugging with clear logging",
+      "repository": "elizaos/elizaos.github.io",
+      "createdAt": "2025-10-17T21:27:42Z",
+      "mergedAt": null,
+      "additions": 7,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDONNAI986ljq92",
+      "title": "Add elizaos/docs repo tracking and claude bot exclusion",
+      "author": "wtfsayo",
+      "number": 151,
+      "body": "## Summary\n- Add elizaos/docs repository to the tracked repositories list for contributor analytics\n- Add \"claude\" to bot users exclusion list to filter out Claude Code contributions from analytics\n\n## Changes\n- Added `elizaos/docs` repository with `main` as default branch to `repositories` array\n- Added `\"claude\"` to `botUsers` array to exclude Claude Code contributions from scoring\n\n## Test plan\n- [ ] Verify pipeline configuration loads without errors\n- [ ] Run pipeline ingest to test elizaos/docs repository tracking\n- [ ] Confirm claude user contributions are properly filtered out\n\n🤖 Generated with [Claude Code](https://claude.ai/code)",
+      "repository": "elizaos/elizaos.github.io",
+      "createdAt": "2025-08-27T08:27:02Z",
+      "mergedAt": "2025-10-17T04:24:13Z",
+      "additions": 6,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 6,
+    "deletions": 0,
+    "files": 1,
+    "commitCount": 4
+  },
+  "completedItems": [
+    {
+      "title": "Add elizaos/docs repo tracking and claude bot exclusion",
+      "prNumber": 151,
+      "type": "other",
+      "body": "## Summary\n- Add elizaos/docs repository to the tracked repositories list for contributor analytics\n- Add \"claude\" to bot users exclusion list to filter out Claude Code contributions from analytics\n\n## Changes\n- Added `elizaos/docs` reposit",
+      "files": [
+        "config/pipeline.config.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 83.06048829440076,
+      "prScore": 83.06048829440076,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "madjin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32600939?u=cdcf89f44c7a50906c7a80d889efa85023af2049&v=4",
+      "totalScore": 27.609464827608075,
+      "prScore": 19.409464827608076,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ryanmstokes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4103619?u=fc6560a14f83b275fdc9442d884182000fb818e1&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "borisudovicic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 1,
+  "newIssues": 4,
+  "closedIssues": 0,
+  "activeContributors": 2
+}
