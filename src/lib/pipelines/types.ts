@@ -169,7 +169,11 @@ export function sequence<TContext extends BasePipelineContext>(
  */
 export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
   operation: PipelineStep<TInput, TOutput, TContext>,
-  options?: { adaptiveConcurrency?: boolean; defaultConcurrency?: number },
+  options?: {
+    adaptiveConcurrency?: boolean;
+    adaptiveThreshold?: number;
+    defaultConcurrency?: number;
+  },
 ): PipelineStep<TInput[], TOutput[], TContext> {
   return async (inputs, context) => {
     if (!Array.isArray(inputs)) {
@@ -182,12 +186,17 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
     // Get concurrency level from context if available and adaptive concurrency is enabled
     let concurrency = options?.defaultConcurrency || 5;
 
+    // Only use adaptive concurrency for large batches
+    const threshold = options?.adaptiveThreshold || 50;
+    const useAdaptive =
+      options?.adaptiveConcurrency && inputs.length >= threshold;
+
     if (
-      options?.adaptiveConcurrency &&
+      useAdaptive &&
       (context as { github?: { getConcurrencyManager?: () => unknown } }).github
     ) {
       const githubClient = (
-        context as {
+        context as unknown as {
           github: {
             getConcurrencyManager: () => {
               getCurrentLevel: () => number;

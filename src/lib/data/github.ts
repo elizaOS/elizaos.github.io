@@ -225,9 +225,9 @@ class AdaptiveConcurrencyManager implements ConcurrencyManager {
   lastRateLimitTime: number;
 
   constructor(
-    initialLevel: number = 3,
+    initialLevel: number = 5,
     maxLevel: number = 8,
-    minLevel: number = 1,
+    minLevel: number = 3,
   ) {
     this.currentLevel = initialLevel;
     this.maxLevel = maxLevel;
