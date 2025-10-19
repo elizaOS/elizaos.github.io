@@ -222,17 +222,7 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
 
     const results = await pMap(
       inputs,
-      async (item, index) => {
-        // Check for graceful shutdown before processing each item
-        if (
-          global.process &&
-          (global.process as { gracefulShutdown?: boolean }).gracefulShutdown
-        ) {
-          context.logger?.warn(
-            `Graceful shutdown requested. Skipping remaining items after ${index}/${inputs.length}`,
-          );
-          throw new Error("GRACEFUL_SHUTDOWN");
-        }
+      async (item) => {
         return await operation(item, context);
       },
       {
@@ -241,7 +231,7 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
       },
     );
 
-    return results.filter((r) => r !== null); // Filter out any null results from interrupted operations
+    return results.filter((r) => r !== null); // Filter out any null results
   };
 }
 
