@@ -32,6 +32,21 @@ export default {
       name: "frontend",
       defaultBranch: "main",
     },
+    {
+      owner: "Sendo-labs",
+      name: "sendo-api",
+      defaultBranch: "main",
+    },
+    {
+      owner: "Sendo-labs",
+      name: "spotlight",
+      defaultBranch: "main",
+    },
+    {
+      owner: "Sendo-labs",
+      name: "reusable-workflows",
+      defaultBranch: "main",
+    },
   ],
   walletAddresses: {
     enabled: true,
