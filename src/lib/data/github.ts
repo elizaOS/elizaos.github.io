@@ -331,8 +331,6 @@ export class GitHubClient {
     maxTimeout: 120000,
     factor: 2,
   };
-  private concurrentRequests = 0;
-  private readonly maxConcurrentRequests = 10;
   private concurrencyManager: AdaptiveConcurrencyManager;
 
   // Token bucket for points-based rate limiting (900 points per minute)
@@ -374,11 +372,6 @@ export class GitHubClient {
   // Public method to get current concurrency level for pipeline use
   getConcurrencyManager(): ConcurrencyManager {
     return this.concurrencyManager;
-  }
-
-  // Method to handle successful operations
-  reportSuccess(): void {
-    this.concurrencyManager.increaseOnSuccess();
   }
 
   // Method to handle rate limit errors with enhanced detection
@@ -478,123 +471,117 @@ export class GitHubClient {
     await this.checkRateLimit();
     await this.checkSecondaryRateLimits(5); // GraphQL queries cost 5 points
 
-    this.concurrentRequests++;
+    return await pRetry(
+      async () => {
+        try {
+          const response = await axios.post("https://api.github.com/graphql", {
+            query,
+            variables,
+          });
 
-    try {
-      return await pRetry(
-        async () => {
-          try {
-            const response = await axios.post(
-              "https://api.github.com/graphql",
-              { query, variables },
+          this.rateLimitInfo = this.parseRateLimitHeaders(response.headers);
+          this.logger.debug("Rate limit status", {
+            remaining: this.rateLimitInfo.remaining,
+            resetAt: this.rateLimitInfo.resetAt,
+            pointsRemaining: Math.floor(this.pointsBucket.tokens),
+            concurrentRemaining: Math.floor(this.concurrentBucket.tokens),
+          });
+
+          const data = response.data;
+          if (data?.errors?.length > 0) {
+            const ignorableErrorTypes = ["NOT_FOUND"];
+
+            const ignorableErrors = data.errors.filter(
+              (e: { type: string; message: string }) =>
+                ignorableErrorTypes.includes(e.type),
             );
 
-            this.rateLimitInfo = this.parseRateLimitHeaders(response.headers);
-            this.logger.debug("Rate limit status", {
-              remaining: this.rateLimitInfo.remaining,
-              resetAt: this.rateLimitInfo.resetAt,
-              pointsRemaining: Math.floor(this.pointsBucket.tokens),
-              concurrentRemaining: Math.floor(this.concurrentBucket.tokens),
-            });
-
-            const data = response.data;
-            if (data?.errors?.length > 0) {
-              const ignorableErrorTypes = ["NOT_FOUND"];
-
-              const ignorableErrors = data.errors.filter(
-                (e: { type: string; message: string }) =>
-                  ignorableErrorTypes.includes(e.type),
-              );
-
-              if (ignorableErrors.length > 0) {
-                this.logger.debug("GraphQL query contained ignorable errors", {
-                  errors: ignorableErrors.map(
-                    (e: { message: string }) => e.message,
-                  ),
-                });
-              }
-
-              const criticalErrors = data.errors.filter(
-                (e: { type: string; message: string }) =>
-                  !ignorableErrorTypes.includes(e.type),
-              );
-
-              if (criticalErrors.length > 0) {
-                const errorMsg = criticalErrors
-                  .map((e: { message: string }) => e.message)
-                  .join(", ");
-                throw new Error(`GraphQL Errors: ${errorMsg}`);
-              }
-            }
-
-            return data;
-          } catch (error) {
-            const axiosError = error as AxiosError;
-            if (axiosError.response) {
-              this.rateLimitInfo = this.parseRateLimitHeaders(
-                axiosError.response.headers as Record<string, string>,
-              );
-              this.logger.warn(`Axios Error`, {
-                data: axiosError.response.data,
+            if (ignorableErrors.length > 0) {
+              this.logger.debug("GraphQL query contained ignorable errors", {
+                errors: ignorableErrors.map(
+                  (e: { message: string }) => e.message,
+                ),
               });
-              const status = axiosError.response.status;
-              const message =
-                (axiosError.response.data as Record<string, string>)?.message ||
-                "";
+            }
 
-              if (status === 403 && message.includes("secondary rate limit")) {
-                this.handleRateLimitError(axiosError);
-                const rateLimitType = parseRateLimitError(axiosError);
-                throw new SecondaryRateLimitError(
-                  `Secondary rate limit exceeded: ${message}`,
-                  rateLimitType.waitTime,
-                );
-              }
+            const criticalErrors = data.errors.filter(
+              (e: { type: string; message: string }) =>
+                !ignorableErrorTypes.includes(e.type),
+            );
 
-              if (
-                status === 403 ||
-                (this.rateLimitInfo?.remaining === 0 &&
-                  this.rateLimitInfo?.resetAt)
-              ) {
-                throw new RateLimitExceededError(
-                  `Primary rate limit exceeded: ${message}`,
-                  this.rateLimitInfo.resetAt,
-                );
-              }
+            if (criticalErrors.length > 0) {
+              const errorMsg = criticalErrors
+                .map((e: { message: string }) => e.message)
+                .join(", ");
+              throw new Error(`GraphQL Errors: ${errorMsg}`);
+            }
+          }
 
-              throw new Error(
-                `GitHub API Error (${status}): ${message || axiosError.message}`,
+          return data;
+        } catch (error) {
+          const axiosError = error as AxiosError;
+          if (axiosError.response) {
+            this.rateLimitInfo = this.parseRateLimitHeaders(
+              axiosError.response.headers as Record<string, string>,
+            );
+            this.logger.warn(`Axios Error`, {
+              data: axiosError.response.data,
+            });
+            const status = axiosError.response.status;
+            const message =
+              (axiosError.response.data as Record<string, string>)?.message ||
+              "";
+
+            if (status === 403 && message.includes("secondary rate limit")) {
+              this.handleRateLimitError(axiosError);
+              const rateLimitType = parseRateLimitError(axiosError);
+              throw new SecondaryRateLimitError(
+                `Secondary rate limit exceeded: ${message}`,
+                rateLimitType.waitTime,
               );
             }
-            throw error; // Rethrow non-Axios errors
+
+            if (
+              status === 403 ||
+              (this.rateLimitInfo?.remaining === 0 &&
+                this.rateLimitInfo?.resetAt)
+            ) {
+              throw new RateLimitExceededError(
+                `Primary rate limit exceeded: ${message}`,
+                this.rateLimitInfo.resetAt,
+              );
+            }
+
+            throw new Error(
+              `GitHub API Error (${status}): ${message || axiosError.message}`,
+            );
+          }
+          throw error; // Rethrow non-Axios errors
+        }
+      },
+      {
+        retries: this.retryConfig.maxRetries,
+        minTimeout: this.retryConfig.minTimeout,
+        maxTimeout: this.retryConfig.maxTimeout,
+        factor: this.retryConfig.factor,
+        randomize: true,
+        onFailedAttempt: async (error) => {
+          this.logger.warn(
+            `Attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
+            { error: error.message },
+          );
+
+          if (error instanceof RateLimitExceededError) {
+            await this.wait(error.resetAt.getTime() - Date.now() + 1000);
+            throw new AbortError(error.message);
+          }
+
+          if (error instanceof SecondaryRateLimitError) {
+            await this.wait(error.waitTime);
           }
         },
-        {
-          retries: this.retryConfig.maxRetries,
-          minTimeout: this.retryConfig.minTimeout,
-          maxTimeout: this.retryConfig.maxTimeout,
-          factor: this.retryConfig.factor,
-          randomize: true,
-          onFailedAttempt: async (error) => {
-            this.logger.warn(
-              `Attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
-              { error: error.message },
-            );
-
-            if (error instanceof RateLimitExceededError) {
-              await this.wait(error.resetAt.getTime() - Date.now() + 1000);
-              throw new AbortError(error.message);
-            }
-
-            if (error instanceof SecondaryRateLimitError) {
-              await this.wait(error.waitTime);
-            }
-          },
-        },
-      );
-    } finally {
-      this.concurrentRequests--;
-    }
+      },
+    );
   }
 
   private async paginateGraphQL<T>(
@@ -1019,112 +1006,106 @@ export class GitHubClient {
     await this.checkRateLimit();
     await this.checkSecondaryRateLimits(1); // REST API calls cost 1 point
 
-    this.concurrentRequests++;
+    return await pRetry(
+      async () => {
+        try {
+          const url = endpoint.startsWith("http")
+            ? endpoint
+            : `https://api.github.com${endpoint}`;
 
-    try {
-      return await pRetry(
-        async () => {
-          try {
-            const url = endpoint.startsWith("http")
-              ? endpoint
-              : `https://api.github.com${endpoint}`;
+          const response = await axios({
+            method,
+            url,
+            data: body,
+            headers: {
+              Authorization: `Bearer ${this.token}`,
+              Accept: "application/vnd.github.v3+json",
+              ...options.headers,
+            },
+          });
 
-            const response = await axios({
-              method,
-              url,
-              data: body,
-              headers: {
-                Authorization: `Bearer ${this.token}`,
-                Accept: "application/vnd.github.v3+json",
-                ...options.headers,
-              },
-            });
+          this.rateLimitInfo = this.parseRateLimitHeaders(response.headers);
+          this.logger.debug("Rate limit status", {
+            remaining: this.rateLimitInfo.remaining,
+            resetAt: this.rateLimitInfo.resetAt,
+            pointsRemaining: Math.floor(this.pointsBucket.tokens),
+            concurrentRemaining: Math.floor(this.concurrentBucket.tokens),
+          });
 
-            this.rateLimitInfo = this.parseRateLimitHeaders(response.headers);
-            this.logger.debug("Rate limit status", {
-              remaining: this.rateLimitInfo.remaining,
-              resetAt: this.rateLimitInfo.resetAt,
-              pointsRemaining: Math.floor(this.pointsBucket.tokens),
-              concurrentRemaining: Math.floor(this.concurrentBucket.tokens),
-            });
-
-            if (response.status === 204) {
-              return null as T;
-            }
-
-            return response.data as T;
-          } catch (error) {
-            const axiosError = error as AxiosError;
-            if (axiosError.response) {
-              this.rateLimitInfo = this.parseRateLimitHeaders(
-                axiosError.response.headers as Record<string, string>,
-              );
-
-              const status = axiosError.response.status;
-              const message =
-                (axiosError.response.data as Record<string, string>)?.message ||
-                "";
-
-              if (status === 404) {
-                // For 404s, don't retry - just return null
-                return null as T;
-              }
-              this.logger.warn(`REST API Error`, {
-                data: axiosError.response.data,
-              });
-              if (status === 403 && message.includes("secondary rate limit")) {
-                this.handleRateLimitError(axiosError);
-                const rateLimitType = parseRateLimitError(axiosError);
-                throw new SecondaryRateLimitError(
-                  `Secondary rate limit exceeded: ${message}`,
-                  rateLimitType.waitTime,
-                );
-              }
-
-              if (
-                status === 403 ||
-                (this.rateLimitInfo?.remaining === 0 &&
-                  this.rateLimitInfo?.resetAt)
-              ) {
-                throw new RateLimitExceededError(
-                  `Primary rate limit exceeded: ${message}`,
-                  this.rateLimitInfo.resetAt,
-                );
-              }
-
-              throw new Error(
-                `GitHub API Error (${status}): ${message || axiosError.message}`,
-              );
-            }
-            throw error; // Rethrow non-Axios errors
+          if (response.status === 204) {
+            return null as T;
           }
-        },
-        {
-          retries: this.retryConfig.maxRetries,
-          minTimeout: this.retryConfig.minTimeout,
-          maxTimeout: this.retryConfig.maxTimeout,
-          factor: this.retryConfig.factor,
-          randomize: true,
-          onFailedAttempt: async (error) => {
-            this.logger.warn(
-              `REST API attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
-              { error: error.message },
+
+          return response.data as T;
+        } catch (error) {
+          const axiosError = error as AxiosError;
+          if (axiosError.response) {
+            this.rateLimitInfo = this.parseRateLimitHeaders(
+              axiosError.response.headers as Record<string, string>,
             );
 
-            if (error instanceof RateLimitExceededError) {
-              await this.wait(error.resetAt.getTime() - Date.now() + 1000);
-              throw new AbortError(error.message);
+            const status = axiosError.response.status;
+            const message =
+              (axiosError.response.data as Record<string, string>)?.message ||
+              "";
+
+            if (status === 404) {
+              // For 404s, don't retry - just return null
+              return null as T;
+            }
+            this.logger.warn(`REST API Error`, {
+              data: axiosError.response.data,
+            });
+            if (status === 403 && message.includes("secondary rate limit")) {
+              this.handleRateLimitError(axiosError);
+              const rateLimitType = parseRateLimitError(axiosError);
+              throw new SecondaryRateLimitError(
+                `Secondary rate limit exceeded: ${message}`,
+                rateLimitType.waitTime,
+              );
             }
 
-            if (error instanceof SecondaryRateLimitError) {
-              await this.wait(error.waitTime);
+            if (
+              status === 403 ||
+              (this.rateLimitInfo?.remaining === 0 &&
+                this.rateLimitInfo?.resetAt)
+            ) {
+              throw new RateLimitExceededError(
+                `Primary rate limit exceeded: ${message}`,
+                this.rateLimitInfo.resetAt,
+              );
             }
-          },
+
+            throw new Error(
+              `GitHub API Error (${status}): ${message || axiosError.message}`,
+            );
+          }
+          throw error; // Rethrow non-Axios errors
+        }
+      },
+      {
+        retries: this.retryConfig.maxRetries,
+        minTimeout: this.retryConfig.minTimeout,
+        maxTimeout: this.retryConfig.maxTimeout,
+        factor: this.retryConfig.factor,
+        randomize: true,
+        onFailedAttempt: async (error) => {
+          this.logger.warn(
+            `REST API attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
+            { error: error.message },
+          );
+
+          if (error instanceof RateLimitExceededError) {
+            await this.wait(error.resetAt.getTime() - Date.now() + 1000);
+            throw new AbortError(error.message);
+          }
+
+          if (error instanceof SecondaryRateLimitError) {
+            await this.wait(error.waitTime);
+          }
         },
-      );
-    } finally {
-      this.concurrentRequests--;
-    }
+      },
+    );
   }
 
   async fetchFileContent(owner: string, repo: string, path: string) {
