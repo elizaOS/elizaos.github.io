@@ -1,0 +1,91 @@
+{
+  "interval": {
+    "intervalStart": "2025-10-19T00:00:00.000Z",
+    "intervalEnd": "2025-10-26T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/elizaos.github.io",
+  "overview": "From 2025-10-19 to 2025-10-26, elizaos/elizaos.github.io had 1 new PRs (0 merged), 1 new issues, and 1 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDONNAI987SX1I5",
+      "title": "Enhancement: Adaptive Rate Limiting for 60% Faster Multi-Repo Ingestion",
+      "author": "madjin",
+      "number": 159,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "## Problem: Sequential Processing is Too Slow for Multi-Repo Pipelines\n\n### Current Bottleneck\n\nThe current pipeline uses **static concurrency** which creates a performance vs reliability tradeoff:\n\n- **Low concurrency (current: 5)**: Safe but SLOW\n  - 23 repos × 52 weeks of data = **~10-15 hours** for full ingestion\n  - Single slow repo blocks entire pipeline\n  - Underutilizes available API quota (5,000 requests/hour)\n\n- **High concurrency**: Fast but RISKY\n  - Hits secondary rate limits frequently\n  - Forces pipeline to wait 15+ minutes\n  - Wastes time with retry backoff cycles\n\n### Real-World Impact\n\n**Example from M3-org fork** (14 Optimism repositories):\n- **Static concurrency=5**: 6-8 hours for full historical ingestion\n- **With adaptive concurrency**: 2-3 hours (60% faster)\n- **Rate limit hits**: Reduced from 10-15 to 2-3 per run\n\n**Projected for 23 elizaOS repositories:**\n- **Current static approach**: 10-15 hours\n- **With adaptive concurrency**: ~4-6 hours (60-70% faster)\n\n### Why Static Concurrency Fails\n\n1. **API health varies** - Morning vs evening, weekday vs weekend\n2. **Repository sizes differ** - Small repos finish fast, large repos take hours\n3. **Rate limit recovery** - After hitting limit, pipeline should slow down temporarily\n4. **Unnecessary conservatism** - Static concurrency=5 is safe but wastes quota\n\n---\n\n## Solution: Adaptive Concurrency Management\n\n### Core Concept\n\n**Dynamically adjust concurrent operations (3-8) based on rate limit health:**\n\n- **Start conservative**: 3 concurrent operations\n- **Increase on success**: +1 concurrency every 2 minutes without rate limits\n- **Decrease on rate limit**: Halve concurrency immediately\n- **Track health**: Remember last rate limit for 5 minutes\n\n### Performance Benchmarks\n\n**Test Setup**: M3-org/op-hiscores fork with 14 ethereum-optimism repos\n\n| Metric | Static (5) | Adaptive (3-8) | Improvement |\n|--------|-----------|----------------|-------------|\n| **Total duration** | 6h 45min | 2h 50min | **58% faster** |\n| **Rate limit hits** | 12 | 2 | **83% fewer** |\n| **Avg concurrency** | 5 | 5.8 | +16% |\n| **Recovery time** | 3h 20min | 45min | **77% faster** |\n\n---\n\n## Implementation Components\n\n### 1. Adaptive Concurrency Manager (~110 lines)\n```typescript\nclass AdaptiveConcurrencyManager {\n  currentLevel: 3-8 (starts at 3)\n  reduceOnSecondaryLimit() → currentLevel / 2\n  increaseOnSuccess() → currentLevel + 1 (if no rate limit in 2min)\n  shouldReduceLoad() → true if rate limited in last 5min\n}\n```\n\n### 2. Rate Limit Type Detection (~50 lines)\n- Distinguishes **primary** vs **secondary** rate limits\n- Different strategies for each type\n- Primary: Wait until reset (1hr)\n- Secondary: Reduce load + backoff (15min)\n\n### 3. Adaptive Pipeline Integration (~60 lines)\n```typescript\nmapStep(operation, {\n  adaptiveConcurrency: true,  // Enable dynamic adjustment\n  defaultConcurrency: 5       // Fallback\n})\n```\n\n### 4. API Cost Estimation (~75 lines)\n- Shows estimated duration BEFORE execution\n- `--estimate-only` flag for dry-run\n- Risk assessment (LOW/MEDIUM/HIGH)\n\n### 5. Graceful Shutdown (~30 lines)\n- First Ctrl+C: Complete current operation, preserve adaptive state\n- Second Ctrl+C: Force exit\n- Better for long-running multi-hour ingestions\n\n**Total**: ~348 lines across 4 files\n\n---\n\n## Production Testing\n\n- **Fork**: https://github.com/M3-org/op-hiscores\n- **Deployment**: https://m3-org.github.io/op-hiscores/\n- **Dataset**: 14 repos, 18,000+ PRs, 4,800+ issues\n- **Duration**: 6+ months in production\n- **Commit**: `309c37c` - feat: Enhance pipeline with adaptive rate limiting\n\n---\n\n## Trade-offs\n\n### Pros\n✅ **60-70% faster** for multi-repo ingestion\n✅ **75% fewer rate limit hits**\n✅ **Self-tuning** - No manual configuration needed\n✅ **Production-tested** - 14 repos, 18K+ PRs successfully processed\n✅ **Backward compatible** - Opt-in via `adaptiveConcurrency: true`\n\n### Cons\n⚠️ **Complexity** - 348 lines vs current static approach\n⚠️ **Tuning** - Thresholds (3-8, 2min, 5min) may not be optimal for all workloads\n⚠️ **Debugging** - Dynamic behavior is harder to reason about\n\n---\n\n## Value Proposition\n\nFor projects tracking **10+ repositories** (like this project with 23 repos), the difference between **15 hours and 4-6 hours** for full ingestion is substantial.\n\nThe self-tuning nature means:\n- No manual configuration needed\n- Automatically finds optimal concurrency\n- Scales better as more repos are added\n- Reduces developer waiting time by 6-10 hours per full ingestion\n\n---\n\n## Next Steps\n\nIf this enhancement aligns with the project's goals, I'm happy to:\n1. Submit a PR with the full implementation\n2. Provide additional benchmarks or testing\n3. Adjust parameters based on your specific workload\n4. Start with a subset (e.g., just rate limit type detection) if preferred\n\nThe implementation is production-ready and has been thoroughly tested with larger datasets than currently tracked by this project.\n\n---\n\n**Question for maintainers**: Is the ~60% performance improvement worth the additional complexity? Would you prefer the full enhancement or a smaller subset (e.g., just rate limit parsing)?\n",
+      "createdAt": "2025-10-19T03:21:00Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDONNAI986ue32W",
+      "title": "feat: Add adaptive rate limiting with low-volume optimization",
+      "author": "madjin",
+      "number": 160,
+      "body": "## Summary\n\nThis PR implements **adaptive rate limiting with low-volume optimization** for GitHub API operations, providing significant performance improvements for high-volume repositories while maintaining zero overhead for typical workloads.\n\n### Key Features\n\n1. **Adaptive Concurrency Manager** - Dynamically adjusts concurrent operations (3-8) based on rate limit health\n2. **Enhanced Rate Limit Detection** - Distinguishes primary vs secondary rate limits for better error handling\n3. **Low-Volume Optimization** - Batch threshold (default 50 items) prevents overhead on small batches\n4. **Production-Tested** - Validated with 14 Optimism repos (283 items/week)\n\n### Performance Impact\n\n**High-volume repos (Optimism - 283 items/week)**:\n- Actual results: **8 minutes** (vs projected 20 minutes with static concurrency)\n- Performance improvement: **60% faster**\n\n**Low-volume repos (ElizaOS - 63 items/week)**:\n- No change: **4-5 minutes** (batch threshold prevents overhead)\n- Performance impact: **Zero overhead**\n\n### Code Changes\n\n- **Net change**: +195 lines (407 additions, 212 deletions)\n- **Files modified**: 5\n  - `src/lib/data/github.ts`: Core adaptive system (+134 net)\n  - `src/lib/pipelines/types.ts`: Batch threshold integration (+49 net)\n  - `src/lib/pipelines/ingest/index.ts`: Enable adaptive (+3 net)\n  - `config/pipeline.config.ts`: Testing config (+10 net)\n  - `cli/analyze-pipeline.ts`: Simplified ingestion (-1 net)\n\n### Design Decisions\n\n**Removed YAGNI features** (33% reduction from initial implementation):\n- API cost estimation (~80 lines) - Token bucket already prevents rate limit issues\n- Graceful shutdown (~26 lines) - Database writes are transactional, re-runs skip processed items\n- Unused tracking code (~10 lines) - Dead code cleanup\n\n**Retained core features**:\n- AdaptiveConcurrencyManager class (~48 lines) - Proven 60% improvement\n- Rate limit type detection (~50 lines) - Better error handling\n- Batch threshold logic (~6 lines) - Zero overhead for low volumes\n- Pipeline integration (~58 lines) - Seamless opt-in activation\n\n### Why This Matters\n\nThis PR is **future-proof architecture**:\n- Current ElizaOS workload sees zero overhead (batch threshold optimization)\n- As repo activity grows, adaptive concurrency kicks in automatically\n- No configuration changes needed - works out of the box\n- Opt-in via `adaptiveConcurrency: true` in pipeline config\n\n### Testing\n\nAll checks pass:\n- ✅ TypeScript compilation (`bunx tsc --noEmit`)\n- ✅ ESLint checks (no new warnings)\n- ✅ Production validated (14 repos, 283 items/week, 60% faster)\n\n### Related\n\n- Resolves issue #159 (Adaptive Concurrency for High-Volume Repos)\n- Builds on PR #157 (Token Bucket Rate Limiting)\n- Builds on PR #158 (Enhance Data Ingestion)\n\n---\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+      "repository": "elizaos/elizaos.github.io",
+      "createdAt": "2025-10-19T04:01:48Z",
+      "mergedAt": null,
+      "additions": 397,
+      "deletions": 212
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 4
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 109.1195477931522,
+      "prScore": 109.1195477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 44.953149053531604,
+      "prScore": 44.953149053531604,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 31.819774539791275,
+      "prScore": 31.819774539791275,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "madjin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32600939?u=cdcf89f44c7a50906c7a80d889efa85023af2049&v=4",
+      "totalScore": 30.655647392918393,
+      "prScore": 28.655647392918393,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 1
+}
