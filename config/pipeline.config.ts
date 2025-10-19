@@ -132,16 +132,6 @@ export default {
       name: "plugin-pdf",
       defaultBranch: "1.x",
     },
-    {
-      owner: "ethereum-optimism",
-      name: "design-docs",
-      defaultBranch: "main",
-    },
-    {
-      owner: "ethereum-optimism",
-      name: "Retro-Funding",
-      defaultBranch: "main",
-    },
   ],
   walletAddresses: {
     enabled: true,
