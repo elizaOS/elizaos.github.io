@@ -1,7 +1,7 @@
 import UserProfile from "@/app/profile/[username]/components/UserProfile";
 import { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getUserProfile } from "./queries";
+import { getUserProfile, getUserBadgesForProfile } from "./queries";
 import { db } from "@/lib/data/db";
 
 type ProfilePageProps = {
@@ -52,9 +52,12 @@ export default async function ProfilePage({ params }: ProfilePageProps) {
     notFound();
   }
 
+  // Fetch badges for the user
+  const userBadges = await getUserBadgesForProfile(username);
+
   return (
     <main className="container mx-auto p-4">
-      <UserProfile {...userData} />
+      <UserProfile {...userData} userBadges={userBadges} />
     </main>
   );
 }

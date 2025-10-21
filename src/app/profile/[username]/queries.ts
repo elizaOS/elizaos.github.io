@@ -6,6 +6,7 @@ import {
   userTagScores,
   tags,
   userSummaries,
+  userBadges,
 } from "@/lib/data/schema";
 import { calculateDateRange, IntervalType } from "@/lib/date-utils";
 import {
@@ -14,6 +15,7 @@ import {
 } from "@/lib/scoring/queries";
 import { TagType } from "@/lib/scoring/types";
 import { getUserWalletData } from "@/lib/walletLinking/queries";
+import { UserBadge } from "@/lib/badges/types";
 
 export async function getUserTags(username: string) {
   const tagSelectFields = {
@@ -176,4 +178,22 @@ export async function getUserProfile(username: string) {
     dailyActivity,
     linkedWallets: walletData?.wallets || [],
   };
+}
+
+/**
+ * Get all badges for a user
+ * @param username - GitHub username
+ * @returns Array of user badges ordered by earned date descending
+ */
+export async function getUserBadgesForProfile(
+  username: string,
+): Promise<UserBadge[]> {
+  const badges = await db
+    .select()
+    .from(userBadges)
+    .where(eq(userBadges.username, username))
+    .orderBy(desc(userBadges.earnedAt))
+    .all();
+
+  return badges as UserBadge[];
 }
