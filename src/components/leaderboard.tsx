@@ -42,6 +42,7 @@ export interface LeaderboardUser {
   avatarUrl?: string | null;
   allTags: { tagName: string; category: string | null; score: number }[];
   linkedWallets: LinkedWallet[];
+  badgeCount: number;
 }
 
 interface LeaderboardTab {

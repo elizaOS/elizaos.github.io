@@ -9,7 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { BadgeCheck } from "lucide-react";
+import { BadgeCheck, Trophy } from "lucide-react";
 
 export function LeaderboardCard({
   user,
@@ -84,6 +84,24 @@ export function LeaderboardCard({
                   value={user.totalLevel}
                   className="px-2 text-xs"
                 />
+                {user.badgeCount > 0 && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
+                          <Trophy className="h-3 w-3" />
+                          <span>{user.badgeCount}</span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>
+                          {user.badgeCount} badge
+                          {user.badgeCount !== 1 ? "s" : ""} earned
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
               </div>
             </div>
             {/* <div className="hidden items-center gap-2 md:flex">
