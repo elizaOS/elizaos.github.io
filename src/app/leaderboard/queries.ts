@@ -1,6 +1,6 @@
 import { db } from "@/lib/data/db";
-import { userTagScores, tags } from "@/lib/data/schema";
-import { eq, inArray } from "drizzle-orm";
+import { userTagScores, tags, userBadges } from "@/lib/data/schema";
+import { eq, inArray, sql } from "drizzle-orm";
 import { getDateRangeForPeriod } from "@/lib/pipelines/queryHelpers";
 import { getTopUsersByScore } from "@/lib/scoring/queries";
 import { groupBy } from "@/lib/arrayHelpers";
@@ -57,6 +57,21 @@ export async function getLeaderboard(period: LeaderboardPeriod) {
     topUsers.map((user) => [user.username, user.totalScore]),
   );
 
+  // Fetch badge counts for these users
+  const badgeCounts = await db
+    .select({
+      username: userBadges.username,
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(userBadges)
+    .where(inArray(userBadges.username, usernameList))
+    .groupBy(userBadges.username);
+
+  // Create a map of badge counts for quick lookup
+  const badgeCountMap = new Map(
+    badgeCounts.map((bc) => [bc.username, bc.count]),
+  );
+
   // Transform the results to match the UserFocusAreaData interface
   const usersFromDb = topUsers
     .map((user) => {
@@ -74,6 +89,7 @@ export async function getLeaderboard(period: LeaderboardPeriod) {
         points: userScore,
         totalXp,
         totalLevel,
+        badgeCount: badgeCountMap.get(user.username) || 0,
       };
     })
     .sort((a, b) => (b.totalXp || 0) - (a.totalXp || 0));

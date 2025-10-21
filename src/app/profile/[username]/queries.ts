@@ -197,3 +197,24 @@ export async function getUserBadgesForProfile(
 
   return badges as UserBadge[];
 }
+
+/**
+ * Get badge progress values for a user
+ * Returns current progress values for all badge types
+ */
+export async function getUserBadgeProgress(
+  username: string,
+): Promise<Record<string, number>> {
+  const { checkAllBadges } = await import("@/lib/badges/checker");
+
+  // Get current badge awards (includes trigger values)
+  const badgeAwards = await checkAllBadges(username);
+
+  // Convert to progress map
+  const progress: Record<string, number> = {};
+  for (const award of badgeAwards) {
+    progress[award.badgeType] = award.triggerValue;
+  }
+
+  return progress;
+}
