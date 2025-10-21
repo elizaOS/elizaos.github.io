@@ -4,13 +4,14 @@ import * as React from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-import { TagData, SkillCard } from "@/components/skill-card";
-import { BadgeCheck, Github } from "lucide-react";
+import { TagData, SkillCard, BadgeData } from "@/components/skill-card";
+import { BadgeCheck, Github, Trophy } from "lucide-react";
 import { formatCompactNumber } from "@/lib/format-number";
 import { DailyActivity } from "@/components/daily-activity";
 import { UserActivityHeatmap } from "@/lib/scoring/queries";
 import { SummaryCard, Summary } from "@/components/summary-card";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
+import { UserBadge, getTierDefinition } from "@/lib/badges/types";
 
 import {
   Tooltip,
@@ -42,6 +43,7 @@ type UserProfileProps = {
   stats: UserStats;
   dailyActivity: UserActivityHeatmap[];
   linkedWallets: LinkedWallet[];
+  userBadges: UserBadge[];
 };
 
 export default function UserProfile({
@@ -56,7 +58,20 @@ export default function UserProfile({
   stats,
   dailyActivity,
   linkedWallets,
+  userBadges,
 }: UserProfileProps) {
+  // Transform user badges into BadgeData format for display
+  const badgeDataList: BadgeData[] = userBadges.map((badge) => {
+    const tierDef = getTierDefinition(badge.badgeType, badge.tier);
+    return {
+      badgeType: badge.badgeType,
+      tier: badge.tier,
+      earnedAt: badge.earnedAt,
+      icon: tierDef?.icon || "🏅",
+      label: tierDef?.label || badge.badgeType,
+      description: tierDef?.description || "",
+    };
+  });
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
       <div className="items-star flex flex-col gap-4 sm:flex-row">
@@ -219,6 +234,28 @@ export default function UserProfile({
           </CardContent>
         </Card>
       </div>
+
+      {/* Badges Section */}
+      {badgeDataList.length > 0 && (
+        <div>
+          <div className="mb-4 flex items-center gap-2">
+            <Trophy className="h-5 w-5 text-yellow-500" />
+            <h3 className="text-lg font-semibold">Achievements</h3>
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+              {badgeDataList.length}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+            {badgeDataList.map((badge) => (
+              <SkillCard
+                key={`${badge.badgeType}_${badge.tier}`}
+                mode="badge"
+                badgeData={badge}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3">
         <div>
