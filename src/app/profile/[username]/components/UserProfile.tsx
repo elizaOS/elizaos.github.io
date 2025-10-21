@@ -18,7 +18,6 @@ import {
   BADGE_DEFINITIONS,
   BadgeType,
 } from "@/lib/badges/types";
-import { Progress } from "@/components/ui/progress";
 
 import {
   Tooltip,
@@ -69,28 +68,64 @@ export default function UserProfile({
   userBadges,
   badgeProgress,
 }: UserProfileProps) {
-  // Transform user badges into BadgeData format for display
-  const badgeDataList: BadgeData[] = userBadges
-    .map((badge) => {
-      const tierDef = getTierDefinition(badge.badgeType, badge.tier);
-      return {
-        badgeType: badge.badgeType,
-        tier: badge.tier,
-        earnedAt: badge.earnedAt,
-        icon: tierDef?.icon || "🏅",
-        label: tierDef?.label || badge.badgeType,
-        description: tierDef?.description || "",
-      };
-    })
-    .sort((a, b) => {
-      // Sort by tier: legend > elite > beginner
-      const tierOrder = { legend: 3, elite: 2, beginner: 1 };
-      const tierA = tierOrder[a.tier as keyof typeof tierOrder] || 0;
-      const tierB = tierOrder[b.tier as keyof typeof tierOrder] || 0;
-      return tierB - tierA;
-    });
+  // Create unified badge list: earned + locked badges
 
-  // Calculate total possible badges (5 types)
+  // Earned badges
+  const earnedBadges: BadgeData[] = userBadges.map((badge) => {
+    const tierDef = getTierDefinition(badge.badgeType, badge.tier);
+    return {
+      badgeType: badge.badgeType,
+      tier: badge.tier,
+      earnedAt: badge.earnedAt,
+      icon: tierDef?.icon || "🏅",
+      label: tierDef?.label || badge.badgeType,
+      description: tierDef?.description || "",
+      isLocked: false,
+    };
+  });
+
+  // Locked badges (not earned or can be upgraded)
+  const lockedBadges: BadgeData[] = Object.keys(BADGE_DEFINITIONS)
+    .map((badgeType) => {
+      const currentValue = badgeProgress[badgeType] || 0;
+      const nextTier = getNextTier(badgeType as BadgeType, currentValue);
+
+      // Skip if already at max tier
+      if (!nextTier) return null;
+
+      const progressPercent = (currentValue / nextTier.threshold) * 100;
+
+      const badge: BadgeData = {
+        badgeType,
+        tier: nextTier.tier,
+        earnedAt: "",
+        icon: nextTier.icon,
+        label: nextTier.label,
+        description: nextTier.description,
+        isLocked: true,
+        progressValue: currentValue,
+        progressTarget: nextTier.threshold,
+        progressPercent,
+      };
+      return badge;
+    })
+    .filter((badge): badge is BadgeData => badge !== null);
+
+  // Sort earned by tier (legend > elite > beginner)
+  const sortedEarned = earnedBadges.sort((a, b) => {
+    const tierOrder = { legend: 3, elite: 2, beginner: 1 };
+    const tierA = tierOrder[a.tier as keyof typeof tierOrder] || 0;
+    const tierB = tierOrder[b.tier as keyof typeof tierOrder] || 0;
+    return tierB - tierA;
+  });
+
+  // Sort locked by progress % (closest to completion first)
+  const sortedLocked = lockedBadges.sort(
+    (a, b) => (b.progressPercent || 0) - (a.progressPercent || 0),
+  );
+
+  // Unified badge list
+  const badgeDataList = [...sortedEarned, ...sortedLocked];
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
       <div className="items-star flex flex-col gap-4 sm:flex-row">
@@ -130,19 +165,23 @@ export default function UserProfile({
                   {Math.round(totalXp).toLocaleString()} XP
                 </span>
               </div>
-              {badgeDataList.length > 0 && (
+              {sortedEarned.length > 0 && (
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
                         <Trophy className="h-3.5 w-3.5" />
-                        <span>{badgeDataList.length}</span>
+                        <span>
+                          {sortedEarned.length} /{" "}
+                          {Object.keys(BADGE_DEFINITIONS).length}
+                        </span>
                       </div>
                     </TooltipTrigger>
                     <TooltipContent>
                       <p>
-                        {badgeDataList.length} badge
-                        {badgeDataList.length !== 1 ? "s" : ""} earned
+                        {sortedEarned.length} of{" "}
+                        {Object.keys(BADGE_DEFINITIONS).length} badge
+                        {sortedEarned.length !== 1 ? "s" : ""} earned
                       </p>
                     </TooltipContent>
                   </Tooltip>
@@ -277,11 +316,9 @@ export default function UserProfile({
         <div className="mb-4 flex items-center gap-2">
           <Trophy className="h-5 w-5 text-yellow-500" />
           <h3 className="text-lg font-semibold">Achievements</h3>
-          {badgeDataList.length > 0 && (
-            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-              {badgeDataList.length}
-            </span>
-          )}
+          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+            {sortedEarned.length} / {Object.keys(BADGE_DEFINITIONS).length}
+          </span>
         </div>
         {badgeDataList.length > 0 ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
@@ -306,62 +343,6 @@ export default function UserProfile({
             </CardContent>
           </Card>
         )}
-
-        {/* Badge Progress Section */}
-        <div className="mt-6">
-          <h4 className="mb-3 text-sm font-semibold text-muted-foreground">
-            Next Achievements
-          </h4>
-          <div className="space-y-3">
-            {Object.keys(BADGE_DEFINITIONS).map((badgeType) => {
-              const currentValue = badgeProgress[badgeType] || 0;
-              const nextTier = getNextTier(
-                badgeType as BadgeType,
-                currentValue,
-              );
-
-              // Don't show if already at max tier
-              if (!nextTier) return null;
-
-              const badgeDef = BADGE_DEFINITIONS[badgeType as BadgeType];
-              const progressPercent = (currentValue / nextTier.threshold) * 100;
-
-              return (
-                <div
-                  key={badgeType}
-                  className="rounded-lg border bg-card p-3 text-card-foreground"
-                >
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg">{nextTier.icon}</span>
-                      <div>
-                        <div className="text-sm font-medium">
-                          {badgeDef.name}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {nextTier.label}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-mono text-sm font-medium">
-                        {Math.floor(currentValue)} / {nextTier.threshold}
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        {Math.max(
-                          0,
-                          nextTier.threshold - Math.floor(currentValue),
-                        )}{" "}
-                        to go
-                      </div>
-                    </div>
-                  </div>
-                  <Progress value={progressPercent} className="h-2" />
-                </div>
-              );
-            })}
-          </div>
-        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3">
