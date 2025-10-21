@@ -171,16 +171,12 @@ export default function UserProfile({
                     <TooltipTrigger asChild>
                       <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
                         <Trophy className="h-3.5 w-3.5" />
-                        <span>
-                          {sortedEarned.length} /{" "}
-                          {Object.keys(BADGE_DEFINITIONS).length}
-                        </span>
+                        <span>{sortedEarned.length}</span>
                       </div>
                     </TooltipTrigger>
                     <TooltipContent>
                       <p>
-                        {sortedEarned.length} of{" "}
-                        {Object.keys(BADGE_DEFINITIONS).length} badge
+                        {sortedEarned.length} badge
                         {sortedEarned.length !== 1 ? "s" : ""} earned
                       </p>
                     </TooltipContent>
@@ -316,9 +312,11 @@ export default function UserProfile({
         <div className="mb-4 flex items-center gap-2">
           <Trophy className="h-5 w-5 text-yellow-500" />
           <h3 className="text-lg font-semibold">Achievements</h3>
-          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-            {sortedEarned.length} / {Object.keys(BADGE_DEFINITIONS).length}
-          </span>
+          {sortedEarned.length > 0 && (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+              {sortedEarned.length}
+            </span>
+          )}
         </div>
         {badgeDataList.length > 0 ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
