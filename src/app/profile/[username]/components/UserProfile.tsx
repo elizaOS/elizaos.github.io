@@ -11,7 +11,14 @@ import { DailyActivity } from "@/components/daily-activity";
 import { UserActivityHeatmap } from "@/lib/scoring/queries";
 import { SummaryCard, Summary } from "@/components/summary-card";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
-import { UserBadge, getTierDefinition } from "@/lib/badges/types";
+import {
+  UserBadge,
+  getTierDefinition,
+  getNextTier,
+  BADGE_DEFINITIONS,
+  BadgeType,
+} from "@/lib/badges/types";
+import { Progress } from "@/components/ui/progress";
 
 import {
   Tooltip,
@@ -44,6 +51,7 @@ type UserProfileProps = {
   dailyActivity: UserActivityHeatmap[];
   linkedWallets: LinkedWallet[];
   userBadges: UserBadge[];
+  badgeProgress: Record<string, number>;
 };
 
 export default function UserProfile({
@@ -59,6 +67,7 @@ export default function UserProfile({
   dailyActivity,
   linkedWallets,
   userBadges,
+  badgeProgress,
 }: UserProfileProps) {
   // Transform user badges into BadgeData format for display
   const badgeDataList: BadgeData[] = userBadges
@@ -297,6 +306,62 @@ export default function UserProfile({
             </CardContent>
           </Card>
         )}
+
+        {/* Badge Progress Section */}
+        <div className="mt-6">
+          <h4 className="mb-3 text-sm font-semibold text-muted-foreground">
+            Next Achievements
+          </h4>
+          <div className="space-y-3">
+            {Object.keys(BADGE_DEFINITIONS).map((badgeType) => {
+              const currentValue = badgeProgress[badgeType] || 0;
+              const nextTier = getNextTier(
+                badgeType as BadgeType,
+                currentValue,
+              );
+
+              // Don't show if already at max tier
+              if (!nextTier) return null;
+
+              const badgeDef = BADGE_DEFINITIONS[badgeType as BadgeType];
+              const progressPercent = (currentValue / nextTier.threshold) * 100;
+
+              return (
+                <div
+                  key={badgeType}
+                  className="rounded-lg border bg-card p-3 text-card-foreground"
+                >
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{nextTier.icon}</span>
+                      <div>
+                        <div className="text-sm font-medium">
+                          {badgeDef.name}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {nextTier.label}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono text-sm font-medium">
+                        {Math.floor(currentValue)} / {nextTier.threshold}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {Math.max(
+                          0,
+                          nextTier.threshold - Math.floor(currentValue),
+                        )}{" "}
+                        to go
+                      </div>
+                    </div>
+                  </div>
+                  <Progress value={progressPercent} className="h-2" />
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3">

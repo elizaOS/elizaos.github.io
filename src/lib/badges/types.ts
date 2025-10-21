@@ -235,6 +235,23 @@ export function getTierDefinition(
 }
 
 /**
+ * Helper to get next tier target for progress calculation
+ */
+export function getNextTier(
+  badgeType: BadgeType,
+  currentValue: number,
+): BadgeTierDefinition | null {
+  const definition = BADGE_DEFINITIONS[badgeType];
+  // Sort tiers by threshold ascending to find next target
+  const sortedTiers = [...definition.tiers].sort(
+    (a, b) => a.threshold - b.threshold,
+  );
+
+  // Find first tier that exceeds current value
+  return sortedTiers.find((t) => t.threshold > currentValue) || null;
+}
+
+/**
  * Helper to get highest earned tier for a value
  */
 export function getEarnedTier(
