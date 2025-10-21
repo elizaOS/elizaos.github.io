@@ -61,17 +61,27 @@ export default function UserProfile({
   userBadges,
 }: UserProfileProps) {
   // Transform user badges into BadgeData format for display
-  const badgeDataList: BadgeData[] = userBadges.map((badge) => {
-    const tierDef = getTierDefinition(badge.badgeType, badge.tier);
-    return {
-      badgeType: badge.badgeType,
-      tier: badge.tier,
-      earnedAt: badge.earnedAt,
-      icon: tierDef?.icon || "🏅",
-      label: tierDef?.label || badge.badgeType,
-      description: tierDef?.description || "",
-    };
-  });
+  const badgeDataList: BadgeData[] = userBadges
+    .map((badge) => {
+      const tierDef = getTierDefinition(badge.badgeType, badge.tier);
+      return {
+        badgeType: badge.badgeType,
+        tier: badge.tier,
+        earnedAt: badge.earnedAt,
+        icon: tierDef?.icon || "🏅",
+        label: tierDef?.label || badge.badgeType,
+        description: tierDef?.description || "",
+      };
+    })
+    .sort((a, b) => {
+      // Sort by tier: legend > elite > beginner
+      const tierOrder = { legend: 3, elite: 2, beginner: 1 };
+      const tierA = tierOrder[a.tier as keyof typeof tierOrder] || 0;
+      const tierB = tierOrder[b.tier as keyof typeof tierOrder] || 0;
+      return tierB - tierA;
+    });
+
+  // Calculate total possible badges (5 types)
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
       <div className="items-star flex flex-col gap-4 sm:flex-row">
@@ -111,6 +121,24 @@ export default function UserProfile({
                   {Math.round(totalXp).toLocaleString()} XP
                 </span>
               </div>
+              {badgeDataList.length > 0 && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
+                        <Trophy className="h-3.5 w-3.5" />
+                        <span>{badgeDataList.length}</span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>
+                        {badgeDataList.length} badge
+                        {badgeDataList.length !== 1 ? "s" : ""} earned
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
               <a
                 href={`https://github.com/${username}`}
                 target="_blank"
@@ -236,15 +264,17 @@ export default function UserProfile({
       </div>
 
       {/* Badges Section */}
-      {badgeDataList.length > 0 && (
-        <div>
-          <div className="mb-4 flex items-center gap-2">
-            <Trophy className="h-5 w-5 text-yellow-500" />
-            <h3 className="text-lg font-semibold">Achievements</h3>
+      <div>
+        <div className="mb-4 flex items-center gap-2">
+          <Trophy className="h-5 w-5 text-yellow-500" />
+          <h3 className="text-lg font-semibold">Achievements</h3>
+          {badgeDataList.length > 0 && (
             <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
               {badgeDataList.length}
             </span>
-          </div>
+          )}
+        </div>
+        {badgeDataList.length > 0 ? (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
             {badgeDataList.map((badge) => (
               <SkillCard
@@ -254,8 +284,20 @@ export default function UserProfile({
               />
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <Card className="border-dashed">
+            <CardContent className="flex flex-col items-center justify-center py-8 text-center">
+              <Trophy className="mb-2 h-12 w-12 text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground">
+                No badges earned yet
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground/60">
+                Keep contributing to unlock your first achievement!
+              </p>
+            </CardContent>
+          </Card>
+        )}
+      </div>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3">
         <div>
