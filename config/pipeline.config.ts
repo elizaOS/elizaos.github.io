@@ -47,6 +47,31 @@ export default {
       name: "reusable-workflows",
       defaultBranch: "main",
     },
+    {
+      owner: "Sendo-labs",
+      name: "plugin-sendo-worker",
+      defaultBranch: "main",
+    },
+    {
+      owner: "Sendo-labs",
+      name: "plugin-sendo-chat",
+      defaultBranch: "main",
+    },
+    {
+      owner: "Sendo-labs",
+      name: "plugin-solana",
+      defaultBranch: "main",
+    },
+    {
+      owner: "Sendo-labs",
+      name: "plugin-jupiter",
+      defaultBranch: "main",
+    },
+    {
+      owner: "Sendo-labs",
+      name: "leaderboard-rewards",
+      defaultBranch: "main",
+    }
   ],
   walletAddresses: {
     enabled: true,
