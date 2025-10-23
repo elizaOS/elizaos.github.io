@@ -1,8 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "export",
-  basePath: "/leaderboard",
-  assetPrefix: "/leaderboard",
   images: {
     unoptimized: true, // Required for static export
   },
