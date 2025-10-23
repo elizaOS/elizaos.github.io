@@ -9,6 +9,7 @@ import type {
   issueComments,
   rawPullRequestFiles,
   repositories,
+  walletAddresses,
 } from "@/lib/data/schema";
 import { toDateString } from "@/lib/date-utils";
 import { UTCDate } from "@date-fns/utc";
@@ -21,6 +22,7 @@ type IssueComment = InferInsertModel<typeof issueComments>;
 type PRReview = InferInsertModel<typeof schema.prReviews>;
 type PRComment = InferInsertModel<typeof schema.prComments>;
 type RawCommit = InferInsertModel<typeof schema.rawCommits>;
+type WalletAddress = InferInsertModel<typeof walletAddresses>;
 
 export function generateMockUsers(items: Partial<User>[]): User[] {
   return items.map((overrides) => ({
@@ -247,6 +249,21 @@ export function generateMockRepoSummaries(
     date: toDateString(new UTCDate()),
     summary: faker.lorem.paragraph(),
     intervalType: "day",
+    ...overrides,
+  }));
+}
+
+export function generateMockWalletAddresses(
+  items: Partial<WalletAddress>[],
+): WalletAddress[] {
+  return items.map((overrides) => ({
+    id: faker.number.int({ min: 1, max: 100000 }),
+    userId: overrides.userId ?? faker.internet.username(),
+    chainId: overrides.chainId ?? "eip155:1",
+    accountAddress: overrides.accountAddress ?? faker.finance.ethereumAddress(),
+    label: overrides.label ?? null,
+    isPrimary: overrides.isPrimary ?? false,
+    isActive: overrides.isActive ?? true,
     ...overrides,
   }));
 }
