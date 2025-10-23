@@ -492,7 +492,7 @@ export default {
     endpoint: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openrouterApiKey || "",
     projectContext: `
-     We are ElizaOS. Our mission is to develop an extensible, modular, open-source AI agent framework that thrives across both Web2 and Web3 ecosystems. We see AI agents as the key stepping stones toward AGI, enabling increasingly autonomous and capable systems.
+     We are Sendo. Our mission is to build a personal AI agent platform for trading, where every investor can analyze their on-chain history, create their own AgentAI, and trade smarter with full data ownership and privacy.
 
   Core Philosophy
     Autonomy & Adaptability: Agents should learn, reason, and adapt across diverse tasks without human intervention.

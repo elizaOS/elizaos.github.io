@@ -44,6 +44,7 @@ import { runPipeline } from "@/lib/pipelines/runPipeline";
 import { createLogger, LogLevel } from "@/lib/logger";
 import { createSummarizerContext } from "@/lib/pipelines/summarize/context";
 import { ingestPipeline, createIngestionContext } from "@/lib/pipelines/ingest";
+import { exportAllLeaderboardAPIs } from "@/lib/pipelines/export/exportLeaderboardAPI";
 
 const DEFAULT_CONFIG_PATH = "../config/pipeline.config.ts";
 const program = new Command();
@@ -384,6 +385,58 @@ program
       rootLogger.info("\nSummary generation completed successfully!");
     } catch (error: unknown) {
       console.error(chalk.red("Error generating summaries:"), error);
+      process.exit(1);
+    }
+  });
+
+// Export leaderboard API endpoints
+program
+  .command("export-leaderboard")
+  .description("Generate static JSON leaderboard API endpoints")
+  .option("-v, --verbose", "Enable verbose logging", false)
+  .option(
+    "-c, --config <path>",
+    "Path to pipeline config file",
+    DEFAULT_CONFIG_PATH,
+  )
+  .option("--output-dir <dir>", "Output directory for API files", "./data/")
+  .option(
+    "-l, --limit <number>",
+    "Limit number of users in leaderboard (0 = no limit)",
+    "100",
+  )
+  .action(async (options) => {
+    try {
+      // Dynamically import the config (not strictly needed but kept for consistency)
+      const configPath = join(import.meta.dir, options.config);
+      const configFile = await import(configPath);
+      PipelineConfigSchema.parse(configFile.default);
+
+      // Create a root logger
+      const logLevel: LogLevel = options.verbose ? "debug" : "info";
+      const rootLogger = createLogger({
+        minLevel: logLevel,
+        context: {
+          command: "export-leaderboard",
+          config: options.config,
+        },
+      });
+
+      rootLogger.info("Generating leaderboard API endpoints...");
+
+      const limit = parseInt(options.limit, 10);
+      const exportOptions = {
+        limit: limit > 0 ? limit : undefined,
+        logger: rootLogger,
+      };
+
+      // Export all three leaderboard files (monthly, weekly, lifetime)
+      await exportAllLeaderboardAPIs(options.outputDir, exportOptions);
+
+      rootLogger.info("\nLeaderboard API export completed successfully!");
+      rootLogger.info(`Files generated in: ${options.outputDir}/api/`);
+    } catch (error: unknown) {
+      console.error(chalk.red("Error exporting leaderboard APIs:"), error);
       process.exit(1);
     }
   });
