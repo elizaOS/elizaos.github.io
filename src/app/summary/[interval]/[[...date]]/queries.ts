@@ -24,11 +24,6 @@ export async function getLatestAvailableDate() {
     .orderBy(desc(rawPullRequests.updatedAt))
     .limit(1);
 
-  // Return today's date if no PRs found
-  if (!date[0] || !date[0].max) {
-    return toDateString(new Date());
-  }
-
   return toDateString(date[0].max);
 }
 

@@ -194,38 +194,26 @@ const AboutPage: NextPage = () => {
             <div>
               <span className="font-semibold text-foreground">Explore:</span>{" "}
               <a
-                href="https://sendo-labs.github.io/leaderboard"
+                href="https://elizaos.github.io"
                 className="font-mono text-primary hover:underline"
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                sendo-labs.github.io/leaderboard
+                elizaos.github.io
               </a>
             </div>
             <div>
               <span className="font-semibold text-foreground">Contribute:</span>{" "}
               <a
-                href="https://github.com/Sendo-labs/leaderboard"
+                href="https://github.com/elizaos/eliza"
                 className="font-mono text-primary hover:underline"
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                github.com/Sendo-labs/leaderboard
+                github.com/elizaos/eliza
               </a>
             </div>
           </div>
-          <p className="mt-4 text-sm text-muted-foreground">
-            Forked from{" "}
-            <a
-              href="https://github.com/elizaOS/elizaos.github.io"
-              className="text-primary hover:underline"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              ElizaOS contributor analytics
-            </a>
-            , adapted for Sendo-labs projects.
-          </p>
           <p className="mt-6 text-lg font-medium italic text-foreground">
             The game has already begun. Time to claim your place on the
             leaderboard.
