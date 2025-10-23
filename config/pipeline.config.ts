@@ -18,59 +18,119 @@ export default {
   // Repositories to track
   repositories: [
     {
-      owner: "Sendo-labs",
-      name: "leaderboard",
+      owner: "elizaos",
+      name: "eliza",
       defaultBranch: "main",
     },
     {
-      owner: "Sendo-labs",
-      name: "plugin-cryptoscore",
+      owner: "elizaos",
+      name: "auto.fun",
+      defaultBranch: "develop",
+    },
+    {
+      owner: "elizaos",
+      name: "elizaos.github.io",
       defaultBranch: "main",
     },
     {
-      owner: "Sendo-labs",
-      name: "frontend",
+      owner: "elizaos",
+      name: "docs",
       defaultBranch: "main",
     },
     {
-      owner: "Sendo-labs",
-      name: "sendo-api",
-      defaultBranch: "main",
-    },
-    {
-      owner: "Sendo-labs",
-      name: "spotlight",
-      defaultBranch: "main",
-    },
-    {
-      owner: "Sendo-labs",
-      name: "reusable-workflows",
-      defaultBranch: "main",
-    },
-    {
-      owner: "Sendo-labs",
-      name: "plugin-sendo-worker",
-      defaultBranch: "main",
-    },
-    {
-      owner: "Sendo-labs",
-      name: "plugin-sendo-chat",
-      defaultBranch: "main",
-    },
-    {
-      owner: "Sendo-labs",
+      owner: "elizaos-plugins",
       name: "plugin-solana",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-knowledge",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "registry",
       defaultBranch: "main",
     },
     {
-      owner: "Sendo-labs",
-      name: "plugin-jupiter",
-      defaultBranch: "main",
+      owner: "elizaos-plugins",
+      name: "plugin-twitter",
+      defaultBranch: "1.x",
     },
     {
-      owner: "Sendo-labs",
-      name: "leaderboard-rewards",
-      defaultBranch: "main",
+      owner: "elizaos-plugins",
+      name: "plugin-auton8n",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-evm",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-coingecko",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-farcaster",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-mcp",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-autocoder",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-discord",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-telegram",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-openrouter",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-openai",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-anthropic",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-relay",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-email",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-ollama",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-pdf",
+      defaultBranch: "1.x",
     },
   ],
   walletAddresses: {
@@ -432,7 +492,7 @@ export default {
     endpoint: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openrouterApiKey || "",
     projectContext: `
-     We are Sendo. Our mission is to build a personal AI agent platform for trading, where every investor can analyze their on-chain history, create their own AgentAI, and trade smarter with full data ownership and privacy.
+     We are ElizaOS. Our mission is to develop an extensible, modular, open-source AI agent framework that thrives across both Web2 and Web3 ecosystems. We see AI agents as the key stepping stones toward AGI, enabling increasingly autonomous and capable systems.
 
   Core Philosophy
     Autonomy & Adaptability: Agents should learn, reason, and adapt across diverse tasks without human intervention.

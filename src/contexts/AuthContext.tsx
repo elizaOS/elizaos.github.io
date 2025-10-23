@@ -141,7 +141,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       );
       authUrl.searchParams.append(
         "redirect_uri",
-        `${window.location.origin}/leaderboard/auth/callback`,
+        `${window.location.origin}/auth/callback`,
       );
       authUrl.searchParams.append("scope", "read:user");
       authUrl.searchParams.append("state", state);
@@ -209,7 +209,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       await fetchUserData(accessToken);
       console.log("Fetching user data somplete", { accessToken });
       // Redirect to the home page or another appropriate page
-      window.location.href = "/leaderboard";
+      window.location.href = "/";
     } catch (error) {
       console.error("Error in auth callback:", error);
       setError(
