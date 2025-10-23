@@ -71,7 +71,7 @@ export default {
       owner: "Sendo-labs",
       name: "leaderboard-rewards",
       defaultBranch: "main",
-    }
+    },
   ],
   walletAddresses: {
     enabled: true,
@@ -97,6 +97,7 @@ export default {
     "graphite-app",
     "google-labs-jules[bot]",
     "cursor",
+    "claude",
   ],
 
   // Scoring rules - controls how different contribution types are valued
