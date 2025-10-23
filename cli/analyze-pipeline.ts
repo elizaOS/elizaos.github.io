@@ -432,7 +432,7 @@ program
         logger: rootLogger,
       };
 
-      rootLogger.info(chalk.cyan("\n📊 Exporting Leaderboard API Endpoints"));
+      rootLogger.info(chalk.cyan("\n Exporting Leaderboard API Endpoints"));
       rootLogger.info(chalk.gray(`Output directory: ${options.outputDir}`));
       if (exportOptions.limit) {
         rootLogger.info(chalk.gray(`User limit: ${exportOptions.limit}`));
