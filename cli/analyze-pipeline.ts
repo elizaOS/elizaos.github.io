@@ -456,7 +456,7 @@ program
       await exportAllLeaderboardAPIs(options.outputDir, exportOptions);
 
       rootLogger.info(
-        chalk.green("\n✅ Leaderboard API export completed successfully!"),
+        chalk.green("\n Leaderboard API export completed successfully!"),
       );
     } catch (error: unknown) {
       console.error(chalk.red("Error exporting leaderboard API:"), error);
