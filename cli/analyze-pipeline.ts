@@ -15,17 +15,15 @@ import { calculateDateRange } from "@/lib/date-utils";
 // Load environment variables from .env file
 loadEnv();
 
-// Validate required environment variables
-const requiredEnvVars = ["GITHUB_TOKEN", "OPENROUTER_API_KEY"];
-const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
-
-if (missingEnvVars.length > 0) {
-  console.error(
-    `Error: Missing required environment variables: ${missingEnvVars.join(
-      ", ",
-    )}`,
-  );
-  process.exit(1);
+// Helper to validate environment variables
+function validateEnvVars(requiredVars: string[]) {
+  const missingVars = requiredVars.filter((envVar) => !process.env[envVar]);
+  if (missingVars.length > 0) {
+    console.error(
+      `Error: Missing required environment variables: ${missingVars.join(", ")}`,
+    );
+    process.exit(1);
+  }
 }
 
 import { Command } from "@commander-js/extra-typings";
@@ -76,6 +74,9 @@ program
     false,
   )
   .action(async (options) => {
+    // Validate required environment variables for ingestion
+    validateEnvVars(["GITHUB_TOKEN"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -139,6 +140,9 @@ program
     false,
   )
   .action(async (options) => {
+    // Validate required environment variables for processing
+    validateEnvVars(["GITHUB_TOKEN"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -199,6 +203,9 @@ program
   .option("-d, --days <number>", "Number of days to look back from before date")
   .option("--all", "Process all data since contributionStartDate", false)
   .action(async (options) => {
+    // Validate required environment variables for export
+    validateEnvVars(["GITHUB_TOKEN"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -287,6 +294,9 @@ program
   .option("--weekly", "Generate weekly summaries")
   .option("--monthly", "Generate monthly summaries")
   .action(async (options) => {
+    // Validate required environment variables for AI summaries
+    validateEnvVars(["GITHUB_TOKEN", "OPENROUTER_API_KEY"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
