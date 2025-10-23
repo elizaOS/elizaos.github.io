@@ -18,14 +18,119 @@ export default {
   // Repositories to track
   repositories: [
     {
-      owner: "Sendo-labs",
-      name: "leaderboard",
+      owner: "elizaos",
+      name: "eliza",
       defaultBranch: "main",
     },
     {
-      owner: "Sendo-labs",
-      name: "plugin-cryptoscore",
+      owner: "elizaos",
+      name: "auto.fun",
+      defaultBranch: "develop",
+    },
+    {
+      owner: "elizaos",
+      name: "elizaos.github.io",
       defaultBranch: "main",
+    },
+    {
+      owner: "elizaos",
+      name: "docs",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-solana",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-knowledge",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "registry",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-twitter",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-auton8n",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-evm",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-coingecko",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-farcaster",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-mcp",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-autocoder",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-discord",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-telegram",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-openrouter",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-openai",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-anthropic",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-relay",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-email",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-ollama",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-pdf",
+      defaultBranch: "1.x",
     },
   ],
   walletAddresses: {
@@ -52,6 +157,7 @@ export default {
     "graphite-app",
     "google-labs-jules[bot]",
     "cursor",
+    "claude",
   ],
 
   // Scoring rules - controls how different contribution types are valued
