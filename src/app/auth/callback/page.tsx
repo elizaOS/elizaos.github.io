@@ -49,7 +49,7 @@ function CallbackContent() {
           <p>{error || searchParams.get("error")}</p>
         </CardContent>
         <CardFooter>
-          <Button onClick={() => (window.location.href = "/")}>
+          <Button onClick={() => (window.location.href = "/leaderboard")}>
             Return Home
           </Button>
         </CardFooter>
