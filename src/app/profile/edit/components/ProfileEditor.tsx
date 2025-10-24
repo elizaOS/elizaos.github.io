@@ -13,6 +13,7 @@ import { Loader2 } from "lucide-react";
 import { ProfileRepoNotice } from "./ProfileRepoNotice"; // Path relative to this new location
 import { WalletLinkForm } from "./WalletLinkForm";
 import { WalletLinkBoard } from "./WalletLinkBoard";
+import { XLinkForm } from "./XLinkForm";
 import { useProfileWallets } from "../hooks/useProfileWallets";
 
 // This is the ProfileEditPageContent function, renamed and exported
@@ -51,7 +52,7 @@ export default function ProfileEditor() {
   const userLogin = user?.login;
 
   return (
-    <div className="container mx-auto px-4 py-8">
+    <div className="container mx-auto space-y-6 px-4 py-8">
       <Card className="mx-auto max-w-2xl">
         <CardHeader>
           <CardTitle>Link Your Wallet Addresses</CardTitle>
@@ -114,6 +115,21 @@ export default function ProfileEditor() {
               )}
             </>
           )}
+        </CardContent>
+      </Card>
+
+      {/* X Account Linking */}
+      <Card className="mx-auto max-w-2xl">
+        <CardHeader>
+          <CardTitle>Link Your X (Twitter) Account</CardTitle>
+          <CardDescription>
+            Connect your X account to earn points for posts mentioning
+            @SendoMarket. Your activity will be tracked and added to your
+            leaderboard score.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <XLinkForm xUsername={null} isLinked={false} />
         </CardContent>
       </Card>
     </div>

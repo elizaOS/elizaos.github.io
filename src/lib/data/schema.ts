@@ -483,11 +483,13 @@ export const userDailyScores = sqliteTable(
     timestamp: text("timestamp")
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),
-    score: real("score").notNull().default(0),
+    score: real("score").notNull().default(0), // GitHub score
     prScore: real("pr_score").default(0),
     issueScore: real("issue_score").default(0),
     reviewScore: real("review_score").default(0),
     commentScore: real("comment_score").default(0),
+    // Social scoring field (Twitter + Discord + Telegram + ...)
+    socialScore: real("social_score").default(0),
     metrics: text("metrics").notNull().default("{}"), // JSON string of all metrics
     category: text("category").default("day"),
     lastUpdated: text("last_updated")
@@ -516,6 +518,8 @@ export const usersRelations = relations(users, ({ many }) => ({
   dailySummaries: many(userSummaries),
   dailyScores: many(userDailyScores),
   walletAddresses: many(walletAddresses),
+  socialAccounts: many(socialAccounts),
+  xActivities: many(xActivities),
 }));
 
 export const walletAddressesRelations = relations(
@@ -824,3 +828,112 @@ export const prClosingIssueReferences = sqliteTable(
     unique("unq_pr_closing_issue_ref").on(table.prId, table.issueId),
   ],
 );
+
+// ==============================================================================
+// SOCIAL INTEGRATION TABLES
+// ==============================================================================
+
+// Social accounts table - stores linked social media accounts (X, Discord, Telegram, etc.)
+export const socialAccounts = sqliteTable(
+  "social_accounts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.username, { onDelete: "cascade" }),
+    platform: text("platform", {
+      enum: ["x", "discord", "telegram"] as const,
+    })
+      .notNull()
+      .default("x"),
+    platformUserId: text("platform_user_id").notNull(), // Platform ID (e.g., X numeric ID)
+    platformUsername: text("platform_username").notNull(), // @handle or username
+    displayName: text("display_name"), // Display name on platform
+    profileUrl: text("profile_url"), // Link to profile
+    isVerified: integer("is_verified", { mode: "boolean" }).default(false),
+    isPrimary: integer("is_primary", { mode: "boolean" }).default(false),
+    isActive: integer("is_active", { mode: "boolean" }).default(true),
+    verificationMethod: text("verification_method"), // 'oauth_jwt' | 'manual'
+    lastSyncedAt: text("last_synced_at"),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_social_accounts_user_id").on(table.userId),
+    index("idx_social_accounts_platform").on(table.platform),
+    index("idx_social_accounts_platform_user_id").on(table.platformUserId),
+    // One user can have only one account per platform
+    unique("unq_user_platform").on(table.userId, table.platform),
+    // One platform account can be linked to only one user
+    unique("unq_platform_user_id").on(table.platform, table.platformUserId),
+  ],
+);
+
+// X activities table - stores X (formerly Twitter) activity for scoring
+export const xActivities = sqliteTable(
+  "x_activities",
+  {
+    id: text("id").primaryKey(), // Post ID from X
+    username: text("username")
+      .notNull()
+      .references(() => users.username, { onDelete: "cascade" }),
+    activityType: text("activity_type", {
+      enum: ["post", "repost", "quote", "reply", "like", "follow"] as const,
+    }).notNull(),
+    content: text("content"), // Post text
+    targetPostId: text("target_post_id"), // For reposts/quotes/replies
+    targetUserId: text("target_user_id"), // For replies/mentions
+    isAboutSendo: integer("is_about_sendo", { mode: "boolean" })
+      .notNull()
+      .default(true), // Filtered at ingestion
+    mentionsSendoMarket: integer("mentions_sendo_market", {
+      mode: "boolean",
+    }).default(false),
+    hashtagsUsed: text("hashtags_used"), // JSON array: ["Sendo", "AI", "Crypto"]
+    mediaCount: integer("media_count").default(0), // Number of images/videos
+
+    // Engagement metrics
+    engagementCount: integer("engagement_count").default(0), // Total
+    likesCount: integer("likes_count").default(0),
+    repostsCount: integer("reposts_count").default(0),
+    repliesCount: integer("replies_count").default(0),
+    viewsCount: integer("views_count").default(0),
+
+    // Timestamps
+    createdAt: text("created_at").notNull(), // When the post was published
+    lastUpdated: text("last_updated")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`), // Last metrics update
+  },
+  (table) => [
+    index("idx_x_activities_username").on(table.username),
+    index("idx_x_activities_type").on(table.activityType),
+    index("idx_x_activities_created_at").on(table.createdAt),
+    index("idx_x_activities_sendo").on(table.isAboutSendo),
+    index("idx_x_activities_username_date").on(table.username, table.createdAt),
+  ],
+);
+
+// ==============================================================================
+// SOCIAL INTEGRATION RELATIONS
+// ==============================================================================
+
+// Relations for socialAccounts
+export const socialAccountsRelations = relations(socialAccounts, ({ one }) => ({
+  user: one(users, {
+    fields: [socialAccounts.userId],
+    references: [users.username],
+  }),
+}));
+
+// Relations for xActivities
+export const xActivitiesRelations = relations(xActivities, ({ one }) => ({
+  user: one(users, {
+    fields: [xActivities.username],
+    references: [users.username],
+  }),
+}));

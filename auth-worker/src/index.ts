@@ -1,7 +1,16 @@
+import { handleInitiateXLink, handleXCallback } from "./x";
+
+// Cloudflare Worker environment
 export interface Env {
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
   ALLOWED_ORIGIN: string;
+  // X OAuth integration
+  X_CLIENT_ID: string;
+  X_CLIENT_SECRET: string;
+  LINKING_SECRET: string;
+  // KV Namespace
+  LINKING_KV: KVNamespace;
 }
 
 const worker = {
@@ -20,6 +29,12 @@ const worker = {
         return await handleCallback(request, env);
       } else if (url.pathname === "/api/status") {
         return handleStatus(env);
+      }
+      // X OAuth routes
+      else if (url.pathname === "/api/x/initiate-link") {
+        return await handleInitiateXLink(request, env);
+      } else if (url.pathname === "/api/x/callback") {
+        return await handleXCallback(request, env);
       } else {
         return new Response("Not found", { status: 404 });
       }
