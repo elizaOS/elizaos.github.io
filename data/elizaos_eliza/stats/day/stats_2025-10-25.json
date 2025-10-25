@@ -1,0 +1,60 @@
+{
+  "interval": {
+    "intervalStart": "2025-10-25T00:00:00.000Z",
+    "intervalEnd": "2025-10-26T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-10-25 to 2025-10-26, elizaos/eliza had 1 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6vrqve",
+      "title": "feat: use custom storage service if found",
+      "author": "alex-nax",
+      "number": 6094,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\nAddresses the need for pluggable storage backends for production deployments and fixes documentation discrepancy for session storage.\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n**Medium**\r\n\r\n- Changes affect core storage mechanisms for state caching and session management\r\n- Could impact existing deployments if they have custom session handling logic\r\n- Migration path should be tested for existing in-memory sessions\r\n- Performance characteristics may differ with custom KV store implementations\r\n\r\nAffected areas:\r\n- Runtime state management\r\n- Session storage and lifecycle\r\n- Any code relying on state caching behavior\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\nThis PR introduces a pluggable Key-Value Store Service interface (`IKVStoreService`) that allows developers to implement custom storage backends for state caching and session management. The implementation:\r\n\r\n1. **Adds new interfaces** in `packages/core/src/types/store.ts`:\r\n   - `IKVStore<T, M>`: Generic key-value store interface with `get`, `set`, `delete`, `entries`, and optional `getMetrics` methods\r\n   - `IKVStoreService`: Service interface for obtaining named KV stores\r\n   - `isKVStoreService`: Type guard helper function\r\n\r\n2. **Integrates KV Store into runtime**:\r\n   - State cache can now use custom KV store implementations\r\n   - Session storage can leverage external storage backends (Redis, etc.)\r\n   - Falls back to in-memory Map-based storage when no custom service is provided\r\n\r\n3. **Fixes documentation discrepancy**: \r\n   - **CRITICAL**: The [official documentation](https://docs.elizaos.ai/runtime/sessions-api#in-memory-storage) states that sessions use in-memory storage by default, but this was NOT actually implemented\r\n   - This PR adds the proper fallback to in-memory storage, achieving parity with the documented behavior\r\n\r\n## What kind of change is this?\r\n\r\n- ✅ **Features** (non-breaking change which adds functionality)\r\n- ✅ **Bug fixes** (fixes documentation/implementation mismatch)\r\n- ✅ **Improvements** (enables production scalability)\r\n\r\n## Why are we doing this? Any context or related work?\r\n\r\n### Motivation 1: Production Scalability with Replicas\r\n\r\nIn production environments, agents can throttle CPU usage when handling high loads. Running multiple replicas is a common solution, but the current in-memory-only storage causes issues:\r\n\r\n- State is not shared across replicas\r\n- Sessions are lost when pods restart or scale\r\n- No persistence between deployments\r\n\r\nWith this KV Store interface, users can implement Redis, Memcached, or other distributed storage solutions to maintain state across replicas without losing data.\r\n\r\n### Motivation 2: Documentation Accuracy\r\n\r\nThe Sessions API documentation explicitly mentions in-memory storage as the default:\r\n> **\"In-Memory Storage\"** - Sessions use in-memory storage by default\r\n\r\nHowever, this was never actually implemented as a proper fallback. This PR corrects this discrepancy by providing a true in-memory implementation when no custom KV store service is registered.\r\n\r\n# Documentation changes needed?\r\n\r\n- ✅ My changes require a change to the project documentation\r\n- Documentation should be updated to mention:\r\n  - How to implement a custom `IKVStoreService` \r\n  - Example Redis implementation for production deployments\r\n  - Migration guide for existing deployments\r\n  - Performance considerations for different storage backends\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n1. Review the new interfaces in `packages/core/src/types/store.ts`\r\n2. Check how the KV store is integrated in `packages/core/src/runtime.ts` for state caching\r\n3. Verify session storage fallback in `packages/server/src/api/messaging/sessions.ts`\r\n4. Test the default in-memory behavior without custom service\r\n5. Validate that custom KV store services can be registered and used\r\n\r\n## Detailed testing steps\r\n\r\n### Test 1: Default In-Memory Behavior (No Custom Service)\r\n- Start a fresh ElizaOS instance without registering a custom KV store service\r\n- Create a session via Sessions API\r\n- Send messages and verify state persistence\r\n- Confirm sessions are stored in-memory (check memory usage)\r\n- Verify session expiration and cleanup works as documented\r\n\r\n### Test 2: State Cache with Default Storage\r\n- Start an agent with state caching enabled\r\n- Perform actions that populate the state cache\r\n- Verify cache entries are retrievable\r\n- Restart the agent and confirm cache is cleared (in-memory behavior)\r\n\r\n### Test 3: Custom KV Store Service (Integration Test)\r\n- Implement a simple custom KV store service (e.g., file-based or Redis mock)\r\n- Register the service with the runtime\r\n- Create sessions and verify they use the custom store\r\n- Verify `getMetrics()` works if implemented\r\n- Test `entries()` async generator functionality\r\n\r\n### Test 4: Production Replica Scenario (Manual)\r\n- Deploy two agent replicas with Redis-backed KV store\r\n- Create a session on replica 1\r\n- Send message to session on replica 2\r\n- Verify session state is shared correctly\r\n- Scale down replica 1, verify replica 2 maintains sessions\r\n\r\n## Database changes\r\n\r\nNone. This PR adds an abstraction layer but does not modify database schemas.\r\n\r\n# Deploy Notes\r\n\r\n## Deployment instructions\r\n\r\n**For existing deployments:** No action required. The default in-memory behavior maintains backward compatibility.\r\n\r\n**For production deployments with replicas:** \r\n1. Implement a custom `IKVStoreService` (e.g., Redis-backed)\r\n2. Register the service via plugin system before agent initialization\r\n3. Configure connection settings via environment variables\r\n4. Monitor metrics if `getMetrics()` is implemented\r\n\r\n**Environment variables to consider adding:**\r\n- `KV_STORE_BACKEND` (e.g., \"redis\", \"memory\")\r\n- `REDIS_URL` or similar connection strings for external stores\r\n- `KV_STORE_TTL` for automatic expiration policies\r\n\r\n## Discord username\r\nalexd000\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-10-25T15:40:18Z",
+      "mergedAt": null,
+      "additions": 424,
+      "deletions": 175
+    },
+    {
+      "id": "PR_kwDOMT5cIs6ihriD",
+      "title": "feat: ability to cancel current run before any calls to LLM are made",
+      "author": "alex-nax",
+      "number": 5728,
+      "body": "# Background\r\n\r\n## What does this PR do?\r\n\r\nIntroduce entity for cancelling runs `CancelRunSignal`\r\n\r\n## Why are we doing this? Any context or related work?\r\n\r\n- Calls to LLMs usually cost some credits\r\n- When we receive the `RUN_STARTED` event we can check current entity and end run to prevent credits spending\r\n\r\n# Documentation changes needed?\r\n\r\n## Methods\r\n\r\n- `static getSignal(runId: UUID)` - get signal by runId or create if null\r\n- `static clear(runId: UUID)` - clear signal from map\r\n- `cancel(content?: Content)` - cancel current run and and send `content` as a response to user\r\n\r\n## Example\r\n\r\n```typescript\r\nimport { Content, EventType, Plugin } from \"@elizaos/core\";\r\nimport { CancelRunSignal } from \"@elizaos/plugin-bootstrap\";\r\n\r\n// consider we have a service to determine eligibility for entity\r\ninterface EligibilityService {\r\n  check(entityId: UUID): Promise<{ result: boolean, reason?: Content }>\r\n}\r\n\r\nconst plugin: Plugin = {\r\n...\r\n  events: {\r\n    [EventType.RUN_STARTED]: ({ entityId, runId, runtime }) => {\r\n      const service = runtime.getService<EligibilityService>(\"USER_MANAGEMENT\");\r\n      const { result, reason } = await service.check(entityId);\r\n      \r\n      if (!result) {\r\n        const signal = CancelRunSignal.getSignal(runId);\r\n        signal.cancel(reason);\r\n      }\r\n    },\r\n    ...\r\n  },\r\n  ...\r\n}\r\n\r\nexport default Plugin;\r\n```\r\n\r\n## Discord username\r\n\r\nalexd000\r\n\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-08-07T07:19:35Z",
+      "mergedAt": null,
+      "additions": 114,
+      "deletions": 34
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 5
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "alex-nax",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82507604?u=b3af75d82f80ed83007a77c351a64bdd9e5d67de&v=4",
+      "totalScore": 42.98618344847266,
+      "prScore": 42.786183448472656,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
