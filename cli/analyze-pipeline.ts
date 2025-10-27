@@ -15,17 +15,15 @@ import { calculateDateRange } from "@/lib/date-utils";
 // Load environment variables from .env file
 loadEnv();
 
-// Validate required environment variables
-const requiredEnvVars = ["GITHUB_TOKEN", "OPENROUTER_API_KEY"];
-const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
-
-if (missingEnvVars.length > 0) {
-  console.error(
-    `Error: Missing required environment variables: ${missingEnvVars.join(
-      ", ",
-    )}`,
-  );
-  process.exit(1);
+// Helper to validate environment variables
+function validateEnvVars(requiredVars: string[]) {
+  const missingVars = requiredVars.filter((envVar) => !process.env[envVar]);
+  if (missingVars.length > 0) {
+    console.error(
+      `Error: Missing required environment variables: ${missingVars.join(", ")}`,
+    );
+    process.exit(1);
+  }
 }
 
 import { Command } from "@commander-js/extra-typings";
@@ -76,6 +74,9 @@ program
     false,
   )
   .action(async (options) => {
+    // Validate required environment variables for ingestion
+    validateEnvVars(["GITHUB_TOKEN"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -139,6 +140,9 @@ program
     false,
   )
   .action(async (options) => {
+    // Validate required environment variables for processing
+    validateEnvVars(["GITHUB_TOKEN"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -199,6 +203,9 @@ program
   .option("-d, --days <number>", "Number of days to look back from before date")
   .option("--all", "Process all data since contributionStartDate", false)
   .action(async (options) => {
+    // Validate required environment variables for export
+    validateEnvVars(["GITHUB_TOKEN"]);
+
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -287,6 +294,8 @@ program
   .option("--weekly", "Generate weekly summaries")
   .option("--monthly", "Generate monthly summaries")
   .action(async (options) => {
+    // Validate required environment variables for AI summaries
+    validateEnvVars(["GITHUB_TOKEN", "OPENROUTER_API_KEY"]);
     try {
       // Dynamically import the config
       const configPath = join(import.meta.dir, options.config);
@@ -383,6 +392,73 @@ program
       rootLogger.info("\nSummary generation completed successfully!");
     } catch (error: unknown) {
       console.error(chalk.red("Error generating summaries:"), error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("export-leaderboard")
+  .description("Generate static JSON leaderboard API endpoints")
+  .option("-v, --verbose", "Enable verbose logging", false)
+  .option(
+    "-c, --config <path>",
+    "Path to pipeline config file",
+    DEFAULT_CONFIG_PATH,
+  )
+  .option("--output-dir <dir>", "Output directory for API files", "./data/")
+  .option(
+    "-l, --limit <number>",
+    "Limit number of users in leaderboard (0 = no limit)",
+    "100",
+  )
+  .action(async (options) => {
+    const logLevel: LogLevel = options.verbose ? "debug" : "info";
+    const rootLogger = createLogger({
+      minLevel: logLevel,
+      context: {
+        pipeline: "export-leaderboard",
+      },
+    });
+
+    try {
+      const { exportLeaderboardAPI } = await import(
+        "@/lib/pipelines/export/exportLeaderboardAPI"
+      );
+
+      const limit = parseInt(options.limit, 10);
+      const exportOptions = {
+        limit: limit > 0 ? limit : undefined,
+        logger: rootLogger,
+      };
+
+      rootLogger.info(chalk.cyan("\n Exporting Leaderboard API Endpoints"));
+      rootLogger.info(chalk.gray(`Output directory: ${options.outputDir}`));
+      if (exportOptions.limit) {
+        rootLogger.info(chalk.gray(`User limit: ${exportOptions.limit}`));
+      }
+
+      async function exportAllLeaderboardAPIs(
+        outputDir: string,
+        exportOpts: typeof exportOptions,
+      ) {
+        const periods: Array<"monthly" | "weekly" | "lifetime"> = [
+          "monthly",
+          "weekly",
+          "lifetime",
+        ];
+
+        for (const period of periods) {
+          await exportLeaderboardAPI(outputDir, period, exportOpts);
+        }
+      }
+
+      await exportAllLeaderboardAPIs(options.outputDir, exportOptions);
+
+      rootLogger.info(
+        chalk.green("\n Leaderboard API export completed successfully!"),
+      );
+    } catch (error: unknown) {
+      console.error(chalk.red("Error exporting leaderboard API:"), error);
       process.exit(1);
     }
   });
