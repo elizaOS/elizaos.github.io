@@ -169,7 +169,11 @@ export function sequence<TContext extends BasePipelineContext>(
  */
 export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
   operation: PipelineStep<TInput, TOutput, TContext>,
-  options?: { adaptiveConcurrency?: boolean; defaultConcurrency?: number },
+  options?: {
+    adaptiveConcurrency?: boolean;
+    adaptiveThreshold?: number;
+    defaultConcurrency?: number;
+  },
 ): PipelineStep<TInput[], TOutput[], TContext> {
   return async (inputs, context) => {
     if (!Array.isArray(inputs)) {
@@ -182,35 +186,35 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
     // Get concurrency level from context if available and adaptive concurrency is enabled
     let concurrency = options?.defaultConcurrency || 5;
 
+    // Only use adaptive concurrency for large batches
+    const threshold = options?.adaptiveThreshold || 50;
+    const useAdaptive =
+      options?.adaptiveConcurrency && inputs.length >= threshold;
+
     if (
-      options?.adaptiveConcurrency &&
-      "github" in context &&
-      context.github &&
-      typeof context.github === "object" &&
-      "getConcurrencyManager" in context.github &&
-      typeof context.github.getConcurrencyManager === "function"
+      useAdaptive &&
+      (context as { github?: { getConcurrencyManager?: () => unknown } }).github
     ) {
-      const concurrencyManager = context.github.getConcurrencyManager();
-      if (
-        concurrencyManager &&
-        typeof concurrencyManager === "object" &&
-        "getCurrentLevel" in concurrencyManager &&
-        typeof concurrencyManager.getCurrentLevel === "function"
-      ) {
+      const githubClient = (
+        context as unknown as {
+          github: {
+            getConcurrencyManager: () => {
+              getCurrentLevel: () => number;
+              shouldReduceLoad: () => boolean;
+              maxLevel: number;
+            };
+          };
+        }
+      ).github;
+      if (typeof githubClient.getConcurrencyManager === "function") {
+        const concurrencyManager = githubClient.getConcurrencyManager();
         concurrency = concurrencyManager.getCurrentLevel();
 
         context.logger?.info(
           `Using adaptive concurrency level: ${concurrency}`,
           {
-            shouldReduceLoad:
-              "shouldReduceLoad" in concurrencyManager &&
-              typeof concurrencyManager.shouldReduceLoad === "function"
-                ? concurrencyManager.shouldReduceLoad()
-                : undefined,
-            maxLevel:
-              "maxLevel" in concurrencyManager
-                ? concurrencyManager.maxLevel
-                : undefined,
+            shouldReduceLoad: concurrencyManager.shouldReduceLoad(),
+            maxLevel: concurrencyManager.maxLevel,
           },
         );
       }
@@ -218,17 +222,7 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
 
     const results = await pMap(
       inputs,
-      async (item, index) => {
-        // Check for graceful shutdown before processing each item
-        if (
-          global.process &&
-          (global.process as { gracefulShutdown?: boolean }).gracefulShutdown
-        ) {
-          context.logger?.warn(
-            `Graceful shutdown requested. Skipping remaining items after ${index}/${inputs.length}`,
-          );
-          throw new Error("GRACEFUL_SHUTDOWN");
-        }
+      async (item) => {
         return await operation(item, context);
       },
       {
@@ -237,7 +231,7 @@ export function mapStep<TInput, TOutput, TContext extends BasePipelineContext>(
       },
     );
 
-    return results.filter((r) => r !== null); // Filter out any null results from interrupted operations
+    return results.filter((r) => r !== null); // Filter out any null results
   };
 }
 

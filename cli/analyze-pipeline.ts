@@ -48,36 +48,6 @@ import { ingestPipeline, createIngestionContext } from "@/lib/pipelines/ingest";
 const DEFAULT_CONFIG_PATH = "../config/pipeline.config.ts";
 const program = new Command();
 
-// Graceful shutdown handler
-let gracefulShutdown = false;
-process.on("SIGINT", () => {
-  if (!gracefulShutdown) {
-    gracefulShutdown = true;
-    (global.process as { gracefulShutdown?: boolean }).gracefulShutdown = true;
-    console.log(
-      "\n⚠️  Graceful shutdown initiated... Current operations will complete.",
-    );
-    console.log("Press Ctrl+C again to force exit.");
-  } else {
-    console.log("\n🔴 Force exit requested.");
-    process.exit(1);
-  }
-});
-
-// Simple API cost estimation helper
-function estimateApiCalls(
-  repositories: { owner: string; name: string }[],
-  intervalCount: number,
-): { total: number; risk: string; duration: number } {
-  const baseCallsPerRepo = intervalCount * 6; // ~6 calls per interval (PRs, issues, commits)
-  const total = repositories.length * baseCallsPerRepo;
-
-  const risk = total > 2000 ? "HIGH" : total > 500 ? "MEDIUM" : "LOW";
-  const duration = Math.ceil(total / 60); // ~60 calls per minute with rate limiting
-
-  return { total, risk, duration };
-}
-
 program
   .name("analyze-pipeline")
   .description("GitHub Contribution Analytics Pipeline")
@@ -103,11 +73,6 @@ program
   .option(
     "-f, --force",
     "Force data ingestion regardless of last fetch time",
-    false,
-  )
-  .option(
-    "--estimate-only",
-    "Show API cost estimation without executing ingestion",
     false,
   )
   .action(async (options) => {
@@ -148,80 +113,9 @@ program
         githubToken: process.env.GITHUB_TOKEN!,
       });
 
-      // Estimate API costs before execution
-      const repositories = options.repository
-        ? pipelineConfig.repositories.filter(
-            (r) => `${r.owner}/${r.name}` === options.repository,
-          )
-        : pipelineConfig.repositories;
-
-      // Rough estimate: ~1 week intervals based on date range
-      const daysDiff =
-        dateRange.endDate && dateRange.startDate
-          ? Math.ceil(
-              (new Date(dateRange.endDate).getTime() -
-                new Date(dateRange.startDate).getTime()) /
-                (1000 * 60 * 60 * 24),
-            )
-          : parseInt(options.days || "7");
-      const intervalCount = Math.ceil(daysDiff / 7);
-
-      const estimate = estimateApiCalls(repositories, intervalCount);
-
-      rootLogger.info(`📊 Cost Estimation:`, {
-        repositories: repositories.length,
-        intervals: intervalCount,
-        estimatedApiCalls: estimate.total,
-        riskLevel: estimate.risk,
-        estimatedDuration: `${estimate.duration} minutes`,
-      });
-
-      if (options.estimateOnly) {
-        console.log(`\n📋 INGESTION ESTIMATE`);
-        console.log(`Repositories: ${repositories.length}`);
-        console.log(`Time intervals: ${intervalCount}`);
-        console.log(`Estimated API calls: ${estimate.total}`);
-        console.log(`Risk level: ${estimate.risk}`);
-        console.log(`Estimated duration: ${estimate.duration} minutes`);
-
-        if (estimate.risk === "HIGH") {
-          console.log(
-            `\n⚠️  HIGH RISK: Consider using smaller date ranges or --repository flag`,
-          );
-        }
-        return;
-      }
-
-      if (estimate.risk === "HIGH") {
-        rootLogger.warn(
-          `⚠️  High API usage detected (${estimate.total} calls). Monitor rate limits closely.`,
-        );
-      }
-
-      // Run the ingestion pipeline - returns array of { repository, prs, issues }
-      try {
-        await ingestPipeline(undefined, context);
-
-        if (gracefulShutdown) {
-          rootLogger.warn(
-            "⚠️  Ingestion interrupted but current operations completed successfully!",
-          );
-          rootLogger.info(
-            "💡 You can resume by running the same command again - the pipeline will skip already processed data.",
-          );
-        } else {
-          rootLogger.info("✅ Ingestion completed successfully!");
-        }
-      } catch (error: unknown) {
-        if (String(error).includes("GRACEFUL_SHUTDOWN")) {
-          rootLogger.warn(
-            "⚠️  Ingestion gracefully interrupted. Progress has been saved.",
-          );
-          rootLogger.info("💡 Resume by running the same command again.");
-          return;
-        }
-        throw error;
-      }
+      // Run the ingestion pipeline
+      await ingestPipeline(undefined, context);
+      rootLogger.info("✅ Ingestion completed successfully!");
     } catch (error: unknown) {
       console.error(chalk.red("Error fetching data:"), error);
       process.exit(1);
