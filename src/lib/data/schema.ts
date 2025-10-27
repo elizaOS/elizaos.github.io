@@ -516,6 +516,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   dailySummaries: many(userSummaries),
   dailyScores: many(userDailyScores),
   walletAddresses: many(walletAddresses),
+  badges: many(userBadges),
 }));
 
 export const walletAddressesRelations = relations(
@@ -824,3 +825,33 @@ export const prClosingIssueReferences = sqliteTable(
     unique("unq_pr_closing_issue_ref").on(table.prId, table.issueId),
   ],
 );
+
+// User badges for achievement/recognition system
+export const userBadges = sqliteTable(
+  "user_badges",
+  {
+    id: text("id").primaryKey(), // username_badgeType
+    username: text("username")
+      .notNull()
+      .references(() => users.username, { onDelete: "cascade" }),
+    badgeType: text("badge_type").notNull(), // 'level', 'streak', 'pr_master', etc.
+    tier: text("tier").notNull(), // 'beginner', 'elite', 'legend'
+    earnedAt: text("earned_at").notNull(),
+    triggerValue: real("trigger_value").notNull(), // Value that earned the badge
+    lastUpdated: text("last_updated")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_user_badges_username").on(table.username),
+    unique("idx_user_badges_unique").on(table.username, table.badgeType),
+  ],
+);
+
+// Add relations for userBadges
+export const userBadgesRelations = relations(userBadges, ({ one }) => ({
+  user: one(users, {
+    fields: [userBadges.username],
+    references: [users.username],
+  }),
+}));
