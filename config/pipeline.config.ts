@@ -488,7 +488,7 @@ export default {
       month: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
     },
     temperature: 0.1,
-    max_tokens: 2000,
+    max_tokens: 2400,
     endpoint: "https://openrouter.ai/api/v1/chat/completions",
     apiKey: openrouterApiKey || "",
     projectContext: `

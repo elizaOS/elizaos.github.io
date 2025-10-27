@@ -113,10 +113,9 @@ program
         githubToken: process.env.GITHUB_TOKEN!,
       });
 
-      // Run the ingestion pipeline - returns array of { repository, prs, issues }
+      // Run the ingestion pipeline
       await ingestPipeline(undefined, context);
-
-      rootLogger.info("Ingestion completed successfully!");
+      rootLogger.info("✅ Ingestion completed successfully!");
     } catch (error: unknown) {
       console.error(chalk.red("Error fetching data:"), error);
       process.exit(1);
