@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2025-10-01 to 2025-11-01, elizaos/eliza had 51 new PRs (45 merged), 18 new issues, and 25 active contributors.",
+  "overview": "From 2025-10-01 to 2025-11-01, elizaos/eliza had 56 new PRs (48 merged), 18 new issues, and 25 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7PXS9F",
@@ -94,6 +94,30 @@
       "deletions": 1753
     },
     {
+      "id": "PR_kwDOMT5cIs6vzbkP",
+      "title": "feat(server): Jobs API for one-off agent messaging with middleware refactor",
+      "author": "wtfsayo",
+      "number": 6098,
+      "body": "## Summary\n\nThis PR implements a **Jobs API** for one-off messaging functionality, enabling external systems to send single messages to agents and poll for responses without maintaining persistent sessions. This is ideal for stateless integrations similar to SDK patterns.\n\nAdditionally, this PR **refactors the middleware architecture** into a modular structure for better maintainability and reusability.\n\n---\n\n## 📊 Scope\n\n- **28 files changed**: +4,592 insertions, -409 deletions\n- **Net addition**: ~4,183 lines (implementation, tests, docs, examples)\n\n---\n\n## 🚀 Core Features\n\n### Jobs API Implementation\n- **Server Router** (`packages/server/src/api/messaging/jobs.ts` - 681 lines)\n  - `POST /api/messaging/jobs` - Create a new job (send message to agent)\n  - `GET /api/messaging/jobs/:jobId` - Poll job status and retrieve result  \n  - `GET /api/messaging/jobs` - List all jobs (admin/debugging)\n  - `GET /api/messaging/jobs/health` - Health check endpoint\n\n- **API Client Service** (`packages/api-client/src/services/jobs.ts` - 423 lines)\n  - Full TypeScript client with type-safe methods\n  - Integrated into `ElizaClient` as `client.jobs`\n  - Built-in polling and retry logic\n\n### Key Capabilities\n✅ **Automatic agent selection** - Uses first available agent if not specified  \n✅ **Configurable timeouts** - Default: 30s, Max: 5 minutes  \n✅ **In-memory job storage** - With automatic cleanup to prevent memory leaks  \n✅ **Job status tracking** - `pending → processing → completed/failed/timeout`  \n✅ **Metadata support** - Custom tracking fields  \n✅ **Intelligent message handling** - Filters intermediate action messages, waits for final result  \n✅ **Memory leak prevention** - Max 10k jobs with automatic cleanup  \n\n### Message Flow\n1. Client creates job via POST request\n2. System creates temporary channel for job isolation\n3. User message is sent to channel and emitted to internal message bus\n4. Agent processes message via normal flow and responds\n5. Response is captured and stored in job result (filters out \"Executing action...\" intermediate messages)\n6. Client polls GET endpoint to retrieve result\n7. Job auto-expires and cleans up after timeout\n\n---\n\n## 🏗️ Middleware Refactor\n\nConsolidated middleware from a single monolithic file into a modular structure:\n\n**Before**: `packages/server/src/api/shared/middleware.ts` (331 lines - deleted)\n\n**After**: `packages/server/src/middleware/` directory structure:\n- `auth.ts` (40 lines) - Authentication middleware\n- `rate-limit.ts` (141 lines) - Rate limiting with in-memory store\n- `security.ts` (81 lines) - Security headers and CORS\n- `validation.ts` (119 lines) - Request validation utilities\n- `index.ts` (27 lines) - Barrel exports\n\n**Total**: 408 lines across 5 focused modules\n\n**Benefits**:\n- Better separation of concerns\n- Easier to test individual middleware\n- More maintainable and extensible\n- Clearer imports throughout the codebase\n\n---\n\n## 📘 Type Definitions\n\n**New types** (`packages/server/src/types/jobs.ts` - 171 lines, `packages/api-client/src/types/jobs.ts` - 167 lines):\n```typescript\nenum JobStatus {\n  PENDING = 'pending',\n  PROCESSING = 'processing', \n  COMPLETED = 'completed',\n  FAILED = 'failed',\n  TIMEOUT = 'timeout'\n}\n\ninterface CreateJobRequest {\n  agentId?: UUID;\n  userId: UUID;\n  content: string;\n  metadata?: Record<string, unknown>;\n  timeoutMs?: number;\n}\n\ninterface JobResult {\n  message: {\n    content: string;\n    processingTimeMs: number;\n  };\n}\n\ninterface JobDetailsResponse {\n  jobId: string;\n  status: JobStatus;\n  result?: JobResult;\n  error?: string;\n  createdAt: number;\n  expiresAt: number;\n  metadata?: Record<string, unknown>;\n}\n```\n\n---\n\n## 🧪 Test Coverage (1,523 lines)\n\n### Server Unit Tests (`packages/server/src/api/messaging/__tests__/jobs.test.ts` - 589 lines)\n- ✅ Job creation (with/without agent ID)\n- ✅ Auto agent selection\n- ✅ Job status polling\n- ✅ Job listing and filtering\n- ✅ Health check endpoint\n- ✅ Timeout handling\n- ✅ Validation (missing fields, invalid UUIDs, timeout limits)\n- ✅ Error scenarios (agent not found, creation failures)\n- ✅ Cleanup mechanisms\n- ✅ Job expiration\n\n### Server Integration Tests (`packages/server/src/__tests__/integration/jobs-message-flow.test.ts` - 335 lines)\n- ✅ End-to-end message bus integration\n- ✅ Real agent response capture\n- ✅ Message filtering (ignores \"Executing action...\" intermediate messages)\n- ✅ Timeout scenarios with message bus\n- ✅ Cleanup and listener removal\n\n### API Client Tests (`packages/api-client/src/__tests__/services/jobs.test.ts` - 599 lines)\n- ✅ All JobsService methods\n- ✅ Request validation\n- ✅ Error handling\n- ✅ Response parsing\n- ✅ Client integration\n\n### Middleware Tests\n- ✅ Auth middleware unit tests\n- ✅ Middleware composition tests\n\n---\n\n## 📚 Documentation & Examples\n\n### Comprehensive Guide (`docs/jobs-api-examples.md` - 475 lines)\n**10 detailed usage examples**:\n1. Minimal request (no agent ID)\n2. With specific agent\n3. With metadata and custom timeout\n4. Shell script with polling\n5. JavaScript/Node.js implementation\n6. Python implementation\n7. TypeScript with retry logic\n8. Batch questions\n9. Robust error handling\n10. React Hook\n\n**Languages covered**: Shell, JavaScript, TypeScript, Python, React\n\n### Runnable Examples\n- **SDK-Style Client** (`examples/jobs-api-example.ts` - 324 lines)\n  - `JobsAPIClient` class with built-in polling\n  - Multiple integration patterns\n  - JWT authentication example\n  - Error handling and retry logic\n\n- **API Client Example** (`examples/jobs-api-client-example.ts` - 314 lines)\n  - Uses official `@elizaos/api-client` \n  - Demonstrates `ElizaClient.jobs` service\n  - Shows TypeScript best practices\n\n---\n\n## 🔌 API Usage Example\n\n```bash\n# Create a job\ncurl -X POST http://localhost:3000/api/messaging/jobs \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"userId\": \"user-uuid\",\n    \"content\": \"What is Bitcoin price?\"\n  }'\n\n# Response\n# {\n#   \"jobId\": \"abc123...\",\n#   \"status\": \"processing\",\n#   \"createdAt\": 1234567890,\n#   \"expiresAt\": 1234597890\n# }\n\n# Poll for result\ncurl http://localhost:3000/api/messaging/jobs/abc123...\n\n# Response (when completed)\n# {\n#   \"jobId\": \"abc123...\",\n#   \"status\": \"completed\",\n#   \"result\": {\n#     \"message\": {\n#       \"content\": \"Bitcoin is currently trading at...\",\n#       \"processingTimeMs\": 2341\n#     }\n#   }\n# }\n```\n\n---\n\n## 🔧 Technical Implementation Details\n\n### Memory Management\n- Jobs expire after configured timeout (default 30s, max 5 minutes)\n- Cleanup runs every 60 seconds to remove completed/expired jobs\n- Emergency cleanup at 10k jobs (removes oldest 10%)\n- Message bus listeners auto-cleanup after timeout + 5s buffer\n- Metrics tracking for job counts and cleanup operations\n\n### Integration Points\n- Integrated with existing messaging router\n- Uses internal message bus for agent communication\n- Creates temporary channels for job isolation\n- Filters out intermediate \"Executing action...\" messages\n- Captures only final agent responses\n\n---\n\n## ⚠️ Testing Notes\n\n**Authentication temporarily disabled** for initial testing/development\n- Need to re-enable `requireAuthOrApiKey` middleware before merging to production\n- See TODO comments in `jobs.ts`\n\n---\n\n## 📋 Next Steps\n\n- [ ] Re-enable authentication middleware\n- [ ] Consider database persistence (optional - currently in-memory is sufficient)\n- [ ] Consider WebSocket notifications for real-time updates (optional enhancement)\n- [ ] Add rate limiting per user/agent\n- [ ] Add metrics/monitoring integration\n\n---\n\n## 🔗 Related\n\n- Feature branch: `jobs-api`\n- Implements one-off messaging pattern similar to external SDK integrations\n- Part of broader effort to provide multiple client integration patterns (sessions, jobs, websockets)\n\n---\n\n## 🎯 Key Files Summary\n\n**Server Implementation:**\n- `packages/server/src/api/messaging/jobs.ts` (681 lines) - Main API router\n- `packages/server/src/types/jobs.ts` (171 lines) - Server-side types\n- `packages/server/src/middleware/*` (408 lines) - Refactored middleware modules\n\n**API Client:**\n- `packages/api-client/src/services/jobs.ts` (423 lines) - Jobs service client\n- `packages/api-client/src/types/jobs.ts` (167 lines) - Client-side types\n\n**Tests:**\n- Server unit: 589 lines\n- Server integration: 335 lines  \n- Client unit: 599 lines\n- **Total test coverage: 1,523 lines**\n\n**Documentation & Examples:**\n- `docs/jobs-api-examples.md` (475 lines)\n- `examples/jobs-api-example.ts` (324 lines)\n- `examples/jobs-api-client-example.ts` (314 lines)\n- **Total documentation: 1,113 lines**\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> Adds a Jobs API with server endpoints and a client SDK (with polling/backoff), integrates it into messaging, introduces modular middleware, and includes types, docs, examples, and tests.\n> \n> - **Backend (server)**:\n>   - **Jobs API**: New router `api/messaging/jobs.ts` with `POST /jobs`, `GET /jobs/:jobId`, `GET /jobs`, `GET /jobs/health`; integrated into `messagingRouter`.\n>   - Per-router in-memory jobs, timeouts/cleanup, metrics, API key auth, temporary channels, internal bus emission, and action-message filtering.\n>   - Types added in `types/jobs.ts`; mounted and wired across server; security headers and minor route handling tweaks.\n> - **Middleware**:\n>   - Refactor to modular `middleware/` (`auth`, `rate-limit`, `security`, `validation`, `index`) and update imports across server; add/expand tests.\n> - **API Client (@elizaos/api-client)**:\n>   - New `JobsService` (`create`, `getJob`, `list`, `health`, `poll`, `createAndPoll`, `createAndPollWithBackoff`, `ask`) with types; exposed on `ElizaClient` and `index`.\n>   - README updated with Jobs usage.\n> - **Docs & Examples**:\n>   - Add `docs/jobs-api-examples.md` and runnable examples `examples/jobs-api-*.ts`.\n> - **Tests**:\n>   - Add comprehensive server unit/integration tests for Jobs and middleware; add client `JobsService` tests.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 1f9905a5ccdbc895286757935364f6ee53e83d85. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-10-27T05:27:00Z",
+      "mergedAt": "2025-10-27T16:44:57Z",
+      "additions": 4610,
+      "deletions": 409
+    },
+    {
+      "id": "PR_kwDOMT5cIs6v8hih",
+      "title": "feat(server): Add x402 payment middleware to Jobs API",
+      "author": "wtfsayo",
+      "number": 6099,
+      "body": "## Summary\n\nThis PR adds x402 payment middleware integration to the Jobs API, enabling cryptocurrency payments for AI agent access.\n\n## Key Features\n\n### Flexible Authentication Modes\n- **Both API key + x402 enabled**: Requires BOTH `X-API-KEY` AND `X-PAYMENT` headers\n- **Only API key** (x402=false): Requires only `X-API-KEY` header  \n- **Only x402** (no API token): Requires only `X-PAYMENT` header\n- **Neither enabled**: No authentication required\n\n### Environment-Based Configuration\nAll settings via `.env` variables:\n- `X402_ENABLED` - Enable/disable payment middleware\n- `X402_WALLET_ADDRESS` - Receiving wallet address\n- `X402_PRICE` - Price in USDC (default: $0.01)\n- `X402_NETWORK` - Blockchain network (default: base-sepolia)\n- `X402_USE_MAINNET` - Use CDP facilitator for production\n- `CDP_API_KEY_ID`/`CDP_API_KEY_SECRET` - Required for mainnet\n\n### Auto-Discovery\nEndpoints automatically listed in x402 Bazaar (mainnet) with:\n- Full JSON schemas (input/output)\n- Descriptive documentation\n- Pricing information\n\n## Files Changed\n\n### New Files\n- `packages/server/src/middleware/x402.ts` - Main middleware implementation\n- `packages/server/src/middleware/__tests__/x402.test.ts` - Comprehensive test suite (12 tests)\n- `docs/x402-payment-integration.md` - Full documentation\n\n### Modified Files  \n- `packages/server/src/middleware/index.ts` - Export x402 middleware\n- `packages/server/src/api/messaging/jobs.ts` - Integrated x402 on POST /jobs route\n- `packages/server/package.json` - Added x402 dependencies\n- `bun.lock` - Lockfile update\n\n## Dependencies Added\n- `x402-express@0.7.0` - Express middleware for x402 protocol\n- `@coinbase/x402@0.7.0` - CDP facilitator for mainnet\n\n## Testing\n\n✅ All 12 unit tests passing  \n✅ Build successful\n✅ No linter errors\n✅ TypeScript types validated\n\nRun tests:\n```bash\ncd packages/server\nbun test src/middleware/__tests__/x402.test.ts\n```\n\n## Documentation\n\nSee `docs/x402-payment-integration.md` for:\n- Complete setup instructions\n- Configuration examples\n- Testing guide\n- Security considerations\n- Troubleshooting\n\n## Breaking Changes\n\nNone - x402 is disabled by default and completely optional.\n\n## References\n\n- [x402 Protocol Docs](https://docs.cdp.coinbase.com/x402/)\n- [x402 Quickstart for Sellers](https://docs.cdp.coinbase.com/x402/quickstart-for-sellers)\n- [Coinbase Developer Platform](https://cdp.coinbase.com)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> Integrates x402 crypto payments into POST /api/messaging/jobs with env-configurable pricing/networks, adds docs/tests, and required dependencies.\n> \n> - **Server/Middleware**:\n>   - Add x402 payment middleware `createX402Middleware` and `x402LoggingMiddleware` in `packages/server/src/middleware/x402.ts`; export via `middleware/index.ts`.\n>   - Supports dual auth: API key and/or x402 (`X-API-KEY`, `X-PAYMENT`) with env-based config (`X402_*`, `CDP_*`).\n> - **API**:\n>   - Protect `POST /api/messaging/jobs` using x402; includes route metadata (input/output schemas) for Bazaar discovery.\n> - **Docs/Tests**:\n>   - Add `docs/x402-payment-integration.md` with setup, modes, and examples.\n>   - Add unit tests `packages/server/src/middleware/__tests__/x402.test.ts`.\n> - **Dependencies**:\n>   - Add `x402-express`, `@coinbase/x402`; update `packages/server/package.json`.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 57ae3cf5914a740335e67133ada19951df0125e5. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-10-27T17:07:39Z",
+      "mergedAt": null,
+      "additions": 2382,
+      "deletions": 3
+    },
+    {
       "id": "PR_kwDOMT5cIs6sm8l_",
       "title": "feat(core): add MessageService interface and default implementation",
       "author": "0xbbjoker",
@@ -104,37 +128,13 @@
       "mergedAt": "2025-10-19T12:24:07Z",
       "additions": 2282,
       "deletions": 1441
-    },
-    {
-      "id": "PR_kwDOMT5cIs6tQLtD",
-      "title": "elizaos deploy r2 artifacts style",
-      "author": "ChristopherTrimboli",
-      "number": 6058,
-      "body": "## Overview\r\n\r\nThis PR completely migrates the ElizaOS CLI deployment system from traditional Docker image builds to a modern bootstrapper architecture. This change significantly improves deployment speed, reduces resource usage, and eliminates platform size limitations.\r\n\r\n## What Changed\r\n\r\n### 🚀 New Bootstrapper Architecture\r\n\r\n**Added:**\r\n- `deploy-bootstrapper.ts` - Core bootstrapper deployment logic\r\n- `artifact.ts` - Artifact creation and management utilities\r\n- `r2-client.ts` - R2 storage client for future direct operations\r\n- Bootstrapper Dockerfile template and entrypoint script\r\n- Support for deterministic artifact creation with `.gitignore` respect\r\n\r\n**Key Features:**\r\n- Creates lightweight tar.gz artifacts (typically <50MB vs 500MB+ Docker images)\r\n- Uploads artifacts to Cloudflare R2 via secure API\r\n- Uses minimal shared bootstrapper image (~100MB)\r\n- Fetches project code at container startup\r\n- Supports both Bun and npm lockfiles\r\n- Implements SHA256 checksum verification\r\n\r\n### 🗑️ Removed Legacy Docker Code\r\n\r\n**Deleted:**\r\n- `utils/docker.ts` - All Docker build/export utilities (~280 lines)\r\n- `deployWithDocker()` function (~300 lines)\r\n- Docker-specific CLI options (`--use-docker`, `--tag`, `--no-build`)\r\n- Dockerfile generation and management code\r\n\r\n### 📦 Dependencies\r\n\r\n**Added:**\r\n- `tar` - For creating compressed archives\r\n- `ignore` - For respecting .gitignore rules\r\n- `node-fetch` - For HTTP operations\r\n- `form-data` - For multipart uploads\r\n\r\n## Why This Change?\r\n\r\n### Problems with Old Approach:\r\n- **Size Limits**: Docker images often exceeded 500MB-2GB, hitting platform limits\r\n- **Slow Uploads**: Uploading entire Docker images was bandwidth-intensive\r\n- **Version Conflicts**: Single Docker image could break older projects\r\n- **Resource Waste**: Duplicated base layers for every deployment\r\n\r\n### Benefits of Bootstrapper:\r\n- **10x Smaller Uploads**: Only project code, not entire OS/runtime\r\n- **Faster Deployments**: 30-60s vs 5-10 minutes\r\n- **Version Isolation**: Each project maintains its own dependencies\r\n- **Better Caching**: Shared base image, project-specific dependencies\r\n- **Platform Friendly**: Works within Cloudflare's 50GB limits\r\n\r\n## Technical Implementation\r\n\r\n### Deployment Flow:\r\n1. **Artifact Creation**\r\n   ```typescript\r\n   // Creates deterministic tar.gz with project files\r\n   const artifact = await createArtifact({\r\n     projectPath: cwd,\r\n     outputPath: artifactPath,\r\n     excludePatterns: ['.git', 'node_modules', '.env'],\r\n     deterministic: true\r\n   });\r\n   ```\r\n\r\n2. **Upload to R2**\r\n   ```typescript\r\n   // Uploads via Cloud API with checksum verification\r\n   const uploadResponse = await apiClient.uploadArtifact({\r\n     projectId: projectName,\r\n     version: projectVersion,\r\n     checksum: artifactChecksum,\r\n     size: artifactSize,\r\n     artifactPath\r\n   });\r\n   ```\r\n\r\n3. **Container Deployment**\r\n   ```typescript\r\n   // Deploys bootstrapper with artifact URL\r\n   const containerConfig = {\r\n     image_tag: \"elizaos/bootstrapper:latest\",\r\n     environment_vars: {\r\n       R2_ARTIFACT_URL: artifactData.artifactUrl,\r\n       R2_TOKEN: artifactData.token,\r\n       R2_ARTIFACT_CHECKSUM: artifactChecksum,\r\n       START_CMD: \"bun run start\"\r\n     }\r\n   };\r\n   ```\r\n\r\n### Bootstrapper Runtime:\r\n- Alpine Linux base with Bun pre-installed\r\n- Downloads artifact using one-time scoped token\r\n- Verifies SHA256 checksum\r\n- Extracts project files\r\n- Installs dependencies from lockfile\r\n- Executes START_CMD\r\n\r\n## Breaking Changes\r\n\r\n⚠️ **Removed CLI Options:**\r\n- `--use-docker` - No longer supported\r\n- `--tag` - Not applicable to bootstrapper\r\n- `--no-build` - Build happens in container\r\n- `--dockerfile` - Bootstrapper uses standard image\r\n\r\n**Migration Guide:**\r\n```bash\r\n# Old (no longer works)\r\nelizaos deploy --use-docker --tag my-image:v1\r\n\r\n# New (default behavior)\r\nelizaos deploy\r\n\r\n# With existing artifact\r\nelizaos deploy --skip-artifact --artifact-path ./dist/artifact.tar.gz\r\n```\r\n\r\n## Testing\r\n\r\n### Manual Testing:\r\n- ✅ Deployed sample project with bootstrapper\r\n- ✅ Verified artifact creation and upload\r\n- ✅ Confirmed container starts and runs correctly\r\n- ✅ Tested with both Bun and npm projects\r\n- ✅ Validated checksum verification\r\n- ✅ Tested artifact cleanup (keeps last 3)\r\n\r\n### Performance Comparison:\r\n| Metric | Docker Mode | Bootstrapper |\r\n|--------|------------|--------------|\r\n| Artifact Size | 500MB-2GB | 10-50MB |\r\n| Upload Time | 2-10 min | 10-30 sec |\r\n| Total Deploy Time | 5-15 min | 1-2 min |\r\n| Storage Used | 2GB/deploy | 50MB/deploy |\r\n\r\n   // Uploads via Cloud API with checksum verification\r\n   const uploadResponse = await apiClient.uploadArtifact({\r\n     projectId: projectName,\r\n     version: projectVersion,\r\n     checksum: artifactChecksum,\r\n     size: artifactSize,\r\n     artifactPath\r\n   });nged\r\n\r\n### 🚀 New Artifact Management System\r\n\r\n**Added Endpoints:**\r\n- `POST /api/v1/artifacts/upload` - Request presigned URL and upload artifacts\r\n- `GET /api/v1/artifacts` - List project artifacts\r\n\r\n**Database Changes:**\r\n- New `artifacts` table with organization/project/version tracking\r\n- Unique constraint on version per project\r\n- Indexes for efficient querying\r\n\r\n**Key Features:**\r\n- Presigned S3 URLs for direct R2 uploads\r\n- SHA256 checksum verification\r\n- 10MB artifact size limit (configurable)\r\n- Artifact metadata storage (Eliza version, Node version, etc.)\r\n- One-time scoped token generation for secure retrieval\r\n\r\n### 🔄 Container Route Updates\r\n\r\n**Modified:**\r\n- Added bootstrapper fields to container schema\r\n- Default to bootstrapper mode (`use_bootstrapper: true`)\r\n- Store artifact metadata in container record\r\n- Pass bootstrapper config to Cloudflare deployment\r\n\r\n**Schema Changes:**\r\n```typescript\r\nconst createContainerSchema = z.object({\r\n  name: z.string(),\r\n  port: z.number(),\r\n  environment_vars: z.record(z.string()),\r\n  \r\n  // New bootstrapper fields\r\n  use_bootstrapper: z.boolean().default(true),\r\n  artifact_url: z.string().optional(),\r\n  artifact_checksum: z.string().optional(),\r\n  image_tag: z.string().default(\"elizaos/bootstrapper:latest\")\r\n});\r\n```\r\n\r\n### 🗑️ Deprecated Legacy Endpoints\r\n\r\n**Marked as Deprecated:**\r\n- `POST /api/v1/containers/upload-image` - Docker image upload\r\n- `CloudflareService.uploadImage()` - Docker upload method\r\n\r\nThese remain functional with deprecation warnings for backward compatibility.\r\n\r\n## Technical Implementation\r\n\r\n### Artifact Upload Flow:\r\n\r\n1. **Request Upload URL**\r\n   ```typescript\r\n   // Client requests presigned URL\r\n   POST /api/v1/artifacts/upload\r\n   {\r\n     projectId: \"my-project\",\r\n     version: \"1.0.0\",\r\n     checksum: \"sha256...\",\r\n     size: 1048576\r\n   }\r\n   ```\r\n\r\n2. **Generate Presigned URL**\r\n   ```typescript\r\n   // Server creates S3 presigned URL for R2\r\n   const putCommand = new PutObjectCommand({\r\n     Bucket: process.env.R2_BUCKET_NAME,\r\n     Key: `artifacts/${org}/${project}/${version}/${id}.tar.gz`,\r\n     ContentType: 'application/gzip',\r\n     ContentLength: size,\r\n     ChecksumSHA256: checksum\r\n   });\r\n   \r\n   const uploadUrl = await getSignedUrl(r2Client, putCommand, {\r\n     expiresIn: 600 // 10 minutes\r\n   });\r\n   ```\r\n\r\n3. **Store Metadata**\r\n   ```typescript\r\n   // Save artifact record\r\n   await db.insert(artifacts).values({\r\n     id: artifactId,\r\n     organization_id: user.organization_id,\r\n     project_id: projectId,\r\n     version,\r\n     checksum,\r\n     size,\r\n     r2_key,\r\n     r2_url: publicUrl,\r\n     metadata,\r\n     created_by: user.id\r\n   });\r\n   ```\r\n\r\n### Container Deployment:\r\n\r\n```typescript\r\n// Deploy with bootstrapper configuration\r\nconst deployment = await cloudflare.deployContainer({\r\n  name: config.name,\r\n  imageTag: \"elizaos/bootstrapper:latest\",\r\n  port: config.port,\r\n  environmentVars: {\r\n    ...config.environment_vars,\r\n    R2_ARTIFACT_URL: config.artifact_url,\r\n    R2_TOKEN: generatedToken,\r\n    R2_ARTIFACT_CHECKSUM: config.artifact_checksum\r\n  }\r\n});\r\n```\r\n\r\n## Database Migration\r\n\r\n```sql\r\n-- 0006_add_artifacts_table.sql\r\nCREATE TABLE IF NOT EXISTS artifacts (\r\n  id TEXT PRIMARY KEY,\r\n  organization_id TEXT NOT NULL,\r\n  project_id TEXT NOT NULL,\r\n  version TEXT NOT NULL,\r\n  checksum TEXT NOT NULL,\r\n  size INTEGER NOT NULL,\r\n  r2_key TEXT NOT NULL,\r\n  r2_url TEXT NOT NULL,\r\n  metadata JSONB DEFAULT '{}',\r\n  created_by TEXT NOT NULL,\r\n  created_at TIMESTAMP DEFAULT NOW() NOT NULL\r\n);\r\n\r\nCREATE INDEX idx_artifacts_org_project ON artifacts(organization_id, project_id);\r\nCREATE INDEX idx_artifacts_project_version ON artifacts(project_id, version);\r\nCREATE UNIQUE INDEX uniq_artifact_version ON artifacts(organization_id, project_id, version);\r\n```\r\n\r\n## Environment Variables\r\n\r\n**New Required Variables:**\r\n```bash\r\n# R2 Storage Configuration\r\nR2_ACCOUNT_ID=your_cloudflare_account_id\r\nR2_ACCESS_KEY_ID=your_r2_access_key\r\nR2_SECRET_ACCESS_KEY=your_r2_secret_key\r\nR2_BUCKET_NAME=elizaos-artifacts\r\nR2_PUBLIC_DOMAIN=artifacts.elizacloud.ai  # Optional custom domain\r\n```\r\n\r\n## Security Considerations\r\n\r\n- ✅ Presigned URLs expire after 10 minutes\r\n- ✅ One-time tokens for artifact retrieval\r\n- ✅ SHA256 checksum verification on upload and download\r\n- ✅ Organization-scoped artifact isolation\r\n- ✅ Size limits to prevent abuse (10MB default)\r\n\r\n## Performance Impact\r\n\r\n### Metrics:\r\n| Operation | Old (Docker) | New (Bootstrapper) |\r\n|-----------|-------------|-------------------|\r\n| Upload Size | 500MB-2GB | 10-50MB |\r\n| API Processing | 30-60s | <1s |\r\n| Storage Cost | High | 95% reduction |\r\n| Network Usage | High | 90% reduction |\r\n\r\n### Load Testing:\r\n- Handled 100 concurrent artifact uploads\r\n- Average upload time: 5 seconds\r\n- No performance degradation observed\r\n\r\n## Breaking Changes\r\n\r\n⚠️ **Default Behavior Change:**\r\n- Containers now default to bootstrapper mode\r\n- `use_bootstrapper` defaults to `true` instead of `false`\r\n\r\n**Backward Compatibility:**\r\n- Legacy Docker endpoints remain functional with warnings\r\n- Existing containers continue to work\r\n- Gradual migration path available\r\n\r\n## Testing\r\n\r\n- ✅ Artifact upload with checksum validation\r\n- ✅ Presigned URL generation and expiry\r\n- ✅ Container deployment with bootstrapper\r\n- ✅ Legacy endpoint deprecation warnings\r\n- ✅ Database migration rollback tested\r\n- ✅ R2 connectivity and error handling\r\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2025-10-11T15:13:37Z",
-      "mergedAt": "2025-10-12T22:19:46Z",
-      "additions": 2170,
-      "deletions": 135
-    },
-    {
-      "id": "PR_kwDOMT5cIs6sMtSD",
-      "title": "feat: migrate to UUID-only agent identification",
-      "author": "0xbbjoker",
-      "number": 6036,
-      "body": "<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> Agents now use randomly generated UUIDs (not names) for identity; duplicate names are allowed, with loader/runtime/server/DB updated plus migrations and tests.\n> \n> - **Core/runtime (`packages/core`)**:\n>   - Generate `agentId` via `uuidv4()` (no name-derived IDs).\n>   - `ensureAgentExists` now requires `agent.id`, updates/creates strictly by UUID.\n>   - Logs/messages reference `agent.id`.\n> - **Server (`packages/server`)**:\n>   - Loader `jsonToCharacter` assigns `id` if missing and supports env prefixes by `name` and `id`.\n>   - Agent CRUD create path uses provided `character.id` (no name-to-UUID), and updates active runtimes in-place.\n>   - Added tests for loader UUID generation and CRUD behavior with duplicate names.\n> - **SQL Plugin (`packages/plugin-sql`)**:\n>   - Schema: drop unique constraint on `agents.name`.\n>   - `createAgent` checks duplicate `id` only; allows duplicate `name`.\n>   - Integration and migration tests verifying duplicate-name support, UUID-based CRUD, and constraint removal.\n> - **CLI (`packages/cli`)**:\n>   - Scenario factory assigns random `id` to test character (no name-based ID).\n> - **Project starter**:\n>   - Character docs note auto-generated `id` and option to set a fixed UUID.\n> - **Tests**:\n>   - Extensive suites across core/server/sql to ensure UUID independence from names and proper migrations.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 93f269089b99832050651406cf7047f4a9392463. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n- New Features\n  - Agents/characters now use randomly generated UUIDs for identity; multiple agents can share the same name.\n  - Loader auto-assigns an ID when missing; explicit IDs are preserved.\n  - Environment variable prefixing now derives from the agent ID for consistent configuration.\n- Documentation\n  - Starter character docs updated to explain ID generation and how to set a fixed ID.\n- Chores\n  - Database schema updated to remove the unique constraint on agent names, enabling duplicate names while keeping ID-based operations.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
-      "repository": "elizaos/eliza",
-      "createdAt": "2025-10-06T06:52:46Z",
-      "mergedAt": "2025-10-17T11:57:29Z",
-      "additions": 1824,
-      "deletions": 124
     }
   ],
   "codeChanges": {
-    "additions": 20548,
-    "deletions": 16385,
-    "files": 239,
-    "commitCount": 312
+    "additions": 27154,
+    "deletions": 17663,
+    "files": 277,
+    "commitCount": 352
   },
   "completedItems": [
     {
@@ -868,46 +868,133 @@
       "files": [
         "packages/core/src/runtime.ts"
       ]
+    },
+    {
+      "title": "feat: implement unified messaging API with elizaOS.sendMessage()",
+      "prNumber": 6095,
+      "type": "feature",
+      "body": "# Relates to\n\nThis PR addresses the need for a unified messaging API across all ElizaOS clients to eliminate code duplication and improve maintainability.\n\n# Risks\n\n**Risk Level: Medium**\n\n- **Affected Areas**: Core messaging infrastructure",
+      "files": [
+        "bun.lock",
+        "packages/core/src/__tests__/elizaos-sendmessage.test.ts",
+        "packages/core/src/__tests__/elizaos.test.ts",
+        "packages/core/src/elizaos.ts",
+        "packages/core/src/types/messaging.ts",
+        "packages/server/src/index.ts",
+        "packages/server/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "feat: elizaos login CLI command",
+      "prNumber": 6100,
+      "type": "feature",
+      "body": "# feat(cli): Add cloud authentication with `elizaos login` command\n\n## Relates to\n\nImplements CLI-side authentication for ElizaOS Cloud integration.\n\n**Related PR**: [Cloud-side implementation in eliza-cloud-v2]\n\n## Risks\n\n**Risk Level**: L",
+      "files": [
+        "bun.lock",
+        "packages/cli/src/commands/deploy/actions/deploy-ecs.ts",
+        "packages/cli/src/commands/deploy/utils/docker-build.ts",
+        "packages/cli/src/commands/login/README.md",
+        "packages/cli/src/commands/login/__tests__/login.test.ts",
+        "packages/cli/src/commands/login/actions/login.ts",
+        "packages/cli/src/commands/login/index.ts",
+        "packages/cli/src/commands/login/types.ts",
+        "packages/cli/src/commands/login/utils/browser.ts",
+        "packages/cli/src/commands/login/utils/index.ts",
+        "packages/cli/src/commands/login/utils/polling.ts",
+        "packages/cli/src/commands/login/utils/session.ts",
+        "packages/cli/src/index.ts",
+        "packages/core/src/__tests__/elizaos-sendmessage.test.ts",
+        "packages/core/src/elizaos.ts",
+        "packages/server/src/__tests__/integration/jobs-message-flow.test.ts",
+        "packages/server/src/api/index.ts",
+        "packages/server/src/api/messaging/__tests__/jobs.test.ts",
+        "packages/server/src/api/messaging/channels.ts",
+        "packages/server/src/api/messaging/jobs.ts",
+        "packages/server/src/index.ts",
+        "packages/server/src/middleware/auth.ts",
+        "packages/server/src/middleware/index.ts",
+        "packages/server/src/middleware/rate-limit.ts",
+        "packages/server/src/middleware/security.ts",
+        "packages/server/src/middleware/validation.ts",
+        "packages/server/src/types/index.ts",
+        "packages/server/src/types/jobs.ts"
+      ]
+    },
+    {
+      "title": "feat(server): Jobs API for one-off agent messaging with middleware refactor",
+      "prNumber": 6098,
+      "type": "feature",
+      "body": "## Summary\n\nThis PR implements a **Jobs API** for one-off messaging functionality, enabling external systems to send single messages to agents and poll for responses without maintaining persistent sessions. This is ideal for stateless integ",
+      "files": [
+        "docs/jobs-api-examples.md",
+        "examples/jobs-api-client-example.ts",
+        "examples/jobs-api-example.ts",
+        "packages/api-client/README.md",
+        "packages/api-client/src/__tests__/services/jobs.test.ts",
+        "packages/api-client/src/client.ts",
+        "packages/api-client/src/index.ts",
+        "packages/api-client/src/services/jobs.ts",
+        "packages/api-client/src/types/jobs.ts",
+        "packages/server/src/__tests__/authMiddleware.test.ts",
+        "packages/server/src/__tests__/integration/jobs-message-flow.test.ts",
+        "packages/server/src/__tests__/middleware.test.ts",
+        "packages/server/src/api/audio/processing.ts",
+        "packages/server/src/api/index.ts",
+        "packages/server/src/api/messaging/__tests__/jobs.test.ts",
+        "packages/server/src/api/messaging/channels.ts",
+        "packages/server/src/api/messaging/index.ts",
+        "packages/server/src/api/messaging/jobs.ts",
+        "packages/server/src/api/shared/index.ts",
+        "packages/server/src/api/shared/middleware.ts",
+        "packages/server/src/index.ts",
+        "packages/server/src/middleware/auth.ts",
+        "packages/server/src/middleware/index.ts",
+        "packages/server/src/middleware/rate-limit.ts",
+        "packages/server/src/middleware/security.ts",
+        "packages/server/src/middleware/validation.ts",
+        "packages/server/src/types/index.ts",
+        "packages/server/src/types/jobs.ts"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 903.4188364997533,
-      "prScore": 858.6628364997533,
+      "totalScore": 946.9626103963294,
+      "prScore": 902.2066103963294,
       "issueScore": 0,
       "reviewScore": 42,
       "commentScore": 2.756,
       "summary": "standujar: Focused on significant refactoring of core components, introducing a new `mentionContext` interface in `elizaos/eliza#6030` which simplified the codebase (+520/-681 lines) and improved response logic. This core change was then propagated to dependent plugins like in `elizaos-plugins/plugin-discord#19`. They also fixed a bug in `elizaos-plugins/plugin-openrouter#15` related to AI SDK v5 tool results extraction. Their activity shows a primary focus on refactoring, bug fixes, and widespread configuration updates."
     },
     {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 669.9200366597221,
+      "prScore": 662.2440366597222,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 1.676,
+      "summary": "wtfsayo: This month, wtfsayo focused on improving code health and repository maintenance, executing a significant code standardization and formatting refactor in elizaos/eliza#6027 (+1124/-1385 lines). They also removed obsolete development files in elizaos/eliza#6026 and expanded the plugin ecosystem by adding a new relay plugin to the registry in elizaos-plugins/registry#234. Their work shows a primary focus on bugfixes and other maintenance, touching mostly code and configuration files."
+    },
+    {
       "username": "0xbbjoker",
       "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
-      "totalScore": 645.3848753767707,
+      "totalScore": 650.3848753767707,
       "prScore": 593.1248753767705,
       "issueScore": 0,
-      "reviewScore": 49.5,
+      "reviewScore": 54.5,
       "commentScore": 2.76,
       "summary": "0xbbjoker: This month, 0xbbjoker focused on enhancing plugin functionality and improving code maintainability within the `elizaos/eliza` repository. They delivered a key feature by adding an offset parameter for memory retrieval in the SQL plugin (elizaos/eliza#6032), a substantial change of +516/-209 lines. Additionally, they improved codebase health by removing 289 lines of unused code in a separate refactoring effort (elizaos/eliza#6029). Their work shows a dual focus on feature development and code quality, and they also supported the team through code review and comments."
     },
     {
-      "username": "wtfsayo",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
-      "totalScore": 547.2693566975971,
-      "prScore": 539.7933566975971,
-      "issueScore": 0,
-      "reviewScore": 6,
-      "commentScore": 1.476,
-      "summary": "wtfsayo: This month, wtfsayo focused on improving code health and repository maintenance, executing a significant code standardization and formatting refactor in elizaos/eliza#6027 (+1124/-1385 lines). They also removed obsolete development files in elizaos/eliza#6026 and expanded the plugin ecosystem by adding a new relay plugin to the registry in elizaos-plugins/registry#234. Their work shows a primary focus on bugfixes and other maintenance, touching mostly code and configuration files."
-    },
-    {
       "username": "ChristopherTrimboli",
       "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
-      "totalScore": 153.4169443000707,
-      "prScore": 143.1769443000707,
+      "totalScore": 217.96071819664678,
+      "prScore": 202.72071819664677,
       "issueScore": 0,
-      "reviewScore": 9.5,
+      "reviewScore": 14.5,
       "commentScore": 0.74,
       "summary": "ChristopherTrimboli: No activity this month."
     },
@@ -959,7 +1046,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "alex-nax: Focused on a significant feature implementation, opening a large pull request to add a custom storage service in `elizaos/eliza` (#6094). This substantial work-in-progress modifies 382 files, introducing over 35,000 lines of new code. The effort appears comprehensive, with contributions split across bugfixes, tests, and other code changes."
     },
     {
       "username": "0xRabbidfly",
@@ -989,7 +1076,17 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "amlord: Focused on expanding the plugin ecosystem this month by adding the new 'nuggets' plugin to the registry (elizaos-plugins/registry#236). This feature contribution was accomplished through a small configuration file change."
+    },
+    {
+      "username": "github-advanced-security",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
+      "totalScore": 22.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": "github-advanced-security: No activity this month."
     },
     {
       "username": "letmehateu",
@@ -1019,7 +1116,7 @@
       "issueScore": 10.1,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "linear: Focused on project planning and defining new work streams within the elizaos/eliza repository. This month, their contributions centered on creating 11 issues to scope out a range of tasks, from fixing a markdown rendering bug (#5688) to proposing significant new features like a unified messaging API (#6096) and creating a dedicated API/SDK documentation section (#6090)."
     },
     {
       "username": "borisudovicic",
@@ -1049,17 +1146,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "github-advanced-security",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
-      "totalScore": 4.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0,
-      "summary": null
+      "summary": "icecoins: This month, icecoins focused on extending the functionality of the Twitter plugin by opening a pull request to add media upload support via the Twitter API v2 (elizaos-plugins/plugin-twitter#45). This work remains in progress, with no other merged contributions or reviews during this period."
     },
     {
       "username": "ryanmstokes",
@@ -1079,7 +1166,7 @@
       "issueScore": 2.1,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "schmidsi: This month, schmidsi's activity was focused on the `elizaos/eliza` repository, where they identified and reported a module resolution problem. They opened and closed issue #6088 to track this installation error. Their engagement also included commenting on two issues."
     },
     {
       "username": "douglasg14b",
@@ -1132,9 +1219,9 @@
       "summary": "FellowTraveler: No activity this month."
     }
   ],
-  "newPRs": 51,
-  "mergedPRs": 45,
+  "newPRs": 56,
+  "mergedPRs": 48,
   "newIssues": 18,
-  "closedIssues": 55,
+  "closedIssues": 56,
   "activeContributors": 25
 }
