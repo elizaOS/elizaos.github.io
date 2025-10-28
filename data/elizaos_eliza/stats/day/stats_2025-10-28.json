@@ -1,0 +1,72 @@
+{
+  "interval": {
+    "intervalStart": "2025-10-28T00:00:00.000Z",
+    "intervalEnd": "2025-10-29T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-10-28 to 2025-10-29, elizaos/eliza had 1 new PRs (1 merged), 0 new issues, and 4 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs6wMQaK",
+      "title": "fix: merge .env variables with character",
+      "author": "standujar",
+      "number": 6102,
+      "body": "# Relates to\r\n\r\nFixes the issue where `.env` variables are completely ignored when `character.settings.secrets` exists, preventing proper configuration merging between global defaults and character-specific overrides.\r\n\r\n# Risks\r\n\r\n**Low Risk**\r\n\r\n- **Affected Areas**: Character configuration loading, environment variable resolution\r\n- **Backward Compatibility**: ✅ Fully backward compatible - existing characters without `.env` or with empty settings work the same way\r\n- **Breaking Changes**: None - only changes behavior from \"all or nothing\" to \"proper merge\"\r\n- **Side Effects**: Characters now have access to ALL `.env` variables via `runtime.getSetting()`, which was the intended behavior\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\nThis PR fixes the environment variable merging logic to properly combine `.env` files with character configuration:\r\n\r\n### Core Changes (`packages/core/src/secrets.ts`)\r\n- **Always merge** `.env` variables into `character.settings` (for all configs)\r\n- **Always merge** `.env` variables into `character.settings.secrets` (for secrets)\r\n- Respects priority: `.env` (defaults) < `character.json` (overrides)\r\n- Preserves `character.secrets` (root) for runtime-only secrets\r\n\r\n### Server Changes (`packages/server/src/loader.ts`)\r\n- Fixes priority order in `combinedSecrets` merge\r\n- `CHARACTER.*` prefixed environment variables now have highest priority\r\n- Correct order: `character.secrets` < `character.settings.secrets` < `CHARACTER.* prefix`\r\n\r\n### Priority Resolution Order\r\n```typescript\r\nruntime.getSetting(key) // Resolves in this order:\r\n1. character.secrets[key]           // Highest - runtime only (via setSetting)\r\n2. character.settings[key]          // High - merged with .env\r\n3. character.settings.secrets[key]  // Medium - merged with .env\r\n4. runtime.settings[key]            // Lowest - fallback\r\n```\r\n\r\n## What kind of change is this?\r\n\r\n**Bug fixes** (non-breaking change which fixes an issue)\r\n\r\n# Documentation changes needed?\r\n\r\nMy changes do not require a change to the project documentation, but could benefit from documentation explaining:\r\n- The priority order for `runtime.getSetting()`\r\n- When to use `character.settings` vs `character.settings.secrets` vs `character.secrets`\r\n- How to override settings at runtime with `CHARACTER.*` prefix\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n1. Review the test changes in `packages/core/src/__tests__/secrets.test.ts` to understand the new merge behavior\r\n2. Review the core logic changes in `packages/core/src/secrets.ts` (lines 21-65)\r\n3. Review the priority fix in `packages/server/src/loader.ts` (lines 136-147)\r\n\r\n## Detailed testing steps\r\n\r\n### Automated Tests\r\n```bash\r\ncd packages/core\r\nbun test src/__tests__/secrets.test.ts\r\nbun test src/__tests__/settings.test.ts\r\n```\r\n\r\n**Result**: ✅ All 57 tests pass\r\n\r\n### Manual Testing\r\n\r\n#### Test 1: Basic Merge\r\n1. Create a `.env` file:\r\n   ```env\r\n   OPENAI_API_KEY=sk-global-key\r\n   DATABASE_URL=postgres://localhost:5432/test\r\n   LOG_LEVEL=info\r\n   ```\r\n\r\n2. Create a `character.json`:\r\n   ```json\r\n   {\r\n     \"name\": \"test\",\r\n     \"bio\": \"test character\",\r\n     \"settings\": {\r\n       \"LOG_LEVEL\": \"debug\"\r\n     }\r\n   }\r\n   ```\r\n\r\n3. Load character and verify:\r\n   - `runtime.getSetting('OPENAI_API_KEY')` → `\"sk-global-key\"` (from .env)\r\n   - `runtime.getSetting('DATABASE_URL')` → `\"postgres://localhost:5432/test\"` (from .env)\r\n   - `runtime.getSetting('LOG_LEVEL')` → `\"debug\"` (character override)\r\n\r\n#### Test 2: Character Overrides\r\n1. Create `character.json` with secrets:\r\n   ```json\r\n   {\r\n     \"name\": \"test\",\r\n     \"bio\": \"test character\",\r\n     \"settings\": {\r\n       \"secrets\": {\r\n         \"OPENAI_API_KEY\": \"character-specific-key\"\r\n       }\r\n     }\r\n   }\r\n   ```\r\n\r\n2. Verify:\r\n   - `runtime.getSetting('OPENAI_API_KEY')` → `\"character-specific-key\"` (override)\r\n   - `runtime.getSetting('DATABASE_URL')` → `\"postgres://localhost:5432/test\"` (from .env)\r\n\r\n#### Test 3: Runtime Override\r\n1. Start with `CHARACTER.TEST.OPENAI_API_KEY=runtime-override`:\r\n   ```bash\r\n   CHARACTER.TEST.OPENAI_API_KEY=runtime-override npm start\r\n   ```\r\n\r\n2. Verify:\r\n   - `runtime.getSetting('OPENAI_API_KEY')` → `\"runtime-override\"` (highest priority)\r\n\r\n#### Test 4: Complex Settings Preservation\r\n1. Create `character.json` with complex settings:\r\n   ```json\r\n   {\r\n     \"name\": \"test\",\r\n     \"bio\": \"test character\",\r\n     \"settings\": {\r\n       \"discord\": {\r\n         \"shouldIgnoreBotMessages\": true,\r\n         \"allowedChannelIds\": [\"123\", \"456\"]\r\n       }\r\n     }\r\n   }\r\n   ```\r\n\r\n2. Verify:\r\n   - Complex objects are preserved\r\n   - `.env` variables are still accessible\r\n   - No corruption of nested structures\r\n\r\n## Test Coverage\r\n\r\n### New Tests Added\r\n- `secrets.test.ts`:\r\n  - ✅ Merge `.env` with existing `character.settings.secrets` (character overrides)\r\n  - ✅ Merge `.env` into `character.settings` (for non-secret configs)\r\n  - ✅ Do NOT touch `character.secrets` (root level)\r\n\r\n- `settings.test.ts`:\r\n  - ✅ Handle complex character settings without corrupting them during merge\r\n\r\n### Existing Tests\r\n- ✅ All 48 existing tests in `settings.test.ts` still pass\r\n- ✅ All 8 existing tests in `secrets.test.ts` updated and passing\r\n\r\n**Total**: 57/57 tests passing\r\n\r\n# Before and After Behavior\r\n\r\n## Before (Broken)\r\n\r\n```typescript\r\n// .env\r\nOPENAI_API_KEY=sk-global\r\nDATABASE_URL=postgres://localhost\r\n\r\n// character.json\r\n{\r\n  \"settings\": {\r\n    \"secrets\": {\r\n      \"CUSTOM_KEY\": \"value\"\r\n    }\r\n  }\r\n}\r\n\r\n// Result: .env is COMPLETELY IGNORED\r\nruntime.getSetting('OPENAI_API_KEY') → null ❌\r\nruntime.getSetting('DATABASE_URL') → null ❌\r\nruntime.getSetting('CUSTOM_KEY') → \"value\" ✅\r\n```\r\n\r\n## After (Fixed)\r\n\r\n```typescript\r\n// .env\r\nOPENAI_API_KEY=sk-global\r\nDATABASE_URL=postgres://localhost\r\n\r\n// character.json\r\n{\r\n  \"settings\": {\r\n    \"secrets\": {\r\n      \"CUSTOM_KEY\": \"value\"\r\n    }\r\n  }\r\n}\r\n\r\n// Result: Proper merge with correct priorities\r\nruntime.getSetting('OPENAI_API_KEY') → \"sk-global\" ✅\r\nruntime.getSetting('DATABASE_URL') → \"postgres://localhost\" ✅\r\nruntime.getSetting('CUSTOM_KEY') → \"value\" ✅\r\n```\r\n\r\n# Implementation Details\r\n\r\n# Deployment Notes\r\n\r\n## Database changes\r\n\r\nNone - this is pure runtime logic changes.\r\n\r\n## Deployment instructions\r\n\r\nStandard deployment - no special instructions needed:\r\n1. Merge PR\r\n2. Build packages: `bun run build`\r\n3. Deploy as usual\r\n\r\n## Migration Notes\r\n\r\n**No migration required** - this is fully backward compatible:\r\n- Existing characters without `.env` work the same\r\n- Existing characters with `.env` but no settings work the same\r\n- Existing characters with settings now properly get `.env` defaults (bug fix)\r\n\r\n# Verification Commands\r\n\r\n```bash\r\n# Build all packages\r\ncd elizaos/eliza\r\nbun run build\r\n\r\n# Run tests\r\ncd packages/core\r\nbun test src/__tests__/secrets.test.ts src/__tests__/settings.test.ts\r\n\r\n# Expected output: 57/57 tests passing\r\n```\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-10-28T16:50:24Z",
+      "mergedAt": "2025-10-28T17:23:08Z",
+      "additions": 146,
+      "deletions": 26
+    }
+  ],
+  "codeChanges": {
+    "additions": 146,
+    "deletions": 26,
+    "files": 5,
+    "commitCount": 29
+  },
+  "completedItems": [
+    {
+      "title": "fix: merge .env variables with character",
+      "prNumber": 6102,
+      "type": "bugfix",
+      "body": "# Relates to\r\n\r\nFixes the issue where `.env` variables are completely ignored when `character.settings.secrets` exists, preventing proper configuration merging between global defaults and character-specific overrides.\r\n\r\n# Risks\r\n\r\n**Low Ri",
+      "files": [
+        "packages/core/src/__tests__/secrets.test.ts",
+        "packages/core/src/__tests__/settings.test.ts",
+        "packages/core/src/elizaos.ts",
+        "packages/core/src/secrets.ts",
+        "packages/server/src/loader.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 48.22322898624445,
+      "prScore": 47.88322898624445,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 10.90875477931522,
+      "prScore": 5.90875477931522,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 4
+}
