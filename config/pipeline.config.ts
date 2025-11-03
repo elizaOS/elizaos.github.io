@@ -17,15 +17,11 @@ export default {
   contributionStartDate: "2024-10-15",
   // Repositories to track
   repositories: [
+    // Core platform
     {
       owner: "elizaos",
       name: "eliza",
       defaultBranch: "main",
-    },
-    {
-      owner: "elizaos",
-      name: "auto.fun",
-      defaultBranch: "develop",
     },
     {
       owner: "elizaos",
@@ -37,6 +33,23 @@ export default {
       name: "docs",
       defaultBranch: "main",
     },
+    // Applications
+    {
+      owner: "elizaos",
+      name: "x402.elizaos.ai",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos",
+      name: "spartan",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos",
+      name: "jeju",
+      defaultBranch: "main",
+    },
+    // Plugins
     {
       owner: "elizaos-plugins",
       name: "plugin-solana",
@@ -46,6 +59,51 @@ export default {
       owner: "elizaos-plugins",
       name: "plugin-knowledge",
       defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-chart",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-analytics",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-jupiter",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-trust",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-rolodex",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-birdeye",
+      defaultBranch: "1.x",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-digitaltwin",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-mysql",
+      defaultBranch: "main",
+    },
+    {
+      owner: "elizaos-plugins",
+      name: "plugin-elizaos-cloud",
+      defaultBranch: "main",
     },
     {
       owner: "elizaos-plugins",
