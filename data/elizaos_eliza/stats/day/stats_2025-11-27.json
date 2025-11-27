@@ -1,0 +1,160 @@
+{
+  "interval": {
+    "intervalStart": "2025-11-27T00:00:00.000Z",
+    "intervalEnd": "2025-11-28T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-11-27 to 2025-11-28, elizaos/eliza had 1 new PRs (2 merged), 0 new issues, and 4 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs607dMZ",
+      "title": "feat: Entity-level RLS & Security Improvements",
+      "author": "standujar",
+      "number": 6167,
+      "body": "## Summary\r\n\r\nThis PR implements four major improvements to ElizaOS's security, data architecture, and observability:\r\n\r\n1. **Entity-Level Row Level Security (RLS)** - PostgreSQL RLS policies for entity-based data isolation\r\n2. **Semantic Clarity Refactoring** - Renames `serverId` to `messageServerId` for clarity\r\n3. **Performance Optimization** - Efficient participant checking methods (`isRoomParticipant`, `isChannelParticipant`)\r\n4. **Timeline Action Spans Fix** - Correct inclusion of `action_event` logs in run timelines\r\n\r\nAll changes maintain full backward compatibility with existing deployments and plugins.\r\n\r\n---\r\n\r\n## Table of Contents\r\n\r\n1. [Architecture Overview](#architecture-overview)\r\n   - [Entity-Level RLS](#1-entity-level-row-level-security-rls)\r\n   - [Semantic Clarity](#2-semantic-clarity-serverid-vs-messageserverid)\r\n   - [Performance Optimization](#3-performance-optimization-participant-checking)\r\n   - [Timeline Action Spans Fix](#4-timeline-action-spans-fix)\r\n2. [Test Coverage](#test-coverage)\r\n3. [Database Migration](#database-migration)\r\n4. [Configuration](#configuration)\r\n\r\n---\r\n\r\n## Architecture Overview\r\n\r\n### 1. Entity-Level Row Level Security (RLS)\r\n\r\n**Problem**: ElizaOS needed fine-grained access control to isolate data by entity (users, agents, bots, etc.) within the same database.\r\n\r\n**Solution**: Implemented PostgreSQL RLS policies that automatically filter data based on the current entity context.\r\n\r\n**Benefits:**\r\n- ✅ **Data Isolation**: Each entity only sees its own data\r\n- ✅ **Automatic Enforcement**: RLS is enforced at the database level, preventing accidental data leaks\r\n- ✅ **Performance**: Database-level filtering is more efficient than application-level checks\r\n- ✅ **Security**: Even if application code has bugs, RLS prevents unauthorized access\r\n\r\n**Implementation:**\r\n- Added `current_entity_id()` PostgreSQL function to track current entity context via `app.entity_id` session variable\r\n- Created `add_entity_isolation()` function to apply RLS policies to tables\r\n- Two isolation strategies:\r\n  - **Direct ownership**: Tables with `entityId` or `authorId` columns\r\n  - **Shared access**: Tables with `roomId` that join to `participants` table\r\n- Integrated with entity context management in ElizaOS core\r\n\r\n**RLS Isolation Strategies:**\r\n\r\nThe system automatically detects which strategy to use based on table schema:\r\n\r\n**Strategy 1: Direct Entity Ownership**\r\n- Tables: `memories`, `tasks`, `components`\r\n- Policy: `entityId = current_entity_id()`\r\n- Effect: Users see only their own records\r\n\r\n**Strategy 2: Room-Based Shared Access**\r\n- Tables: `logs`, `messages` (via `roomId`)\r\n- Policy: `roomId IN (SELECT roomId FROM participants WHERE entityId = current_entity_id())`\r\n- Effect: Users see all records in rooms they're a participant in\r\n- **Key Benefit**: In a room with 3 participants, all 3 can see the same logs/messages\r\n\r\n---\r\n\r\n### 2. Server-Level Row Level Security (RLS)\r\n\r\n**Problem**: ElizaOS needed multi-tenant isolation to prevent data leakage between different server instances (deployments, environments).\r\n\r\n**Solution**: Implemented PostgreSQL RLS policies that automatically isolate data by ElizaOS server instance.\r\n\r\nAlready implemented: #6101\r\n\r\n---\r\n\r\n### 3. Semantic Clarity: `serverId` vs `messageServerId`\r\n\r\n#### Problem Statement\r\n\r\n##### Why `serverId` was problematic\r\n\r\nThe term `serverId` was ambiguous and created confusion in the codebase for multiple reasons:\r\n\r\n**1. Semantic Ambiguity**\r\n\r\nThe name `serverId` doesn't clearly indicate what type of server it refers to. In a distributed system like ElizaOS, \"server\" could mean:\r\n- Message servers (Discord, Telegram, Slack)\r\n- Application servers (ElizaOS instances)\r\n- Database servers\r\n- Authentication servers\r\n\r\nThis ambiguity made code harder to read and maintain.\r\n\r\n**2. Conflict with Row Level Security (RLS)**\r\n\r\nElizaOS uses PostgreSQL Row Level Security for multi-tenant isolation. In this context:\r\n- `server_id` in RLS refers to the **ElizaOS server instance** (for tenant isolation)\r\n- `serverId` in messaging refers to **external message platforms** (Discord guild, Telegram bot, etc.)\r\n\r\n**Key distinction:**\r\n- ONE ElizaOS server instance (`server_id = \"abc-123\"`) can connect to MULTIPLE message servers\r\n  - Discord guilds (`messageServerId = \"discord-1\"`, `messageServerId = \"discord-2\"`)\r\n  - Telegram bots (`messageServerId = \"telegram-1\"`)\r\n\r\nThis dual meaning created confusion:\r\n\r\n```typescript\r\n// Which serverId is this? ElizaOS instance or Discord guild?\r\nconst room = await adapter.getRoom({ serverId, roomId });\r\n\r\n// Is this filtering by tenant or by Discord server?\r\nawait adapter.getRoomsByServerId(serverId);\r\n```\r\n\r\n**3. Developer Confusion**\r\n\r\nWhen working on features involving both RLS and messaging:\r\n- Setting RLS policies with `server_id` (tenant isolation)\r\n- Querying rooms by `serverId` (message platform)\r\n\r\nSame name, completely different concepts → bugs and confusion\r\n\r\n**4. API Inconsistency**\r\n\r\nAPI routes like `/api/agents/:agentId/servers/:serverId/channels` didn't clearly communicate that `serverId` refers to a messaging platform, not an ElizaOS server.\r\n\r\n#### Solution\r\n\r\nRename message-related `serverId` to `messageServerId` to:\r\n- **Clearly indicate purpose**: It's the ID of an external messaging platform\r\n- **Avoid RLS conflicts**: RLS continues using `server_id` for tenant isolation\r\n- **Improve maintainability**: Code is self-documenting and semantically clear\r\n- **Better API design**: Routes like `/api/agents/:agentId/message-servers/:messageServerId/channels` are crystal clear\r\n\r\n---\r\n\r\n### 4. Performance Optimization: Participant Checking\r\n\r\n**Problem**: Checking if an entity is a participant required loading ALL participants into memory and using `.some()` - O(n) complexity.\r\n\r\n**Solution**: Added direct database existence checks - O(1) complexity.\r\n\r\n**New Methods:**\r\n- `isRoomParticipant(entityId, roomId)` - Direct DB query\r\n- `isChannelParticipant(entityId, channelId)` - Direct DB query\r\n\r\n**Benefits:**\r\n- **Constant time complexity** - O(1) instead of O(n)\r\n- **Lower memory usage** - No loading all participants\r\n- **Better scalability** - Handles rooms with 1000+ participants\r\n- **Database indexes** - Optimized queries\r\n\r\n**Implementation:**\r\n\r\n```typescript\r\n// OLD: O(n) - Load all participants into memory\r\nasync isParticipant(entityId: UUID, roomId: UUID): Promise<boolean> {\r\n  const participants = await this.getParticipantsForRoom(roomId);\r\n  return participants.some(p => p === entityId);\r\n}\r\n\r\n// NEW: O(1) - Direct database existence check\r\nasync isRoomParticipant(entityId: UUID, roomId: UUID): Promise<boolean> {\r\n  return this.withEntityContext(null, async (tx) => {\r\n    const result = await tx\r\n      .select({ exists: sql<number>`1` })\r\n      .from(participantTable)\r\n      .where(\r\n        and(\r\n          eq(participantTable.roomId, roomId),\r\n          eq(participantTable.entityId, entityId)\r\n        )\r\n      )\r\n      .limit(1);\r\n    return result.length > 0;\r\n  });\r\n}\r\n```\r\n\r\n**Impact on Authorization Checks:**\r\n\r\nBefore:\r\n```typescript\r\n// Load 1000 participants into memory\r\nconst participants = await runtime.getParticipantsForRoom(roomId);\r\nif (!participants.includes(entityId)) {\r\n  return sendError(res, 403, 'FORBIDDEN', 'Not a participant');\r\n}\r\n```\r\n\r\nAfter:\r\n```typescript\r\n// Single indexed DB query\r\nif (!(await runtime.isRoomParticipant(entityId, roomId))) {\r\n  return sendError(res, 403, 'FORBIDDEN', 'Not a participant');\r\n}\r\n```\r\n\r\n---\r\n\r\n### 5. Timeline Action Spans Fix\r\n\r\n**Problem**: The Timeline tab showed run summaries with action counts (e.g., \"11 spans\") but didn't display individual action details (REPLY, GET_TOKEN_CRYPTOSCORE, etc.). Only model calls (TEXT_LARGE, TEXT_EMBEDDING) were visible.\r\n\r\n**Root Cause**:\r\n\r\nElizaOS creates two types of logs for actions:\r\n- `action_event`: Logged when action STARTS (contains `runId` of the action, NO `parentRunId`)\r\n- `action`: Logged when action COMPLETES (contains `runId` of the action AND `parentRunId` pointing to main run)\r\n\r\n**Example from database:**\r\n\r\n```sql\r\n-- Main run\r\nrunId: c29cc856-4ee0-435b-a5ca-b81f76f7ef43\r\n\r\n-- Action completion log (type: 'action')\r\nrunId: 03286e8f-6eff-4c48-b0b9-e92cf2c52d0a  -- action's run\r\nparentRunId: c29cc856-4ee0-435b-a5ca-b81f76f7ef43  -- main run ✅\r\n\r\n-- Action start log (type: 'action_event')\r\nrunId: 03286e8f-6eff-4c48-b0b9-e92cf2c52d0a  -- action's run\r\nparentRunId: NULL  -- ❌ no link to main run\r\n```\r\n\r\n**The Filter Problem:**\r\n\r\nThe original filter in `runs.ts` only matched logs where:\r\n```typescript\r\nbody.runId === runId || body.parentRunId === runId\r\n```\r\n\r\nFor main run `c29cc856...`:\r\n- ✅ `action` logs matched (via `parentRunId`)\r\n- ❌ `action_event` logs didn't match (neither `runId` nor `parentRunId` matched)\r\n\r\n**Frontend Behavior:**\r\n\r\nThe frontend (`eliza-span-adapter.ts`) requires BOTH events:\r\n- `ACTION_STARTED` (from `action_event` logs) → **creates** the action span\r\n- `ACTION_COMPLETED` (from `action` logs) → **updates** the existing span\r\n\r\nWithout `ACTION_STARTED` events:\r\n- Action spans never created\r\n- `ACTION_COMPLETED` events try to update non-existent spans\r\n- Actions invisible in timeline UI\r\n\r\n**Solution:**\r\n\r\nModified the filter logic in [`runs.ts:439-466`](/Users/stanislasandujar/Projects/elizaos/eliza/packages/server/src/api/agents/runs.ts#L439-L466):\r\n\r\n```typescript\r\n// Step 1: Find directly related logs (run_event, action, etc.)\r\nconst directlyRelated = logs.filter((l) => {\r\n  const body = l.body as { runId?: UUID; parentRunId?: UUID };\r\n  return body.runId === runId || body.parentRunId === runId;\r\n});\r\n\r\n// Step 2: Extract action runIds from matched action completion logs\r\nconst actionRunIds = new Set(\r\n  directlyRelated\r\n    .filter((l) => l.type === 'action')\r\n    .map((l) => (l.body as { runId?: UUID }).runId)\r\n    .filter((id): id is UUID => !!id)\r\n);\r\n\r\n// Step 3: Include action_event logs that share runId with matched actions\r\nconst related = logs.filter((l) => {\r\n  const body = l.body as { runId?: UUID; parentRunId?: UUID };\r\n\r\n  // Include if directly related to main run\r\n  if (body.runId === runId || body.parentRunId === runId) {\r\n    return true;\r\n  }\r\n\r\n  // Also include action_event logs matching action runIds\r\n  if (l.type === 'action_event' && body.runId && actionRunIds.has(body.runId)) {\r\n    return true;\r\n  }\r\n\r\n  return false;\r\n});\r\n```\r\n\r\n**How it Works:**\r\n\r\n1. **First pass**: Find all logs directly related to the main run\r\n   - Includes `action` completion logs (via `parentRunId`)\r\n   - Includes `run_event`, model calls, etc.\r\n\r\n2. **Extract action IDs**: Collect all `runId` values from the matched `action` logs\r\n   - These are the action-specific run IDs\r\n\r\n3. **Second pass**: Also include `action_event` logs that share those action run IDs\r\n   - Even though they don't link to the main run via `parentRunId`\r\n   - They're identified by matching the action's `runId`\r\n\r\n**Result:**\r\n\r\nNow the API returns complete action data:\r\n- `ACTION_STARTED` events (from `action_event` logs)\r\n- `ACTION_COMPLETED` events (from `action` logs)\r\n\r\nFrontend can now:\r\n- Create action spans on `ACTION_STARTED`\r\n- Update them on `ACTION_COMPLETED`\r\n- Display actions in timeline alongside model calls\r\n\r\n**Files Modified:**\r\n- [`packages/server/src/api/agents/runs.ts`](/Users/stanislasandujar/Projects/elizaos/eliza/packages/server/src/api/agents/runs.ts#L439-L466)\r\n\r\n**Impact:**\r\n- ✅ Timeline now shows ALL spans (actions + model calls)\r\n- ✅ Action details visible (REPLY, GET_TOKEN_CRYPTOSCORE, etc.)\r\n- ✅ Accurate span counts match displayed spans\r\n- ✅ Complete observability for debugging agent behavior\r\n\r\n---\r\n\r\n### 6. RLS Security for Junction Table\r\n\r\n**Problem Identified**: Without RLS on `message_server_agents`, Server A could see the existence of Discord/Telegram servers linked to Server B's agents.\r\n\r\n**Solution**: The RLS system automatically adds isolation to the junction table:\r\n\r\n- Adds `server_id UUID DEFAULT current_server_id()` column\r\n- Creates `server_isolation_policy` for complete isolation\r\n- Server A cannot see or modify Server B's message server associations\r\n\r\n---\r\n\r\n## Test Coverage\r\n\r\n### All Tests Passing ✅\r\n\r\n**RLS Tests**: 77 tests pass, 0 fail, 173 expect() calls\r\n\r\n**Participant Tests**: 11 tests pass, 0 fail, 27 expect() calls\r\n- 5 tests in `participant.test.ts` (3 new for `isRoomParticipant`)\r\n- 6 tests in `messaging.test.ts` (2 new for `isChannelParticipant`)\r\n\r\n**Timeline Tests**: Integration tests verify action spans display correctly\r\n- Run detail API returns both `ACTION_STARTED` and `ACTION_COMPLETED` events\r\n- Frontend renders action spans with correct names and status\r\n- Span counts match displayed spans\r\n\r\n### Test Files\r\n\r\n**Unit Tests - Entity RLS** (`entity-rls.test.ts`)\r\n- Column detection priority (`roomId` > `entityId` > `authorId`)\r\n- Policy generation (STRICT vs PERMISSIVE modes)\r\n- Isolation behavior logic\r\n\r\n**Integration Tests - Entity RLS** (`rls-entity.test.ts`)\r\n- Entity isolation (Alice, Bob, Charlie)\r\n- Participant-based access control (room membership)\r\n- Combined Server RLS + Entity RLS (double isolation)\r\n\r\n**Integration Tests - message_server_agents** (`rls-message-server-agents.test.ts`)\r\n- Isolation: Server A sees only its 2 associations, Server B sees only its 1\r\n- Auto-population: `server_id` automatically set via `DEFAULT current_server_id()`\r\n- Query blocking: Server A queries Server B's message server → 0 results\r\n- Modification blocking: Server B tries to delete Server A's association → blocked\r\n- JOIN protection: Cross-server JOINs filtered correctly\r\n- Schema validation: Policy and DEFAULT constraint verified\r\n\r\n**Room Integration Tests** (5/5 passing)\r\n- Added test: `should map messageServerId to serverId for backward compatibility`\r\n- Verifies both fields are populated correctly\r\n\r\n**Timeline Integration Tests**\r\n- Verifies `action_event` logs included in run details\r\n- Confirms `ACTION_STARTED` events generated\r\n- Validates action spans display in frontend\r\n\r\n---\r\n\r\n## Breaking Changes\r\n\r\n**None**. All changes are fully backward compatible.\r\n\r\n---\r\n\r\n## Benefits\r\n\r\n### Code Clarity\r\n- **Developers immediately understand what `messageServerId` refers to**\r\n- **Self-documenting code**: No additional comments needed\r\n- **Clear method names**: `isChannelParticipant()` vs generic checks\r\n\r\n### Security\r\n- **Three-layer security**: Server RLS + Entity RLS + Application Authorization\r\n- **Complete RLS isolation** for both Server-level and Entity-level data\r\n- **Fail-closed** security model (deny access on errors)\r\n- **Database-enforced** isolation (can't be bypassed by application bugs)\r\n- **Zero Configuration**: RLS policies apply automatically to all tables\r\n\r\n### Developer Experience\r\n- **Reduced Bugs**: No more confusion between RLS `server_id` and messaging `serverId`\r\n- **Better Onboarding**: New developers don't need to guess which \"server\" is referenced\r\n- **Future-Proof**: Clear naming prevents similar ambiguities in future development\r\n- **Backward Compatible**: Existing code continues to work\r\n- **Type Safety**: TypeScript guides migration with deprecation warnings\r\n\r\n### Performance\r\n- **O(1) participant checks**: Constant time instead of linear\r\n- **Lower memory usage**: No loading all participants\r\n- **Database optimization**: Indexed queries for fast lookups\r\n- **Scalable**: Handles rooms with thousands of participants\r\n\r\n### Observability\r\n- **Complete timeline visibility**: All actions and model calls displayed\r\n- **Accurate span counts**: Numbers match displayed spans\r\n- **Better debugging**: See exactly what actions executed and when\r\n- **Production monitoring**: Full observability for agent behavior analysis\r\n\r\n### Testing\r\n- **Comprehensive Testing**: 88+ total tests ensure complete coverage\r\n- **All tests passing**: 0 failures, 200+ assertions\r\n- **Integration tests**: Real database scenarios\r\n- **Performance tests**: Verify optimization improvements\r\n- **Security tests**: RLS isolation, unauthorized access prevention\r\n\r\n---\r\n\r\n## Database Migration\r\n\r\n### Automatic Migration System\r\n\r\nThe migration system automatically handles:\r\n\r\n1. **Table rename**: `server_agents` → `message_server_agents`\r\n2. **Column rename**: `server_id` → `message_server_id` in junction table\r\n3. **RLS automatic application**:\r\n   - Adds `server_id` column with `DEFAULT current_server_id()` to all tables\r\n   - Creates indexes for performance\r\n   - Applies isolation policies (both server-level and entity-level)\r\n   - Handles backfill for existing data\r\n\r\n**Developer experience:**\r\n- **Zero configuration required** - just update and restart\r\n- **No manual SQL scripts** - everything is automated\r\n- **Idempotent and safe** - can be run multiple times without issues\r\n\r\n---\r\n\r\n## RLS Architecture Details\r\n\r\n### Three-Layer Security Model\r\n\r\n**Layer 1: Server RLS (Multi-Tenant Isolation)**\r\n- Isolates data between different ElizaOS server instances\r\n- Uses `server_id` for isolation\r\n- Context set via `application_name` connection parameter\r\n\r\n**Layer 2: Entity RLS (User Privacy Isolation)**\r\n- Isolates data between different entities within a server\r\n- Uses `entityId`, `authorId`, or joins via `participants` table\r\n- Context set via `app.entity_id` transaction-local variable\r\n- Provides DM privacy and multi-user isolation\r\n\r\n**Layer 3: Application Layer**\r\n- Authorization checks (participant validation)\r\n- Business logic enforcement\r\n\r\n**All three layers stack** - a user can only see data from their server AND their accessible entities AND that they have permission to access.\r\n\r\n### Excluded Tables (with rationale)\r\n\r\n**Entity RLS Exclusions:**\r\n- `users` - Authentication table (no entity isolation needed)\r\n- `entity_mappings` - Cross-platform entity mapping\r\n- `drizzle_migrations`, `__drizzle_migrations` - Migration tracking\r\n- `agents` - Shared across entities\r\n- `owners` - RLS management table\r\n\r\nAll other tables receive RLS automatically based on their column structure.\r\n\r\n---\r\n\r\n## Configuration\r\n\r\n### Environment Variables\r\n\r\n```bash\r\n# Layer 1: Server RLS (Multi-tenant isolation)\r\nENABLE_RLS_ISOLATION=true                  # Enable Row Level Security\r\nRLS_OWNER_ID=my-server-uuid               # Server instance ID for multi-tenant isolation\r\n\r\n# Layer 2: Entity RLS (User privacy isolation)\r\nENABLE_DATA_ISOLATION=true                # Enable entity-level data isolation\r\n\r\n# Database\r\nPOSTGRES_URL=postgresql://user:password@localhost:5432/eliza\r\n```\r\n\r\n---\r\n\r\n## API Changes\r\n\r\n### Backward Compatibility\r\n\r\nAll API changes maintain backward compatibility:\r\n\r\n**Database Adapter Methods:**\r\n- ✅ New methods added: `isRoomParticipant()`, `isChannelParticipant()`\r\n- ✅ Existing methods unchanged\r\n- ✅ `serverId` field still populated (maps to `messageServerId`)\r\n\r\n**API Endpoints:**\r\n- ✅ All existing endpoints continue to work\r\n- ✅ Run detail endpoint now includes `action_event` logs\r\n- ✅ No breaking changes to request/response formats\r\n\r\n**TypeScript:**\r\n- ✅ `serverId` marked as deprecated (still works)\r\n- ✅ Migration path via TypeScript warnings\r\n- ✅ Type safety preserved\r\n\r\n---\r\n\r\n## Summary\r\n\r\nThis PR delivers a complete security, performance, and observability overhaul:\r\n\r\n- **Entity-Level RLS**: Automatic data isolation at the database level\r\n- **Semantic Clarity**: Clear naming eliminates confusion\r\n- **Performance Optimization**: O(1) participant checking\r\n- **Timeline Fix**: Complete action visibility in observability UI\r\n- **100% Backward Compatible**: Zero breaking changes\r\n- **Fully Tested**: 88+ tests, 0 failures\r\n- **Production Ready**: Auto-migration, fail-closed security\r\n\r\n**Impact:**\r\n- 🔒 **Stronger security** with three-layer isolation (Server RLS + Entity RLS + Authorization)\r\n- 📖 **Clearer code** with semantic naming\r\n- 🚀 **Better performance** with optimized queries\r\n- 👁️ **Complete observability** with action spans in timelines\r\n- 🛡️ **Database-enforced** security that can't be bypassed\r\n- 🔧 **Developer-friendly** zero-config automatic migrations\r\n\r\n**Testing:**\r\n- ✅ 77 RLS tests passing\r\n- ✅ 11 participant optimization tests passing\r\n- ✅ Timeline integration tests passing\r\n- ✅ All existing tests passing\r\n- ✅ 0 failures\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-11-22T01:44:49Z",
+      "mergedAt": "2025-11-27T09:14:36Z",
+      "additions": 6118,
+      "deletions": 2157
+    },
+    {
+      "id": "PR_kwDOMT5cIs610jWx",
+      "title": "fix: dynamic prompt normalization follow-up",
+      "author": "wtfsayo",
+      "number": 6192,
+      "body": "## Summary\n- normalize structured responses from dynamicPromptExecFromState for both XML and JSON outputs\n- relax required field validation to allow legitimate falsy values\n- add regression tests exercising JSON normalization and falsy required fields\n\n## Testing\n- bun test src/__tests__/runtime.test.ts\n- bun test src/__tests__/message-service.test.ts\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> Normalizes dynamicPromptExecFromState structured outputs (arrays/booleans), relaxes required-field checks, adds tests, and supports contextCheckLevel 0|1|2.\n> \n> - **Core Runtime (`packages/core/src/runtime.ts`)**:\n>   - Normalize structured responses via `_normalizeStructuredResponse`:\n>     - Coerce `actions`, `providers`, `evaluators` to string arrays (comma/string/array inputs).\n>     - Coerce `simple` to boolean using `parseBooleanFromText`.\n>   - Apply normalization to parsed LLM output; improve typing of `responseContent`.\n>   - Relax `requiredFields` validation to allow present-but-falsy values (empty string/object/array handling).\n>   - Import `parseBooleanFromText`; minor code cleanups.\n> - **Types (`packages/core/src/types/runtime.ts`)**:\n>   - Expand `options.contextCheckLevel` to `0 | 1 | 2`.\n> - **Tests (`packages/core/src/__tests__/runtime.test.ts`)**:\n>   - Add regression tests for JSON normalization and falsy required fields in `dynamicPromptExecFromState`.\n>   - Extend DB adapter mock with `isRoomParticipant`; minor test tidy-ups.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 0c1e1fdfe9efd01d97e23c08678a2a084f275f5d. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-11-27T10:30:43Z",
+      "mergedAt": "2025-11-27T10:40:44Z",
+      "additions": 161,
+      "deletions": 14
+    }
+  ],
+  "codeChanges": {
+    "additions": 885,
+    "deletions": 291,
+    "files": 53,
+    "commitCount": 15
+  },
+  "completedItems": [
+    {
+      "title": "feat: Entity-level RLS & Security Improvements",
+      "prNumber": 6167,
+      "type": "feature",
+      "body": "## Summary\r\n\r\nThis PR implements four major improvements to ElizaOS's security, data architecture, and observability:\r\n\r\n1. **Entity-Level Row Level Security (RLS)** - PostgreSQL RLS policies for entity-based data isolation\r\n2. **Semantic C",
+      "files": [
+        ".github/workflows/client-cypress-tests.yml",
+        "bun.lock",
+        "examples/standalone-cli-chat.ts",
+        "examples/standalone.ts",
+        "packages/api-client/src/__tests__/services/media.test.ts",
+        "packages/api-client/src/__tests__/services/memory.test.ts",
+        "packages/api-client/src/__tests__/services/messaging.test.ts",
+        "packages/api-client/src/services/agents.ts",
+        "packages/api-client/src/services/media.ts",
+        "packages/api-client/src/services/memory.ts",
+        "packages/api-client/src/services/messaging.ts",
+        "packages/api-client/src/types/memory.ts",
+        "packages/api-client/src/types/messaging.ts",
+        "packages/cli/src/commands/scenario/src/ConversationManager.ts",
+        "packages/cli/src/commands/scenario/src/runtime-factory.ts",
+        "packages/cli/tests/commands/dev.test.ts",
+        "packages/cli/tests/commands/plugins.test.ts",
+        "packages/cli/tests/integration/version-display.test.ts",
+        "packages/client/cypress.config.cjs",
+        "packages/client/cypress/e2e/01-home-page.cy.ts",
+        "packages/client/cypress/e2e/02-chat-functionality.cy.ts",
+        "packages/client/cypress/e2e/03-spa-routing.cy.ts",
+        "packages/client/cypress/support/auth-commands.ts",
+        "packages/client/cypress/support/commands.ts",
+        "packages/client/cypress/support/e2e.ts",
+        "packages/client/docker-compose.test.yml",
+        "packages/client/package.json",
+        "packages/client/scripts/test-e2e-server-auth.sh",
+        "packages/client/scripts/test-e2e-server.sh",
+        "packages/client/src/App.tsx",
+        "packages/client/src/components/agent-creator.tsx",
+        "packages/client/src/components/agent-log-viewer.tsx",
+        "packages/client/src/components/agent-runs/AgentRunTimeline.tsx",
+        "packages/client/src/components/agent-settings.tsx",
+        "packages/client/src/components/app-sidebar.tsx",
+        "packages/client/src/components/audio-recorder.tsx",
+        "packages/client/src/components/character-form.tsx",
+        "packages/client/src/components/chat.tsx",
+        "packages/client/src/components/connection-error-banner.tsx",
+        "packages/client/src/components/connection-status.cy.tsx",
+        "packages/client/src/components/connection-status.tsx",
+        "packages/client/src/components/env-settings.tsx",
+        "packages/client/src/components/group-card.tsx",
+        "packages/client/src/components/group-panel.tsx",
+        "packages/client/src/components/secret-panel.tsx",
+        "packages/client/src/components/server-management.tsx",
+        "packages/client/src/components/ui/chat/chat-tts-button.tsx",
+        "packages/client/src/context/AuthContext.tsx",
+        "packages/client/src/context/ConnectionContext.tsx",
+        "packages/client/src/hooks/__tests__/use-character-convert.test.ts"
+      ]
+    },
+    {
+      "title": "fix: dynamic prompt normalization follow-up",
+      "prNumber": 6192,
+      "type": "bugfix",
+      "body": "## Summary\n- normalize structured responses from dynamicPromptExecFromState for both XML and JSON outputs\n- relax required field validation to allow legitimate falsy values\n- add regression tests exercising JSON normalization and falsy requ",
+      "files": [
+        "packages/core/src/__tests__/runtime.test.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/types/runtime.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 50.73149379599165,
+      "prScore": 50.73149379599165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 37.93972599255723,
+      "prScore": 37.93972599255723,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 5.71971895621705,
+      "prScore": 5.71971895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 4
+}
