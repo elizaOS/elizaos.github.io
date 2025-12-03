@@ -1,0 +1,90 @@
+{
+  "interval": {
+    "intervalStart": "2025-12-03T00:00:00.000Z",
+    "intervalEnd": "2025-12-04T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-12-03 to 2025-12-04, elizaos/eliza had 2 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs620Si3",
+      "title": "feat(auth): implement JWT authentication and user management",
+      "author": "standujar",
+      "number": 6200,
+      "body": "## Relates to\r\n\r\n- Data isolation / multi-entity support\r\n- External JWT provider integration (Privy, Auth0, Clerk, Supabase, Google, Embbeded)\r\n\r\n## Risks\r\n\r\n**Low**\r\n\r\n- Requires `ENABLE_DATA_ISOLATION=true` to activate JWT auth mode\r\n\r\n## Background\r\n\r\n### What does this PR do?\r\n\r\nImplements a complete JWT authentication system for ElizaOS with support for multiple verification strategies:\r\n\r\n1. **JWT Verifier Factory** - Priority-based verifier selection:\r\n   - Ed25519 (highest priority) - For self-signed JWTs with Ed25519 keys\r\n   - JWKS (medium priority) - For external providers (Auth0, Clerk, Privy, Supabase, Google)\r\n   - Secret (lowest priority) - For simple HS256 symmetric key verification\r\n\r\n2. **Entity ID derivation from JWT `sub` claim**:\r\n   - `entityId = stringToUuid(payload.sub)`\r\n   - Compatible with ANY JWT provider since `sub` is a standard claim\r\n   - No custom claims needed in external JWTs\r\n\r\n3. **Dual authentication modes**:\r\n   - `ENABLE_DATA_ISOLATION=true` → JWT authentication required\r\n   - `ENABLE_DATA_ISOLATION=false` → X-Entity-Id header (legacy mode)\r\n\r\n4. **Internal service bypass** - Process-local UUID secret for service-to-service calls\r\n\r\n5. **Credentials-based auth endpoints** (`/api/auth/*`) - only in custom - JWT-SECRET mode:\r\n   - `POST /register` - User registration with bcrypt password hashing\r\n   - `POST /login` - User login with JWT generation\r\n   - `POST /refresh` - Token refresh\r\n   - `GET /me` - Current user info\r\n\r\n6. **Client UI default implementation using self mode (Secret)\r\n\r\n### What kind of change is this?\r\n\r\n**Features** (non-breaking change which adds functionality)\r\n\r\n## Architecture\r\n\r\n```\r\n┌─────────────────────────────────────────────────────────────────┐\r\n│                    JWT Verification Flow                         │\r\n├─────────────────────────────────────────────────────────────────┤\r\n│  Request with Bearer token                                       │\r\n│       ↓                                                          │\r\n│  JWTVerifierFactory.create()                                     │\r\n│       ↓                                                          │\r\n│  Priority: Ed25519 > JWKS > Secret > Disabled                   │\r\n│       ↓                                                          │\r\n│  verifier.verify(token)                                          │\r\n│       ↓                                                          │\r\n│  Extract payload.sub                                             │\r\n│       ↓                                                          │\r\n│  entityId = stringToUuid(sub)  ← Derived, NOT stored in JWT     │\r\n│       ↓                                                          │\r\n│  req.entityId = entityId                                         │\r\n└─────────────────────────────────────────────────────────────────┘\r\n```\r\n\r\n## Environment Variables\r\n\r\n| Variable | Description | Example |\r\n|----------|-------------|---------|\r\n| `ENABLE_DATA_ISOLATION` | Enable JWT auth mode | `true` |\r\n| `JWT_SECRET` (optional) | HS256 symmetric secret | `your-secret-key` |\r\n| `JWT_PUBLIC_KEY_ED25519` (optional) | Ed25519 public key (base64) | `MCowBQYDK2Vw...` |\r\n| `JWT_JWKS_URI` (optional) | JWKS endpoint URL | `https://auth0.com/.well-known/jwks.json` |\r\n| `JWT_ISSUER_WHITELIST` (optional) | Allowed issuers (comma-separated) | `https://auth0.com/,https://clerk.dev` |\r\n\r\n## Documentation changes needed?\r\n\r\nYes - Documentation should be added for:\r\n- Environment variable configuration\r\n- External provider setup (Auth0, Clerk, Privy examples)\r\n\r\n## Testing\r\n\r\n### Where should a reviewer start?\r\n\r\n1. `packages/server/src/services/jwt-verifiers/factory.ts` - Core factory logic\r\n2. `packages/server/src/middleware/jwtMiddleware.ts` - HTTP middleware\r\n3. `packages/server/src/socketio/index.ts` - SocketIO authentication\r\n\r\n### Detailed testing steps\r\n\r\n**Unit Tests:**\r\n```bash\r\ncd packages/server\r\nbun run test:unit\r\n```\r\n\r\n**Integration Tests:**\r\n```bash\r\ncd packages/server\r\nbun run test:integration\r\n```\r\n\r\n**Results:** 489 unit tests pass, 6 integration test files pass\r\n\r\n### Manual Testing\r\n\r\n1. **Test with JWT_SECRET (HS256):**\r\n```bash\r\nENABLE_DATA_ISOLATION=true JWT_SECRET=test-secret bun run dev\r\n```\r\n\r\n2. **Register a user:**\r\n```bash\r\ncurl -X POST http://localhost:3000/api/auth/register \\\r\n  -H \"Content-Type: application/json\" \\\r\n  -d '{\"email\":\"test@example.com\",\"username\":\"testuser\",\"password\":\"password123\"}'\r\n```\r\n\r\n3. **Use returned token:**\r\n```bash\r\ncurl http://localhost:3000/api/agents \\\r\n  -H \"Authorization: Bearer <token>\"\r\n```\r\n\r\n## External Provider Compatibility\r\n\r\nTested JWT formats:\r\n- **Auth0**: `sub: \"auth0|1234567890\"`\r\n- **Clerk**: `sub: \"user_2abcdefgh123456\"`\r\n- **Google**: `sub: \"1234567890\"` with `email`, `email_verified`\r\n- **Supabase**: `sub: \"uuid\"` with `role: \"authenticated\"`\r\n- **Privy**: `sub: \"did:privy:...\"`\r\n\r\nAll providers work because we only require the standard `sub` claim.\r\n\r\n## Next Idea Steps: Access Control Layer (ACL)\r\n\r\nThe next phase will add access control on agents and rooms: \r\n\r\nAgents:\r\n- Each user can create their own agents (ownerId = entityId)\r\n- Visibility: public or private\r\n- Private = only the owner can chat with it\r\n- Public = everyone can chat, but only the owner can modify/delete\r\n\r\nRooms:\r\n- Each room has an owner\r\nOnly the owner can:\r\n- Delete the room (DELETE /rooms/:id)\r\n- Clear message history (DELETE /rooms/:id/messages)\r\n- Change visibility\r\n\r\nThis will enable true multi-tenant mode where each user manages their resources in isolation.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-12-03T11:55:47Z",
+      "mergedAt": null,
+      "additions": 5918,
+      "deletions": 351
+    },
+    {
+      "id": "PR_kwDOMT5cIs623me3",
+      "title": "feat: Unified API - serverless - nodejs",
+      "author": "standujar",
+      "number": 6201,
+      "body": "",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-12-03T16:15:31Z",
+      "mergedAt": null,
+      "additions": 324,
+      "deletions": 88
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 5
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 67.60239287897869,
+      "prScore": 67.60239287897869,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 33.31247180559945,
+      "prScore": 33.31247180559945,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-advanced-security",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
