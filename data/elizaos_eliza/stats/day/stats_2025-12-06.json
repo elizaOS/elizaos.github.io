@@ -1,0 +1,111 @@
+{
+  "interval": {
+    "intervalStart": "2025-12-06T00:00:00.000Z",
+    "intervalEnd": "2025-12-07T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2025-12-06 to 2025-12-07, elizaos/eliza had 3 new PRs (1 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs63dqrL",
+      "title": "[DRAFT] feat(core): Implement parallel action execution in processActions",
+      "author": "wtfsayo",
+      "number": 6209,
+      "body": "## Summary\n\nThis PR implements parallel action execution within the `processActions()` method to improve performance for multi-action responses.\n\n## Changes\n\n### Core Runtime (`packages/core/src/runtime.ts`)\n- Execute actions within a single response batch **in parallel** using `Promise.allSettled()`\n- All actions in a batch receive the **same initial state snapshot**\n- State accumulates **sequentially between response batches**\n- Merge all `ActionResult.values` after parallel batch completes\n- Preserve fault tolerance: if one action fails, others still complete\n\n### Prompts (`packages/core/src/prompts.ts`)\n- Updated `messageHandlerTemplate` to reflect parallel execution model\n- Changed \"IMPORTANT ACTION ORDERING RULES\" to \"IMPORTANT ACTION EXECUTION RULES\"\n- Clarified that actions listed in a single response execute in parallel\n- Added guidance to use multi-step workflow for sequential dependencies\n\n### Action State Provider (`packages/plugin-bootstrap/src/providers/actionState.ts`)\n- Updated JSDoc and description to clarify \"previous results\" refers to prior response batches, not sibling parallel actions\n\n### Tests\n- Updated `runtime.test.ts` to match new state initialization behavior\n- Updated `prompts.test.ts` to match new prompt text\n\n## Key Data Flow\n\n```\nResponse 1: [action1, action2, action3]\n  ├─> Execute ALL in parallel with initialState\n  ├─> Wait for all to complete\n  └─> Merge results → accumulatedState\n\nResponse 2: [action4, action5]\n  ├─> Execute ALL in parallel with accumulatedState from Response 1\n  ├─> Wait for all to complete\n  └─> Merge results → new accumulatedState\n```\n\n## Testing\n\n- All existing runtime tests pass\n- All prompt tests pass\n- All multi-step workflow tests pass\n- Action chaining tests pass\n\n## Breaking Changes\n\nNone - backward compatible. Actions that previously assumed sequential execution within a batch will now run in parallel, but since they all receive the same state snapshot, behavior should be equivalent for independent actions.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> Execute actions in a response batch in parallel with a shared state snapshot, accumulate results across batches, and introduce AsyncLocalStorage-based prompt tracking with prompt/provider/test updates.\n> \n> - **Core (runtime.ts)**:\n>   - Parallelize `processActions` per response using `Promise.allSettled()`; each batch shares a composed state snapshot; accumulate `ActionResult.values` and plan state between batches.\n>   - Add robust action resolution (exact/fuzzy/similes), error paths for missing action/handler, and consistent action memory/logging.\n>   - Preserve legacy returns (void/boolean) as completed; treat `{ success:false }` (including minimal/error-only) as failed.\n>   - Merge working memory with size cap; cache `action_results`; update action plan immutably per step.\n>   - Introduce AsyncLocalStorage context: `ActionContextStore`, `getCurrentActionContext`, and browser fallback `createBrowserFallback` for prompt collection; include action context in `useModel` logs; skip collecting `TEXT_EMBEDDING` prompts.\n> - **Prompts (prompts.ts)**:\n>   - Update `messageHandlerTemplate` for parallel execution model and guidance on multi-step dependencies.\n> - **Provider (plugin-bootstrap/actionState.ts)**:\n>   - Clarify description/docs: \"previous results\" are from prior response batches; parallel actions share the same snapshot.\n> - **Tests**:\n>   - Expand `runtime.test.ts`: parallel execution behavior, action result status semantics, prompt collection/isolation via AsyncLocalStorage, browser fallback behavior, exact vs fuzzy action matching.\n>   - Update `prompts.test.ts` for new execution rules and wording.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 55765fc289c965232d5d690c363f73c7ea1b81f6. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-12-06T19:03:17Z",
+      "mergedAt": null,
+      "additions": 1467,
+      "deletions": 292
+    },
+    {
+      "id": "PR_kwDOMT5cIs63ddxK",
+      "title": "feat: Add ElizaOS Cloud as Default AI Provider in CLI",
+      "author": "ChristopherTrimboli",
+      "number": 6208,
+      "body": "## Add ElizaOS Cloud as Default AI Provider in CLI\n\n### Summary\n- Add **ElizaOS Cloud** as the first/recommended option in `elizaos create` AI model selection\n- Integrate browser-based login flow for seamless API key setup\n- Fix env variable naming to match plugin (`ELIZAOS_CLOUD_API_KEY`)\n\n### Changes\n\n**`packages/cli/src/commands/create/utils/selection.ts`**\n- Add ElizaOS Cloud as top option with \"(Recommended)\" label\n- Set `elizacloud` as default `initialValue`\n- Add `elizacloud` to `hasEmbeddingSupport()` list\n\n**`packages/cli/src/utils/get-config.ts`**\n- Add `storeElizaCloudKey()` and `promptAndStoreElizaCloudKey()` \n- Support 3 auth flows: browser login, manual key entry, skip\n\n**`packages/cli/src/commands/create/actions/setup.ts`**\n- Add `elizacloud` case in `setupAIModelConfig()`\n- Map `elizacloud` → `@elizaos/plugin-elizacloud` in `resolveModelToPlugin()`\n- Skip Ollama fallback when using ElizaOS Cloud\n\n**`packages/cli/src/commands/login/actions/login.ts`**\n- Rename `ELIZA_CLOUD_API_KEY` → `ELIZAOS_CLOUD_API_KEY`\n\n### User Flow\n```\n◆  Which AI model would you like to use?\n│  ● ElizaOS Cloud (Recommended)\n│  ○ Local AI (Ollama)\n│  ○ OpenAI\n│  ...\n\n◆  How would you like to authenticate?\n│  ● Login with browser (recommended)\n│  ○ Enter API key manually\n│  ○ Skip for now\n```\n\n### Test Plan\n- [ ] Run `elizaos create test-project` and select ElizaOS Cloud\n- [ ] Verify browser login flow saves key correctly\n- [ ] Verify manual key entry works\n- [ ] Verify plugin installs as `@elizaos/plugin-elizacloud`\n- [ ] Verify skip option adds placeholder to `.env`",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-12-06T18:21:51Z",
+      "mergedAt": "2025-12-06T19:51:44Z",
+      "additions": 491,
+      "deletions": 66
+    },
+    {
+      "id": "PR_kwDOMT5cIs63c65D",
+      "title": "fix(cli): correct startAgents API signature in e2e-tests",
+      "author": "standujar",
+      "number": 6207,
+      "body": "## Summary\r\n\r\n- Fixed `startAgents` API signature mismatch in CLI's e2e-tests.ts\r\n- Fixed unit test mock function name (`getElizaCharacter` → `getDefaultCharacter`)\r\n\r\n## Problem\r\n\r\nThe CLI's `elizaos test` command was failing with:\r\n```\r\nundefined is not an object (evaluating 'agent.character.id')\r\n```\r\n\r\nThis was caused by the e2e-tests calling `server.startAgents` with incorrect arguments:\r\n- **Before**: `startAgents([character], [plugins], options)` (3 separate args)\r\n- **After**: `startAgents([{ character, plugins }], options)` (proper format)\r\n\r\n## Test Plan\r\n\r\n- [x] Unit tests pass: `bun test packages/cli/tests/unit/commands/test/e2e-tests.test.ts`\r\n- [x] CLI builds successfully: `bun run build` in packages/cli\r\n- [x] `elizaos test` runs plugin tests correctly\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-12-06T16:03:56Z",
+      "mergedAt": null,
+      "additions": 7,
+      "deletions": 3
+    }
+  ],
+  "codeChanges": {
+    "additions": 491,
+    "deletions": 66,
+    "files": 10,
+    "commitCount": 17
+  },
+  "completedItems": [
+    {
+      "title": "feat: Add ElizaOS Cloud as Default AI Provider in CLI",
+      "prNumber": 6208,
+      "type": "feature",
+      "body": "## Add ElizaOS Cloud as Default AI Provider in CLI\n\n### Summary\n- Add **ElizaOS Cloud** as the first/recommended option in `elizaos create` AI model selection\n- Integrate browser-based login flow for seamless API key setup\n- Fix env variabl",
+      "files": [
+        "bun.lock",
+        "packages/cli/src/commands/create/actions/setup.ts",
+        "packages/cli/src/commands/create/utils/selection.ts",
+        "packages/cli/src/commands/deploy/utils/api-client.ts",
+        "packages/cli/src/commands/login/README.md",
+        "packages/cli/src/commands/login/actions/login.ts",
+        "packages/cli/src/utils/get-config.ts",
+        "packages/cli/tests/commands/create.test.ts",
+        "packages/cli/tests/unit/utils/elizacloud-config.test.ts",
+        "packages/cli/tests/unit/utils/selection.test.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 56.364794811906556,
+      "prScore": 56.364794811906556,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 26.47188694828805,
+      "prScore": 26.27188694828805,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 8.73489527279837,
+      "prScore": 8.73489527279837,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
