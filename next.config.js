@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "export",
-  basePath: "/op-hiscores",
+  basePath: process.env.NODE_ENV === "production" ? "/op-hiscores" : "",
   images: {
     unoptimized: true, // Required for static export
   },
