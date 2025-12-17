@@ -1,3 +1,5 @@
+"use client";
+
 import { StatCard } from "@/components/stat-card";
 import { CounterWithIcon } from "@/components/counter-with-icon";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -25,7 +27,7 @@ interface Contributor {
   totalScore: number;
 }
 
-export async function StatCardsDisplay({ metrics }: StatCardsDisplayProps) {
+export function StatCardsDisplay({ metrics }: StatCardsDisplayProps) {
   const timeframeTitle = formatTimeframeTitle(
     metrics.interval.intervalStart,
     metrics.interval.intervalType,
