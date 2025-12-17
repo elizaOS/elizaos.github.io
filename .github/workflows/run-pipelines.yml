@@ -41,8 +41,21 @@ on:
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-  PIPELINE_DATA_BRANCH: "_data" # Define branch name as environment variable
+  PIPELINE_DATA_BRANCH: "_data"
   DATA_DIR: "data"
+
+  # =============================================================================
+  # FORK CONFIGURATION
+  # =============================================================================
+  # Config is loaded from JSON file. Priority: PIPELINE_CONFIG_FILE → config/config.json
+  #
+  # For forks, you have 2 options:
+  # 1. Create config/config.json (copy from config.example.json) - keeps this file unchanged
+  # 2. Create your own named config (e.g., config/myorg.json) and update PIPELINE_CONFIG_FILE below
+  #
+  # Either option = zero merge conflicts when syncing with upstream
+  # =============================================================================
+  PIPELINE_CONFIG_FILE: ${{ secrets.PIPELINE_CONFIG_FILE || 'config/example.json' }}
 jobs:
   ingest-export:
     name: Ingest/Export Pipeline
@@ -202,18 +215,8 @@ jobs:
             if [[ "$SUMMARY_TYPES" == *'overall'* ]]; then echo "RUN_OVERALL=true"; else echo "RUN_OVERALL=false"; fi >> $GITHUB_OUTPUT
           fi
 
-      - name: Run Overall Summaries
-        if: steps.conditions.outputs.RUN_OVERALL == 'true'
-        uses: ./.github/actions/run-summary
-        with:
-          summary-type: "overall"
-          daily: ${{ steps.conditions.outputs.RUN_DAILY }}
-          weekly: ${{ steps.conditions.outputs.RUN_WEEKLY }}
-          monthly: ${{ steps.conditions.outputs.RUN_MONTHLY }}
-          force: ${{ github.event.inputs.force_summaries }}
-          start-date: ${{ github.event.inputs.startDate }}
-          end-date: ${{ github.event.inputs.endDate }}
-
+      # Repository summaries must run BEFORE overall summaries
+      # because overall summaries aggregate repository summaries
       - name: Run Repository Summaries
         if: steps.conditions.outputs.RUN_REPOSITORIES == 'true'
         uses: ./.github/actions/run-summary
@@ -238,15 +241,19 @@ jobs:
           start-date: ${{ github.event.inputs.startDate }}
           end-date: ${{ github.event.inputs.endDate }}
 
-      - name: Force regenerate recent summaries
-        if: github.event_name == 'schedule'
+      - name: Run Overall Summaries
+        if: steps.conditions.outputs.RUN_OVERALL == 'true'
         uses: ./.github/actions/run-summary
         with:
           summary-type: "overall"
-          daily: "true"
-          force: "true"
-          days: 1
+          daily: ${{ steps.conditions.outputs.RUN_DAILY }}
+          weekly: ${{ steps.conditions.outputs.RUN_WEEKLY }}
+          monthly: ${{ steps.conditions.outputs.RUN_MONTHLY }}
+          force: ${{ github.event.inputs.force_summaries }}
+          start-date: ${{ github.event.inputs.startDate }}
+          end-date: ${{ github.event.inputs.endDate }}
 
+      # Force regenerate steps also need correct order: repo -> contributor -> overall
       - name: Force regenerate recent repository summaries
         if: github.event_name == 'schedule' && steps.conditions.outputs.RUN_REPOSITORIES == 'true'
         uses: ./.github/actions/run-summary
@@ -261,6 +268,15 @@ jobs:
         uses: ./.github/actions/run-summary
         with:
           summary-type: "contributors"
+          daily: "true"
+          force: "true"
+          days: 1
+
+      - name: Force regenerate recent overall summaries
+        if: github.event_name == 'schedule'
+        uses: ./.github/actions/run-summary
+        with:
+          summary-type: "overall"
           daily: "true"
           force: "true"
           days: 1

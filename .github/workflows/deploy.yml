@@ -27,6 +27,19 @@ env:
   DATA_DIR: "data"
   PIPELINE_DATA_BRANCH: "_data"
 
+  # =============================================================================
+  # FORK CONFIGURATION
+  # =============================================================================
+  # Config is loaded from JSON file. Priority: PIPELINE_CONFIG_FILE → config/config.json
+  #
+  # For forks, you have 2 options:
+  # 1. Create config/config.json (copy from config.example.json) - keeps this file unchanged
+  # 2. Create your own named config (e.g., config/myorg.json) and update PIPELINE_CONFIG_FILE below
+  #
+  # Either option = zero merge conflicts when syncing with upstream
+  # =============================================================================
+  PIPELINE_CONFIG_FILE: ${{ secrets.PIPELINE_CONFIG_FILE || 'config/example.json' }}
+
 jobs:
   build-and-deploy:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
@@ -68,34 +81,39 @@ jobs:
       - name: Copy yesterday's stats for all tracked repositories
         run: |
           YESTERDAY=$(date -d "yesterday" +'%Y-%m-%d')
-          echo "Processing stats for date: ${YESTERDAY}"
-
-          # Find all repository directories and copy stats files
-          for repo_dir in data/ethereum-optimism_*/; do
-            repo_name=$(basename "$repo_dir")
-            stats_file="${repo_dir}stats/day/stats_${YESTERDAY}.json"
-            target_file="${repo_dir}stats/day/stats.json"
-
-            if [ -f "$stats_file" ]; then
-              cp "$stats_file" "$target_file"
-              echo "Copied stats for ${repo_name}"
-            else
-              echo "Warning: No stats file found for ${repo_name} on ${YESTERDAY}"
-            fi
+          shopt -s nullglob
+          for file in data/*/stats/day/stats_${YESTERDAY}.json; do
+            cp "$file" "${file%_*}.json"
+            echo "Copied: $(basename $(dirname $(dirname $(dirname "$file"))))"
           done
-
-          echo "Stats copy complete"
 
       - name: Generate Directory Listings
         uses: jayanta525/github-pages-directory-listing@v4.0.0
         with:
           FOLDER: data
 
+      # Auto-detect site URL based on repo type:
+      # - Org/user sites (*.github.io): https://{owner}.github.io
+      # - Project sites: https://{owner}.github.io/{repo}
+      - name: Determine site URL
+        id: site-config
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          OWNER="${{ github.repository_owner }}"
+          if [[ "$REPO_NAME" == *.github.io ]]; then
+            echo "site_url=https://${OWNER}.github.io" >> $GITHUB_OUTPUT
+          else
+            echo "site_url=https://${OWNER}.github.io/${REPO_NAME}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build Next.js app
         run: bun run build
         env:
           NEXT_TELEMETRY_DISABLED: 1
           CI: true
+          SITE_URL: ${{ secrets.SITE_URL || steps.site-config.outputs.site_url }}
+          SITE_NAME: ${{ secrets.SITE_NAME || github.repository_owner }}
+          NEXT_PUBLIC_SITE_NAME: ${{ secrets.SITE_NAME || github.repository_owner }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXT_PUBLIC_GITHUB_CLIENT_ID: ${{ secrets.NEXT_PUBLIC_GITHUB_CLIENT_ID }}
           NEXT_PUBLIC_AUTH_WORKER_URL: ${{ secrets.NEXT_PUBLIC_AUTH_WORKER_URL }}
