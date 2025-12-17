@@ -8,12 +8,13 @@ import { AuthProvider } from "@/contexts/AuthContext";
 
 const inter = Inter({ subsets: ["latin"] });
 
+const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "Contributor Analytics";
+
 export const metadata: Metadata = {
-  title: "Optimism Contributor Leaderboard",
-  description:
-    "GitHub contribution analytics for Optimism ecosystem contributors and developers",
+  title: siteName,
+  description: `GitHub contributor analytics and leaderboard for ${siteName}`,
   icons: {
-    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔴</text></svg>",
+    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>",
   },
 };
 
@@ -27,7 +28,7 @@ export default function RootLayout({
       <body className={inter.className}>
         <ThemeProvider
           attribute="class"
-          defaultTheme="light"
+          defaultTheme="system"
           enableSystem
           disableTransitionOnChange
         >
