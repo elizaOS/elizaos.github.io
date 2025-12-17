@@ -1,6 +1,6 @@
-# Eliza Leaderboard
+# GitHub Contributor Analytics
 
-A modern analytics pipeline for tracking and analyzing GitHub contributions. The system processes contributor data, generates AI-powered summaries, and maintains a leaderboard of developer activity.
+A modern analytics pipeline for tracking and analyzing GitHub contributions across repositories. The system processes contributor data, generates AI-powered summaries, and maintains a leaderboard of developer activity.
 
 ## Prerequisites
 
@@ -21,6 +21,19 @@ A modern analytics pipeline for tracking and analyzing GitHub contributions. The
 - Daily, weekly, and monthly reports
 - Smart contributor scoring system
 
+## Wallet Linking (Optional Feature)
+
+Contributors can optionally link their Ethereum and Solana wallet addresses to their GitHub profiles. When configured, users can authenticate via GitHub OAuth and store wallet addresses in their profile README.
+
+**Setup:** See [`auth-worker/README.md`](auth-worker/README.md) for Cloudflare Worker deployment and OAuth configuration.
+
+**Required secrets (if enabling):**
+
+- `NEXT_PUBLIC_GITHUB_CLIENT_ID` - GitHub OAuth App Client ID
+- `NEXT_PUBLIC_AUTH_WORKER_URL` - Deployed Cloudflare Worker URL
+
+**Note:** The leaderboard works perfectly fine without this feature. It's purely additive.
+
 ## Setup
 
 1. Install dependencies:
@@ -39,9 +52,13 @@ OPENROUTER_API_KEY=your_api_key_here
 # configure local environment to use cheaper models
 LARGE_MODEL=openai/gpt-4o-mini
 
-# Optional site info
-SITE_URL=https://elizaos.github.io
-SITE_NAME="ElizaOS Leaderboard"
+# Optional site info (auto-detected in CI if not set)
+SITE_URL=https://your-deployment-url.com
+SITE_NAME="Contributor Leaderboard"
+
+# Optional: For wallet linking feature
+NEXT_PUBLIC_GITHUB_CLIENT_ID=
+NEXT_PUBLIC_AUTH_WORKER_URL=
 ```
 
 Then load the environment variables:
@@ -51,16 +68,7 @@ source .envrc
 # Or if using direnv: direnv allow
 ```
 
-3. Setup pipeline config:
-
-   **For local development:**
-
-   ```bash
-   export PIPELINE_CONFIG_FILE=config/example.json
-   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/example.json
-   ```
-
-   **For forks:** See [Fork Configuration](#fork-configuration) below.
+3. Configure repositories to track in `config/pipeline.config.ts`. See the config file for the full schema and options.
 
 4. Initialize Database
 
@@ -130,6 +138,19 @@ bun run db:studio
 ```
 
 If you encounter any issues with Drizzle Studio due to Node.js version mismatches, you can use a different SQLite browser tool like [SQLite Browser](https://sqlitebrowser.org/).
+
+## Quick Start
+
+```bash
+# Ingest recent data
+bun run pipeline ingest --days 90
+
+# Process and calculate scores
+bun run pipeline process
+
+# Build the site
+bun run build
+```
 
 ## Commands and Capabilities
 
@@ -273,6 +294,19 @@ bun run build
 bunx serve@latest out
 ```
 
+## Automation Options
+
+### Local Automation
+
+For simple local or server deployments without GitHub Actions:
+
+```bash
+# Continuous daily automation (runs every 24 hours)
+./scripts/daily-automation.sh
+```
+
+This script runs the complete pipeline sequence (`ingest → process → export → summarize`) continuously. Perfect for development environments or simple server setups. See `scripts/README.md` for more automation utilities.
+
 ## CI/CD and Data Management
 
 The project uses GitHub Actions for automated data processing, summary generation, and deployment. The system maintains separate branches for code and data to optimize Git history management.
@@ -326,103 +360,54 @@ This architecture ensures:
 - Simplified deployment with automatic data restoration
 - Effective collaboration without data conflict issues
 
-## Development
-
 ## Deploying Your Own Instance
-
-### Fork Configuration
-
-Pipeline config is loaded from a JSON file specified by `PIPELINE_CONFIG_FILE`. This allows GitHub's "Sync fork" button to work without conflicts.
-
-**Option 1: Create your own config file (recommended)**
-
-```bash
-# Create your config based on the template
-cp config/example.json config/myorg.json
-# Edit config/myorg.json with your repositories, project context, scoring, etc.
-```
-
-Then set the `PIPELINE_CONFIG_FILE` secret in your repository:
-
-- Go to Settings → Secrets and variables → Actions
-- Add secret: `PIPELINE_CONFIG_FILE` = `config/myorg.json`
-
-**Option 2: Edit workflow files directly**
-
-Change `PIPELINE_CONFIG_FILE` in the workflow files:
-
-- `.github/workflows/run-pipelines.yml`
-- `.github/workflows/deploy.yml`
-
-Note: This will cause minor merge conflicts when syncing with upstream.
-
-**Config files:**
-| File | Purpose |
-|------|---------|
-| `config/example.json` | Default config with ElizaOS values |
-| `config/pipeline.config.ts` | Config loader (don't modify) |
-
-**Optional environment variables** (for site branding):
-
-- `SITE_NAME` - Display name (used in navigation, RSS feed)
-- `SITE_URL` - Auto-detected for GitHub Pages, set for custom domains
 
 ### GitHub Pages Configuration
 
-This project deploys to the root of elizaos.github.io. If you fork this repository to deploy to a subdirectory (e.g., `username.github.io/repo-name`):
+This project is configured to deploy to GitHub Pages with **automatic base path detection**. The deploy workflow automatically determines whether your repo is:
 
-1. **Update `next.config.js`** - Add `basePath` to match your repository name:
+- An **organization/user site** (`username.github.io`) → deploys to root path
+- A **project site** (any other repo name) → deploys to `/${repo-name}`
 
-   ```javascript
-   const nextConfig = {
-     output: "export",
-     basePath: "/repo-name", // Add this line - replace with your repo name
-     images: {
-       unoptimized: true,
-     },
-     typescript: {
-       tsconfigPath: "tsconfig.nextjs.json",
-     },
-   };
-   ```
+If you fork this repository:
 
-2. **Enable GitHub Pages**:
+1. **Enable GitHub Pages**:
 
    - Go to repository Settings → Pages
    - Source: "GitHub Actions"
    - Save
 
-3. **Add Required Secrets** (Settings → Secrets and variables → Actions):
+2. **Add Required Secrets** (Settings → Secrets and variables → Actions):
 
    - `OPENROUTER_API_KEY` - Required for AI summary generation
-   - `GITHUB_TOKEN` - Automatically provided by GitHub Actions
-   - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking feature
-   - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking feature
+   - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking
+   - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking
 
-4. **Enable Workflows**:
+3. **Enable Workflows**:
 
    - Go to Actions tab
    - Enable workflows if prompted
    - Manually trigger "Run Pipelines" to generate initial data
 
-5. **Access Your Site**:
-   - Root deployment: `https://your-org.github.io/`
-   - Subdirectory deployment: `https://your-username.github.io/repo-name/`
+4. **Access Your Site**:
+   - After successful deployment: `https://your-username.github.io/your-repo-name/`
 
 ### Deployment Architecture
 
 The site automatically deploys via GitHub Actions:
 
 - **Data Generation**: `run-pipelines.yml` runs daily at 23:00 UTC
-  - Ingests GitHub data, processes contributions, generates summaries
-  - Stores data in `_data` branch (SQLite dumps, stats files, summaries)
+  - Stores data in `_data` branch (SQLite dumps, stats, summaries)
   - Never commits large binary files to main branch
 - **Site Build**: `deploy.yml` triggers on push to main or after pipeline runs
+  - Auto-detects `BASE_PATH` and `SITE_URL` from repository name
   - Restores data from `_data` branch
   - Builds Next.js static site
   - Deploys to GitHub Pages
 
-**Note**: If deploying to a custom domain, update `basePath` in `next.config.js` accordingly (may need to remove it entirely for root domains).
+**Note**: To override auto-detection, set `BASE_PATH` and `SITE_URL` secrets in your repository settings.
+
+## Development
 
 ### Taskmaster for AI-Assisted Development
 
@@ -586,6 +571,10 @@ bun run pipeline ingest -d 10 -v
 ├── config/             # Configuration files
 │   └── pipeline.config.ts  # TypeScript pipeline configuration
 ├── drizzle/            # Database migration files
+├── scripts/            # Utility scripts (see scripts/README.md)
+│   ├── daily-automation.sh    # Continuous daily pipeline automation
+│   ├── verify-data.sh         # Data quality verification
+│   └── fetch_github.py        # GitHub metrics collection
 ├── src/
 │   ├── app/            # Next.js app router pages
 │   ├── components/     # React components
