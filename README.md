@@ -51,31 +51,16 @@ source .envrc
 # Or if using direnv: direnv allow
 ```
 
-3. Configure repositories in `config/pipeline.config.ts`:
+3. Setup pipeline config:
 
-```typescript
-export default {
-  // Repositories to track
-  repositories: [
-    {
-      owner: "elizaos",
-      name: "eliza",
-    },
-  ],
+   **For local development:**
 
-  // Bot users to ignore
-  botUsers: ["dependabot", "renovate-bot"],
+   ```bash
+   export PIPELINE_CONFIG_FILE=config/example.json
+   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/example.json
+   ```
 
-  // Scoring and tag configuration...
-
-  // AI Summary configuration
-  aiSummary: {
-    enabled: true,
-    apiKey: process.env.OPENROUTER_API_KEY,
-    // ...
-  },
-};
-```
+   **For forks:** See [Fork Configuration](#fork-configuration) below.
 
 4. Initialize Database
 
@@ -344,6 +329,43 @@ This architecture ensures:
 ## Development
 
 ## Deploying Your Own Instance
+
+### Fork Configuration
+
+Pipeline config is loaded from a JSON file specified by `PIPELINE_CONFIG_FILE`. This allows GitHub's "Sync fork" button to work without conflicts.
+
+**Option 1: Create your own config file (recommended)**
+
+```bash
+# Create your config based on the template
+cp config/example.json config/myorg.json
+# Edit config/myorg.json with your repositories, project context, scoring, etc.
+```
+
+Then set the `PIPELINE_CONFIG_FILE` secret in your repository:
+
+- Go to Settings → Secrets and variables → Actions
+- Add secret: `PIPELINE_CONFIG_FILE` = `config/myorg.json`
+
+**Option 2: Edit workflow files directly**
+
+Change `PIPELINE_CONFIG_FILE` in the workflow files:
+
+- `.github/workflows/run-pipelines.yml`
+- `.github/workflows/deploy.yml`
+
+Note: This will cause minor merge conflicts when syncing with upstream.
+
+**Config files:**
+| File | Purpose |
+|------|---------|
+| `config/example.json` | Default config with ElizaOS values |
+| `config/pipeline.config.ts` | Config loader (don't modify) |
+
+**Optional environment variables** (for site branding):
+
+- `SITE_NAME` - Display name (used in navigation, RSS feed)
+- `SITE_URL` - Auto-detected for GitHub Pages, set for custom domains
 
 ### GitHub Pages Configuration
 
