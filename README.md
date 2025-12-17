@@ -56,8 +56,8 @@ source .envrc
    **For local development:**
 
    ```bash
-   export PIPELINE_CONFIG_FILE=config/elizaos.json
-   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/elizaos.json
+   export PIPELINE_CONFIG_FILE=config/example.json
+   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/example.json
    ```
 
    **For forks:** See [Fork Configuration](#fork-configuration) below.
@@ -359,8 +359,7 @@ Note: This will cause minor merge conflicts when syncing with upstream.
 **Config files:**
 | File | Purpose |
 |------|---------|
-| `config/elizaos.json` | ElizaOS production config |
-| `config/example.json` | Template with all available options |
+| `config/example.json` | Default config with ElizaOS values |
 | `config/pipeline.config.ts` | Config loader (don't modify) |
 
 **Optional environment variables** (for site branding):

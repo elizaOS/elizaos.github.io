@@ -5,16 +5,16 @@
  * No hardcoded org-specific data - all values come from external sources.
  *
  * Data sources:
- * 1. JSON file specified by PIPELINE_CONFIG_FILE (e.g., "config/elizaos.json")
+ * 1. JSON file specified by PIPELINE_CONFIG_FILE (e.g., "config/example.json")
  * 2. Environment variables as fallback
  *
  * For CI/CD (GitHub Actions):
  *   PIPELINE_CONFIG_FILE is set in workflow env: section
- *   Points to config/elizaos.json by default, or custom via secrets
+ *   Points to config/example.json by default, or custom via secrets
  *
  * For local dev:
- *   export PIPELINE_CONFIG_FILE=config/elizaos.json
- *   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/elizaos.json
+ *   export PIPELINE_CONFIG_FILE=config/example.json
+ *   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/example.json
  */
 
 import { PipelineConfig } from "../src/lib/pipelines/pipelineConfig";
