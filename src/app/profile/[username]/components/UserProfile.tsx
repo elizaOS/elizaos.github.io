@@ -4,13 +4,20 @@ import * as React from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-import { TagData, SkillCard } from "@/components/skill-card";
-import { BadgeCheck, Github } from "lucide-react";
+import { TagData, SkillCard, BadgeData } from "@/components/skill-card";
+import { BadgeCheck, Github, Trophy } from "lucide-react";
 import { formatCompactNumber } from "@/lib/format-number";
 import { DailyActivity } from "@/components/daily-activity";
 import { UserActivityHeatmap } from "@/lib/scoring/queries";
 import { SummaryCard, Summary } from "@/components/summary-card";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
+import {
+  UserBadge,
+  getTierDefinition,
+  getNextTier,
+  BADGE_DEFINITIONS,
+  BadgeType,
+} from "@/lib/badges/types";
 
 import {
   Tooltip,
@@ -42,6 +49,8 @@ type UserProfileProps = {
   stats: UserStats;
   dailyActivity: UserActivityHeatmap[];
   linkedWallets: LinkedWallet[];
+  userBadges: UserBadge[];
+  badgeProgress: Record<string, number>;
 };
 
 export default function UserProfile({
@@ -56,7 +65,67 @@ export default function UserProfile({
   stats,
   dailyActivity,
   linkedWallets,
+  userBadges,
+  badgeProgress,
 }: UserProfileProps) {
+  // Create unified badge list: earned + locked badges
+
+  // Earned badges
+  const earnedBadges: BadgeData[] = userBadges.map((badge) => {
+    const tierDef = getTierDefinition(badge.badgeType, badge.tier);
+    return {
+      badgeType: badge.badgeType,
+      tier: badge.tier,
+      earnedAt: badge.earnedAt,
+      icon: tierDef?.icon || "🏅",
+      label: tierDef?.label || badge.badgeType,
+      description: tierDef?.description || "",
+      isLocked: false,
+    };
+  });
+
+  // Locked badges (not earned or can be upgraded)
+  const lockedBadges: BadgeData[] = Object.keys(BADGE_DEFINITIONS)
+    .map((badgeType) => {
+      const currentValue = badgeProgress[badgeType] || 0;
+      const nextTier = getNextTier(badgeType as BadgeType, currentValue);
+
+      // Skip if already at max tier
+      if (!nextTier) return null;
+
+      const progressPercent = (currentValue / nextTier.threshold) * 100;
+
+      const badge: BadgeData = {
+        badgeType,
+        tier: nextTier.tier,
+        earnedAt: "",
+        icon: nextTier.icon,
+        label: nextTier.label,
+        description: nextTier.description,
+        isLocked: true,
+        progressValue: currentValue,
+        progressTarget: nextTier.threshold,
+        progressPercent,
+      };
+      return badge;
+    })
+    .filter((badge): badge is BadgeData => badge !== null);
+
+  // Sort earned by tier (legend > elite > beginner)
+  const sortedEarned = earnedBadges.sort((a, b) => {
+    const tierOrder = { legend: 3, elite: 2, beginner: 1 };
+    const tierA = tierOrder[a.tier as keyof typeof tierOrder] || 0;
+    const tierB = tierOrder[b.tier as keyof typeof tierOrder] || 0;
+    return tierB - tierA;
+  });
+
+  // Sort locked by progress % (closest to completion first)
+  const sortedLocked = lockedBadges.sort(
+    (a, b) => (b.progressPercent || 0) - (a.progressPercent || 0),
+  );
+
+  // Unified badge list
+  const badgeDataList = [...sortedEarned, ...sortedLocked];
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
       <div className="items-star flex flex-col gap-4 sm:flex-row">
@@ -96,6 +165,24 @@ export default function UserProfile({
                   {Math.round(totalXp).toLocaleString()} XP
                 </span>
               </div>
+              {sortedEarned.length > 0 && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
+                        <Trophy className="h-3.5 w-3.5" />
+                        <span>{sortedEarned.length}</span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>
+                        {sortedEarned.length} badge
+                        {sortedEarned.length !== 1 ? "s" : ""} earned
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
               <a
                 href={`https://github.com/${username}`}
                 target="_blank"
@@ -218,6 +305,42 @@ export default function UserProfile({
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Badges Section */}
+      <div>
+        <div className="mb-4 flex items-center gap-2">
+          <Trophy className="h-5 w-5 text-yellow-500" />
+          <h3 className="text-lg font-semibold">Achievements</h3>
+          {sortedEarned.length > 0 && (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+              {sortedEarned.length}
+            </span>
+          )}
+        </div>
+        {badgeDataList.length > 0 ? (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+            {badgeDataList.map((badge) => (
+              <SkillCard
+                key={`${badge.badgeType}_${badge.tier}`}
+                mode="badge"
+                badgeData={badge}
+              />
+            ))}
+          </div>
+        ) : (
+          <Card className="border-dashed">
+            <CardContent className="flex flex-col items-center justify-center py-8 text-center">
+              <Trophy className="mb-2 h-12 w-12 text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground">
+                No badges earned yet
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground/60">
+                Keep contributing to unlock your first achievement!
+              </p>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3">
