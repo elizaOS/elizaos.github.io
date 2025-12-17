@@ -51,31 +51,15 @@ source .envrc
 # Or if using direnv: direnv allow
 ```
 
-3. Configure repositories in `config/pipeline.config.ts`:
+3. Configure repositories (for forks only):
 
-```typescript
-export default {
-  // Repositories to track
-  repositories: [
-    {
-      owner: "elizaos",
-      name: "eliza",
-    },
-  ],
+   If you're deploying a fork, copy the example config and customize it:
 
-  // Bot users to ignore
-  botUsers: ["dependabot", "renovate-bot"],
+   ```bash
+   cp config/example.config.ts config/deployment.config.ts
+   ```
 
-  // Scoring and tag configuration...
-
-  // AI Summary configuration
-  aiSummary: {
-    enabled: true,
-    apiKey: process.env.OPENROUTER_API_KEY,
-    // ...
-  },
-};
-```
+   Then edit `config/deployment.config.ts` with your repositories. See [Fork Configuration](#fork-configuration-required-for-forks) for details.
 
 4. Initialize Database
 
@@ -344,6 +328,45 @@ This architecture ensures:
 ## Development
 
 ## Deploying Your Own Instance
+
+### Fork Configuration (Required for Forks)
+
+If you're deploying a fork, you'll need to customize the configuration for your organization:
+
+1. **Create your deployment config**:
+
+   ```bash
+   cp config/example.config.ts config/deployment.config.ts
+   ```
+
+2. **Edit `config/deployment.config.ts`** with your organization's values:
+
+   ```typescript
+   const config: DeploymentConfig = {
+     organizationName: "Your Org",
+
+     projectDescription: `
+       Description of your project for AI-generated summaries.
+     `,
+
+     projectPhilosophy: `
+       Your project's core values and philosophy.
+     `,
+
+     contributionStartDate: "2024-01-01", // When to start tracking
+
+     repositories: [
+       { owner: "your-org", name: "your-repo", defaultBranch: "main" },
+       // Add more repositories...
+     ],
+   };
+   ```
+
+3. **Set environment variables** (optional, for site branding):
+   - `SITE_NAME` - Your site's display name (used in navigation, RSS feed)
+   - `SITE_URL` - Your site's URL (auto-detected for GitHub Pages)
+
+The `deployment.config.ts` file is gitignored, so your customizations won't conflict when syncing with upstream. This enables you to use GitHub's "Sync fork" button without merge conflicts.
 
 ### GitHub Pages Configuration
 
