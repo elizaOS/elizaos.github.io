@@ -8,9 +8,11 @@ import { AuthProvider } from "@/contexts/AuthContext";
 
 const inter = Inter({ subsets: ["latin"] });
 
+const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "Contributor Analytics";
+
 export const metadata: Metadata = {
-  title: "ElizaOS Leaderboard",
-  description: "Stats for GitHub contributors to Eliza",
+  title: siteName,
+  description: `GitHub contributor analytics and leaderboard for ${siteName}`,
   icons: {
     icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>",
   },
