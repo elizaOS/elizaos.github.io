@@ -1,69 +1,74 @@
 /**
  * Pipeline Configuration
  *
- * This config reads from environment variables or config.json file.
+ * This config reads from a JSON file specified by PIPELINE_CONFIG_FILE env var.
  * No hardcoded org-specific data - all values come from external sources.
  *
- * Data sources (in priority order):
- * 1. Environment variables (GitHub Secrets, workflow env:, .env.local)
- * 2. config/config.json file (for local development)
+ * Data sources:
+ * 1. JSON file specified by PIPELINE_CONFIG_FILE (e.g., "config/elizaos.json")
+ * 2. Environment variables as fallback
+ *
+ * For CI/CD (GitHub Actions):
+ *   PIPELINE_CONFIG_FILE is set in workflow env: section
+ *   Points to config/elizaos.json by default, or custom via secrets
  *
  * For local dev:
- *   cp config/config.example.json config/config.json
- *   # Edit config.json with your values
- *
- * For CI/CD:
- *   Set env vars in your workflow file
+ *   export PIPELINE_CONFIG_FILE=config/elizaos.json
+ *   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/elizaos.json
  */
 
 import { PipelineConfig } from "../src/lib/pipelines/pipelineConfig";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 
-// Try to load JSON config file (for local dev)
-// Use process.cwd() for Next.js compatibility during build
+// Load JSON config file from PIPELINE_CONFIG_FILE env var
 let jsonConfig: Record<string, unknown> = {};
-const configPaths = [
-  join(process.cwd(), "config", "config.json"),
-  join(__dirname, "config.json"),
-];
 
-for (const configPath of configPaths) {
-  if (existsSync(configPath)) {
-    try {
-      jsonConfig = JSON.parse(readFileSync(configPath, "utf-8"));
-      break;
-    } catch (e) {
-      console.warn(`Failed to parse ${configPath}:`, e);
+const configFile = process.env.PIPELINE_CONFIG_FILE;
+if (configFile) {
+  // Try multiple paths to handle different execution contexts (Next.js build, CLI, etc.)
+  const configPaths = [
+    join(process.cwd(), configFile),
+    join(__dirname, "..", configFile),
+  ];
+
+  for (const configPath of configPaths) {
+    if (existsSync(configPath)) {
+      try {
+        jsonConfig = JSON.parse(readFileSync(configPath, "utf-8"));
+        break;
+      } catch (e) {
+        console.warn(`Failed to parse ${configPath}:`, e);
+      }
     }
   }
 }
 
 /**
- * Get a string config value from env var or JSON file
+ * Get a string config value from JSON file first, then env var
  */
 const getConfig = (key: string): string => {
-  const value = process.env[key] ?? jsonConfig[key];
+  const value = jsonConfig[key] ?? process.env[key];
   if (value === undefined || value === null) {
     throw new Error(
       `Missing required config: ${key}\n` +
-        `Set it via environment variable or in config/config.json\n` +
-        `See config/config.example.json for reference.`,
+        `Set PIPELINE_CONFIG_FILE env var (e.g., "config/elizaos.json")\n` +
+        `See config/example.json for available keys.`,
     );
   }
   return typeof value === "string" ? value : JSON.stringify(value);
 };
 
 /**
- * Get a JSON config value from env var or JSON file
+ * Get a JSON config value from JSON file first, then env var
  */
 const getJsonConfig = <T>(key: string): T => {
-  const value = process.env[key] ?? jsonConfig[key];
+  const value = jsonConfig[key] ?? process.env[key];
   if (value === undefined || value === null) {
     throw new Error(
       `Missing required config: ${key}\n` +
-        `Set it via environment variable or in config/config.json\n` +
-        `See config/config.example.json for reference.`,
+        `Set PIPELINE_CONFIG_FILE env var (e.g., "config/elizaos.json")\n` +
+        `See config/example.json for available keys.`,
     );
   }
   if (typeof value === "string") {
