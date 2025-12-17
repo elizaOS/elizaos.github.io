@@ -139,9 +139,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
         "client_id",
         process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID || "",
       );
+      const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
       authUrl.searchParams.append(
         "redirect_uri",
-        `${window.location.origin}/auth/callback`,
+        `${window.location.origin}${basePath}/auth/callback`,
       );
       authUrl.searchParams.append("scope", "read:user");
       authUrl.searchParams.append("state", state);
@@ -209,7 +210,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
       await fetchUserData(accessToken);
       console.log("Fetching user data somplete", { accessToken });
       // Redirect to the home page or another appropriate page
-      window.location.href = "/";
+      const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
+      window.location.href = `${basePath}/`;
     } catch (error) {
       console.error("Error in auth callback:", error);
       setError(
