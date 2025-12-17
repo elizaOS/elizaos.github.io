@@ -53,11 +53,21 @@ source .envrc
 
 3. Setup pipeline config:
 
+   **For local development:**
+
    ```bash
-   cp config/example.config.ts config/pipeline.config.ts
+   cp config/config.example.json config/config.json
+   # Edit config/config.json with your repositories and settings
    ```
 
-   For forks, edit `config/pipeline.config.ts` with your repositories and project context. This file is gitignored so your changes won't conflict with upstream.
+   **For forks (CI/CD):**
+   Edit the `PIPELINE_*` environment variables in your workflow files:
+
+   - `.github/workflows/run-pipelines.yml`
+   - `.github/workflows/deploy.yml`
+
+   The config reads from environment variables first, then falls back to `config/config.json`.
+   This allows GitHub's "Sync fork" button to work without conflicts.
 
 4. Initialize Database
 

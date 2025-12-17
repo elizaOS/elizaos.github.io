@@ -1,186 +1,91 @@
 /**
- * Pipeline Configuration Template
+ * Pipeline Configuration
  *
- * Copy this file to pipeline.config.ts and customize for your deployment:
- *   cp config/example.config.ts config/pipeline.config.ts
+ * This config reads from environment variables or config.json file.
+ * No hardcoded org-specific data - all values come from external sources.
  *
- * pipeline.config.ts is gitignored, so your changes won't conflict with upstream.
+ * Data sources (in priority order):
+ * 1. Environment variables (GitHub Secrets, workflow env:, .env.local)
+ * 2. config/config.json file (for local development)
+ *
+ * For local dev:
+ *   cp config/config.example.json config/config.json
+ *   # Edit config.json with your values
+ *
+ * For CI/CD:
+ *   Set env vars in your workflow file
  */
 
 import { PipelineConfig } from "../src/lib/pipelines/pipelineConfig";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 
-const openrouterApiKey = process.env.OPENROUTER_API_KEY;
-if (!openrouterApiKey) {
-  console.warn("OPENROUTER_API_KEY is not set");
+// Try to load JSON config file (for local dev)
+// Use process.cwd() for Next.js compatibility during build
+let jsonConfig: Record<string, unknown> = {};
+const configPaths = [
+  join(process.cwd(), "config", "config.json"),
+  join(__dirname, "config.json"),
+];
+
+for (const configPath of configPaths) {
+  if (existsSync(configPath)) {
+    try {
+      jsonConfig = JSON.parse(readFileSync(configPath, "utf-8"));
+      break;
+    } catch (e) {
+      console.warn(`Failed to parse ${configPath}:`, e);
+    }
+  }
 }
 
+/**
+ * Get a string config value from env var or JSON file
+ */
+const getConfig = (key: string): string => {
+  const value = process.env[key] ?? jsonConfig[key];
+  if (value === undefined || value === null) {
+    throw new Error(
+      `Missing required config: ${key}\n` +
+        `Set it via environment variable or in config/config.json\n` +
+        `See config/config.example.json for reference.`,
+    );
+  }
+  return typeof value === "string" ? value : JSON.stringify(value);
+};
+
+/**
+ * Get a JSON config value from env var or JSON file
+ */
+const getJsonConfig = <T>(key: string): T => {
+  const value = process.env[key] ?? jsonConfig[key];
+  if (value === undefined || value === null) {
+    throw new Error(
+      `Missing required config: ${key}\n` +
+        `Set it via environment variable or in config/config.json\n` +
+        `See config/config.example.json for reference.`,
+    );
+  }
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch (e) {
+      throw new Error(`Failed to parse ${key} as JSON: ${e}`);
+    }
+  }
+  return value as T;
+};
+
+// All data comes from external sources - no hardcoded org-specific values
 export default {
-  // ============================================================================
-  // FORK-SPECIFIC VALUES - Customize these for your organization
-  // ============================================================================
-
-  contributionStartDate: "2024-10-15",
-
-  repositories: [
-    // Core platform
-    { owner: "elizaos", name: "eliza", defaultBranch: "main" },
-    { owner: "elizaos", name: "elizaos.github.io", defaultBranch: "main" },
-    { owner: "elizaos", name: "docs", defaultBranch: "main" },
-    // Applications
-    { owner: "elizaos", name: "x402.elizaos.ai", defaultBranch: "main" },
-    { owner: "elizaos", name: "spartan", defaultBranch: "main" },
-    { owner: "elizaos", name: "jeju", defaultBranch: "main" },
-    // Plugins
-    { owner: "elizaos-plugins", name: "plugin-solana", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-knowledge", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-chart", defaultBranch: "main" },
-    { owner: "elizaos-plugins", name: "plugin-analytics", defaultBranch: "main" },
-    { owner: "elizaos-plugins", name: "plugin-jupiter", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-trust", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-rolodex", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-birdeye", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-digitaltwin", defaultBranch: "main" },
-    { owner: "elizaos-plugins", name: "plugin-mysql", defaultBranch: "main" },
-    { owner: "elizaos-plugins", name: "plugin-elizaos-cloud", defaultBranch: "main" },
-    { owner: "elizaos-plugins", name: "registry", defaultBranch: "main" },
-    { owner: "elizaos-plugins", name: "plugin-twitter", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-auton8n", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-evm", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-coingecko", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-farcaster", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-mcp", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-autocoder", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-discord", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-telegram", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-openrouter", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-openai", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-anthropic", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-relay", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-email", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-ollama", defaultBranch: "1.x" },
-    { owner: "elizaos-plugins", name: "plugin-pdf", defaultBranch: "1.x" },
-  ],
-
-  // ============================================================================
-  // SHARED CONFIG - Usually no need to modify these
-  // ============================================================================
+  contributionStartDate: getConfig("PIPELINE_START_DATE"),
+  repositories: getJsonConfig("PIPELINE_REPOS"),
+  botUsers: getJsonConfig("PIPELINE_BOT_USERS"),
+  scoring: getJsonConfig("PIPELINE_SCORING"),
+  tags: getJsonConfig("PIPELINE_TAGS"),
 
   walletAddresses: {
     enabled: true,
-  },
-
-  botUsers: [
-    "dependabot",
-    "dependabot-preview",
-    "renovate",
-    "renovate-bot",
-    "renovate[bot]",
-    "github-actions",
-    "github-actions[bot]",
-    "github-bot",
-    "codecov",
-    "codecov-io",
-    "stale[bot]",
-    "semantic-release-bot",
-    "copilot-pull-request-reviewer",
-    "imgbot",
-    "coderabbitai",
-    "codefactor-io",
-    "graphite-app",
-    "google-labs-jules[bot]",
-    "cursor",
-    "claude",
-  ],
-
-  scoring: {
-    pullRequest: {
-      base: 4,
-      merged: 16,
-      perReview: 1.5,
-      perApproval: 2,
-      perComment: 0.2,
-      descriptionMultiplier: 0.003,
-      complexityMultiplier: 0.5,
-      optimalSizeBonus: 5,
-      maxPerDay: 10,
-      closingIssueBonus: 5,
-    },
-    reaction: {
-      diminishingReturns: 0.7,
-      base: 0.5,
-      received: 0.1,
-      maxPerDay: 10,
-      types: {
-        thumbs_up: 1.2,
-        thumbs_down: 0.5,
-        laugh: 1.0,
-        hooray: 1.5,
-        confused: 0.5,
-        heart: 1.5,
-        rocket: 1.5,
-        eyes: 1.2,
-      },
-    },
-    issue: {
-      base: 2,
-      perComment: 0.1,
-      withLabelsMultiplier: {
-        bug: 1.8,
-        enhancement: 1.4,
-        documentation: 1.0,
-      },
-      closedBonus: 2,
-      resolutionSpeedMultiplier: 1.0,
-    },
-    review: {
-      base: 4,
-      approved: 1,
-      changesRequested: 2,
-      commented: 0.5,
-      detailedFeedbackMultiplier: 0.002,
-      thoroughnessMultiplier: 1.3,
-      maxPerDay: 8,
-    },
-    comment: {
-      base: 0.2,
-      substantiveMultiplier: 0.001,
-      diminishingReturns: 0.7,
-      maxPerThread: 3,
-    },
-    codeChange: {
-      perLineAddition: 0.005,
-      perLineDeletion: 0.01,
-      perFile: 0.15,
-      maxLines: 800,
-      testCoverageBonus: 2.0,
-    },
-  },
-
-  tags: {
-    area: [
-      { name: "core", category: "AREA", patterns: ["core/", "src/core", "packages/core"], weight: 2.5, description: "Core system components and libraries" },
-      { name: "ui", category: "AREA", patterns: ["components/", "ui/", "src/components", "pages/"], weight: 1.8, description: "User interface and component libraries" },
-      { name: "docs", category: "AREA", patterns: ["docs/", "README", ".md"], weight: 1.5, description: "Documentation and guides" },
-      { name: "infra", category: "AREA", patterns: [".github/", "docker", "k8s", ".yml", ".yaml"], weight: 1.8, description: "Infrastructure and deployment" },
-      { name: "tests", category: "AREA", patterns: ["test/", "tests/", ".spec.", ".test."], weight: 2.0, description: "Test files and test infrastructure" },
-    ],
-    role: [
-      { name: "architect", category: "ROLE", patterns: ["feat:", "refactor:", "breaking:"], weight: 2.5, description: "Architects major features and refactorings" },
-      { name: "maintainer", category: "ROLE", patterns: ["fix:", "chore:", "bump:", "update:"], weight: 2.0, description: "Maintains codebase health and fixes issues" },
-      { name: "feature-dev", category: "ROLE", patterns: ["feat:", "feature:", "add:"], weight: 2.0, description: "Develops new features" },
-      { name: "bug-fixer", category: "ROLE", patterns: ["fix:", "bug:", "hotfix:"], weight: 2.2, description: "Identifies and fixes bugs" },
-      { name: "docs-writer", category: "ROLE", patterns: ["docs:", "documentation:"], weight: 1.2, description: "Writes and improves documentation" },
-      { name: "reviewer", category: "ROLE", patterns: ["review:", "feedback:"], weight: 1.8, description: "Reviews code and provides feedback" },
-      { name: "devops", category: "ROLE", patterns: ["ci:", "cd:", "deploy:", "build:"], weight: 2.2, description: "Works on CI/CD and deployment infrastructure" },
-    ],
-    tech: [
-      { name: "typescript", category: "TECH", patterns: [".ts", ".tsx", "tsconfig"], weight: 1.5, description: "TypeScript language expertise" },
-      { name: "react", category: "TECH", patterns: ["react", ".jsx", ".tsx", "component"], weight: 1.4, description: "React framework expertise" },
-      { name: "nextjs", category: "TECH", patterns: ["next.", "nextjs", "pages/", "app/"], weight: 1.6, description: "Next.js framework expertise" },
-      { name: "tailwind", category: "TECH", patterns: ["tailwind", "tw-", "className"], weight: 1.2, description: "Tailwind CSS expertise" },
-      { name: "database", category: "TECH", patterns: ["sql", "db", "database", "query", "schema"], weight: 1.7, description: "Database and SQL expertise" },
-      { name: "api", category: "TECH", patterns: ["api", "rest", "graphql", "endpoint"], weight: 1.6, description: "API design and implementation" },
-    ],
   },
 
   aiSummary: {
@@ -194,16 +99,7 @@ export default {
     temperature: 0.1,
     max_tokens: 2400,
     endpoint: "https://openrouter.ai/api/v1/chat/completions",
-    apiKey: openrouterApiKey || "",
-    // Customize this for your project
-    projectContext: `
-We are ElizaOS. Our mission is to develop an extensible, modular, open-source
-AI agent framework that thrives across both Web2 and Web3 ecosystems.
-
-Core Philosophy:
-- Autonomy & Adaptability: Agents should learn, reason, and adapt across diverse tasks.
-- Modularity & Composability: AI architectures should be modular for iterative improvements.
-- Decentralization & Open Collaboration: Moving beyond centralized control towards distributed intelligence.
-    `.trim(),
+    apiKey: process.env.OPENROUTER_API_KEY || "",
+    projectContext: getConfig("PIPELINE_PROJECT_CONTEXT"),
   },
 } as const satisfies PipelineConfig;
