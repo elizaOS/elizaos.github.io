@@ -118,11 +118,32 @@ export async function GET() {
     </item>`;
   };
 
-  const items = [
-    ...monthlySummaries.map((s) => formatItem(s, "month", "Monthly Summary")),
-    ...weeklySummaries.map((s) => formatItem(s, "week", "Weekly Summary")),
-    ...dailySummaries.map((s) => formatItem(s, "day", "Daily Summary")),
-  ].join("");
+  // Combine all summaries with their type, then sort by date descending
+  const allSummaries = [
+    ...monthlySummaries.map((s) => ({
+      ...s,
+      intervalType: "month" as const,
+      labelPrefix: "Monthly Summary",
+    })),
+    ...weeklySummaries.map((s) => ({
+      ...s,
+      intervalType: "week" as const,
+      labelPrefix: "Weekly Summary",
+    })),
+    ...dailySummaries.map((s) => ({
+      ...s,
+      intervalType: "day" as const,
+      labelPrefix: "Daily Summary",
+    })),
+  ].sort((a, b) => {
+    const dateA = parseDate(a.date)?.getTime() ?? 0;
+    const dateB = parseDate(b.date)?.getTime() ?? 0;
+    return dateB - dateA; // Descending (newest first)
+  });
+
+  const items = allSummaries
+    .map((s) => formatItem(s, s.intervalType, s.labelPrefix))
+    .join("");
 
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
