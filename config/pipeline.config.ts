@@ -539,7 +539,7 @@ export default {
   // AI Summary generation (optional)
   aiSummary: {
     enabled: true,
-    defaultModel: "google/gemini-2.0-flash-001",
+    defaultModel: "google/gemini-2.5-flash",
     models: {
       day: process.env.SMALL_MODEL || "google/gemini-2.5-flash",
       week: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
