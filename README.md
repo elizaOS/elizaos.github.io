@@ -56,18 +56,11 @@ source .envrc
    **For local development:**
 
    ```bash
-   cp config/config.example.json config/config.json
-   # Edit config/config.json with your repositories and settings
+   export PIPELINE_CONFIG_FILE=config/elizaos.json
+   # Or add to .env.local: PIPELINE_CONFIG_FILE=config/elizaos.json
    ```
 
-   **For forks (CI/CD):**
-   Edit the `PIPELINE_*` environment variables in your workflow files:
-
-   - `.github/workflows/run-pipelines.yml`
-   - `.github/workflows/deploy.yml`
-
-   The config reads from environment variables first, then falls back to `config/config.json`.
-   This allows GitHub's "Sync fork" button to work without conflicts.
+   **For forks:** See [Fork Configuration](#fork-configuration) below.
 
 4. Initialize Database
 
@@ -339,14 +332,36 @@ This architecture ensures:
 
 ### Fork Configuration
 
-For forks, customize `config/pipeline.config.ts` with your organization's values:
+Pipeline config is loaded from a JSON file specified by `PIPELINE_CONFIG_FILE`. This allows GitHub's "Sync fork" button to work without conflicts.
+
+**Option 1: Create your own config file (recommended)**
 
 ```bash
-cp config/example.config.ts config/pipeline.config.ts
-# Edit pipeline.config.ts with your repositories, project context, etc.
+# Create your config based on the template
+cp config/example.json config/myorg.json
+# Edit config/myorg.json with your repositories, project context, scoring, etc.
 ```
 
-The config file is gitignored, so your changes won't conflict when syncing with upstream.
+Then set the `PIPELINE_CONFIG_FILE` secret in your repository:
+
+- Go to Settings → Secrets and variables → Actions
+- Add secret: `PIPELINE_CONFIG_FILE` = `config/myorg.json`
+
+**Option 2: Edit workflow files directly**
+
+Change `PIPELINE_CONFIG_FILE` in the workflow files:
+
+- `.github/workflows/run-pipelines.yml`
+- `.github/workflows/deploy.yml`
+
+Note: This will cause minor merge conflicts when syncing with upstream.
+
+**Config files:**
+| File | Purpose |
+|------|---------|
+| `config/elizaos.json` | ElizaOS production config |
+| `config/example.json` | Template with all available options |
+| `config/pipeline.config.ts` | Config loader (don't modify) |
 
 **Optional environment variables** (for site branding):
 
