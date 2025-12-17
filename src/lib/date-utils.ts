@@ -8,7 +8,7 @@ import {
 } from "date-fns";
 
 /**
- * Extracts date from a title string in format "elizaos Eliza (2025-01-12)"
+ * Extracts date from a title string in format "owner repo (2025-01-12)"
  * First tries to extract from parentheses, then falls back to direct date pattern matching
  */
 export function extractDateFromTitle(title: string): string | null {
