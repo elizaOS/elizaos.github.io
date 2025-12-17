@@ -51,15 +51,13 @@ source .envrc
 # Or if using direnv: direnv allow
 ```
 
-3. Configure repositories (for forks only):
-
-   If you're deploying a fork, copy the example config and customize it:
+3. Setup pipeline config:
 
    ```bash
-   cp config/example.config.ts config/deployment.config.ts
+   cp config/example.config.ts config/pipeline.config.ts
    ```
 
-   Then edit `config/deployment.config.ts` with your repositories. See [Fork Configuration](#fork-configuration-required-for-forks) for details.
+   For forks, edit `config/pipeline.config.ts` with your repositories and project context. This file is gitignored so your changes won't conflict with upstream.
 
 4. Initialize Database
 
@@ -329,44 +327,21 @@ This architecture ensures:
 
 ## Deploying Your Own Instance
 
-### Fork Configuration (Required for Forks)
+### Fork Configuration
 
-If you're deploying a fork, you'll need to customize the configuration for your organization:
+For forks, customize `config/pipeline.config.ts` with your organization's values:
 
-1. **Create your deployment config**:
+```bash
+cp config/example.config.ts config/pipeline.config.ts
+# Edit pipeline.config.ts with your repositories, project context, etc.
+```
 
-   ```bash
-   cp config/example.config.ts config/deployment.config.ts
-   ```
+The config file is gitignored, so your changes won't conflict when syncing with upstream.
 
-2. **Edit `config/deployment.config.ts`** with your organization's values:
+**Optional environment variables** (for site branding):
 
-   ```typescript
-   const config: DeploymentConfig = {
-     organizationName: "Your Org",
-
-     projectDescription: `
-       Description of your project for AI-generated summaries.
-     `,
-
-     projectPhilosophy: `
-       Your project's core values and philosophy.
-     `,
-
-     contributionStartDate: "2024-01-01", // When to start tracking
-
-     repositories: [
-       { owner: "your-org", name: "your-repo", defaultBranch: "main" },
-       // Add more repositories...
-     ],
-   };
-   ```
-
-3. **Set environment variables** (optional, for site branding):
-   - `SITE_NAME` - Your site's display name (used in navigation, RSS feed)
-   - `SITE_URL` - Your site's URL (auto-detected for GitHub Pages)
-
-The `deployment.config.ts` file is gitignored, so your customizations won't conflict when syncing with upstream. This enables you to use GitHub's "Sync fork" button without merge conflicts.
+- `SITE_NAME` - Display name (used in navigation, RSS feed)
+- `SITE_URL` - Auto-detected for GitHub Pages, set for custom domains
 
 ### GitHub Pages Configuration
 

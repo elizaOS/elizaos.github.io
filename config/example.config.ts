@@ -1,62 +1,23 @@
 /**
- * Deployment Configuration
+ * Pipeline Configuration Template
  *
- * This file contains fork-specific configuration values.
- * It serves as both the default configuration for upstream AND a template for forks.
+ * Copy this file to pipeline.config.ts and customize for your deployment:
+ *   cp config/example.config.ts config/pipeline.config.ts
  *
- * FOR FORKS:
- * 1. Copy this file: cp example.config.ts deployment.config.ts
- * 2. Edit deployment.config.ts with your organization's values
- * 3. deployment.config.ts is gitignored, so your changes won't conflict with upstream
- *
- * The pipeline will automatically use deployment.config.ts if it exists,
- * otherwise it falls back to this file (example.config.ts).
+ * pipeline.config.ts is gitignored, so your changes won't conflict with upstream.
  */
 
-import type { RepositoryConfig } from "../src/lib/pipelines/pipelineConfig";
+import { PipelineConfig } from "../src/lib/pipelines/pipelineConfig";
 
-export interface DeploymentConfig {
-  /** Display name for your organization/project */
-  organizationName: string;
-
-  /** Brief description of your project for AI context */
-  projectDescription: string;
-
-  /** Core philosophy or mission statement (used in AI summaries) */
-  projectPhilosophy: string;
-
-  /** Date to start tracking contributions (YYYY-MM-DD format) */
-  contributionStartDate: string;
-
-  /** GitHub repositories to track */
-  repositories: RepositoryConfig[];
-
-  /** Additional bot usernames to ignore (merged with defaults) */
-  additionalBotUsers?: string[];
+const openrouterApiKey = process.env.OPENROUTER_API_KEY;
+if (!openrouterApiKey) {
+  console.warn("OPENROUTER_API_KEY is not set");
 }
 
-/**
- * ElizaOS Default Configuration
- *
- * This is the production configuration for elizaos.github.io.
- * Forks should copy this file to deployment.config.ts and customize.
- */
-const config: DeploymentConfig = {
-  organizationName: "ElizaOS",
-
-  projectDescription: `
-We are ElizaOS. Our mission is to develop an extensible, modular, open-source
-AI agent framework that thrives across both Web2 and Web3 ecosystems. We see
-AI agents as the key stepping stones toward AGI, enabling increasingly
-autonomous and capable systems.
-  `.trim(),
-
-  projectPhilosophy: `
-Core Philosophy:
-- Autonomy & Adaptability: Agents should learn, reason, and adapt across diverse tasks without human intervention.
-- Modularity & Composability: AI architectures should be modular, allowing for iterative improvements and robust scalability.
-- Decentralization & Open Collaboration: AI systems should move beyond centralized control towards distributed intelligence and community-driven progress.
-  `.trim(),
+export default {
+  // ============================================================================
+  // FORK-SPECIFIC VALUES - Customize these for your organization
+  // ============================================================================
 
   contributionStartDate: "2024-10-15",
 
@@ -136,9 +97,257 @@ Core Philosophy:
     { owner: "elizaos-plugins", name: "plugin-pdf", defaultBranch: "1.x" },
   ],
 
-  additionalBotUsers: [
-    // Add any ElizaOS-specific bot usernames here
-  ],
-};
+  // ============================================================================
+  // SHARED CONFIG - Usually no need to modify these
+  // ============================================================================
 
-export default config;
+  walletAddresses: {
+    enabled: true,
+  },
+
+  botUsers: [
+    "dependabot",
+    "dependabot-preview",
+    "renovate",
+    "renovate-bot",
+    "renovate[bot]",
+    "github-actions",
+    "github-actions[bot]",
+    "github-bot",
+    "codecov",
+    "codecov-io",
+    "stale[bot]",
+    "semantic-release-bot",
+    "copilot-pull-request-reviewer",
+    "imgbot",
+    "coderabbitai",
+    "codefactor-io",
+    "graphite-app",
+    "google-labs-jules[bot]",
+    "cursor",
+    "claude",
+  ],
+
+  scoring: {
+    pullRequest: {
+      base: 4,
+      merged: 16,
+      perReview: 1.5,
+      perApproval: 2,
+      perComment: 0.2,
+      descriptionMultiplier: 0.003,
+      complexityMultiplier: 0.5,
+      optimalSizeBonus: 5,
+      maxPerDay: 10,
+      closingIssueBonus: 5,
+    },
+    reaction: {
+      diminishingReturns: 0.7,
+      base: 0.5,
+      received: 0.1,
+      maxPerDay: 10,
+      types: {
+        thumbs_up: 1.2,
+        thumbs_down: 0.5,
+        laugh: 1.0,
+        hooray: 1.5,
+        confused: 0.5,
+        heart: 1.5,
+        rocket: 1.5,
+        eyes: 1.2,
+      },
+    },
+    issue: {
+      base: 2,
+      perComment: 0.1,
+      withLabelsMultiplier: {
+        bug: 1.8,
+        enhancement: 1.4,
+        documentation: 1.0,
+      },
+      closedBonus: 2,
+      resolutionSpeedMultiplier: 1.0,
+    },
+    review: {
+      base: 4,
+      approved: 1,
+      changesRequested: 2,
+      commented: 0.5,
+      detailedFeedbackMultiplier: 0.002,
+      thoroughnessMultiplier: 1.3,
+      maxPerDay: 8,
+    },
+    comment: {
+      base: 0.2,
+      substantiveMultiplier: 0.001,
+      diminishingReturns: 0.7,
+      maxPerThread: 3,
+    },
+    codeChange: {
+      perLineAddition: 0.005,
+      perLineDeletion: 0.01,
+      perFile: 0.15,
+      maxLines: 800,
+      testCoverageBonus: 2.0,
+    },
+  },
+
+  tags: {
+    area: [
+      {
+        name: "core",
+        category: "AREA",
+        patterns: ["core/", "src/core", "packages/core"],
+        weight: 2.5,
+        description: "Core system components and libraries",
+      },
+      {
+        name: "ui",
+        category: "AREA",
+        patterns: ["components/", "ui/", "src/components", "pages/"],
+        weight: 1.8,
+        description: "User interface and component libraries",
+      },
+      {
+        name: "docs",
+        category: "AREA",
+        patterns: ["docs/", "README", ".md"],
+        weight: 1.5,
+        description: "Documentation and guides",
+      },
+      {
+        name: "infra",
+        category: "AREA",
+        patterns: [".github/", "docker", "k8s", ".yml", ".yaml"],
+        weight: 1.8,
+        description: "Infrastructure and deployment",
+      },
+      {
+        name: "tests",
+        category: "AREA",
+        patterns: ["test/", "tests/", ".spec.", ".test."],
+        weight: 2.0,
+        description: "Test files and test infrastructure",
+      },
+    ],
+    role: [
+      {
+        name: "architect",
+        category: "ROLE",
+        patterns: ["feat:", "refactor:", "breaking:"],
+        weight: 2.5,
+        description: "Architects major features and refactorings",
+      },
+      {
+        name: "maintainer",
+        category: "ROLE",
+        patterns: ["fix:", "chore:", "bump:", "update:"],
+        weight: 2.0,
+        description: "Maintains codebase health and fixes issues",
+      },
+      {
+        name: "feature-dev",
+        category: "ROLE",
+        patterns: ["feat:", "feature:", "add:"],
+        weight: 2.0,
+        description: "Develops new features",
+      },
+      {
+        name: "bug-fixer",
+        category: "ROLE",
+        patterns: ["fix:", "bug:", "hotfix:"],
+        weight: 2.2,
+        description: "Identifies and fixes bugs",
+      },
+      {
+        name: "docs-writer",
+        category: "ROLE",
+        patterns: ["docs:", "documentation:"],
+        weight: 1.2,
+        description: "Writes and improves documentation",
+      },
+      {
+        name: "reviewer",
+        category: "ROLE",
+        patterns: ["review:", "feedback:"],
+        weight: 1.8,
+        description: "Reviews code and provides feedback",
+      },
+      {
+        name: "devops",
+        category: "ROLE",
+        patterns: ["ci:", "cd:", "deploy:", "build:"],
+        weight: 2.2,
+        description: "Works on CI/CD and deployment infrastructure",
+      },
+    ],
+    tech: [
+      {
+        name: "typescript",
+        category: "TECH",
+        patterns: [".ts", ".tsx", "tsconfig"],
+        weight: 1.5,
+        description: "TypeScript language expertise",
+      },
+      {
+        name: "react",
+        category: "TECH",
+        patterns: ["react", ".jsx", ".tsx", "component"],
+        weight: 1.4,
+        description: "React framework expertise",
+      },
+      {
+        name: "nextjs",
+        category: "TECH",
+        patterns: ["next.", "nextjs", "pages/", "app/"],
+        weight: 1.6,
+        description: "Next.js framework expertise",
+      },
+      {
+        name: "tailwind",
+        category: "TECH",
+        patterns: ["tailwind", "tw-", "className"],
+        weight: 1.2,
+        description: "Tailwind CSS expertise",
+      },
+      {
+        name: "database",
+        category: "TECH",
+        patterns: ["sql", "db", "database", "query", "schema"],
+        weight: 1.7,
+        description: "Database and SQL expertise",
+      },
+      {
+        name: "api",
+        category: "TECH",
+        patterns: ["api", "rest", "graphql", "endpoint"],
+        weight: 1.6,
+        description: "API design and implementation",
+      },
+    ],
+  },
+
+  aiSummary: {
+    enabled: true,
+    defaultModel: "google/gemini-2.5-flash",
+    models: {
+      day: process.env.SMALL_MODEL || "google/gemini-2.5-flash",
+      week: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
+      month: process.env.LARGE_MODEL || "google/gemini-2.5-pro",
+    },
+    temperature: 0.1,
+    max_tokens: 2400,
+    endpoint: "https://openrouter.ai/api/v1/chat/completions",
+    apiKey: openrouterApiKey || "",
+    // Customize this for your project
+    projectContext: `
+We are ElizaOS. Our mission is to develop an extensible, modular, open-source
+AI agent framework that thrives across both Web2 and Web3 ecosystems.
+
+Core Philosophy:
+- Autonomy & Adaptability: Agents should learn, reason, and adapt across diverse tasks.
+- Modularity & Composability: AI architectures should be modular for iterative improvements.
+- Decentralization & Open Collaboration: Moving beyond centralized control towards distributed intelligence.
+    `.trim(),
+  },
+} as const satisfies PipelineConfig;
