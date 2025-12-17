@@ -1,8 +1,6 @@
-# Optimism Contributor Leaderboard
+# GitHub Contributor Analytics
 
-A modern analytics pipeline for tracking and analyzing GitHub contributions across the Optimism ecosystem. The system processes contributor data, generates AI-powered summaries, and maintains a leaderboard of developer activity across the top 12 most active Optimism repositories.
-
-> **🔴 Recently Updated**: This system has been reconfigured for the Optimism ecosystem. See [GitHub Issue #1](https://github.com/M3-org/op-hiscores/issues/1) for migration details.
+A modern analytics pipeline for tracking and analyzing GitHub contributions across repositories. The system processes contributor data, generates AI-powered summaries, and maintains a leaderboard of developer activity.
 
 ## Prerequisites
 
@@ -54,9 +52,9 @@ OPENROUTER_API_KEY=your_api_key_here
 # configure local environment to use cheaper models
 LARGE_MODEL=openai/gpt-4o-mini
 
-# Optional site info
+# Optional site info (auto-detected in CI if not set)
 SITE_URL=https://your-deployment-url.com
-SITE_NAME="Optimism Contributor Leaderboard"
+SITE_NAME="Contributor Leaderboard"
 
 # Optional: For wallet linking feature
 NEXT_PUBLIC_GITHUB_CLIENT_ID=
@@ -70,26 +68,7 @@ source .envrc
 # Or if using direnv: direnv allow
 ```
 
-3. Repository configuration is already set up for Optimism ecosystem.
-
-**Current Configuration** (14 Most Active Optimism Repositories):
-
-- `ethereum-optimism/optimism` - Main protocol repository (38K+ activity score)
-- `ethereum-optimism/op-analytics` - Data and analytics tools
-- `ethereum-optimism/docs` - Developer documentation
-- `ethereum-optimism/community-hub` - Governance documentation
-- `ethereum-optimism/ethereum-optimism.github.io` - Token lists and web presence
-- `ethereum-optimism/superchain-ops` - Operational tooling
-- `ethereum-optimism/superchain-registry` - Ecosystem index
-- `ethereum-optimism/ecosystem` - Ecosystem tracking
-- `ethereum-optimism/op-geth` - Ethereum client fork
-- `ethereum-optimism/specs` - Technical specifications
-- `ethereum-optimism/infra` - Infrastructure
-- `ethereum-optimism/supersim` - Multi-L2 development environment
-- `ethereum-optimism/design-docs` - Design documentation and proposals
-- `ethereum-optimism/Retro-Funding` - Retroactive public goods funding
-
-> **Note**: Configuration is complete and tested. See `config/pipeline.config.ts` for full details.
+3. Configure repositories to track in `config/pipeline.config.ts`. See the config file for the full schema and options.
 
 4. Initialize Database
 
@@ -160,40 +139,16 @@ bun run db:studio
 
 If you encounter any issues with Drizzle Studio due to Node.js version mismatches, you can use a different SQLite browser tool like [SQLite Browser](https://sqlitebrowser.org/).
 
-## 🚀 Current Status - Ready for Data Ingestion
-
-The system has been **fully configured and tested** for the Optimism ecosystem:
-
-✅ **COMPLETED**:
-
-- Repository configuration updated for top 12 Optimism repositories
-- Optimism branding and theme applied (Torch Red #FF0621)
-- Database schema migrated and tested
-- Pipeline tested with sample data (105 contributors processed)
-- Build verification completed
-
-📋 **READY FOR EXECUTION**:
-
-- **Phase 1**: 90-day recent data ingestion (~15 minutes, low risk)
-- **Phase 2+**: Historical data ingestion (monitored, phased approach)
-
-📊 **Data Scope**:
-
-- **18,508 PRs** + **4,846 issues** across 12 repositories
-- **~2,000+ contributors** estimated
-- **5-year history** available for ingestion
-
-For detailed execution plan, see:
-
-- **GitHub Issue**: [#1 Optimism Ecosystem Data Ingestion](https://github.com/M3-org/op-hiscores/issues/1)
-- **Task Documentation**: `.claude/tasks/optimism-reconfiguration/`
-
-### Quick Start - Phase 1 (Recommended)
+## Quick Start
 
 ```bash
-# Execute 90-day ingestion (safe, quick, high-value)
+# Ingest recent data
 bun run pipeline ingest --days 90
+
+# Process and calculate scores
 bun run pipeline process
+
+# Build the site
 bun run build
 ```
 
@@ -409,33 +364,32 @@ This architecture ensures:
 
 ### GitHub Pages Configuration
 
-This project is configured to deploy to GitHub Pages with automatic base path detection. If you fork this repository:
+This project is configured to deploy to GitHub Pages with **automatic base path detection**. The deploy workflow automatically determines whether your repo is:
 
-1. **Update `next.config.js`** - Change the `basePath` to match your repository name:
+- An **organization/user site** (`username.github.io`) → deploys to root path
+- A **project site** (any other repo name) → deploys to `/${repo-name}`
 
-   ```javascript
-   basePath: "/your-repo-name", // Replace with your actual repo name
-   ```
+If you fork this repository:
 
-2. **Enable GitHub Pages**:
+1. **Enable GitHub Pages**:
 
    - Go to repository Settings → Pages
    - Source: "GitHub Actions"
    - Save
 
-3. **Add Required Secrets** (Settings → Secrets and variables → Actions):
+2. **Add Required Secrets** (Settings → Secrets and variables → Actions):
 
    - `OPENROUTER_API_KEY` - Required for AI summary generation
    - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking
    - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking
 
-4. **Enable Workflows**:
+3. **Enable Workflows**:
 
    - Go to Actions tab
    - Enable workflows if prompted
    - Manually trigger "Run Pipelines" to generate initial data
 
-5. **Access Your Site**:
+4. **Access Your Site**:
    - After successful deployment: `https://your-username.github.io/your-repo-name/`
 
 ### Deployment Architecture
@@ -446,11 +400,12 @@ The site automatically deploys via GitHub Actions:
   - Stores data in `_data` branch (SQLite dumps, stats, summaries)
   - Never commits large binary files to main branch
 - **Site Build**: `deploy.yml` triggers on push to main or after pipeline runs
+  - Auto-detects `BASE_PATH` and `SITE_URL` from repository name
   - Restores data from `_data` branch
   - Builds Next.js static site
   - Deploys to GitHub Pages
 
-**Note**: If deploying to a custom domain or different base path, update `basePath` in `next.config.js` accordingly.
+**Note**: To override auto-detection, set `BASE_PATH` and `SITE_URL` secrets in your repository settings.
 
 ## Development
 
