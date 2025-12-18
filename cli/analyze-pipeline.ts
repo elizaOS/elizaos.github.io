@@ -654,4 +654,68 @@ Import completed:
     }
   });
 
+// Export leaderboard API endpoints
+program
+  .command("export-leaderboard")
+  .description("Generate static JSON leaderboard API endpoints")
+  .option("-v, --verbose", "Enable verbose logging", false)
+  .option(
+    "-c, --config <path>",
+    "Path to pipeline config file",
+    DEFAULT_CONFIG_PATH,
+  )
+  .option("--output-dir <dir>", "Output directory for API files", "./data/")
+  .option(
+    "-l, --limit <number>",
+    "Limit number of users in leaderboard (0 = no limit)",
+    "100",
+  )
+  .action(async (options) => {
+    // Validate required environment variables
+    validateEnvVars(["GITHUB_TOKEN"]);
+
+    try {
+      // Dynamically import the config
+      const configPath = join(import.meta.dir, options.config);
+      const configFile = await import(configPath);
+      const pipelineConfig = PipelineConfigSchema.parse(configFile.default);
+
+      // Create a root logger
+      const logLevel: LogLevel = options.verbose ? "debug" : "info";
+      const rootLogger = createLogger({
+        minLevel: logLevel,
+        context: {
+          command: "export-leaderboard",
+          config: options.config,
+        },
+      });
+
+      rootLogger.info(
+        `Generating leaderboard API endpoints using config from ${configPath}`,
+      );
+
+      // Dynamically import the export function
+      const { exportAllLeaderboardAPIs } = await import(
+        "@/lib/pipelines/export/exportLeaderboardAPI"
+      );
+
+      // Parse limit option (0 means no limit)
+      const limit = parseInt(options.limit, 10);
+      const userLimit = limit === 0 ? undefined : limit;
+
+      // Export all leaderboard endpoints
+      await exportAllLeaderboardAPIs(options.outputDir, {
+        limit: userLimit,
+        contributionStartDate:
+          pipelineConfig.contributionStartDate ?? "2024-10-15",
+        logger: rootLogger,
+      });
+
+      rootLogger.info("\nLeaderboard API export completed successfully!");
+    } catch (error: unknown) {
+      console.error(chalk.red("Error exporting leaderboard:"), error);
+      process.exit(1);
+    }
+  });
+
 program.parse(process.argv);
