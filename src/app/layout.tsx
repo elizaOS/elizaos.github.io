@@ -8,7 +8,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 
 const inter = Inter({ subsets: ["latin"] });
 
-const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "Contributor Analytics";
+const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "HiScores";
 
 export const metadata: Metadata = {
   title: siteName,
