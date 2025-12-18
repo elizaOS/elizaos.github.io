@@ -1,545 +1,142 @@
-# ElizaOS Contributor Analytics: Agent & Contributor Guide
+# Contributor Analytics: Agent & Developer Guide
 
-This document provides a comprehensive overview of the ElizaOS Contributor Analytics project, designed to guide both AI agents and human contributors. It covers the project's purpose, architecture, key components, and development workflows.
-
-**Agent Protocol**: When a plan is available (e.g., in the `plan/` directory), the agent MUST follow it step-by-step. After completing a task described in the plan, the agent MUST update the plan document to mark the task as complete (e.g., by checking a checkbox `[x]`). After a full phase of the plan is complete, the agent MUST commit the changes to the codebase before proceeding to the next phase. This ensures a clear record of progress and alignment with the project goals.
+This document provides a comprehensive overview of the Contributor Analytics project for AI agents and human contributors.
 
 ## 1. Project Overview
 
-This project is a sophisticated analytics and visualization platform for GitHub repositories. Its primary goal is to track, analyze, score, and summarize contributor activity, providing valuable insights into the development process.
+A sophisticated analytics platform for GitHub repositories that tracks, analyzes, scores, and summarizes contributor activity.
 
 **Core Features:**
 
-- **Data Ingestion**: Fetches comprehensive data (PRs, issues, commits, reviews, comments) from the GitHub API.
-- **Scoring System**: A configurable algorithm that scores contributions based on type, complexity, and impact.
-- **AI-Powered Summaries**: Generates daily, weekly, and monthly summaries of both individual contributor activity and overall project progress using LLMs.
-- **Data Pipelines**: A robust, modular pipeline system for orchestrating data fetching, processing, and analysis.
-- **Web Interface**: A Next.js application for visualizing data, leaderboards, and contributor profiles.
-- **Automation**: GitHub Actions workflows for daily data processing and deployment.
+- **Data Ingestion**: Fetches PRs, issues, commits, reviews, comments from GitHub API
+- **Scoring System**: Configurable algorithm scoring contributions by type, complexity, impact
+- **AI Summaries**: Daily, weekly, monthly summaries using LLMs (via OpenRouter)
+- **Data Pipelines**: Modular TypeScript pipeline system
+- **Web Interface**: Next.js static site with leaderboards and contributor profiles
+- **Automation**: GitHub Actions for daily processing and deployment
 
 **Tech Stack:**
 
-- **Frontend**: Next.js, React, TypeScript, Tailwind CSS, shadcn/ui
-- **Backend/Pipelines**: TypeScript, Bun
-- **Database**: SQLite with Drizzle ORM
-- **CI/CD**: GitHub Actions
+- Frontend: Next.js 15, React, TypeScript, Tailwind CSS, shadcn/ui
+- Backend/Pipelines: TypeScript, Bun
+- Database: SQLite with Drizzle ORM
+- CI/CD: GitHub Actions
 
 ---
 
 ## 2. System Architecture
 
-The system is composed of three main parts: the data pipeline, the database, and the frontend application.
+### 2.1. Data Pipeline (`src/lib/pipelines/` & `cli/`)
 
-### 2.1. The Data Pipeline (`src/lib/pipelines/` & `cli/`)
+The TypeScript-based pipeline system handles all data operations:
 
-This is the engine of the system. It's a TypeScript-based, modular system responsible for all data operations.
+- **Entry Point**: `cli/analyze-pipeline.ts`
+- **Orchestration**: Functional composition (`pipe`, `parallel`, `mapStep`)
+- **Configuration**: `config/pipeline.config.ts` reads from `PIPELINE_CONFIG_FILE`
 
-- **Entry Point**: The pipeline is executed via the CLI script at `cli/analyze-pipeline.ts`.
-- **Orchestration**: It uses a functional composition model (`pipe`, `parallel`, `mapStep`) to build complex workflows from small, reusable steps. See `src/lib/pipelines/AGENTS.md` for a deep dive.
-- **Configuration**: All pipeline behavior, including repository lists, scoring rules, and AI model settings, is defined in `config/pipeline.config.ts`.
+**Pipeline Stages:**
 
-The pipeline is divided into four main stages:
+1. **Ingest**: Fetch from GitHub API → store in SQLite
+2. **Process**: Calculate scores and expertise tags
+3. **Export**: Generate JSON/MD files for frontend
+4. **Summarize**: AI-generated summaries via OpenRouter
 
-1.  **Ingest**: Fetches data from the GitHub API and stores it in the database.
-2.  **Process**: Calculates contributor scores and expertise tags based on the raw data.
-3.  **Export**: Generates aggregated JSON/MD files for static consumption by the frontend.
-4.  **Summarize**: Uses an AI service (via OpenRouter) to generate summaries.
+### 2.2. Database (`src/lib/data/` & `drizzle/`)
 
-### 2.2. The Database (`src/lib/data/` & `drizzle/`)
+SQLite database as single source of truth:
 
-A SQLite database serves as the single source of truth for all raw and processed data.
+- **Schema**: `src/lib/data/schema.ts` using Drizzle ORM
+- **Tables**: users, repositories, pullRequests, issues, reviews, comments, scores
+- **Migrations**: `drizzle/` directory, managed by Drizzle Kit
 
-- **Schema**: Defined in `src/lib/data/schema.ts` using Drizzle ORM. It includes tables for users, repositories, all GitHub activities (PRs, issues, etc.), and processed data like scores and summaries.
-- **Migrations**: Database schema changes are managed through migration files generated by Drizzle Kit, located in the `drizzle/` directory.
-- **Data Integrity**: The schema is heavily indexed and uses foreign key relationships to ensure data consistency.
+### 2.3. Frontend (`src/app/` & `src/components/`)
 
-### 2.3. The Frontend (`src/app/` & `src/components/`)
+Static Next.js 15 application for GitHub Pages:
 
-A fully static Next.js 15 application hosted on GitHub Pages, designed to visualize the processed data. There is no backend server or API routes.
+- **SSG**: Server Components query SQLite at build time
+- **Routing**: App Router with dynamic date-based pages
+- **Styling**: Tailwind CSS + shadcn/ui components
 
-- **Static Site Generation (SSG)**: The site is generated at build time. Next.js Server Components are used to query the SQLite database directly during the build process, embedding the data into static HTML files.
-- **Framework**: Uses the App Router for routing and Server Components for data fetching at build time.
-- **Styling**: Tailwind CSS for utility-first styling, with `shadcn/ui` for pre-built, accessible components.
+### 2.4. Auth Worker (`auth-worker/`)
 
-### 2.4. Authentication Worker (`auth-worker/`)
+Cloudflare Worker for GitHub OAuth:
 
-The `auth-worker/` directory contains a Cloudflare Worker responsible for handling the GitHub OAuth flow.
-
-- **Purpose**: Its sole function is to securely exchange a temporary GitHub code for a user access token. This token is then passed back to the frontend.
-- **Wallet Linking**: This mechanism is crucial for the wallet linking feature (`src/app/profile/edit/`). It allows contributors to authenticate with their GitHub account, which in turn grants the application permission to update their public profile `README.md` file with a hidden comment containing their wallet addresses.
-- **See also**: `src/lib/walletLinking/**` for the core logic of parsing and generating the wallet data comment.
+- Exchanges GitHub code for access token
+- Enables wallet linking feature for contributor profiles
 
 ---
 
-## 3. Automation & CI/CD (`.github/`)
+## 3. Automation (`.github/`)
 
-Automation is a cornerstone of this project, ensuring data is always fresh and the application is consistently deployed.
+### Workflows
 
-### 3.1. GitHub Actions Workflows
+- **`run-pipelines.yml`**: Daily at 23:00 UTC, runs full pipeline chain
+- **`deploy.yml`**: Builds and deploys to GitHub Pages
+- **`pr-checks.yml`**: Linting, type checking, build verification
 
-- **`run-pipelines.yml`**: The main data processing workflow.
-  - **Schedule**: Runs daily at 23:00 UTC.
-  - **Process**: Executes the full `ingest -> process -> export -> summarize` pipeline.
-  - **Data Management**: Uses a dedicated `_data` branch to store the generated data and SQLite database dump, keeping the `main` branch clean.
-- **`deploy.yml`**: Handles the build and deployment to GitHub Pages.
-  - **Trigger**: Runs after a successful pipeline run or on a push to `main`.
-  - **Data Restoration**: Before building the Next.js app, it checks out the `_data` branch to ensure the latest data is included in the static site generation.
+### Custom Actions
 
-### 3.2. Custom Actions
+- **`pipeline-data`**: Manages `_data` branch lifecycle via Git worktrees
+- **`restore-db`**: Serializes/deserializes SQLite for version control
 
-The automation relies on two key custom GitHub Actions located in the `.github/actions/` directory:
+### Data Branch Strategy
 
-- **`pipeline-data`**: Manages the lifecycle of the `_data` branch. It uses Git worktrees to check out the data branch, sync data between it and the main workspace, and commit updates.
-- **`restore-db`**: Handles the serialization and deserialization of the SQLite database. It dumps the database into a version-controllable text format and can restore it, ensuring the schema is correctly migrated before loading the data.
-
-### 3.3. Data Branch Strategy
-
-- **`main` branch**: Contains the application code.
-- **`_data` branch**: Contains all generated data, including the SQLite database dump.
-- **Benefit**: This separation prevents the Git history of the application code from being cluttered with frequent data updates, simplifying code reviews and version control.
+- `main`: Application code
+- `_data`: Generated data and SQLite dumps
 
 ---
 
-## 4. Developer Tooling
+## 4. Configuration
 
-### 4.1. Data Sync Utility (`cli/data-sync.ts`)
-
-To facilitate local development, the project includes a powerful data synchronization utility. This CLI script allows developers to pull the latest data directly from the production `_data` branch into their local environment.
-
-- **Purpose**: It eliminates the need for developers to run the time-consuming `ingest` and `summarize` pipelines locally. Instead, they can get a complete, up-to-date dataset with a single command.
-- **Mechanism**: The script mirrors the logic used in the GitHub Actions workflows. It fetches the `_data` branch, creates a temporary worktree, copies all the generated JSON/MD files, and restores the SQLite database from its version-controlled dump.
-- **Usage**:
-
-  ```bash
-  # Sync data from the upstream repository
-  bun run data:sync
-
-  # See all options
-  bun run data:sync --help
-  ```
-
---
-
-# Typescript Rules
-
-- Dont cast to `any` type when you have a type error, instead think about the underlying issue causing the error and if/how you can update the related code to respect full typesafety.
-- Avoid manual type signatures on functions and vars whenever possible, always prefer to use inference.
-- Before declaring new Interfaces, search the codebase and types files to see if there's existing type definitions / zod schemas you can use
-- avoid adding comments to code that is self explanatory
-- For testing, use bun.sh test runner, and import from bun:test (https://bun.sh/docs/cli/test)
-
-# Task Master AI - Claude Code Integration Guide
-
-## Essential Commands
-
-### Core Workflow Commands
+Pipeline reads from JSON file specified by `PIPELINE_CONFIG_FILE` env var:
 
 ```bash
-# Project Setup
-task-master init                                    # Initialize Task Master in current project
-task-master parse-prd .taskmaster/docs/prd.txt      # Generate tasks from PRD document
-task-master models --setup                        # Configure AI models interactively
-
-# Daily Development Workflow
-task-master list                                   # Show all tasks with status
-task-master next                                   # Get next available task to work on
-task-master show <id>                             # View detailed task information (e.g., task-master show 1.2)
-task-master set-status --id=<id> --status=done    # Mark task complete
-
-# Task Management
-task-master add-task --prompt="description" --research        # Add new task with AI assistance
-task-master expand --id=<id> --research --force              # Break task into subtasks
-task-master update-task --id=<id> --prompt="changes"         # Update specific task
-task-master update --from=<id> --prompt="changes"            # Update multiple tasks from ID onwards
-task-master update-subtask --id=<id> --prompt="notes"        # Add implementation notes to subtask
-
-# Analysis & Planning
-task-master analyze-complexity --research          # Analyze task complexity
-task-master complexity-report                      # View complexity analysis
-task-master expand --all --research               # Expand all eligible tasks
-
-# Dependencies & Organization
-task-master add-dependency --id=<id> --depends-on=<id>       # Add task dependency
-task-master move --from=<id> --to=<id>                       # Reorganize task hierarchy
-task-master validate-dependencies                            # Check for dependency issues
-task-master generate                                         # Update task markdown files (usually auto-called)
+# Local development
+export PIPELINE_CONFIG_FILE=config/example.json
 ```
 
-## Key Files & Project Structure
-
-### Core Files
-
-- `.taskmaster/tasks/tasks.json` - Main task data file (auto-managed)
-- `.taskmaster/config.json` - AI model configuration (use `task-master models` to modify)
-- `.taskmaster/docs/prd.txt` - Product Requirements Document for parsing
-- `.taskmaster/tasks/*.txt` - Individual task files (auto-generated from tasks.json)
-- `.env` - API keys for CLI usage
-
-### Claude Code Integration Files
-
-- `CLAUDE.md` - Auto-loaded context for Claude Code (this file)
-- `.claude/settings.json` - Claude Code tool allowlist and preferences
-- `.claude/commands/` - Custom slash commands for repeated workflows
-- `.mcp.json` - MCP server configuration (project-specific)
-
-### Directory Structure
-
-```
-project/
-├── .taskmaster/
-│   ├── tasks/              # Task files directory
-│   │   ├── tasks.json      # Main task database
-│   │   ├── task-1.md      # Individual task files
-│   │   └── task-2.md
-│   ├── docs/              # Documentation directory
-│   │   ├── prd.txt        # Product requirements
-│   ├── reports/           # Analysis reports directory
-│   │   └── task-complexity-report.json
-│   ├── templates/         # Template files
-│   │   └── example_prd.txt  # Example PRD template
-│   └── config.json        # AI models & settings
-├── .claude/
-│   ├── settings.json      # Claude Code configuration
-│   └── commands/         # Custom slash commands
-├── .env                  # API keys
-├── .mcp.json            # MCP configuration
-└── CLAUDE.md            # This file - auto-loaded by Claude Code
-```
-
-## MCP Integration
-
-Task Master provides an MCP server that Claude Code can connect to. Configure in `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "task-master-ai": {
-      "command": "npx",
-      "args": ["-y", "--package=task-master-ai", "task-master-ai"],
-      "env": {
-        "ANTHROPIC_API_KEY": "your_key_here",
-        "PERPLEXITY_API_KEY": "your_key_here",
-        "OPENAI_API_KEY": "OPENAI_API_KEY_HERE",
-        "GOOGLE_API_KEY": "GOOGLE_API_KEY_HERE",
-        "XAI_API_KEY": "XAI_API_KEY_HERE",
-        "OPENROUTER_API_KEY": "OPENROUTER_API_KEY_HERE",
-        "MISTRAL_API_KEY": "MISTRAL_API_KEY_HERE",
-        "AZURE_OPENAI_API_KEY": "AZURE_OPENAI_API_KEY_HERE",
-        "OLLAMA_API_KEY": "OLLAMA_API_KEY_HERE"
-      }
-    }
-  }
-}
-```
-
-### Essential MCP Tools
-
-```javascript
-help; // = shows available taskmaster commands
-// Project setup
-initialize_project; // = task-master init
-parse_prd; // = task-master parse-prd
-
-// Daily workflow
-get_tasks; // = task-master list
-next_task; // = task-master next
-get_task; // = task-master show <id>
-set_task_status; // = task-master set-status
-
-// Task management
-add_task; // = task-master add-task
-expand_task; // = task-master expand
-update_task; // = task-master update-task
-update_subtask; // = task-master update-subtask
-update; // = task-master update
-
-// Analysis
-analyze_project_complexity; // = task-master analyze-complexity
-complexity_report; // = task-master complexity-report
-```
-
-## Claude Code Workflow Integration
-
-### Standard Development Workflow
-
-#### 1. Project Initialization
-
-```bash
-# Initialize Task Master
-task-master init
-
-# Create or obtain PRD, then parse it
-task-master parse-prd .taskmaster/docs/prd.txt
-
-# Analyze complexity and expand tasks
-task-master analyze-complexity --research
-task-master expand --all --research
-```
-
-If tasks already exist, another PRD can be parsed (with new information only!) using parse-prd with --append flag. This will add the generated tasks to the existing list of tasks..
-
-#### 2. Daily Development Loop
-
-```bash
-# Start each session
-task-master next                           # Find next available task
-task-master show <id>                     # Review task details
-
-# During implementation, check in code context into the tasks and subtasks
-task-master update-subtask --id=<id> --prompt="implementation notes..."
-
-# Complete tasks
-task-master set-status --id=<id> --status=done
-```
-
-#### 3. Multi-Claude Workflows
-
-For complex projects, use multiple Claude Code sessions:
-
-```bash
-# Terminal 1: Main implementation
-cd project && claude
-
-# Terminal 2: Testing and validation
-cd project-test-worktree && claude
-
-# Terminal 3: Documentation updates
-cd project-docs-worktree && claude
-```
-
-### Custom Slash Commands
-
-Create `.claude/commands/taskmaster-next.md`:
-
-```markdown
-Find the next available Task Master task and show its details.
-
-Steps:
-
-1. Run `task-master next` to get the next task
-2. If a task is available, run `task-master show <id>` for full details
-3. Provide a summary of what needs to be implemented
-4. Suggest the first implementation step
-```
-
-Create `.claude/commands/taskmaster-complete.md`:
-
-```markdown
-Complete a Task Master task: $ARGUMENTS
-
-Steps:
-
-1. Review the current task with `task-master show $ARGUMENTS`
-2. Verify all implementation is complete
-3. Run any tests related to this task
-4. Mark as complete: `task-master set-status --id=$ARGUMENTS --status=done`
-5. Show the next available task with `task-master next`
-```
-
-## Tool Allowlist Recommendations
-
-Add to `.claude/settings.json`:
-
-```json
-{
-  "allowedTools": [
-    "Edit",
-    "Bash(task-master *)",
-    "Bash(git commit:*)",
-    "Bash(git add:*)",
-    "Bash(npm run *)",
-    "mcp__task_master_ai__*"
-  ]
-}
-```
-
-## Configuration & Setup
-
-### API Keys Required
-
-At least **one** of these API keys must be configured:
-
-- `ANTHROPIC_API_KEY` (Claude models) - **Recommended**
-- `PERPLEXITY_API_KEY` (Research features) - **Highly recommended**
-- `OPENAI_API_KEY` (GPT models)
-- `GOOGLE_API_KEY` (Gemini models)
-- `MISTRAL_API_KEY` (Mistral models)
-- `OPENROUTER_API_KEY` (Multiple models)
-- `XAI_API_KEY` (Grok models)
-
-An API key is required for any provider used across any of the 3 roles defined in the `models` command.
-
-### Model Configuration
-
-```bash
-# Interactive setup (recommended)
-task-master models --setup
-
-# Set specific models
-task-master models --set-main claude-3-5-sonnet-20241022
-task-master models --set-research perplexity-llama-3.1-sonar-large-128k-online
-task-master models --set-fallback gpt-4o-mini
-```
-
-## Task Structure & IDs
-
-### Task ID Format
-
-- Main tasks: `1`, `2`, `3`, etc.
-- Subtasks: `1.1`, `1.2`, `2.1`, etc.
-- Sub-subtasks: `1.1.1`, `1.1.2`, etc.
-
-### Task Status Values
-
-- `pending` - Ready to work on
-- `in-progress` - Currently being worked on
-- `done` - Completed and verified
-- `deferred` - Postponed
-- `cancelled` - No longer needed
-- `blocked` - Waiting on external factors
-
-### Task Fields
-
-```json
-{
-  "id": "1.2",
-  "title": "Implement user authentication",
-  "description": "Set up JWT-based auth system",
-  "status": "pending",
-  "priority": "high",
-  "dependencies": ["1.1"],
-  "details": "Use bcrypt for hashing, JWT for tokens...",
-  "testStrategy": "Unit tests for auth functions, integration tests for login flow",
-  "subtasks": []
-}
-```
-
-## Claude Code Best Practices with Task Master
-
-### Context Management
-
-- Use `/clear` between different tasks to maintain focus
-- This CLAUDE.md file is automatically loaded for context
-- Use `task-master show <id>` to pull specific task context when needed
-
-### Iterative Implementation
-
-1. `task-master show <subtask-id>` - Understand requirements
-2. Explore codebase and plan implementation
-3. `task-master update-subtask --id=<id> --prompt="detailed plan"` - Log plan
-4. `task-master set-status --id=<id> --status=in-progress` - Start work
-5. Implement code following logged plan
-6. `task-master update-subtask --id=<id> --prompt="what worked/didn't work"` - Log progress
-7. `task-master set-status --id=<id> --status=done` - Complete task
-
-### Complex Workflows with Checklists
-
-For large migrations or multi-step processes:
-
-1. Create a markdown PRD file describing the new changes: `touch task-migration-checklist.md` (prds can be .txt or .md)
-2. Use Taskmaster to parse the new prd with `task-master parse-prd --append` (also available in MCP)
-3. Use Taskmaster to expand the newly generated tasks into subtasks. Consdier using `analyze-complexity` with the correct --to and --from IDs (the new ids) to identify the ideal subtask amounts for each task. Then expand them.
-4. Work through items systematically, checking them off as completed
-5. Use `task-master update-subtask` to log progress on each task/subtask and/or updating/researching them before/during implementation if getting stuck
-
-### Git Integration
-
-Task Master works well with `gh` CLI:
-
-```bash
-# Create PR for completed task
-gh pr create --title "Complete task 1.2: User authentication" --body "Implements JWT auth system as specified in task 1.2"
-
-# Reference task in commits
-git commit -m "feat: implement JWT auth (task 1.2)"
-```
-
-### Parallel Development with Git Worktrees
-
-```bash
-# Create worktrees for parallel task development
-git worktree add ../project-auth feature/auth-system
-git worktree add ../project-api feature/api-refactor
-
-# Run Claude Code in each worktree
-cd ../project-auth && claude    # Terminal 1: Auth work
-cd ../project-api && claude     # Terminal 2: API work
-```
-
-## Troubleshooting
-
-### AI Commands Failing
-
-```bash
-# Check API keys are configured
-cat .env                           # For CLI usage
-
-# Verify model configuration
-task-master models
-
-# Test with different model
-task-master models --set-fallback gpt-4o-mini
-```
-
-### MCP Connection Issues
-
-- Check `.mcp.json` configuration
-- Verify Node.js installation
-- Use `--mcp-debug` flag when starting Claude Code
-- Use CLI as fallback if MCP unavailable
-
-### Task File Sync Issues
-
-```bash
-# Regenerate task files from tasks.json
-task-master generate
-
-# Fix dependency issues
-task-master fix-dependencies
-```
-
-DO NOT RE-INITIALIZE. That will not do anything beyond re-adding the same Taskmaster core files.
-
-## Important Notes
-
-### AI-Powered Operations
-
-These commands make AI calls and may take up to a minute:
-
-- `parse_prd` / `task-master parse-prd`
-- `analyze_project_complexity` / `task-master analyze-complexity`
-- `expand_task` / `task-master expand`
-- `expand_all` / `task-master expand --all`
-- `add_task` / `task-master add-task`
-- `update` / `task-master update`
-- `update_task` / `task-master update-task`
-- `update_subtask` / `task-master update-subtask`
-
-### File Management
-
-- Never manually edit `tasks.json` - use commands instead
-- Never manually edit `.taskmaster/config.json` - use `task-master models`
-- Task markdown files in `tasks/` are auto-generated
-- Run `task-master generate` after manual changes to tasks.json
-
-### Claude Code Session Management
-
-- Use `/clear` frequently to maintain focused context
-- Create custom slash commands for repeated Task Master workflows
-- Configure tool allowlist to streamline permissions
-- Use headless mode for automation: `claude -p "task-master next"`
-
-### Multi-Task Updates
-
-- Use `update --from=<id>` to update multiple future tasks
-- Use `update-task --id=<id>` for single task updates
-- Use `update-subtask --id=<id>` for implementation logging
-
-### Research Mode
-
-- Add `--research` flag for research-based AI enhancement
-- Requires a research model API key like Perplexity (`PERPLEXITY_API_KEY`) in environment
-- Provides more informed task creation and updates
-- Recommended for complex technical tasks
+**Config options** (`config/example.json`):
+
+- `PIPELINE_REPOS`: Repository list to track
+- `PIPELINE_START_DATE`: Contribution tracking start date
+- `PIPELINE_PROJECT_CONTEXT`: AI summary context
+- `PIPELINE_SCORING`: Scoring rules for PRs, issues, reviews
+- `PIPELINE_TAGS`: Area/role/tech tag definitions
+- `PIPELINE_BOT_USERS`: Bot accounts to exclude
 
 ---
+
+## 5. Development
+
+### Data Sync Utility
+
+Pull production data for local development:
+
+```bash
+bun run data:sync              # Sync from upstream
+bun run data:sync --help       # See all options
+```
+
+### Schema Changes
+
+1. Modify `src/lib/data/schema.ts`
+2. Run `bun run db:generate`
+3. Run `bun run db:migrate`
+
+### Testing Pipelines
+
+```bash
+bun run pipeline --help        # See all options
+bun run pipeline ingest -d 7   # Small date range
+bun run pipeline process -f    # Force reprocess
+```
+
+---
+
+## 6. TypeScript Guidelines
+
+- Prefer type inference over manual signatures
+- Never cast to `any` - fix underlying type issues
+- Search for existing types/schemas before creating new ones
+- Avoid comments on self-explanatory code
+- Use `bun:test` for testing
