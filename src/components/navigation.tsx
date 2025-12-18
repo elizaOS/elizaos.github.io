@@ -210,7 +210,7 @@ export function Navigation() {
           <Button variant="none" size={"none"} asChild>
             <Link href="/" className="transition-opacity hover:opacity-80">
               <h1 className="text-xl font-bold">
-                {process.env.NEXT_PUBLIC_SITE_NAME || "Contributor Analytics"}
+                {process.env.NEXT_PUBLIC_SITE_NAME || "HiScores"}
               </h1>
             </Link>
           </Button>

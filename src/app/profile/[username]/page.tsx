@@ -37,7 +37,7 @@ export async function generateMetadata({
   const userData = await getUserProfile(username);
 
   // Get the latest weekly summary for meta description if available
-  const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "Contributor Analytics";
+  const siteName = process.env.NEXT_PUBLIC_SITE_NAME || "HiScores";
   const description =
     userData?.weeklySummaries && userData.weeklySummaries.length > 0
       ? userData.weeklySummaries[0].summary || `${siteName} contributor profile`

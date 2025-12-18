@@ -11,6 +11,7 @@ import { DailyActivity } from "@/components/daily-activity";
 import { UserActivityHeatmap } from "@/lib/scoring/queries";
 import { SummaryCard, Summary } from "@/components/summary-card";
 import { WalletAddressBadge } from "@/components/ui/WalletAddressBadge";
+import { ProfileCopyButton } from "@/components/ui/profile-copy-button";
 import {
   UserBadge,
   getTierDefinition,
@@ -128,89 +129,105 @@ export default function UserProfile({
   const badgeDataList = [...sortedEarned, ...sortedLocked];
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 sm:p-4">
-      <div className="items-star flex flex-col gap-4 sm:flex-row">
-        <Avatar className="h-20 w-20">
-          <AvatarImage
-            src={`https://github.com/${username}.png`}
-            alt={username}
-          />
-          <AvatarFallback>{username[0].toUpperCase()}</AvatarFallback>
-        </Avatar>
-        <div className="flex-grow">
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-row items-center gap-1">
-              <h1 className="max-w-full text-lg font-bold sm:text-2xl">
-                {username}
-              </h1>
-              <span className="font-bold text-primary">
-                (level-{totalLevel})
-              </span>
-
-              {linkedWallets.length > 0 && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <BadgeCheck className="ml-1 inline-flex h-5 w-5 text-yellow-500" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Wallet linked</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center">
-                <span className="font-mono text-sm font-medium">
-                  {Math.round(totalXp).toLocaleString()} XP
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row">
+          <Avatar className="h-20 w-20">
+            <AvatarImage
+              src={`https://github.com/${username}.png`}
+              alt={username}
+            />
+            <AvatarFallback>{username[0].toUpperCase()}</AvatarFallback>
+          </Avatar>
+          <div className="flex-grow">
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-row items-center gap-1">
+                <h1 className="max-w-full text-lg font-bold sm:text-2xl">
+                  {username}
+                </h1>
+                <span className="font-bold text-primary">
+                  (level-{totalLevel})
                 </span>
-              </div>
-              {sortedEarned.length > 0 && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
-                        <Trophy className="h-3.5 w-3.5" />
-                        <span>{sortedEarned.length}</span>
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>
-                        {sortedEarned.length} badge
-                        {sortedEarned.length !== 1 ? "s" : ""} earned
-                      </p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
-              <a
-                href={`https://github.com/${username}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-secondary transition-colors hover:bg-secondary/80"
-              >
-                <Github className="h-4 w-4" />
-                <span className="sr-only">View GitHub Profile</span>
-              </a>
 
-              {linkedWallets.map((wallet, index) => {
-                const IconComponent = SUPPORTED_CHAINS[wallet.chain]?.icon;
-                return (
-                  <WalletAddressBadge
-                    key={index}
-                    address={wallet.address}
-                    icon={
-                      IconComponent ? (
-                        <IconComponent className="h-4 w-4" />
-                      ) : null
-                    }
-                    label={wallet.chain}
-                  />
-                );
-              })}
+                {linkedWallets.length > 0 && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <BadgeCheck className="ml-1 inline-flex h-5 w-5 text-yellow-500" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Wallet linked</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center">
+                  <span className="font-mono text-sm font-medium">
+                    {Math.round(totalXp).toLocaleString()} XP
+                  </span>
+                </div>
+                {sortedEarned.length > 0 && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs font-medium text-yellow-600 dark:text-yellow-500">
+                          <Trophy className="h-3.5 w-3.5" />
+                          <span>{sortedEarned.length}</span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>
+                          {sortedEarned.length} badge
+                          {sortedEarned.length !== 1 ? "s" : ""} earned
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                <a
+                  href={`https://github.com/${username}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-secondary transition-colors hover:bg-secondary/80"
+                >
+                  <Github className="h-4 w-4" />
+                  <span className="sr-only">View GitHub Profile</span>
+                </a>
+
+                {linkedWallets.map((wallet, index) => {
+                  const IconComponent = SUPPORTED_CHAINS[wallet.chain]?.icon;
+                  return (
+                    <WalletAddressBadge
+                      key={index}
+                      address={wallet.address}
+                      icon={
+                        IconComponent ? (
+                          <IconComponent className="h-4 w-4" />
+                        ) : null
+                      }
+                      label={wallet.chain}
+                    />
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
+        <ProfileCopyButton
+          username={username}
+          stats={stats}
+          monthlySummaries={monthlySummaries}
+          weeklySummaries={weeklySummaries}
+          roleTags={roleTags}
+          skillTags={skillTags}
+          focusAreaTags={focusAreaTags}
+          totalXp={totalXp}
+          totalLevel={totalLevel}
+          dailyActivity={dailyActivity}
+          userBadges={userBadges}
+          badgeProgress={badgeProgress}
+        />
       </div>
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
         {monthlySummaries.length > 0 && (

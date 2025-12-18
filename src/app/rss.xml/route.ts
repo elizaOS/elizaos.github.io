@@ -89,7 +89,7 @@ export async function GET() {
     ],
   );
 
-  const title = process.env.NEXT_PUBLIC_SITE_NAME || "Contributor Analytics";
+  const title = process.env.NEXT_PUBLIC_SITE_NAME || "HiScores";
 
   const formatItem = (
     summary: (typeof dailySummaries)[number],
