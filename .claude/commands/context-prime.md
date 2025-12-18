@@ -1,1 +1,1 @@
-Read README.md, AGENTS.md, and CLAUDE.md to understand the project context.
+Read README.md, AGENTS.md, and CLAUDE.md, THEN run `git ls-files | grep -v -f (sed 's|^|^|; s|$|/|' .cursorignore | psub)` to understand the context of the project
