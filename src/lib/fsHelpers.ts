@@ -5,6 +5,13 @@ import { createHash } from "crypto";
 import { IntervalType } from "@/lib/date-utils";
 
 /**
+ * Normalize a string for use as a path segment
+ */
+export function normalizePathSegment(segment: string): string {
+  return segment.replace(/\.\./g, "").replace(/[\/\\]/g, "_");
+}
+
+/**
  * Ensures a directory exists, creating it and all parent directories if needed
  */
 export async function ensureDir(dirPath: string) {
@@ -29,8 +36,14 @@ export function getRepoFilePath(
   intervalType: string,
   fileName: string,
 ) {
-  const safeRepoId = repoId.replace("/", "_");
-  return path.join(outputDir, safeRepoId, dataType, intervalType, fileName);
+  const normalizedRepoId = normalizePathSegment(repoId);
+  return path.join(
+    outputDir,
+    normalizedRepoId,
+    dataType,
+    intervalType,
+    fileName,
+  );
 }
 
 /**
@@ -57,7 +70,7 @@ export function getContributorSummaryFilePath(
   return join(
     baseDir,
     "contributors",
-    username,
+    normalizePathSegment(username),
     "summaries",
     interval,
     filename,
@@ -78,11 +91,16 @@ export function getAPISummaryPath(
   baseDir: string,
   ...segments: string[]
 ): string {
-  return join(baseDir, "api", "summaries", ...segments);
+  return join(
+    baseDir,
+    "api",
+    "summaries",
+    ...segments.map(normalizePathSegment),
+  );
 }
 
 /**
- * Write JSON file and update latest pointer atomically
+ * Write JSON file and update latest pointer
  */
 export async function writeJSONWithLatest(
   jsonPath: string,

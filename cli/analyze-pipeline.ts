@@ -863,7 +863,6 @@ program
               const now = new Date().toISOString();
               const contentHash = sha256(summary.summary);
               const [owner, repo] = summary.repoId.split("/");
-              const safeRepoId = summary.repoId.replace("/", "_");
 
               const response = {
                 version: "1.0" as const,
@@ -882,14 +881,14 @@ program
               const jsonPath = getAPISummaryPath(
                 options.outputDir,
                 "repos",
-                safeRepoId,
+                summary.repoId,
                 intervalType,
                 jsonFilename,
               );
               const latestPath = getAPISummaryPath(
                 options.outputDir,
                 "repos",
-                safeRepoId,
+                summary.repoId,
                 intervalType,
                 "latest.json",
               );
@@ -901,7 +900,7 @@ program
                 const indexPath = getAPISummaryPath(
                   options.outputDir,
                   "repos",
-                  safeRepoId,
+                  summary.repoId,
                   intervalType,
                   "index.json",
                 );

@@ -51,19 +51,18 @@ async function writeRepoSummaryJSON(
     content: summary,
   };
 
-  const safeRepoId = repoId.replace("/", "_");
   const jsonFilename = `${startDate}.json`;
   const jsonPath = getAPISummaryPath(
     outputDir,
     "repos",
-    safeRepoId,
+    repoId,
     intervalType,
     jsonFilename,
   );
   const latestPath = getAPISummaryPath(
     outputDir,
     "repos",
-    safeRepoId,
+    repoId,
     intervalType,
     "latest.json",
   );
@@ -73,7 +72,7 @@ async function writeRepoSummaryJSON(
   const indexPath = getAPISummaryPath(
     outputDir,
     "repos",
-    safeRepoId,
+    repoId,
     intervalType,
     "index.json",
   );
