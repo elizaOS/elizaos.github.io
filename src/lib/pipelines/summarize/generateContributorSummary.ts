@@ -10,6 +10,11 @@ import { eq, and } from "drizzle-orm";
 import { isNotNullOrUndefined } from "@/lib/typeHelpers";
 import { getActiveContributorsInInterval } from "../getActiveContributors";
 import { generateTimeIntervals } from "../generateTimeIntervals";
+import {
+  getContributorSummaryFilePath,
+  writeToFile,
+  writeSummaryToAPI,
+} from "@/lib/fsHelpers";
 
 /**
  * Check if a summary already exists for a user on a specific date and interval type
@@ -96,8 +101,30 @@ const generateSummaryForContributor = createStep(
         interval.intervalType,
       );
 
+      // Export summary as markdown file
+      const mdFilename = `${startDate}.md`;
+      const mdPath = getContributorSummaryFilePath(
+        context.outputDir,
+        username,
+        interval.intervalType,
+        mdFilename,
+      );
+      await writeToFile(mdPath, summary);
+
+      // Export summary as JSON API artifact
+      await writeSummaryToAPI(
+        context.outputDir,
+        "contributor",
+        interval.intervalType,
+        startDate,
+        summary,
+        username,
+        { username },
+      );
+
       intervalLogger?.info(
-        `Generated and stored ${interval.intervalType} summary for ${username} on ${startDate}`,
+        `Generated and exported ${interval.intervalType} summary for ${username}`,
+        { mdPath },
       );
       return { username, summary };
     } catch (error) {

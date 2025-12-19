@@ -46,7 +46,7 @@ import { storeOverallSummary } from "@/lib/pipelines/summarize/mutations";
 import { overallSummaries } from "@/lib/data/schema";
 import { db } from "@/lib/data/db";
 import { and, eq } from "drizzle-orm";
-import { IntervalType, toDateString } from "@/lib/date-utils";
+import { IntervalType } from "@/lib/date-utils";
 import { readdir, readFile } from "fs/promises";
 import { existsSync } from "fs";
 
@@ -713,6 +713,181 @@ program
       rootLogger.info("\nLeaderboard API export completed successfully!");
     } catch (error: unknown) {
       console.error(chalk.red("Error exporting leaderboard:"), error);
+      process.exit(1);
+    }
+  });
+
+// Export summary JSON API files from existing database summaries
+program
+  .command("export-summaries")
+  .description(
+    "Export existing database summaries to JSON API format (for backfilling)",
+  )
+  .option("-v, --verbose", "Enable verbose logging", false)
+  .option("--output-dir <dir>", "Output directory for API files", "./data/")
+  .option(
+    "-t, --type <type>",
+    "Type of summaries to export (overall, repository, contributor, all)",
+    "all",
+  )
+  .option(
+    "--interval <interval>",
+    "Interval type (day, week, month, all)",
+    "all",
+  )
+  .option(
+    "--dry-run",
+    "Show what would be exported without writing files",
+    false,
+  )
+  .action(async (options) => {
+    try {
+      const { writeSummaryToAPI, getAPISummaryPath } = await import(
+        "@/lib/fsHelpers"
+      );
+      const { repoSummaries, userSummaries } = await import(
+        "@/lib/data/schema"
+      );
+
+      const logLevel: LogLevel = options.verbose ? "debug" : "info";
+      const rootLogger = createLogger({
+        minLevel: logLevel,
+        context: { command: "export-summaries" },
+      });
+
+      const validTypes = ["overall", "repository", "contributor", "all"];
+      const validIntervals = ["day", "week", "month", "all"];
+
+      if (!validTypes.includes(options.type)) {
+        rootLogger.error(
+          `Invalid type: ${options.type}. Must be one of: ${validTypes.join(", ")}`,
+        );
+        process.exit(1);
+      }
+      if (!validIntervals.includes(options.interval)) {
+        rootLogger.error(
+          `Invalid interval: ${options.interval}. Must be one of: ${validIntervals.join(", ")}`,
+        );
+        process.exit(1);
+      }
+
+      const typesToExport =
+        options.type === "all"
+          ? (["overall", "repository", "contributor"] as const)
+          : ([options.type] as const);
+      const intervalsToExport: IntervalType[] =
+        options.interval === "all"
+          ? ["day", "week", "month"]
+          : [options.interval as IntervalType];
+
+      let totalExported = 0;
+
+      for (const summaryType of typesToExport) {
+        for (const intervalType of intervalsToExport) {
+          rootLogger.info(
+            `Exporting ${summaryType} ${intervalType} summaries...`,
+          );
+
+          if (summaryType === "overall") {
+            const summaries = await db.query.overallSummaries.findMany({
+              where: eq(overallSummaries.intervalType, intervalType),
+            });
+
+            for (const summary of summaries) {
+              if (!summary.summary) continue;
+              if (options.dryRun) {
+                const path = getAPISummaryPath(
+                  options.outputDir,
+                  "overall",
+                  intervalType,
+                  `${summary.date}.json`,
+                );
+                rootLogger.info(`[DRY RUN] Would export ${path}`);
+              } else {
+                await writeSummaryToAPI(
+                  options.outputDir,
+                  "overall",
+                  intervalType,
+                  summary.date,
+                  summary.summary,
+                );
+              }
+              totalExported++;
+            }
+          } else if (summaryType === "repository") {
+            const summaries = await db.query.repoSummaries.findMany({
+              where: eq(repoSummaries.intervalType, intervalType),
+            });
+
+            for (const summary of summaries) {
+              if (!summary.summary) continue;
+              const [owner, repo] = summary.repoId.split("/");
+              if (!owner || !repo) {
+                rootLogger.warn(
+                  `Invalid repoId format: ${summary.repoId}, skipping`,
+                );
+                continue;
+              }
+              if (options.dryRun) {
+                const path = getAPISummaryPath(
+                  options.outputDir,
+                  "repos",
+                  summary.repoId,
+                  intervalType,
+                  `${summary.date}.json`,
+                );
+                rootLogger.info(`[DRY RUN] Would export ${path}`);
+              } else {
+                await writeSummaryToAPI(
+                  options.outputDir,
+                  "repository",
+                  intervalType,
+                  summary.date,
+                  summary.summary,
+                  summary.repoId,
+                  { repoId: summary.repoId, owner, repo },
+                );
+              }
+              totalExported++;
+            }
+          } else if (summaryType === "contributor") {
+            const summaries = await db.query.userSummaries.findMany({
+              where: eq(userSummaries.intervalType, intervalType),
+            });
+
+            for (const summary of summaries) {
+              if (!summary.summary || !summary.username) continue;
+              if (options.dryRun) {
+                const path = getAPISummaryPath(
+                  options.outputDir,
+                  "contributors",
+                  summary.username,
+                  intervalType,
+                  `${summary.date}.json`,
+                );
+                rootLogger.info(`[DRY RUN] Would export ${path}`);
+              } else {
+                await writeSummaryToAPI(
+                  options.outputDir,
+                  "contributor",
+                  intervalType,
+                  summary.date,
+                  summary.summary,
+                  summary.username,
+                  { username: summary.username },
+                );
+              }
+              totalExported++;
+            }
+          }
+        }
+      }
+
+      rootLogger.info(
+        `\nExport completed: ${totalExported} summaries${options.dryRun ? " (dry run)" : " exported"}`,
+      );
+    } catch (error: unknown) {
+      console.error(chalk.red("Error exporting summaries:"), error);
       process.exit(1);
     }
   });

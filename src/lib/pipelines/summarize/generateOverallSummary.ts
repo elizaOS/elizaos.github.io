@@ -4,7 +4,11 @@ import { generateOverallSummary } from "./aiOverallSummary";
 import { generateTimeIntervals } from "../generateTimeIntervals";
 import { IntervalType, TimeInterval, toDateString } from "@/lib/date-utils";
 import { getAllRepoSummariesForInterval } from "./queries";
-import { getOverallSummaryFilePath, writeToFile } from "@/lib/fsHelpers";
+import {
+  getOverallSummaryFilePath,
+  writeToFile,
+  writeSummaryToAPI,
+} from "@/lib/fsHelpers";
 import { storeOverallSummary } from "./mutations";
 import { db } from "@/lib/data/db";
 import { overallSummaries } from "@/lib/data/schema";
@@ -85,17 +89,26 @@ export const generateOverallSummaryForInterval = createStep(
       await storeOverallSummary(startDate, summary, intervalType);
 
       // Export summary as markdown file
-      const filename = `${startDate}.md`;
-      const outputPath = getOverallSummaryFilePath(
+      const mdFilename = `${startDate}.md`;
+      const mdPath = getOverallSummaryFilePath(
         outputDir,
         intervalType,
-        filename,
+        mdFilename,
       );
-      await writeToFile(outputPath, summary);
+      await writeToFile(mdPath, summary);
+
+      // Export summary as JSON API artifact
+      await writeSummaryToAPI(
+        outputDir,
+        "overall",
+        intervalType,
+        startDate,
+        summary,
+      );
 
       intervalLogger?.info(
         `Generated and exported overall ${intervalType} summary`,
-        { outputPath },
+        { mdPath },
       );
 
       return summary;
