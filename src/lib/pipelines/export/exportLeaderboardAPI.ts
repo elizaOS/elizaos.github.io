@@ -29,15 +29,6 @@ export interface LeaderboardEntry {
 }
 
 /**
- * Pagination metadata for API responses
- */
-export interface PaginationInfo {
-  limit: number;
-  offset: number;
-  hasMore: boolean;
-}
-
-/**
  * Leaderboard API response structure
  */
 export interface LeaderboardAPIResponse {
@@ -47,7 +38,6 @@ export interface LeaderboardAPIResponse {
   endDate: string;
   generatedAt: string;
   totalUsers: number;
-  pagination?: PaginationInfo;
   leaderboard: LeaderboardEntry[];
 }
 
@@ -144,7 +134,6 @@ async function getLeaderboardData(
   startDate?: string,
   endDate?: string,
   limit?: number,
-  offset?: number,
 ): Promise<LeaderboardEntry[]> {
   // Build conditions
   const conditions = [
@@ -161,7 +150,7 @@ async function getLeaderboardData(
   const scoreFields = generateScoreSelectFields(userDailyScores);
 
   // Query top users by score
-  let baseQuery = db
+  const baseQuery = db
     .select({
       username: userDailyScores.username,
       avatarUrl: users.avatarUrl,
@@ -173,11 +162,6 @@ async function getLeaderboardData(
     .groupBy(userDailyScores.username)
     .orderBy(desc(scoreFields.totalScore));
 
-  // Apply offset if specified
-  if (offset && offset > 0) {
-    baseQuery = baseQuery.offset(offset) as typeof baseQuery;
-  }
-
   // Apply limit if specified
   const results = limit
     ? await baseQuery.limit(limit).all()
@@ -188,9 +172,8 @@ async function getLeaderboardData(
   const walletMap = await getUserWallets(usernames);
 
   // Format results with ranks and wallets
-  const startRank = (offset ?? 0) + 1;
   return results.map((row, index) => ({
-    rank: startRank + index,
+    rank: index + 1,
     username: row.username,
     avatarUrl: row.avatarUrl || "",
     score: Number(row.totalScore || 0),
@@ -243,14 +226,12 @@ export async function exportLeaderboardAPI(
   period: "monthly" | "weekly" | "lifetime",
   options?: {
     limit?: number;
-    offset?: number;
     contributionStartDate: string;
     logger?: Logger;
   },
 ): Promise<void> {
   const logger = options?.logger;
   const limit = options?.limit;
-  const offset = options?.offset ?? 0;
   const contributionStartDate = options?.contributionStartDate ?? "2024-10-15";
 
   logger?.info(`Generating ${period} leaderboard API endpoint...`);
@@ -261,25 +242,11 @@ export async function exportLeaderboardAPI(
     contributionStartDate,
   );
 
-  // Get total count for pagination
+  // Get total count of users
   const totalCount = await getTotalUserCount(startDate, endDate);
 
-  // Get leaderboard data
-  const leaderboard = await getLeaderboardData(
-    startDate,
-    endDate,
-    limit,
-    offset,
-  );
-
-  // Build pagination info if limit is used
-  const pagination: PaginationInfo | undefined = limit
-    ? {
-        limit,
-        offset,
-        hasMore: offset + leaderboard.length < totalCount,
-      }
-    : undefined;
+  // Get leaderboard data (top N if limit specified)
+  const leaderboard = await getLeaderboardData(startDate, endDate, limit);
 
   // Build response
   const response: LeaderboardAPIResponse = {
@@ -288,8 +255,7 @@ export async function exportLeaderboardAPI(
     startDate,
     endDate,
     generatedAt: new Date().toISOString(),
-    totalUsers: limit ? totalCount : leaderboard.length,
-    ...(pagination && { pagination }),
+    totalUsers: totalCount,
     leaderboard,
   };
 

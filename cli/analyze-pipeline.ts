@@ -717,4 +717,286 @@ program
     }
   });
 
+// Export summary JSON API files from existing database summaries
+program
+  .command("export-summaries")
+  .description(
+    "Export existing database summaries to JSON API format (for backfilling)",
+  )
+  .option("-v, --verbose", "Enable verbose logging", false)
+  .option("--output-dir <dir>", "Output directory for API files", "./data/")
+  .option(
+    "-t, --type <type>",
+    "Type of summaries to export (overall, repository, contributor, all)",
+    "all",
+  )
+  .option(
+    "--interval <interval>",
+    "Interval type (day, week, month, all)",
+    "all",
+  )
+  .option(
+    "--dry-run",
+    "Show what would be exported without writing files",
+    false,
+  )
+  .action(async (options) => {
+    try {
+      // Dynamically import needed utilities
+      const {
+        sha256,
+        getAPISummaryPath,
+        writeJSONWithLatest,
+        updateSummaryIndex,
+      } = await import("@/lib/fsHelpers");
+      const { repoSummaries, userSummaries } = await import(
+        "@/lib/data/schema"
+      );
+
+      // Create a root logger
+      const logLevel: LogLevel = options.verbose ? "debug" : "info";
+      const rootLogger = createLogger({
+        minLevel: logLevel,
+        context: {
+          command: "export-summaries",
+        },
+      });
+
+      const validTypes = ["overall", "repository", "contributor", "all"];
+      if (!validTypes.includes(options.type)) {
+        rootLogger.error(
+          `Invalid type: ${options.type}. Must be one of: ${validTypes.join(", ")}`,
+        );
+        process.exit(1);
+      }
+
+      const validIntervals = ["day", "week", "month", "all"];
+      if (!validIntervals.includes(options.interval)) {
+        rootLogger.error(
+          `Invalid interval: ${options.interval}. Must be one of: ${validIntervals.join(", ")}`,
+        );
+        process.exit(1);
+      }
+
+      const typesToExport =
+        options.type === "all"
+          ? ["overall", "repository", "contributor"]
+          : [options.type];
+      const intervalsToExport: IntervalType[] =
+        options.interval === "all"
+          ? ["day", "week", "month"]
+          : [options.interval as IntervalType];
+
+      let totalExported = 0;
+
+      for (const summaryType of typesToExport) {
+        for (const intervalType of intervalsToExport) {
+          rootLogger.info(
+            `Exporting ${summaryType} ${intervalType} summaries...`,
+          );
+
+          if (summaryType === "overall") {
+            // Query overall summaries
+            const summaries = await db.query.overallSummaries.findMany({
+              where: eq(overallSummaries.intervalType, intervalType),
+            });
+
+            for (const summary of summaries) {
+              if (!summary.summary) continue;
+
+              const now = new Date().toISOString();
+              const contentHash = sha256(summary.summary);
+              const response = {
+                version: "1.0" as const,
+                type: "overall" as const,
+                interval: intervalType,
+                date: summary.date,
+                generatedAt: now,
+                sourceLastUpdated: now,
+                contentFormat: "markdown" as const,
+                contentHash,
+                content: summary.summary,
+              };
+
+              const jsonFilename = `${summary.date}.json`;
+              const jsonPath = getAPISummaryPath(
+                options.outputDir,
+                "overall",
+                intervalType,
+                jsonFilename,
+              );
+              const latestPath = getAPISummaryPath(
+                options.outputDir,
+                "overall",
+                intervalType,
+                "latest.json",
+              );
+
+              if (options.dryRun) {
+                rootLogger.info(`[DRY RUN] Would export ${jsonPath}`);
+              } else {
+                await writeJSONWithLatest(jsonPath, latestPath, response);
+                const indexPath = getAPISummaryPath(
+                  options.outputDir,
+                  "overall",
+                  intervalType,
+                  "index.json",
+                );
+                await updateSummaryIndex(indexPath, "overall", intervalType, {
+                  date: summary.date,
+                  sourceLastUpdated: now,
+                  contentHash,
+                  path: jsonFilename,
+                });
+              }
+              totalExported++;
+            }
+          } else if (summaryType === "repository") {
+            // Query repo summaries
+            const summaries = await db.query.repoSummaries.findMany({
+              where: eq(repoSummaries.intervalType, intervalType),
+            });
+
+            for (const summary of summaries) {
+              if (!summary.summary) continue;
+
+              const now = new Date().toISOString();
+              const contentHash = sha256(summary.summary);
+              const [owner, repo] = summary.repoId.split("/");
+              const safeRepoId = summary.repoId.replace("/", "_");
+
+              const response = {
+                version: "1.0" as const,
+                type: "repository" as const,
+                interval: intervalType,
+                date: summary.date,
+                generatedAt: now,
+                sourceLastUpdated: now,
+                contentFormat: "markdown" as const,
+                contentHash,
+                entity: { repoId: summary.repoId, owner, repo },
+                content: summary.summary,
+              };
+
+              const jsonFilename = `${summary.date}.json`;
+              const jsonPath = getAPISummaryPath(
+                options.outputDir,
+                "repos",
+                safeRepoId,
+                intervalType,
+                jsonFilename,
+              );
+              const latestPath = getAPISummaryPath(
+                options.outputDir,
+                "repos",
+                safeRepoId,
+                intervalType,
+                "latest.json",
+              );
+
+              if (options.dryRun) {
+                rootLogger.info(`[DRY RUN] Would export ${jsonPath}`);
+              } else {
+                await writeJSONWithLatest(jsonPath, latestPath, response);
+                const indexPath = getAPISummaryPath(
+                  options.outputDir,
+                  "repos",
+                  safeRepoId,
+                  intervalType,
+                  "index.json",
+                );
+                await updateSummaryIndex(
+                  indexPath,
+                  "repository",
+                  intervalType,
+                  {
+                    date: summary.date,
+                    sourceLastUpdated: now,
+                    contentHash,
+                    path: jsonFilename,
+                  },
+                );
+              }
+              totalExported++;
+            }
+          } else if (summaryType === "contributor") {
+            // Query contributor summaries
+            const summaries = await db.query.userSummaries.findMany({
+              where: eq(userSummaries.intervalType, intervalType),
+            });
+
+            for (const summary of summaries) {
+              if (!summary.summary || !summary.username) continue;
+
+              const now = new Date().toISOString();
+              const contentHash = sha256(summary.summary);
+              const username = summary.username;
+
+              const response = {
+                version: "1.0" as const,
+                type: "contributor" as const,
+                interval: intervalType,
+                date: summary.date,
+                generatedAt: now,
+                sourceLastUpdated: now,
+                contentFormat: "markdown" as const,
+                contentHash,
+                entity: { username },
+                content: summary.summary,
+              };
+
+              const jsonFilename = `${summary.date}.json`;
+              const jsonPath = getAPISummaryPath(
+                options.outputDir,
+                "contributors",
+                username,
+                intervalType,
+                jsonFilename,
+              );
+              const latestPath = getAPISummaryPath(
+                options.outputDir,
+                "contributors",
+                username,
+                intervalType,
+                "latest.json",
+              );
+
+              if (options.dryRun) {
+                rootLogger.info(`[DRY RUN] Would export ${jsonPath}`);
+              } else {
+                await writeJSONWithLatest(jsonPath, latestPath, response);
+                const indexPath = getAPISummaryPath(
+                  options.outputDir,
+                  "contributors",
+                  username,
+                  intervalType,
+                  "index.json",
+                );
+                await updateSummaryIndex(
+                  indexPath,
+                  "contributor",
+                  intervalType,
+                  {
+                    date: summary.date,
+                    sourceLastUpdated: now,
+                    contentHash,
+                    path: jsonFilename,
+                  },
+                );
+              }
+              totalExported++;
+            }
+          }
+        }
+      }
+
+      rootLogger.info(
+        `\nExport completed: ${totalExported} summaries${options.dryRun ? " (dry run)" : " exported"}`,
+      );
+    } catch (error: unknown) {
+      console.error(chalk.red("Error exporting summaries:"), error);
+      process.exit(1);
+    }
+  });
+
 program.parse(process.argv);

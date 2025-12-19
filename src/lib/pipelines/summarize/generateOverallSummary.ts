@@ -4,7 +4,15 @@ import { generateOverallSummary } from "./aiOverallSummary";
 import { generateTimeIntervals } from "../generateTimeIntervals";
 import { IntervalType, TimeInterval, toDateString } from "@/lib/date-utils";
 import { getAllRepoSummariesForInterval } from "./queries";
-import { getOverallSummaryFilePath, writeToFile } from "@/lib/fsHelpers";
+import {
+  getOverallSummaryFilePath,
+  writeToFile,
+  sha256,
+  getAPISummaryPath,
+  writeJSONWithLatest,
+  updateSummaryIndex,
+  SummaryAPIResponse,
+} from "@/lib/fsHelpers";
 import { storeOverallSummary } from "./mutations";
 import { db } from "@/lib/data/db";
 import { overallSummaries } from "@/lib/data/schema";
@@ -85,17 +93,61 @@ export const generateOverallSummaryForInterval = createStep(
       await storeOverallSummary(startDate, summary, intervalType);
 
       // Export summary as markdown file
-      const filename = `${startDate}.md`;
-      const outputPath = getOverallSummaryFilePath(
+      const mdFilename = `${startDate}.md`;
+      const mdPath = getOverallSummaryFilePath(
         outputDir,
         intervalType,
-        filename,
+        mdFilename,
       );
-      await writeToFile(outputPath, summary);
+      await writeToFile(mdPath, summary);
+
+      // Export summary as JSON API artifact
+      const now = new Date().toISOString();
+      const contentHash = sha256(summary);
+      const response: SummaryAPIResponse = {
+        version: "1.0",
+        type: "overall",
+        interval: intervalType,
+        date: startDate,
+        generatedAt: now,
+        sourceLastUpdated: now,
+        contentFormat: "markdown",
+        contentHash,
+        content: summary,
+      };
+
+      const jsonFilename = `${startDate}.json`;
+      const jsonPath = getAPISummaryPath(
+        outputDir,
+        "overall",
+        intervalType,
+        jsonFilename,
+      );
+      const latestPath = getAPISummaryPath(
+        outputDir,
+        "overall",
+        intervalType,
+        "latest.json",
+      );
+      await writeJSONWithLatest(jsonPath, latestPath, response);
+
+      // Update index
+      const indexPath = getAPISummaryPath(
+        outputDir,
+        "overall",
+        intervalType,
+        "index.json",
+      );
+      await updateSummaryIndex(indexPath, "overall", intervalType, {
+        date: startDate,
+        sourceLastUpdated: now,
+        contentHash,
+        path: jsonFilename,
+      });
 
       intervalLogger?.info(
         `Generated and exported overall ${intervalType} summary`,
-        { outputPath },
+        { mdPath, jsonPath },
       );
 
       return summary;

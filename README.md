@@ -271,6 +271,132 @@ bun run pipeline summarize -t repository -v
 
 By default, the summarize command wont regenerate summaries that already exist for a given day. To regenerate summaries, you can pass in the -f/--force flag.
 
+### Static JSON API
+
+The pipeline generates static JSON API endpoints that can be consumed by external tools, dashboards, or AI agents. These files are generated during pipeline execution and served as static files.
+
+#### Leaderboard API
+
+```bash
+# Generate leaderboard API endpoints
+bun run pipeline export-leaderboard
+
+# With custom limit (default 100, 0 = unlimited)
+bun run pipeline export-leaderboard --limit 50
+
+# Output to custom directory
+bun run pipeline export-leaderboard --output-dir ./custom-dir/
+```
+
+**Endpoints:**
+
+| Endpoint                         | Description                 |
+| -------------------------------- | --------------------------- |
+| `/api/leaderboard-monthly.json`  | Current month's leaderboard |
+| `/api/leaderboard-weekly.json`   | Current week's leaderboard  |
+| `/api/leaderboard-lifetime.json` | All-time leaderboard        |
+
+**Response structure:**
+
+```json
+{
+  "version": "1.0",
+  "period": "monthly",
+  "startDate": "2025-01-01",
+  "endDate": "2025-01-31",
+  "generatedAt": "2025-01-15T12:00:00Z",
+  "totalUsers": 150,
+  "leaderboard": [
+    {
+      "rank": 1,
+      "username": "contributor1",
+      "avatarUrl": "https://...",
+      "score": 1250,
+      "prScore": 800,
+      "issueScore": 200,
+      "reviewScore": 150,
+      "commentScore": 100,
+      "wallets": { "solana": "...", "ethereum": "..." }
+    }
+  ]
+}
+```
+
+#### Summary API
+
+Summaries are generated alongside markdown files during the `summarize` command. JSON API artifacts include metadata for caching and validation.
+
+**Endpoints:**
+
+| Endpoint Pattern                                                | Description                         |
+| --------------------------------------------------------------- | ----------------------------------- |
+| `/api/summaries/overall/{interval}/{date}.json`                 | Overall summary for a specific date |
+| `/api/summaries/overall/{interval}/latest.json`                 | Most recent overall summary         |
+| `/api/summaries/overall/{interval}/index.json`                  | Index of all overall summaries      |
+| `/api/summaries/repos/{owner}_{repo}/{interval}/{date}.json`    | Repository summary                  |
+| `/api/summaries/repos/{owner}_{repo}/{interval}/latest.json`    | Most recent repo summary            |
+| `/api/summaries/contributors/{username}/{interval}/{date}.json` | Contributor summary                 |
+| `/api/summaries/contributors/{username}/{interval}/latest.json` | Most recent contributor summary     |
+
+Where `{interval}` is one of: `day`, `week`, `month`
+
+**Response structure:**
+
+```json
+{
+  "version": "1.0",
+  "type": "overall",
+  "interval": "day",
+  "date": "2025-01-15",
+  "generatedAt": "2025-01-15T23:00:00Z",
+  "sourceLastUpdated": "2025-01-15T23:00:00Z",
+  "contentFormat": "markdown",
+  "contentHash": "sha256...",
+  "entity": { "repoId": "owner/repo" },
+  "content": "# Summary\n\n..."
+}
+```
+
+**Index structure:**
+
+```json
+{
+  "version": "1.0",
+  "type": "overall",
+  "interval": "day",
+  "generatedAt": "2025-01-15T23:00:00Z",
+  "items": [
+    {
+      "date": "2025-01-15",
+      "sourceLastUpdated": "...",
+      "contentHash": "...",
+      "path": "2025-01-15.json"
+    }
+  ]
+}
+```
+
+#### Backfilling JSON API
+
+If you have existing summaries in the database that need JSON export (e.g., from before this feature was added):
+
+```bash
+# Export all summaries to JSON
+bun run pipeline export-summaries
+
+# Export specific type
+bun run pipeline export-summaries -t overall
+bun run pipeline export-summaries -t repository
+bun run pipeline export-summaries -t contributor
+
+# Export specific interval
+bun run pipeline export-summaries --interval day
+bun run pipeline export-summaries --interval week
+
+# Dry run to see what would be exported
+bun run pipeline export-summaries --dry-run
+```
+
 ### Database Management
 
 ```bash

@@ -9,12 +9,81 @@ import { IntervalType, TimeInterval, toDateString } from "@/lib/date-utils";
 import { storeRepoSummary } from "./mutations";
 import { isNotNullOrUndefined } from "@/lib/typeHelpers";
 import { getRepoMetrics } from "../export/queries";
-import { getRepoFilePath, writeToFile } from "@/lib/fsHelpers";
+import {
+  getRepoFilePath,
+  writeToFile,
+  sha256,
+  getAPISummaryPath,
+  writeJSONWithLatest,
+  updateSummaryIndex,
+  SummaryAPIResponse,
+} from "@/lib/fsHelpers";
 import { getRepoSummariesForInterval } from "./queries";
 import { db } from "@/lib/data/db";
 import { repoSummaries } from "@/lib/data/schema";
 import { and, eq } from "drizzle-orm";
 import { getActiveReposForInterval } from "./getActiveRepos";
+
+/**
+ * Write JSON API artifact for repository summary
+ */
+async function writeRepoSummaryJSON(
+  outputDir: string,
+  repoId: string,
+  intervalType: IntervalType,
+  startDate: string,
+  summary: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const contentHash = sha256(summary);
+  const [owner, repo] = repoId.split("/");
+
+  const response: SummaryAPIResponse = {
+    version: "1.0",
+    type: "repository",
+    interval: intervalType,
+    date: startDate,
+    generatedAt: now,
+    sourceLastUpdated: now,
+    contentFormat: "markdown",
+    contentHash,
+    entity: { repoId, owner, repo },
+    content: summary,
+  };
+
+  const safeRepoId = repoId.replace("/", "_");
+  const jsonFilename = `${startDate}.json`;
+  const jsonPath = getAPISummaryPath(
+    outputDir,
+    "repos",
+    safeRepoId,
+    intervalType,
+    jsonFilename,
+  );
+  const latestPath = getAPISummaryPath(
+    outputDir,
+    "repos",
+    safeRepoId,
+    intervalType,
+    "latest.json",
+  );
+  await writeJSONWithLatest(jsonPath, latestPath, response);
+
+  // Update index
+  const indexPath = getAPISummaryPath(
+    outputDir,
+    "repos",
+    safeRepoId,
+    intervalType,
+    "index.json",
+  );
+  await updateSummaryIndex(indexPath, "repository", intervalType, {
+    date: startDate,
+    sourceLastUpdated: now,
+    contentHash,
+    path: jsonFilename,
+  });
+}
 
 /**
  * Check if a summary already exists for a repository on a specific date and interval type
@@ -108,22 +177,30 @@ export const generateDailyRepoSummaryForInterval = createStep(
         interval.intervalType,
       );
 
-      // Export summary as markdown file if outputDir is configured
-      const filename = `${toDateString(interval.intervalStart)}.md`;
-      const outputPath = getRepoFilePath(
+      // Export summary as markdown file
+      const startDate = toDateString(interval.intervalStart);
+      const mdFilename = `${startDate}.md`;
+      const mdPath = getRepoFilePath(
         context.outputDir,
         repoId,
         "summaries",
         interval.intervalType,
-        filename,
+        mdFilename,
       );
-      await writeToFile(outputPath, summary);
+      await writeToFile(mdPath, summary);
+
+      // Export summary as JSON API artifact
+      await writeRepoSummaryJSON(
+        context.outputDir,
+        repoId,
+        interval.intervalType,
+        startDate,
+        summary,
+      );
 
       intervalLogger?.info(
         `Generated and exported ${interval.intervalType} summary for repo ${repoId}`,
-        {
-          outputPath,
-        },
+        { mdPath },
       );
 
       return summary;
@@ -216,6 +293,15 @@ export const generateAggregatedRepoSummaryForInterval = createStep(
         filename,
       );
       await writeToFile(outputPath, summary);
+
+      // Export summary as JSON API artifact
+      await writeRepoSummaryJSON(
+        outputDir,
+        repoId,
+        intervalType,
+        startDate,
+        summary,
+      );
 
       intervalLogger?.info(
         `Generated and exported ${intervalType} aggregated summary for repo ${repoId}`,
