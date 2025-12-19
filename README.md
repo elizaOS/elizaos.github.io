@@ -296,6 +296,12 @@ bun run pipeline export-leaderboard --output-dir ./custom-dir/
 | `/api/leaderboard-weekly.json`   | Current week's leaderboard  |
 | `/api/leaderboard-lifetime.json` | All-time leaderboard        |
 
+**Live API URLs:**
+
+- Monthly: https://elizaos.github.io/api/leaderboard-monthly.json
+- Weekly: https://elizaos.github.io/api/leaderboard-weekly.json
+- Lifetime: https://elizaos.github.io/api/leaderboard-lifetime.json
+
 **Response structure:**
 
 ```json
@@ -335,10 +341,21 @@ Summaries are generated alongside markdown files during the `summarize` command.
 | `/api/summaries/overall/{interval}/index.json`                  | Index of all overall summaries      |
 | `/api/summaries/repos/{owner}_{repo}/{interval}/{date}.json`    | Repository summary                  |
 | `/api/summaries/repos/{owner}_{repo}/{interval}/latest.json`    | Most recent repo summary            |
+| `/api/summaries/repos/{owner}_{repo}/{interval}/index.json`     | Index of all repo summaries         |
 | `/api/summaries/contributors/{username}/{interval}/{date}.json` | Contributor summary                 |
 | `/api/summaries/contributors/{username}/{interval}/latest.json` | Most recent contributor summary     |
+| `/api/summaries/contributors/{username}/{interval}/index.json`  | Index of contributor summaries      |
 
 Where `{interval}` is one of: `day`, `week`, `month`
+
+**Live API URLs:**
+
+- Overall daily (latest): https://elizaos.github.io/api/summaries/overall/day/latest.json
+- Overall daily (index): https://elizaos.github.io/api/summaries/overall/day/index.json
+- Overall weekly: https://elizaos.github.io/api/summaries/overall/week/latest.json
+- Overall monthly: https://elizaos.github.io/api/summaries/overall/month/latest.json
+- Repository: https://elizaos.github.io/api/summaries/repos/elizaos_eliza/day/latest.json
+- Contributor: https://elizaos.github.io/api/summaries/contributors/wtfsayo/day/latest.json
 
 **Response structure:**
 
