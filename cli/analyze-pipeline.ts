@@ -671,8 +671,7 @@ program
     "100",
   )
   .action(async (options) => {
-    // Validate required environment variables
-    validateEnvVars(["GITHUB_TOKEN"]);
+    // No env vars required - reads from local database only
 
     try {
       // Dynamically import the config
