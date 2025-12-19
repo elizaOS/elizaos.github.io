@@ -168,8 +168,19 @@ export async function updateSummaryIndex(
   try {
     const existing = await fs.readFile(indexPath, "utf-8");
     index = JSON.parse(existing);
-  } catch {
-    // Create new index if file doesn't exist
+  } catch (error) {
+    const isFileNotFound =
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT";
+
+    if (!isFileNotFound) {
+      // Log but continue with fresh index if parse fails
+      console.warn(
+        `Warning: Could not parse index at ${indexPath}, creating fresh index`,
+      );
+    }
+
     index = {
       version: "1.0",
       type,
@@ -194,4 +205,60 @@ export async function updateSummaryIndex(
   index.generatedAt = new Date().toISOString();
 
   await writeToFile(indexPath, JSON.stringify(index, null, 2));
+}
+
+/**
+ * Write a summary to the JSON API with latest pointer and index update
+ */
+export async function writeSummaryToAPI(
+  outputDir: string,
+  type: "overall" | "repository" | "contributor",
+  intervalType: IntervalType,
+  date: string,
+  summary: string,
+  identifier?: string,
+  entity?: SummaryAPIResponse["entity"],
+): Promise<string> {
+  const now = new Date().toISOString();
+  const contentHash = sha256(summary);
+
+  const response: SummaryAPIResponse = {
+    version: "1.0",
+    type,
+    interval: intervalType,
+    date,
+    generatedAt: now,
+    sourceLastUpdated: now,
+    contentFormat: "markdown",
+    contentHash,
+    ...(entity && { entity }),
+    content: summary,
+  };
+
+  // Build path segments based on type
+  const pathSegments: string[] =
+    type === "overall"
+      ? ["overall", intervalType]
+      : type === "repository" && identifier
+        ? ["repos", identifier, intervalType]
+        : ["contributors", identifier ?? "", intervalType];
+
+  const jsonFilename = `${date}.json`;
+  const jsonPath = getAPISummaryPath(outputDir, ...pathSegments, jsonFilename);
+  const latestPath = getAPISummaryPath(
+    outputDir,
+    ...pathSegments,
+    "latest.json",
+  );
+  const indexPath = getAPISummaryPath(outputDir, ...pathSegments, "index.json");
+
+  await writeJSONWithLatest(jsonPath, latestPath, response);
+  await updateSummaryIndex(indexPath, type, intervalType, {
+    date,
+    sourceLastUpdated: now,
+    contentHash,
+    path: jsonFilename,
+  });
+
+  return jsonPath;
 }
