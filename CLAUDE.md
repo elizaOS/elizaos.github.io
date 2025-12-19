@@ -44,9 +44,11 @@ bun run pipeline process --force     # Force recalculation of scores
 
 # Export and Summarization
 bun run pipeline export              # Export repository stats
+bun run pipeline export-leaderboard  # Generate JSON leaderboard API
 bun run pipeline summarize -t repository    # Generate repo summaries
 bun run pipeline summarize -t contributors  # Generate contributor summaries
 bun run pipeline summarize -t overall       # Generate overall summaries
+bun run pipeline import-summaries    # Import markdown summaries to database
 ```
 
 ## Code Style
@@ -91,6 +93,18 @@ drizzle/             # Database migrations
 - Server components query SQLite during build
 - Deployed to GitHub Pages
 
+### JSON API (Static Files)
+
+Static JSON endpoints generated at build time:
+
+```
+/data/api/leaderboard-monthly.json   # Current month rankings
+/data/api/leaderboard-weekly.json    # Current week rankings
+/data/api/leaderboard-lifetime.json  # All-time rankings
+```
+
+Response includes: version, period, date range, totalUsers, and leaderboard array with scores and wallet addresses.
+
 ## Configuration
 
 Pipeline config is loaded from JSON file specified by `PIPELINE_CONFIG_FILE` env var:
@@ -117,7 +131,8 @@ See `config/example.json` for all configurable options including:
 
 ## GitHub Actions Workflows
 
-- `run-pipelines.yml` - Daily data processing (23:00 UTC)
+- `run-pipelines.yml` - Daily data ingestion/processing (23:00 UTC)
+- `generate-summaries.yml` - AI summary generation (runs after pipelines)
 - `deploy.yml` - Build and deploy to GitHub Pages
 - `pr-checks.yml` - Lint, typecheck, build verification
 
