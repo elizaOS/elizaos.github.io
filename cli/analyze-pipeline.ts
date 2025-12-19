@@ -46,7 +46,7 @@ import { storeOverallSummary } from "@/lib/pipelines/summarize/mutations";
 import { overallSummaries } from "@/lib/data/schema";
 import { db } from "@/lib/data/db";
 import { and, eq } from "drizzle-orm";
-import { IntervalType, toDateString } from "@/lib/date-utils";
+import { IntervalType } from "@/lib/date-utils";
 import { readdir, readFile } from "fs/promises";
 import { existsSync } from "fs";
 

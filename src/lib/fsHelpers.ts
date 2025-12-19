@@ -1,6 +1,5 @@
 import * as fs from "fs/promises";
 import * as path from "path";
-import { join } from "path";
 import { createHash } from "crypto";
 import { IntervalType } from "@/lib/date-utils";
 
@@ -54,8 +53,7 @@ export function getOverallSummaryFilePath(
   interval: IntervalType,
   filename: string,
 ) {
-  const filePath = join(baseDir, "summaries", interval, filename);
-  return filePath;
+  return path.join(baseDir, "summaries", interval, filename);
 }
 
 /**
@@ -67,7 +65,7 @@ export function getContributorSummaryFilePath(
   interval: IntervalType,
   filename: string,
 ): string {
-  return join(
+  return path.join(
     baseDir,
     "contributors",
     normalizePathSegment(username),
@@ -91,7 +89,7 @@ export function getAPISummaryPath(
   baseDir: string,
   ...segments: string[]
 ): string {
-  return join(
+  return path.join(
     baseDir,
     "api",
     "summaries",
