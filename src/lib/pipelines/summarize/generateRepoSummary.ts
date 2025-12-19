@@ -12,77 +12,13 @@ import { getRepoMetrics } from "../export/queries";
 import {
   getRepoFilePath,
   writeToFile,
-  sha256,
-  getAPISummaryPath,
-  writeJSONWithLatest,
-  updateSummaryIndex,
-  SummaryAPIResponse,
+  writeSummaryToAPI,
 } from "@/lib/fsHelpers";
 import { getRepoSummariesForInterval } from "./queries";
 import { db } from "@/lib/data/db";
 import { repoSummaries } from "@/lib/data/schema";
 import { and, eq } from "drizzle-orm";
 import { getActiveReposForInterval } from "./getActiveRepos";
-
-/**
- * Write JSON API artifact for repository summary
- */
-async function writeRepoSummaryJSON(
-  outputDir: string,
-  repoId: string,
-  intervalType: IntervalType,
-  startDate: string,
-  summary: string,
-): Promise<void> {
-  const now = new Date().toISOString();
-  const contentHash = sha256(summary);
-  const [owner, repo] = repoId.split("/");
-
-  const response: SummaryAPIResponse = {
-    version: "1.0",
-    type: "repository",
-    interval: intervalType,
-    date: startDate,
-    generatedAt: now,
-    sourceLastUpdated: now,
-    contentFormat: "markdown",
-    contentHash,
-    entity: { repoId, owner, repo },
-    content: summary,
-  };
-
-  const jsonFilename = `${startDate}.json`;
-  const jsonPath = getAPISummaryPath(
-    outputDir,
-    "repos",
-    repoId,
-    intervalType,
-    jsonFilename,
-  );
-  const latestPath = getAPISummaryPath(
-    outputDir,
-    "repos",
-    repoId,
-    intervalType,
-    "latest.json",
-  );
-  await writeJSONWithLatest(jsonPath, latestPath, response);
-
-  // Update index
-  const indexPath = getAPISummaryPath(
-    outputDir,
-    "repos",
-    repoId,
-    intervalType,
-    "index.json",
-  );
-  await updateSummaryIndex(indexPath, "repository", intervalType, {
-    date: startDate,
-    sourceLastUpdated: now,
-    contentHash,
-    path: jsonFilename,
-  });
-}
 
 /**
  * Check if a summary already exists for a repository on a specific date and interval type
@@ -189,12 +125,15 @@ export const generateDailyRepoSummaryForInterval = createStep(
       await writeToFile(mdPath, summary);
 
       // Export summary as JSON API artifact
-      await writeRepoSummaryJSON(
+      const [owner, repo] = repoId.split("/");
+      await writeSummaryToAPI(
         context.outputDir,
-        repoId,
+        "repository",
         interval.intervalType,
         startDate,
         summary,
+        repoId,
+        { repoId, owner, repo },
       );
 
       intervalLogger?.info(
@@ -294,12 +233,15 @@ export const generateAggregatedRepoSummaryForInterval = createStep(
       await writeToFile(outputPath, summary);
 
       // Export summary as JSON API artifact
-      await writeRepoSummaryJSON(
+      const [owner, repo] = repoId.split("/");
+      await writeSummaryToAPI(
         outputDir,
-        repoId,
+        "repository",
         intervalType,
         startDate,
         summary,
+        repoId,
+        { repoId, owner, repo },
       );
 
       intervalLogger?.info(

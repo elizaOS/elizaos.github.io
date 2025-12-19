@@ -234,12 +234,15 @@ export async function writeSummaryToAPI(
   };
 
   // Build path segments based on type
+  if (type !== "overall" && !identifier) {
+    throw new Error(`identifier required for ${type} summary type`);
+  }
   const pathSegments: string[] =
     type === "overall"
       ? ["overall", intervalType]
-      : type === "repository" && identifier
-        ? ["repos", identifier, intervalType]
-        : ["contributors", identifier ?? "", intervalType];
+      : type === "repository"
+        ? ["repos", identifier!, intervalType]
+        : ["contributors", identifier!, intervalType];
 
   const jsonFilename = `${date}.json`;
   const jsonPath = getAPISummaryPath(outputDir, ...pathSegments, jsonFilename);

@@ -13,11 +13,7 @@ import { generateTimeIntervals } from "../generateTimeIntervals";
 import {
   getContributorSummaryFilePath,
   writeToFile,
-  sha256,
-  getAPISummaryPath,
-  writeJSONWithLatest,
-  updateSummaryIndex,
-  SummaryAPIResponse,
+  writeSummaryToAPI,
 } from "@/lib/fsHelpers";
 
 /**
@@ -37,65 +33,6 @@ async function checkExistingSummary(
   });
 
   return !!existingSummary?.summary;
-}
-
-/**
- * Write JSON API artifact for contributor summary
- */
-async function writeContributorSummaryJSON(
-  outputDir: string,
-  username: string,
-  intervalType: IntervalType,
-  startDate: string,
-  summary: string,
-): Promise<void> {
-  const now = new Date().toISOString();
-  const contentHash = sha256(summary);
-
-  const response: SummaryAPIResponse = {
-    version: "1.0",
-    type: "contributor",
-    interval: intervalType,
-    date: startDate,
-    generatedAt: now,
-    sourceLastUpdated: now,
-    contentFormat: "markdown",
-    contentHash,
-    entity: { username },
-    content: summary,
-  };
-
-  const jsonFilename = `${startDate}.json`;
-  const jsonPath = getAPISummaryPath(
-    outputDir,
-    "contributors",
-    username,
-    intervalType,
-    jsonFilename,
-  );
-  const latestPath = getAPISummaryPath(
-    outputDir,
-    "contributors",
-    username,
-    intervalType,
-    "latest.json",
-  );
-  await writeJSONWithLatest(jsonPath, latestPath, response);
-
-  // Update index
-  const indexPath = getAPISummaryPath(
-    outputDir,
-    "contributors",
-    username,
-    intervalType,
-    "index.json",
-  );
-  await updateSummaryIndex(indexPath, "contributor", intervalType, {
-    date: startDate,
-    sourceLastUpdated: now,
-    contentHash,
-    path: jsonFilename,
-  });
 }
 
 /**
@@ -175,12 +112,14 @@ const generateSummaryForContributor = createStep(
       await writeToFile(mdPath, summary);
 
       // Export summary as JSON API artifact
-      await writeContributorSummaryJSON(
+      await writeSummaryToAPI(
         context.outputDir,
-        username,
+        "contributor",
         interval.intervalType,
         startDate,
         summary,
+        username,
+        { username },
       );
 
       intervalLogger?.info(

@@ -822,6 +822,12 @@ program
             for (const summary of summaries) {
               if (!summary.summary) continue;
               const [owner, repo] = summary.repoId.split("/");
+              if (!owner || !repo) {
+                rootLogger.warn(
+                  `Invalid repoId format: ${summary.repoId}, skipping`,
+                );
+                continue;
+              }
               if (options.dryRun) {
                 const path = getAPISummaryPath(
                   options.outputDir,
