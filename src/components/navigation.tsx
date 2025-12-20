@@ -220,6 +220,22 @@ export function Navigation() {
         </div>
 
         <div className="hidden items-center gap-4 sm:flex">
+          {process.env.NEXT_PUBLIC_GITHUB_REPO && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 text-muted-foreground hover:text-foreground"
+              asChild
+            >
+              <Link
+                href={`https://github.com/${process.env.NEXT_PUBLIC_GITHUB_REPO}`}
+                target="_blank"
+                title="GitHub Repository"
+              >
+                <Github className="h-4 w-4" />
+              </Link>
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
