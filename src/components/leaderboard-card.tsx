@@ -23,7 +23,7 @@ export function LeaderboardCard({
       <div className="h-[72px] px-3 transition-colors hover:bg-accent/50 sm:px-5">
         <div className="grid h-full grid-cols-[40px_1fr_70px_90px] items-center gap-3 md:grid-cols-[50px_minmax(150px,400px)_100px_120px]">
           {/* Rank */}
-          <span className="text-center text-sm font-semibold text-muted-foreground md:text-xl">
+          <span className="text-sm font-semibold text-muted-foreground md:text-xl">
             {rank}
           </span>
 
@@ -56,7 +56,7 @@ export function LeaderboardCard({
           </div>
 
           {/* Level */}
-          <div className="text-right">
+          <div className="text-center">
             <div className="text-lg font-bold">{user.totalLevel}</div>
             <div className="text-xs text-muted-foreground">Level</div>
           </div>

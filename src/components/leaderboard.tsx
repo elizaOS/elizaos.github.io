@@ -278,9 +278,9 @@ const VirtualizedLeaderboardList = ({
     <div ref={listRef} className="rounded-lg border">
       {/* Header row */}
       <div className="grid h-10 grid-cols-[40px_1fr_70px_90px] items-center gap-3 border-b bg-muted/50 px-3 text-sm font-medium text-muted-foreground sm:px-5 md:grid-cols-[50px_minmax(150px,400px)_100px_120px]">
-        <span className="text-center">#</span>
+        <span>#</span>
         <span>Contributor</span>
-        <span className="text-right">Level</span>
+        <span className="text-center">Level</span>
         <span className="text-right">XP</span>
       </div>
       <div className="divide-y">
