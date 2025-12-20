@@ -296,11 +296,12 @@ bun run pipeline export-leaderboard --output-dir ./custom-dir/
 | `/api/leaderboard-weekly.json`   | Current week's leaderboard  |
 | `/api/leaderboard-lifetime.json` | All-time leaderboard        |
 
-**Live API URLs:**
+**API Base URL:** `https://{your-domain}/api/`
 
-- Monthly: https://elizaos.github.io/api/leaderboard-monthly.json
-- Weekly: https://elizaos.github.io/api/leaderboard-weekly.json
-- Lifetime: https://elizaos.github.io/api/leaderboard-lifetime.json
+For GitHub Pages deployments, your base URL follows this pattern:
+
+- **Org/user site** (`username.github.io` repo): `https://{username}.github.io/api/`
+- **Project site** (any other repo): `https://{username}.github.io/{repo-name}/api/`
 
 **Response structure:**
 
@@ -347,15 +348,6 @@ Summaries are generated alongside markdown files during the `summarize` command.
 | `/api/summaries/contributors/{username}/{interval}/index.json`  | Index of contributor summaries      |
 
 Where `{interval}` is one of: `day`, `week`, `month`
-
-**Live API URLs:**
-
-- Overall daily (latest): https://elizaos.github.io/api/summaries/overall/day/latest.json
-- Overall daily (index): https://elizaos.github.io/api/summaries/overall/day/index.json
-- Overall weekly: https://elizaos.github.io/api/summaries/overall/week/latest.json
-- Overall monthly: https://elizaos.github.io/api/summaries/overall/month/latest.json
-- Repository: https://elizaos.github.io/api/summaries/repos/elizaos_eliza/day/latest.json
-- Contributor: https://elizaos.github.io/api/summaries/contributors/wtfsayo/day/latest.json
 
 **Response structure:**
 
