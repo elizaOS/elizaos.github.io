@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { ExternalLink, Copy, Check } from "lucide-react";
+import { ExternalLink, Copy, Check, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const endpoints = {
@@ -146,12 +146,22 @@ export default function ApiPage() {
         </p>
 
         <section className="not-prose mt-8 rounded-lg border border-border bg-card p-6">
-          <h2 className="mb-2 text-lg font-semibold">Base URL</h2>
-          <div className="flex items-center gap-2">
-            <code className="rounded bg-muted px-3 py-2 text-sm">
-              {baseUrl || "Loading..."}
-            </code>
-            {baseUrl && <CopyButton text={baseUrl} />}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="mb-2 text-lg font-semibold">Base URL</h2>
+              <div className="flex items-center gap-2">
+                <code className="rounded bg-muted px-3 py-2 text-sm">
+                  {baseUrl || "Loading..."}
+                </code>
+                {baseUrl && <CopyButton text={baseUrl} />}
+              </div>
+            </div>
+            <Button variant="outline" size="sm" asChild>
+              <Link href="/openapi.json" download="openapi.json">
+                <Download className="mr-2 h-4 w-4" />
+                OpenAPI Spec
+              </Link>
+            </Button>
           </div>
         </section>
 
