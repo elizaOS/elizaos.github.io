@@ -21,7 +21,7 @@ export function LeaderboardCard({
   return (
     <Link href={`/profile/${user.username}`}>
       <div className="h-[72px] px-3 transition-colors hover:bg-accent/50 sm:px-5">
-        <div className="grid h-full grid-cols-[40px_1fr_70px_90px] items-center gap-3 md:grid-cols-[50px_minmax(150px,400px)_100px_120px]">
+        <div className="grid h-full grid-cols-[40px_1fr_70px_90px] items-center gap-3 md:grid-cols-[50px_1fr_80px_100px]">
           {/* Rank */}
           <span className="text-sm font-semibold text-muted-foreground md:text-xl">
             {rank}
