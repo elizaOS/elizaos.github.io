@@ -20,16 +20,16 @@ export function LeaderboardCard({
 }) {
   return (
     <Link href={`/profile/${user.username}`}>
-      <div className="h-[72px] px-3 transition-colors hover:bg-accent/50 sm:px-5">
-        <div className="grid h-full grid-cols-[40px_1fr_70px_90px] items-center gap-3 md:grid-cols-[50px_1fr_80px_100px]">
+      <div className="h-[72px] transition-colors hover:bg-accent/50">
+        <div className="grid h-full grid-cols-[3rem_2fr_1fr_1fr] items-center px-4">
           {/* Rank */}
-          <span className="text-sm font-semibold text-muted-foreground md:text-xl">
+          <span className="text-lg font-semibold text-muted-foreground">
             {rank}
           </span>
 
           {/* Avatar + Username */}
           <div className="flex min-w-0 items-center gap-3">
-            <Avatar className="h-10 w-10 flex-shrink-0">
+            <Avatar className="h-10 w-10 shrink-0">
               <AvatarImage
                 src={`https://github.com/${user.username}.png`}
                 alt={user.username}
@@ -56,17 +56,11 @@ export function LeaderboardCard({
           </div>
 
           {/* Level */}
-          <div className="text-center">
-            <div className="text-lg font-bold">{user.totalLevel}</div>
-            <div className="text-xs text-muted-foreground">Level</div>
-          </div>
+          <div className="text-center text-lg font-bold">{user.totalLevel}</div>
 
           {/* XP */}
-          <div className="text-right">
-            <div className="text-lg font-bold tabular-nums">
-              {user.totalXp.toLocaleString()}
-            </div>
-            <div className="text-xs text-muted-foreground">XP</div>
+          <div className="text-right text-lg font-bold tabular-nums">
+            {user.totalXp.toLocaleString()}
           </div>
         </div>
       </div>

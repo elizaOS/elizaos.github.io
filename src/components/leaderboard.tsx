@@ -275,9 +275,9 @@ const VirtualizedLeaderboardList = ({
   });
 
   return (
-    <div ref={listRef} className="max-w-3xl rounded-lg border">
+    <div ref={listRef} className="overflow-hidden rounded-lg border">
       {/* Header row */}
-      <div className="grid h-10 grid-cols-[40px_1fr_70px_90px] items-center gap-3 border-b bg-muted/50 px-3 text-sm font-medium text-muted-foreground sm:px-5 md:grid-cols-[50px_1fr_80px_100px]">
+      <div className="grid h-10 grid-cols-[3rem_2fr_1fr_1fr] items-center border-b bg-muted/50 px-4 text-sm font-medium text-muted-foreground">
         <span>#</span>
         <span>Contributor</span>
         <span className="text-center">Level</span>
