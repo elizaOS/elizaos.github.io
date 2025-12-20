@@ -98,9 +98,9 @@ drizzle/             # Database migrations
 Static JSON endpoints generated at build time:
 
 ```
-/data/api/leaderboard-monthly.json   # Current month rankings
-/data/api/leaderboard-weekly.json    # Current week rankings
-/data/api/leaderboard-lifetime.json  # All-time rankings
+/api/leaderboard-monthly.json   # Current month rankings
+/api/leaderboard-weekly.json    # Current week rankings
+/api/leaderboard-lifetime.json  # All-time rankings
 ```
 
 Response includes: version, period, date range, totalUsers, and leaderboard array with scores and wallet addresses.
