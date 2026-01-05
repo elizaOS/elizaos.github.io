@@ -146,6 +146,7 @@ export async function GET() {
     .join("");
 
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="${escapeXml(`${siteUrl}/rss-style.xsl`)}"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>${escapeXml(title)}</title>
@@ -160,7 +161,9 @@ export async function GET() {
 
   return new Response(rss, {
     headers: {
-      "Content-Type": "application/rss+xml; charset=utf-8",
+      // Use application/xml for browser XSLT rendering (RSS readers parse XML regardless)
+      "Content-Type": "application/xml; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
       "Cache-Control": "public, max-age=3600",
     },
   });
