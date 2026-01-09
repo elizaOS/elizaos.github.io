@@ -484,12 +484,12 @@ async function computeContributorProfiles(
     const reviewRatio = totalPRs > 0 ? reviewsGiven / totalPRs : 0;
     let contributorType: ContributorProfile["contributorType"];
 
-    if (reviewRatio >= 2) {
+    if (reviewsGiven > totalPRs && reviewRatio >= 2) {
       contributorType = "maintainer"; // Heavy reviewer
-    } else if (reviewRatio >= 1) {
-      contributorType = "collaborator"; // Balanced
     } else if (reviewsGiven > totalPRs) {
       contributorType = "reviewer"; // More reviews than PRs
+    } else if (reviewRatio >= 1) {
+      contributorType = "collaborator"; // Balanced
     } else {
       contributorType = "author"; // Primarily contributor
     }
