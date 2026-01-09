@@ -101,36 +101,116 @@ function formatContributorPrompt(
       return parts[0] || area.area;
     });
 
-  // Format merged PRs
-  const mergedPRDetails = metrics.pullRequests.items
-    .filter((pr) => pr.merged === 1)
-    .map((pr) => {
-      const additions =
-        pr.commits?.reduce((sum, c) => sum + (c.additions || 0), 0) || 0;
-      const deletions =
-        pr.commits?.reduce((sum, c) => sum + (c.deletions || 0), 0) || 0;
+  // Helper to group items by repository (uses full org/repo format)
+  const groupByRepo = <T extends { repository: string }>(
+    items: T[],
+  ): Map<string, T[]> => {
+    const grouped = new Map<string, T[]>();
+    for (const item of items) {
+      const repo = item.repository; // Already in "org/repo" format from DB
+      if (!grouped.has(repo)) {
+        grouped.set(repo, []);
+      }
+      grouped.get(repo)!.push(item);
+    }
+    return grouped;
+  };
 
-      return `${pr.repository}#${pr.number} "${truncateTitle(
-        pr.title,
-      )}" (+${additions}/-${deletions} lines)`;
-    })
-    .join(", ");
+  // Format merged PRs - use grouped format for lifetime, flat format for other intervals
+  const mergedPRs = metrics.pullRequests.items.filter((pr) => pr.merged === 1);
+  let mergedPRDetails: string;
 
-  // Format open PRs
-  const openPRDetails = metrics.pullRequests.items
-    .filter((pr) => pr.merged !== 1)
-    .map((pr) => `${pr.repository}#${pr.number} "${truncateTitle(pr.title)}"`)
-    .join(", ");
+  if (intervalType === "lifetime" && mergedPRs.length > 0) {
+    // Grouped by repository for lifetime summaries (org/repo format)
+    const mergedByRepo = groupByRepo(mergedPRs);
+    mergedPRDetails = Array.from(mergedByRepo.entries())
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([repo, prs]) => {
+        const prList = prs
+          .map((pr) => {
+            const additions =
+              pr.commits?.reduce((sum, c) => sum + (c.additions || 0), 0) || 0;
+            const deletions =
+              pr.commits?.reduce((sum, c) => sum + (c.deletions || 0), 0) || 0;
+            return `#${pr.number} "${truncateTitle(pr.title)}" (+${additions}/-${deletions})`;
+          })
+          .join(", ");
+        return `  - ${repo} (${prs.length} PRs): ${prList}`;
+      })
+      .join("\n");
+  } else {
+    // Flat format for day/week/month (org/repo#number format)
+    mergedPRDetails =
+      mergedPRs.length > 0
+        ? mergedPRs
+            .map((pr) => {
+              const additions =
+                pr.commits?.reduce((sum, c) => sum + (c.additions || 0), 0) ||
+                0;
+              const deletions =
+                pr.commits?.reduce((sum, c) => sum + (c.deletions || 0), 0) ||
+                0;
+              return `${pr.repository}#${pr.number} "${truncateTitle(pr.title)}" (+${additions}/-${deletions} lines)`;
+            })
+            .join(", ")
+        : "None";
+  }
 
-  // Format issues
-  const issueDetails = metrics.issues.items
-    .map(
-      (issue) =>
-        `${issue.repository}#${issue.number} "${truncateTitle(issue.title)}" (${
-          issue.state
-        })`,
-    )
-    .join(", ");
+  // Format open PRs - use grouped format for lifetime
+  const openPRs = metrics.pullRequests.items.filter((pr) => pr.merged !== 1);
+  let openPRDetails: string;
+
+  if (intervalType === "lifetime" && openPRs.length > 0) {
+    const openByRepo = groupByRepo(openPRs);
+    openPRDetails = Array.from(openByRepo.entries())
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([repo, prs]) => {
+        const prList = prs
+          .map((pr) => `#${pr.number} "${truncateTitle(pr.title)}"`)
+          .join(", ");
+        return `  - ${repo} (${prs.length} PRs): ${prList}`;
+      })
+      .join("\n");
+  } else {
+    openPRDetails =
+      openPRs.length > 0
+        ? openPRs
+            .map(
+              (pr) =>
+                `${pr.repository}#${pr.number} "${truncateTitle(pr.title)}"`,
+            )
+            .join(", ")
+        : "None";
+  }
+
+  // Format issues - use grouped format for lifetime
+  let issueDetails: string;
+
+  if (intervalType === "lifetime" && metrics.issues.items.length > 0) {
+    const issuesByRepo = groupByRepo(metrics.issues.items);
+    issueDetails = Array.from(issuesByRepo.entries())
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([repo, issues]) => {
+        const issueList = issues
+          .map(
+            (issue) =>
+              `#${issue.number} "${truncateTitle(issue.title)}" (${issue.state})`,
+          )
+          .join(", ");
+        return `  - ${repo} (${issues.length}): ${issueList}`;
+      })
+      .join("\n");
+  } else {
+    issueDetails =
+      metrics.issues.items.length > 0
+        ? metrics.issues.items
+            .map(
+              (issue) =>
+                `${issue.repository}#${issue.number} "${truncateTitle(issue.title)}" (${issue.state})`,
+            )
+            .join(", ")
+        : "None";
+  }
 
   // Work pattern analysis
   const workPatternDescription =
@@ -224,8 +304,12 @@ PULL REQUESTS:
 - Complexity: ${prComplexityInsights}
 
 ISSUES:
-- Created: ${metrics.issues.opened > 0 ? metrics.issues.opened : "None"} ${
-    issueDetails ? `(${issueDetails})` : ""
+- Created: ${metrics.issues.opened > 0 ? metrics.issues.opened : "None"}${
+    issueDetails && issueDetails !== "None"
+      ? intervalType === "lifetime"
+        ? `:\n${issueDetails}`
+        : ` (${issueDetails})`
+      : ""
   }
 - Closed: ${metrics.issues.closed > 0 ? metrics.issues.closed : "None"}
 - Commented on: ${
