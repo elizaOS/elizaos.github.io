@@ -86,7 +86,7 @@ export interface LeaderboardEntry {
   }[];
   profile?: ContributorProfile; // Qualitative signals, not counts
   scoreBreakdown?: ScoreBreakdown; // MMORPG character sheet
-  links: ContributorLinks; // Deep links for more context
+  links?: ContributorLinks; // Deep links for more context (requires SITE_URL)
 }
 
 /**
@@ -546,6 +546,7 @@ async function getLeaderboardData(
   startDate?: string,
   endDate?: string,
   limit?: number,
+  baseUrl?: string,
 ): Promise<LeaderboardEntry[]> {
   // Build conditions
   const conditions = [
@@ -590,11 +591,9 @@ async function getLeaderboardData(
     endDate,
   );
 
-  // Determine base URL for links (use env var or default)
-  const baseUrl =
-    process.env.NEXT_PUBLIC_SITE_URL ||
-    process.env.SITE_URL ||
-    "https://elizaos.github.io";
+  // Use provided baseUrl or fallback to env vars (for Next.js pages)
+  const linkBase =
+    baseUrl || process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "";
 
   // Collect all scores for percentile calculation
   const allScores = results.map((r) => Number(r.totalScore || 0));
@@ -655,11 +654,13 @@ async function getLeaderboardData(
       achievements: achievementsMap.get(row.username),
       profile,
       scoreBreakdown,
-      links: {
-        profile: `${baseUrl}/profile/${row.username}`,
-        summary: `${baseUrl}/api/summaries/contributors/${row.username}/day/latest.json`,
-        github: `https://github.com/${row.username}`,
-      },
+      links: linkBase
+        ? {
+            profile: `${linkBase}/profile/${row.username}`,
+            summary: `${linkBase}/api/summaries/contributors/${row.username}/day/latest.json`,
+            github: `https://github.com/${row.username}`,
+          }
+        : undefined,
     };
   });
 }
@@ -707,10 +708,12 @@ export async function exportLeaderboardAPI(
     limit?: number;
     contributionStartDate: string;
     logger?: Logger;
+    baseUrl?: string;
   },
 ): Promise<void> {
   const logger = options?.logger;
   const limit = options?.limit;
+  const baseUrl = options?.baseUrl;
   const contributionStartDate = options?.contributionStartDate ?? "2024-10-15";
 
   logger?.info(`Generating ${period} leaderboard API endpoint...`);
@@ -725,7 +728,12 @@ export async function exportLeaderboardAPI(
   const totalCount = await getTotalUserCount(startDate, endDate);
 
   // Get leaderboard data (top N if limit specified)
-  const leaderboard = await getLeaderboardData(startDate, endDate, limit);
+  const leaderboard = await getLeaderboardData(
+    startDate,
+    endDate,
+    limit,
+    baseUrl,
+  );
 
   // Build response
   const response: LeaderboardAPIResponse = {
@@ -877,7 +885,12 @@ export async function exportUserProfile(
 ): Promise<void> {
   const logger = options?.logger;
   const contributionStartDate = options?.contributionStartDate ?? "2024-10-15";
-  const baseUrl = options?.baseUrl ?? "https://elizaos.github.io";
+  const baseUrl = options?.baseUrl;
+
+  if (!baseUrl) {
+    logger?.debug(`Skipping profile for ${username}: SITE_URL not configured`);
+    return;
+  }
 
   logger?.debug(`Generating profile for ${username}...`);
 
@@ -888,6 +901,7 @@ export async function exportUserProfile(
     contributionStartDate,
     endDate,
     undefined,
+    baseUrl,
   );
 
   const userEntry = leaderboard.find((entry) => entry.username === username);
@@ -981,6 +995,12 @@ export async function exportAllUserProfiles(
 ): Promise<void> {
   const logger = options?.logger;
   const contributionStartDate = options?.contributionStartDate ?? "2024-10-15";
+  const baseUrl = options?.baseUrl;
+
+  if (!baseUrl) {
+    logger?.info("Skipping user profiles: SITE_URL not configured");
+    return;
+  }
 
   logger?.info("Exporting user profiles...");
 
@@ -991,6 +1011,7 @@ export async function exportAllUserProfiles(
     contributionStartDate,
     endDate,
     undefined,
+    baseUrl,
   );
 
   logger?.info(`Found ${leaderboard.length} users to export profiles for`);
@@ -1001,6 +1022,153 @@ export async function exportAllUserProfiles(
   }
 
   logger?.info(`✓ Exported ${leaderboard.length} user profiles successfully`);
+}
+
+/**
+ * API Index response for discovery
+ */
+export interface APIIndexResponse {
+  version: string;
+  baseUrl: string;
+  documentation: string;
+  openapi: string;
+  endpoints: {
+    leaderboard: {
+      monthly: string;
+      weekly: string;
+      lifetime: string;
+    };
+    profiles: {
+      pattern: string;
+      example: string;
+    };
+    summaries: {
+      overall: {
+        pattern: string;
+        intervals: string[];
+      };
+      contributors: {
+        pattern: string;
+        intervals: string[];
+      };
+    };
+  };
+  capabilities: {
+    search: {
+      byUsername: boolean;
+      byRank: boolean;
+      byTier: boolean;
+      byFocusArea: boolean;
+    };
+    intervals: string[];
+    characterSystem: {
+      tiers: string[];
+      classes: string[];
+      focusAreas: string[];
+    };
+  };
+}
+
+/**
+ * Get all unique focus area tags from the database
+ */
+async function getAllFocusAreaTags(): Promise<string[]> {
+  const tags = await db
+    .select({ tag: userTagScores.tag })
+    .from(userTagScores)
+    .groupBy(userTagScores.tag)
+    .orderBy(userTagScores.tag)
+    .all();
+
+  return tags.map((t) => t.tag);
+}
+
+/**
+ * Export API index for discovery
+ */
+export async function exportAPIIndex(
+  outputDir: string,
+  options?: {
+    baseUrl?: string;
+    logger?: Logger;
+  },
+): Promise<void> {
+  const logger = options?.logger;
+  const baseUrl = options?.baseUrl;
+
+  if (!baseUrl) {
+    logger?.warn(
+      "Skipping API index: SITE_URL not configured (set NEXT_PUBLIC_SITE_URL or SITE_URL env var)",
+    );
+    return;
+  }
+
+  logger?.info("Generating API index...");
+
+  // Get all focus area tags from database
+  const focusAreas = await getAllFocusAreaTags();
+
+  const index: APIIndexResponse = {
+    version: "1.0",
+    baseUrl,
+    documentation: `${baseUrl}/api`,
+    openapi: `${baseUrl}/openapi.json`,
+    endpoints: {
+      leaderboard: {
+        monthly: `${baseUrl}/api/leaderboard-monthly.json`,
+        weekly: `${baseUrl}/api/leaderboard-weekly.json`,
+        lifetime: `${baseUrl}/api/leaderboard-lifetime.json`,
+      },
+      profiles: {
+        pattern: `${baseUrl}/api/contributors/{username}/profile.json`,
+        example: `${baseUrl}/api/contributors/example-user/profile.json`,
+      },
+      summaries: {
+        overall: {
+          pattern: `${baseUrl}/api/summaries/overall/{interval}/latest.json`,
+          intervals: ["day", "week", "month"],
+        },
+        contributors: {
+          pattern: `${baseUrl}/api/summaries/contributors/{username}/{interval}/latest.json`,
+          intervals: ["day", "week", "month", "lifetime"],
+        },
+      },
+    },
+    capabilities: {
+      search: {
+        byUsername: true,
+        byRank: true,
+        byTier: true,
+        byFocusArea: true,
+      },
+      intervals: ["day", "week", "month", "lifetime"],
+      characterSystem: {
+        tiers: ["beginner", "regular", "active", "veteran", "elite", "legend"],
+        classes: [
+          "Author",
+          "Reviewer",
+          "Maintainer",
+          "Advocate",
+          "Discussant",
+          "Contributor",
+          "Author-Reviewer",
+          "Author-Advocate",
+          "Reviewer-Advocate",
+          "Maintainer-Community",
+        ],
+        focusAreas,
+      },
+    },
+  };
+
+  // Write to /api/index.json
+  const apiDir = join(outputDir, "api");
+  mkdirSync(apiDir, { recursive: true });
+
+  const outputPath = join(apiDir, "index.json");
+  await writeToFile(outputPath, JSON.stringify(index, null, 2));
+
+  logger?.info(`✓ API index exported to ${outputPath}`);
 }
 
 /**
@@ -1017,6 +1185,9 @@ export async function exportAllLeaderboardAPIs(
 ): Promise<void> {
   const logger = options?.logger;
   logger?.info("Exporting all leaderboard API endpoints...");
+
+  // Export API index first for discovery
+  await exportAPIIndex(outputDir, options);
 
   // Export all three periods
   await exportLeaderboardAPI(outputDir, "monthly", options);

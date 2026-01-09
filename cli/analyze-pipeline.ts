@@ -705,12 +705,15 @@ program
       const limit = parseInt(options.limit, 10);
       const userLimit = limit === 0 ? undefined : limit;
 
+      const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL;
+
       // Export all leaderboard endpoints
       await exportAllLeaderboardAPIs(options.outputDir, {
         limit: userLimit,
         contributionStartDate:
           pipelineConfig.contributionStartDate ?? "2024-10-15",
         logger: rootLogger,
+        baseUrl,
       });
 
       rootLogger.info("\nLeaderboard API export completed successfully!");

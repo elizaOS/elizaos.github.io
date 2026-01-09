@@ -140,6 +140,120 @@ export default function ApiPage() {
         </section>
 
         <section className="mt-8">
+          <h2>API Discovery</h2>
+          <p>
+            Start here: the API index provides a complete map of all available
+            endpoints, capabilities, and metadata for programmatic discovery.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            <strong>For AI Agents:</strong> Query <code>/api/index.json</code>{" "}
+            first to discover all endpoints, intervals, character system
+            metadata (tiers, classes, focus areas), and search capabilities
+            without hardcoding URLs.
+          </p>
+
+          <div className="not-prose overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-b border-border bg-muted/50">
+                  <th className="px-4 py-3 text-left font-medium">Endpoint</th>
+                  <th className="px-4 py-3 text-left font-medium">
+                    Description
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <StaticEndpointRow
+                  path="/api/index.json"
+                  description="Complete API directory with all endpoints and capabilities"
+                />
+              </tbody>
+            </table>
+          </div>
+
+          <details className="mt-4">
+            <summary className="cursor-pointer font-medium">
+              Response Schema
+            </summary>
+            <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-4 text-sm">
+              {JSON.stringify(
+                {
+                  version: "1.0",
+                  baseUrl: "https://elizaos.github.io",
+                  documentation: "https://elizaos.github.io/api",
+                  openapi: "https://elizaos.github.io/openapi.json",
+                  endpoints: {
+                    leaderboard: {
+                      monthly:
+                        "https://elizaos.github.io/api/leaderboard-monthly.json",
+                      weekly:
+                        "https://elizaos.github.io/api/leaderboard-weekly.json",
+                      lifetime:
+                        "https://elizaos.github.io/api/leaderboard-lifetime.json",
+                    },
+                    profiles: {
+                      pattern:
+                        "https://elizaos.github.io/api/contributors/{username}/profile.json",
+                      example:
+                        "https://elizaos.github.io/api/contributors/example-user/profile.json",
+                    },
+                    summaries: {
+                      overall: {
+                        pattern:
+                          "https://elizaos.github.io/api/summaries/overall/{interval}/latest.json",
+                        intervals: ["day", "week", "month"],
+                      },
+                      contributors: {
+                        pattern:
+                          "https://elizaos.github.io/api/summaries/contributors/{username}/{interval}/latest.json",
+                        intervals: ["day", "week", "month", "lifetime"],
+                      },
+                    },
+                  },
+                  capabilities: {
+                    search: {
+                      byUsername: true,
+                      byRank: true,
+                      byTier: true,
+                      byFocusArea: true,
+                    },
+                    intervals: ["day", "week", "month", "lifetime"],
+                    characterSystem: {
+                      tiers: [
+                        "beginner",
+                        "regular",
+                        "active",
+                        "veteran",
+                        "elite",
+                        "legend",
+                      ],
+                      classes: [
+                        "Author",
+                        "Reviewer",
+                        "Maintainer",
+                        "Advocate",
+                        "Discussant",
+                        "Contributor",
+                      ],
+                      focusAreas: [
+                        "core",
+                        "frontend",
+                        "backend",
+                        "typescript",
+                        "react",
+                        "docs",
+                      ],
+                    },
+                  },
+                },
+                null,
+                2,
+              )}
+            </pre>
+          </details>
+        </section>
+
+        <section className="mt-8">
           <h2>Leaderboard</h2>
           <p>
             Ranked contributor data with scores, wallet addresses, and avatars
@@ -483,6 +597,11 @@ export default function ApiPage() {
         <section className="mt-8 rounded-lg border border-border bg-muted/30 p-6">
           <h2 className="mt-0">Notes</h2>
           <ul className="mb-0">
+            <li>
+              <strong>API Discovery:</strong> Start with{" "}
+              <code>/api/index.json</code> to programmatically discover all
+              endpoints, capabilities, and metadata without hardcoding URLs
+            </li>
             <li>All endpoints return JSON with CORS headers</li>
             <li>Data regenerates on each deployment</li>
             <li>
@@ -497,6 +616,12 @@ export default function ApiPage() {
               <strong>Repository Stats vs Leaderboard:</strong> Stats show
               per-repository contributor rankings, while leaderboard shows
               global rankings across all repositories
+            </li>
+            <li>
+              <strong>Query with jq:</strong> Extract data easily with{" "}
+              <code>
+                curl {baseUrl}/api/index.json | jq &apos;.endpoints&apos;
+              </code>
             </li>
           </ul>
         </section>
