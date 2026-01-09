@@ -297,27 +297,78 @@ function calculatePercentile(score: number, allScores: number[]): number {
 }
 
 /**
- * Derive character class based on score distribution
+ * CHARACTER CLASS SYSTEM
+ * ======================
+ * Derives contributor class based on activity distribution.
+ *
+ * PRIMARY CLASSES (creation activities):
+ *   Builder     - PRs >= 50%           - Primary code creator
+ *   Hunter      - Issues >= 25%        - Bug finder, issue reporter
+ *   Scribe      - Docs focus >= 40%    - Documentation writer
+ *   Machine     - Bot in username      - AI agents
+ *   Contributor - Default              - Starting class
+ *
+ * EVOLUTIONS & HYBRIDS:
+ *   Maintainer  - Builder + Reviews >= 25%  - Creator who reviews
+ *   Pathfinder  - Builder + Hunter          - Creates code + finds bugs
+ *
+ * META STATS (not classes, influence evolution):
+ *   Reviews     - Evolves Builder to Maintainer
+ *   Engagement  - Reserved for future evolution paths
+ *
+ * TO CUSTOMIZE: Adjust thresholds in the `types` array and `hasHighReviews`
+ * check below. Consider moving to config/example.json for per-org tuning.
  */
 function deriveCharacterClass(
   distribution: ScoreBreakdown["distribution"],
+  focusAreas?: FocusAreaDetail[],
+  username?: string,
 ): string {
+  // Check for Machine (AI agent/bot) - for future bot inclusion
+  if (username && (username.endsWith("[bot]") || username.includes("-bot"))) {
+    return "Machine";
+  }
+
+  // Check for Scribe (docs-focused contributor)
+  if (focusAreas && focusAreas.length > 0) {
+    const docsArea = focusAreas.find(
+      (fa) => fa.tag === "docs" || fa.tag === "docs-writer",
+    );
+    // If docs is their #1 focus area with > 40% of their work
+    if (
+      docsArea &&
+      focusAreas[0].tag === docsArea.tag &&
+      docsArea.percentage > 40
+    ) {
+      return "Scribe";
+    }
+  }
+
+  // Primary classes based on *creation* activities
+  // Reviews and engagement are meta stats, not primary classes
   const types = [
-    { key: "prs" as const, name: "Author", threshold: 50 },
-    { key: "reviews" as const, name: "Reviewer", threshold: 30 },
-    { key: "issues" as const, name: "Advocate", threshold: 25 },
-    { key: "comments" as const, name: "Discussant", threshold: 20 },
+    { key: "prs" as const, name: "Builder", threshold: 50 },
+    { key: "issues" as const, name: "Hunter", threshold: 25 },
   ];
 
   const classes = types
     .filter((t) => distribution[t.key].percentage >= t.threshold)
     .map((t) => t.name);
 
+  // Check for Maintainer evolution (Builder with high review activity)
+  const hasHighReviews = distribution.reviews.percentage >= 25;
+  if (classes.includes("Builder") && hasHighReviews) {
+    return "Maintainer";
+  }
+
+  // Named hybrids
+  if (classes.includes("Builder") && classes.includes("Hunter"))
+    return "Pathfinder";
+
   if (classes.length === 0) return "Contributor";
   if (classes.length === 1) return classes[0];
-  if (classes.includes("Author") && classes.includes("Reviewer"))
-    return "Maintainer";
-  return classes.slice(0, 2).join("-");
+
+  return classes[0]; // Return dominant class
 }
 
 /**
@@ -609,35 +660,41 @@ async function getLeaderboardData(
     const commentScore = Number(row.commentScore || 0);
 
     // Calculate score breakdown (MMORPG character sheet)
+    // Labels use Orders nomenclature
     const distribution = {
       prs: {
         score: prScore,
         percentage: score > 0 ? (prScore / score) * 100 : 0,
-        label: "Code Author",
+        label: "Builder",
       },
       issues: {
         score: issueScore,
         percentage: score > 0 ? (issueScore / score) * 100 : 0,
-        label: "Problem Finder",
+        label: "Hunter",
       },
       reviews: {
         score: reviewScore,
         percentage: score > 0 ? (reviewScore / score) * 100 : 0,
-        label: "Code Reviewer",
+        label: "Reviews", // Meta stat - high reviews evolves Builder to Maintainer
       },
       comments: {
         score: commentScore,
         percentage: score > 0 ? (commentScore / score) * 100 : 0,
-        label: "Discussant",
+        label: "Engagement", // Meta stat for future evolution paths, not a primary class
       },
     };
 
+    const userFocusAreas = focusAreasMap.get(row.username);
     const scoreBreakdown: ScoreBreakdown = {
       total: score,
       distribution,
       tier: calculateTier(score),
       percentile: calculatePercentile(score, allScores),
-      characterClass: deriveCharacterClass(distribution),
+      characterClass: deriveCharacterClass(
+        distribution,
+        userFocusAreas,
+        row.username,
+      ),
     };
 
     return {
@@ -1145,16 +1202,13 @@ export async function exportAPIIndex(
       characterSystem: {
         tiers: ["beginner", "regular", "active", "veteran", "elite", "legend"],
         classes: [
-          "Author",
-          "Reviewer",
-          "Maintainer",
-          "Advocate",
-          "Discussant",
-          "Contributor",
-          "Author-Reviewer",
-          "Author-Advocate",
-          "Reviewer-Advocate",
-          "Maintainer-Community",
+          "Builder", // Primary: writes code (PRs)
+          "Hunter", // Primary: finds bugs (Issues)
+          "Scribe", // Primary: writes docs
+          "Maintainer", // Evolution: Builder + high reviews
+          "Pathfinder", // Hybrid: Builder + Hunter
+          "Machine", // AI agents
+          "Contributor", // Default
         ],
         focusAreas,
       },
