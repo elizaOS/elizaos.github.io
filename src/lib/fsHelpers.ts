@@ -211,7 +211,7 @@ export async function updateSummaryIndex(
 export async function writeSummaryToAPI(
   outputDir: string,
   type: "overall" | "repository" | "contributor",
-  intervalType: IntervalType,
+  intervalType: IntervalType | "lifetime",
   date: string,
   summary: string,
   identifier?: string,
@@ -223,7 +223,7 @@ export async function writeSummaryToAPI(
   const response: SummaryAPIResponse = {
     version: "1.0",
     type,
-    interval: intervalType,
+    interval: intervalType as IntervalType,
     date,
     generatedAt: now,
     sourceLastUpdated: now,
@@ -237,6 +237,19 @@ export async function writeSummaryToAPI(
   if (type !== "overall" && !identifier) {
     throw new Error(`identifier required for ${type} summary type`);
   }
+
+  // Special handling for lifetime - simplified path structure
+  if (intervalType === "lifetime" && type === "contributor") {
+    const lifetimePath = getAPISummaryPath(
+      outputDir,
+      "contributors",
+      identifier!,
+      "lifetime.json",
+    );
+    await writeToFile(lifetimePath, JSON.stringify(response, null, 2));
+    return lifetimePath;
+  }
+
   const pathSegments: string[] =
     type === "overall"
       ? ["overall", intervalType]
@@ -254,7 +267,7 @@ export async function writeSummaryToAPI(
   const indexPath = getAPISummaryPath(outputDir, ...pathSegments, "index.json");
 
   await writeJSONWithLatest(jsonPath, latestPath, response);
-  await updateSummaryIndex(indexPath, type, intervalType, {
+  await updateSummaryIndex(indexPath, type, intervalType as IntervalType, {
     date,
     sourceLastUpdated: now,
     contentHash,

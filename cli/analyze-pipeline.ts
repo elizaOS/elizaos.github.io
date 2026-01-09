@@ -300,6 +300,7 @@ program
   .option("--daily", "Generate daily summaries")
   .option("--weekly", "Generate weekly summaries")
   .option("--monthly", "Generate monthly summaries")
+  .option("--lifetime", "Generate lifetime (all-time) summaries")
   .action(async (options) => {
     // Validate required environment variables for AI summaries
     validateEnvVars(["GITHUB_TOKEN", "OPENROUTER_API_KEY"]);
@@ -355,19 +356,21 @@ program
         `Generating ${summaryType} summaries using config from ${configPath}`,
       );
 
-      // If no interval flags are set, enable all intervals
+      // If no interval flags are set, enable all intervals (except lifetime)
       const hasIntervalFlags =
-        options.daily || options.weekly || options.monthly;
+        options.daily || options.weekly || options.monthly || options.lifetime;
       const enabledIntervals = hasIntervalFlags
         ? {
             day: !!options.daily,
             week: !!options.weekly,
             month: !!options.monthly,
+            lifetime: !!options.lifetime,
           }
         : {
             day: true,
             week: true,
             month: true,
+            lifetime: false, // Lifetime is opt-in only
           };
       // Create summarizer context
       const context = createSummarizerContext({

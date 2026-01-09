@@ -7,6 +7,7 @@ import {
   generateMonthlyContributorSummaries,
   generateWeeklyContributorSummaries,
 } from "./generateContributorSummary";
+import { generateLifetimeContributorSummaries } from "./generateLifetimeSummary";
 import { SummarizerPipelineContext, createSummarizerContext } from "./context";
 import {
   generateDailyRepoSummaries,
@@ -38,14 +39,17 @@ export const overallSummariesPipeline = sequence(
 // Existing Contributor Summaries Pipeline (can be run independently)
 export const contributorSummariesPipeline = pipe(
   sequence(
-    generateMonthlyContributorSummaries,
-    generateWeeklyContributorSummaries,
+    sequence(
+      generateMonthlyContributorSummaries,
+      generateWeeklyContributorSummaries,
+    ),
     generateDailyContributorSummaries,
+    generateLifetimeContributorSummaries,
   ),
   createStep("Log Results", (results, context) => {
-    const [monthly, weekly, daily] = results;
+    const [[monthly, weekly], daily, lifetime] = results;
     context.logger?.info(
-      `Generated ${monthly.length} monthly, ${weekly.length} weekly, and ${daily.length} daily contributor summaries.`,
+      `Generated ${monthly?.length || 0} monthly, ${weekly?.length || 0} weekly, ${daily?.length || 0} daily, and ${lifetime?.length || 0} lifetime contributor summaries.`,
     );
   }),
 );

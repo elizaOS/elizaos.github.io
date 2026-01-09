@@ -297,7 +297,7 @@ export const userSummaries = sqliteTable(
     id: text("id").primaryKey(), // username_intervalType_date
     username: text("username").references(() => users.username),
     intervalType: text("interval_type", {
-      enum: ["day", "week", "month"] as const,
+      enum: ["day", "week", "month", "lifetime"] as const,
     })
       .notNull()
       .default("day"),

@@ -13,7 +13,7 @@ export type ContributorMetricsForSummary = Awaited<
 export async function generateAISummaryForContributor(
   metrics: ContributorMetricsForSummary,
   config: AISummaryConfig,
-  intervalType: IntervalType,
+  intervalType: IntervalType | "lifetime",
 ): Promise<string | null> {
   const apiKey = config.apiKey;
   if (!apiKey) {
@@ -37,9 +37,13 @@ export async function generateAISummaryForContributor(
     // Format the metrics data for the AI prompt
     const prompt = formatContributorPrompt(metrics, intervalType);
 
+    // Get model for this interval (use "month" model for lifetime)
+    const modelKey: IntervalType =
+      intervalType === "lifetime" ? "month" : intervalType;
+
     // Get summary from AI model
     return await callAIService(prompt, config, {
-      model: config.models[intervalType],
+      model: config.models[modelKey],
     });
   } catch (error) {
     console.error(`Error generating summary for ${metrics.username}:`, error);
@@ -52,7 +56,7 @@ export async function generateAISummaryForContributor(
  */
 function formatContributorPrompt(
   metrics: ContributorMetricsForSummary,
-  intervalType: IntervalType,
+  intervalType: IntervalType | "lifetime",
 ): string {
   // Helper to truncate long titles
   const truncateTitle = (title: string, maxLength = 64) => {
@@ -61,7 +65,14 @@ function formatContributorPrompt(
   };
 
   // Get time period description for the prompt
-  const timePeriod = getTimePeriodText(intervalType);
+  const timePeriod =
+    intervalType === "lifetime"
+      ? {
+          timeFrame: "all-time",
+          timeFrameShort: "lifetime",
+          sentenceCount: 100,
+        }
+      : getTimePeriodText(intervalType);
 
   // Get the most significant directories from focus areas
   const topDirs = metrics.focusAreas
