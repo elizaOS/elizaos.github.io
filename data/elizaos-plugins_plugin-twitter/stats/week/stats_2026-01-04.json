@@ -5,16 +5,71 @@
     "intervalType": "week"
   },
   "repository": "elizaos-plugins/plugin-twitter",
-  "overview": "From 2026-01-04 to 2026-01-11, elizaos-plugins/plugin-twitter had 0 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "overview": "From 2026-01-04 to 2026-01-11, elizaos-plugins/plugin-twitter had 0 new PRs (1 merged), 0 new issues, and 7 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDONkwNcc67GQmV",
+      "title": "feat: OAuth2 PKCE auth mode + provider abstraction (env-compatible)",
+      "author": "vbkotecha",
+      "number": 46,
+      "body": "### Summary\r\nAdds 3-legged \"login + approve\" Twitter/X auth (OAuth 2.0 Authorization Code + PKCE) to @elizaos/plugin-twitter without shipping any client secret, while keeping full backward compatibility with the existing env-var OAuth 1.0a credentials. Also adds a broker-ready auth mode stub (not functional yet) so a future Eliza-hosted broker can be added without touching tweet logic.\r\n\r\nThis requires a “Twitter broker” I referenced below which is a future Eliza-hosted service (not implemented in this repo) that would sit between the plugin and Twitter to handle the parts that require a client secret and a user session.\r\n\r\nWhat it is\r\nA separate web service (owned by ElizaOS) that:\r\n- Runs the OAuth2 “login + approve” flow on behalf of users\r\n- Stores the client secret and refresh tokens securely\r\n- Hands the agent/plugin short‑lived access tokens (so the plugin never needs secrets)\r\n\r\n\r\n### What changed in this PR (exact)\r\n- Introduced a single auth abstraction: TwitterAuthProvider#getAccessToken(): Promise<string>\r\n- Added TWITTER_AUTH_MODE (env|oauth|broker) and centralized auth selection\r\n- env mode (default): preserves TWITTER_API_KEY / TWITTER_API_SECRET_KEY / TWITTER_ACCESS_TOKEN / TWITTER_ACCESS_TOKEN_SECRET behavior\r\n- oauth mode: OAuth2 PKCE interactive login + token refresh + persistence\r\n- broker mode: stub-only; fails clearly until an Eliza Twitter broker service exists\r\n- Refactored TwitterAuth + client call sites to use provider-driven tokens (no direct env reads in request logic)\r\n- Added unit tests for PKCE, OAuth2 refresh flows, token store, and broker stub\r\n- Updated docs and plugin parameter metadata\r\n\r\n### Auth modes\r\n#### 1) Legacy env mode (no behavior change)\r\nSet:\r\n- TWITTER_AUTH_MODE=env (or omit)\r\n- TWITTER_API_KEY\r\n- TWITTER_API_SECRET_KEY\r\n- TWITTER_ACCESS_TOKEN\r\n- TWITTER_ACCESS_TOKEN_SECRET\r\n\r\n#### 2) OAuth2 PKCE mode (\"login + approve\")\r\nSet:\r\n- TWITTER_AUTH_MODE=oauth\r\n- TWITTER_CLIENT_ID\r\n- TWITTER_REDIRECT_URI (loopback recommended, e.g. http://127.0.0.1:8080/callback)\r\nOptional:\r\n- TWITTER_SCOPES (default: tweet.read tweet.write users.read offline.access)\r\n\r\nFirst run prints an authorization URL. After approval it stores tokens and auto-refreshes.\r\n\r\nRequires a \r\n\r\n### Local callback server (required for best UX)\r\nIn oauth mode, the plugin starts a small local HTTP server bound to 127.0.0.1 to capture the OAuth redirect at the host/port/path in TWITTER_REDIRECT_URI.\r\n- If it can’t bind, it falls back to \"paste the redirected URL\".\r\n\r\n### Broker mode (stub; requires Eliza Twitter broker server)\r\nIf TWITTER_AUTH_MODE=broker:\r\n- Requires TWITTER_BROKER_URL\r\n- This PR does NOT implement the broker server; it only provides the plugin-side provider stub.\r\n- Later, an Eliza-hosted broker (e.g. eliza twitter auth server) can hold the client secret and return short-lived access tokens.\r\n\r\n### Validation\r\n- bun run build\r\n- bun run test:coverage (unit tests; E2E stays env-mode only / skipped without credentials)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\n\n- Introduces OAuth2 PKCE authentication mode for Twitter/X integration while preserving backward compatibility with existing OAuth 1.0a environment variable credentials\n- Implements auth provider abstraction with three modes: 'env' (default legacy), 'oauth' (OAuth2 PKCE), and 'broker' (stub for future hosted service)\n- Adds interactive \"login + approve\" flow with local callback server, automatic token refresh, token persistence, and comprehensive error handling\n\n<h3>Important Files Changed</h3>\n\n\n| Filename | Overview |\n|----------|----------|\n| `src/client/auth-providers/oauth2-pkce.ts` | New OAuth2 PKCE authentication provider with interactive login, token refresh, and persistence |\n| `src/client/auth.ts` | Refactored to use provider abstraction; made `getV2Client()` async, added lazy initialization and token refresh detection |\n| `src/environment.ts` | Added `TWITTER_AUTH_MODE` configuration with mode-specific validation for env/oauth/broker authentication |\n| `src/client/tweets.ts` | Updated all API client retrieval calls to be async to support dynamic token operations |\n| `src/index.ts` | Modified plugin initialization to validate credentials based on selected auth mode instead of hardcoded OAuth 1.0a |\n\n<h3>Confidence score: 4/5</h3>\n\n\n- This PR introduces significant but well-architected changes that maintain backward compatibility\n- Score reflects comprehensive testing coverage, clean abstractions, and thorough error handling, but deducted one point due to the complexity of authentication refactoring affecting many files\n- Pay close attention to the async changes in `tweets.ts`, `relationships.ts`, `profile.ts`, and `search.ts` to ensure all callers handle Promise rejections properly\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant Plugin as TwitterPlugin\n    participant Provider as OAuth2PKCEAuthProvider\n    participant TwitterAPI as Twitter/X API\n    participant TokenStore as Token Store\n    participant Browser\n\n    User->>Plugin: \"Initialize with TWITTER_AUTH_MODE=oauth\"\n    Plugin->>Provider: \"createTwitterAuthProvider(runtime, state)\"\n    Provider->>TokenStore: \"load()\"\n    TokenStore-->>Provider: \"null (no existing tokens)\"\n    \n    User->>Plugin: \"Perform Twitter action (post tweet, etc.)\"\n    Plugin->>Provider: \"getAccessToken()\"\n    Provider->>Provider: \"interactiveLogin()\"\n    Provider->>Provider: \"createCodeVerifier() & createCodeChallenge()\"\n    Provider->>Provider: \"buildAuthorizeUrl(state, codeChallenge)\"\n    \n    Provider->>User: \"Print authorization URL\"\n    User->>Browser: \"Open authorization URL\"\n    Browser->>TwitterAPI: \"GET /oauth2/authorize with PKCE params\"\n    TwitterAPI-->>Browser: \"User consent page\"\n    User->>Browser: \"Approve application\"\n    Browser->>Provider: \"Redirect with authorization code\"\n    \n    Provider->>TwitterAPI: \"POST /oauth2/token with code & verifier\"\n    TwitterAPI-->>Provider: \"access_token + refresh_token + expires_in\"\n    Provider->>TokenStore: \"save(tokens)\"\n    Provider-->>Plugin: \"access_token\"\n    \n    Plugin->>TwitterAPI: \"API call with Bearer token\"\n    TwitterAPI-->>Plugin: \"API response\"\n    Plugin-->>User: \"Success\"\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added interactive OAuth2 PKCE login and a broker option alongside legacy env-based auth\n  * New authenticate() entrypoint and mode-aware client initialization for Twitter integration\n\n* **Documentation**\n  * Reworked auth setup docs to explain auth-mode choices, PKCE flow, and mode-specific troubleshooting\n  * Updated test guides to reflect auth-mode behaviors\n\n* **Configuration**\n  * New TWITTER_AUTH_MODE plus client ID, redirect URI, scopes, and broker URL settings\n\n* **Tests**\n  * Added suites for PKCE, token stores, OAuth provider behaviors, and broker validation\n\n* **Chores**\n  * Ignore local OAuth token files and related artifacts in repo ignore list\n\n<sub>✏️ Tip: You can customize this high-level summary in your review settings.</sub>\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-twitter",
+      "createdAt": "2025-12-31T12:05:13Z",
+      "mergedAt": "2026-01-09T00:37:28Z",
+      "additions": 1554,
+      "deletions": 193
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 1554,
+    "deletions": 193,
+    "files": 33,
+    "commitCount": 1
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "feat: OAuth2 PKCE auth mode + provider abstraction (env-compatible)",
+      "prNumber": 46,
+      "type": "feature",
+      "body": "### Summary\r\nAdds 3-legged \"login + approve\" Twitter/X auth (OAuth 2.0 Authorization Code + PKCE) to @elizaos/plugin-twitter without shipping any client secret, while keeping full backward compatibility with the existing env-var OAuth 1.0a ",
+      "files": [
+        ".gitignore",
+        "README.md",
+        "package.json",
+        "src/__tests__/README.md",
+        "src/__tests__/TESTING_GUIDE.md",
+        "src/__tests__/e2e/twitter-integration.test.ts",
+        "src/__tests__/environment.test.ts",
+        "src/base.ts",
+        "src/client/__tests__/auth.test.ts",
+        "src/client/__tests__/broker-provider.test.ts",
+        "src/client/__tests__/oauth2-provider.test.ts",
+        "src/client/__tests__/pkce.test.ts",
+        "src/client/__tests__/token-store.test.ts",
+        "src/client/auth-providers/broker.ts",
+        "src/client/auth-providers/env.ts",
+        "src/client/auth-providers/factory.ts",
+        "src/client/auth-providers/interactive.ts",
+        "src/client/auth-providers/oauth2-pkce.ts",
+        "src/client/auth-providers/pkce.ts",
+        "src/client/auth-providers/token-store.ts",
+        "src/client/auth-providers/types.ts",
+        "src/client/auth.ts",
+        "src/client/client.ts",
+        "src/client/profile.ts",
+        "src/client/relationships.ts",
+        "src/client/search.ts",
+        "src/client/tweets.ts",
+        "src/environment.ts",
+        "src/index.ts",
+        "src/services/MessageService.ts",
+        "src/services/PostService.ts",
+        "src/services/__tests__/PostService.test.ts",
+        "tsup.config.ts"
+      ]
+    }
+  ],
   "topContributors": [
     {
       "username": "wtfsayo",
@@ -37,31 +92,41 @@
       "summary": null
     },
     {
+      "username": "madjin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32600939?u=cdcf89f44c7a50906c7a80d889efa85023af2049&v=4",
+      "totalScore": 102.30445676214967,
+      "prScore": 80.30445676214967,
+      "issueScore": 22,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "odilitime",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 53.073019117260884,
-      "prScore": 52.63501911726088,
+      "totalScore": 69.34861962271484,
+      "prScore": 68.57061962271483,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 45.4,
+      "totalScore": 59.099999999999994,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 45,
-      "commentScore": 0.4,
+      "reviewScore": 58.5,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
-      "username": "madjin",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/32600939?u=cdcf89f44c7a50906c7a80d889efa85023af2049&v=4",
-      "totalScore": 44.760682865573564,
-      "prScore": 36.760682865573564,
-      "issueScore": 8,
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 34.1407738965761,
+      "prScore": 34.1407738965761,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -69,9 +134,19 @@
     {
       "username": "0xbbjoker",
       "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
-      "totalScore": 22.81750955863044,
+      "totalScore": 32.81750955863044,
       "prScore": 22.81750955863044,
       "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "borisudovicic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
+      "totalScore": 26,
+      "prScore": 0,
+      "issueScore": 26,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -87,11 +162,11 @@
       "summary": null
     },
     {
-      "username": "borisudovicic",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
-      "totalScore": 18,
-      "prScore": 0,
-      "issueScore": 18,
+      "username": "takasaki404",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/193405421?u=8b79613f736e04d6e10ebe37042851efa758768d&v=4",
+      "totalScore": 14.346573590279972,
+      "prScore": 14.346573590279972,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -103,6 +178,16 @@
       "prScore": 14.346573590279972,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ChristopherTrimboli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27584221?u=0d816ce1dcdea8f925aba18bb710153d4a87a719&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -128,8 +213,8 @@
     }
   ],
   "newPRs": 0,
-  "mergedPRs": 0,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 3
+  "activeContributors": 7
 }
