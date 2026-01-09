@@ -30,7 +30,8 @@ export interface ContributorProfile {
  * Links to detailed contributor information
  */
 export interface ContributorLinks {
-  profile: string; // Link to full profile page
+  profile: string; // Link to full profile page (UI)
+  profileApi: string; // Link to profile JSON API endpoint
   summary: string; // Link to latest summary
   github: string; // GitHub profile
 }
@@ -69,6 +70,8 @@ export interface LeaderboardEntry {
   rank: number;
   username: string;
   avatarUrl: string;
+  characterClass: string; // Top-level for quick access (Builder, Hunter, Scribe, etc.)
+  tier: ScoreBreakdown["tier"]; // Top-level for quick access (beginner → legend)
   score: number;
   prScore: number;
   issueScore: number;
@@ -85,7 +88,7 @@ export interface LeaderboardEntry {
     earnedAt: string;
   }[];
   profile?: ContributorProfile; // Qualitative signals, not counts
-  scoreBreakdown?: ScoreBreakdown; // MMORPG character sheet
+  scoreBreakdown?: ScoreBreakdown; // Full MMORPG character sheet (detailed breakdown)
   links?: ContributorLinks; // Deep links for more context (requires SITE_URL)
 }
 
@@ -643,8 +646,13 @@ async function getLeaderboardData(
   );
 
   // Use provided baseUrl or fallback to env vars (for Next.js pages)
-  const linkBase =
-    baseUrl || process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "";
+  // Trim trailing slash to avoid double-slash in URLs
+  const linkBase = (
+    baseUrl ||
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.SITE_URL ||
+    ""
+  ).replace(/\/$/, "");
 
   // Collect all scores for percentile calculation
   const allScores = results.map((r) => Number(r.totalScore || 0));
@@ -701,6 +709,8 @@ async function getLeaderboardData(
       rank: index + 1,
       username: row.username,
       avatarUrl: row.avatarUrl || "",
+      characterClass: scoreBreakdown.characterClass,
+      tier: scoreBreakdown.tier,
       score,
       prScore,
       issueScore,
@@ -714,6 +724,7 @@ async function getLeaderboardData(
       links: linkBase
         ? {
             profile: `${linkBase}/profile/${row.username}`,
+            profileApi: `${linkBase}/api/contributors/${row.username}/profile.json`,
             summary: `${linkBase}/api/summaries/contributors/${row.username}/day/latest.json`,
             github: `https://github.com/${row.username}`,
           }
@@ -942,12 +953,15 @@ export async function exportUserProfile(
 ): Promise<void> {
   const logger = options?.logger;
   const contributionStartDate = options?.contributionStartDate ?? "2024-10-15";
-  const baseUrl = options?.baseUrl;
+  const rawBaseUrl = options?.baseUrl;
 
-  if (!baseUrl) {
+  if (!rawBaseUrl) {
     logger?.debug(`Skipping profile for ${username}: SITE_URL not configured`);
     return;
   }
+
+  // Trim trailing slash to avoid double-slash in URLs
+  const baseUrl = rawBaseUrl.replace(/\/$/, "");
 
   logger?.debug(`Generating profile for ${username}...`);
 
