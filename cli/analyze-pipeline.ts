@@ -301,6 +301,10 @@ program
   .option("--weekly", "Generate weekly summaries")
   .option("--monthly", "Generate monthly summaries")
   .option("--lifetime", "Generate lifetime (all-time) summaries")
+  .option(
+    "-u, --username <username>",
+    "Filter to a specific username (for testing)",
+  )
   .action(async (options) => {
     // Validate required environment variables for AI summaries
     validateEnvVars(["GITHUB_TOKEN", "OPENROUTER_API_KEY"]);
@@ -382,6 +386,7 @@ program
         overwrite: options.force,
         dateRange,
         enabledIntervals,
+        usernameFilter: options.username,
       });
       // Run the appropriate pipeline based on summary type
       if (summaryType === "contributors") {
