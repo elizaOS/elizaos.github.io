@@ -5,6 +5,7 @@ import { RepositoryMetrics } from "../export/queries";
 import { UTCDate } from "@date-fns/utc";
 import {
   IntervalType,
+  RepoIntervalType,
   formatTimeframeTitle,
   getIntervalTypeTitle,
 } from "@/lib/date-utils";
@@ -90,7 +91,7 @@ export async function generateRepoSummary(
   metrics: RepositoryMetrics,
   config: AISummaryConfig,
   dateInfo: { startDate: string },
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<string | null> {
   const apiKey = config.apiKey;
   if (!apiKey) {
@@ -129,7 +130,7 @@ export async function generateRepoSummary(
  */
 function calculateMaxTokens(
   prompt: string,
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
   config: AISummaryConfig,
 ): number {
   // Base tokens by interval type
@@ -355,7 +356,7 @@ export async function generateAggregatedRepoSummary(
   dailySummaries: { date: string; summary: string }[],
   config: AISummaryConfig,
   dateInfo: { startDate: string },
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<string | null> {
   const apiKey = config.apiKey;
   if (!apiKey) {

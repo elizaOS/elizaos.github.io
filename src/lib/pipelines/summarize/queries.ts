@@ -19,7 +19,7 @@ import {
 } from "@/lib/pipelines/codeAreaHelpers";
 import { UTCDate } from "@date-fns/utc";
 import { buildCommonWhereConditions } from "../queryHelpers";
-import { TimeInterval, toDateString } from "@/lib/date-utils";
+import { TimeInterval, toDateString, RepoIntervalType } from "@/lib/date-utils";
 
 /**
  * Get metrics for a contributor within a time range
@@ -669,7 +669,7 @@ export async function getAllRepoSummariesForInterval(
 ): Promise<{ repoId: string; summary: string }[]> {
   const summaries = await db.query.repoSummaries.findMany({
     where: and(
-      eq(repoSummaries.intervalType, interval.intervalType),
+      eq(repoSummaries.intervalType, interval.intervalType as RepoIntervalType),
       eq(repoSummaries.date, toDateString(interval.intervalStart)),
       isNotNull(repoSummaries.summary),
     ),

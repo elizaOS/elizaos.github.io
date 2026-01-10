@@ -2,6 +2,7 @@ import { AISummaryConfig } from "./config";
 import { callAIService } from "./callAIService";
 import {
   IntervalType,
+  RepoIntervalType,
   formatTimeframeTitle,
   getIntervalTypeTitle,
 } from "@/lib/date-utils";
@@ -170,7 +171,7 @@ export async function generateOverallSummary(
   repoSummaries: RepoSummary[],
   config: AISummaryConfig,
   dateInfo: { startDate: string },
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<string | null> {
   const apiKey = config.apiKey;
   if (!apiKey) {

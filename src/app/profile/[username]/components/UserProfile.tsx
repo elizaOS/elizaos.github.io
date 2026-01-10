@@ -40,6 +40,7 @@ export interface UserStats {
 
 type UserProfileProps = {
   username: string;
+  lifetimeSummary?: { date: string; summary: string | null } | null;
   monthlySummaries: Summary[];
   weeklySummaries: Summary[];
   roleTags: TagData[];
@@ -56,6 +57,7 @@ type UserProfileProps = {
 
 export default function UserProfile({
   username,
+  lifetimeSummary,
   monthlySummaries,
   weeklySummaries,
   roleTags,
@@ -217,6 +219,7 @@ export default function UserProfile({
         <ProfileCopyButton
           username={username}
           stats={stats}
+          lifetimeSummary={lifetimeSummary}
           monthlySummaries={monthlySummaries}
           weeklySummaries={weeklySummaries}
           roleTags={roleTags}
@@ -227,9 +230,20 @@ export default function UserProfile({
           dailyActivity={dailyActivity}
           userBadges={userBadges}
           badgeProgress={badgeProgress}
+          linkedWallets={linkedWallets}
         />
       </div>
+
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        {lifetimeSummary && (
+          <SummaryCard
+            summaries={[lifetimeSummary]}
+            intervalType="lifetime"
+            prominent={true}
+            className="md:col-span-2"
+          />
+        )}
+
         {monthlySummaries.length > 0 && (
           <SummaryCard
             summaries={monthlySummaries}

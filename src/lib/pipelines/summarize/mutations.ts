@@ -1,4 +1,4 @@
-import { IntervalType } from "@/lib/date-utils";
+import { IntervalType, RepoIntervalType } from "@/lib/date-utils";
 import { db } from "@/lib/data/db";
 import {
   userSummaries,
@@ -44,7 +44,7 @@ export async function storeRepoSummary(
   repoId: string,
   date: string,
   summary: string,
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<void> {
   const id = `${repoId}_${intervalType}_${date}`;
 
@@ -73,7 +73,7 @@ export async function storeRepoSummary(
 export async function storeOverallSummary(
   date: string,
   summary: string,
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<void> {
   const id = `${intervalType}_${date}`;
 

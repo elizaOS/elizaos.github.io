@@ -6,6 +6,7 @@ import {
 import { getContributorSummariesForInterval } from "@/lib/pipelines/summarize/queries";
 import {
   IntervalType,
+  RepoIntervalType,
   parseIntervalDate,
   toDateString,
 } from "@/lib/date-utils";
@@ -182,7 +183,7 @@ export async function getIntervalSummaryContent(
     const result = await db.query.overallSummaries.findFirst({
       where: and(
         eq(overallSummaries.date, queryDate),
-        eq(overallSummaries.intervalType, intervalType),
+        eq(overallSummaries.intervalType, intervalType as RepoIntervalType),
       ),
     });
 

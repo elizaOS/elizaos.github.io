@@ -2,7 +2,12 @@ import { createStep, pipe, mapStep } from "../types";
 import { SummarizerPipelineContext } from "./context";
 import { generateOverallSummary } from "./aiOverallSummary";
 import { generateTimeIntervals } from "../generateTimeIntervals";
-import { IntervalType, TimeInterval, toDateString } from "@/lib/date-utils";
+import {
+  IntervalType,
+  RepoIntervalType,
+  TimeInterval,
+  toDateString,
+} from "@/lib/date-utils";
 import { getAllRepoSummariesForInterval } from "./queries";
 import {
   getOverallSummaryFilePath,
@@ -19,7 +24,7 @@ import { and, eq } from "drizzle-orm";
  */
 async function checkExistingOverallSummary(
   date: string | Date,
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<boolean> {
   // Check database
   const existingSummary = await db.query.overallSummaries.findFirst({
@@ -53,7 +58,7 @@ export const generateOverallSummaryForInterval = createStep(
       if (!overwrite) {
         const summaryExists = await checkExistingOverallSummary(
           startDate,
-          intervalType,
+          intervalType as RepoIntervalType,
         );
         if (summaryExists) {
           intervalLogger?.debug(
@@ -75,7 +80,7 @@ export const generateOverallSummaryForInterval = createStep(
         repoSummaries,
         aiSummaryConfig,
         { startDate },
-        intervalType,
+        intervalType as RepoIntervalType,
       );
 
       if (!summary) {
@@ -86,7 +91,11 @@ export const generateOverallSummaryForInterval = createStep(
       }
 
       // Store the summary in database
-      await storeOverallSummary(startDate, summary, intervalType);
+      await storeOverallSummary(
+        startDate,
+        summary,
+        intervalType as RepoIntervalType,
+      );
 
       // Export summary as markdown file
       const mdFilename = `${startDate}.md`;

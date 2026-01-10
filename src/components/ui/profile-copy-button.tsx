@@ -18,10 +18,12 @@ import type { Summary } from "@/components/summary-card";
 import type { UserActivityHeatmap } from "@/lib/scoring/queries";
 import type { UserBadge } from "@/lib/badges/types";
 import type { UserStats } from "@/app/profile/[username]/components/UserProfile";
+import type { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
 
 interface ProfileCopyButtonProps {
   username: string;
   stats: UserStats;
+  lifetimeSummary?: { date: string; summary: string | null } | null;
   monthlySummaries: Summary[];
   weeklySummaries: Summary[];
   roleTags: TagData[];
@@ -32,12 +34,14 @@ interface ProfileCopyButtonProps {
   dailyActivity: UserActivityHeatmap[];
   userBadges: UserBadge[];
   badgeProgress: Record<string, number>;
+  linkedWallets: LinkedWallet[];
   className?: string;
 }
 
 export function ProfileCopyButton({
   username,
   stats,
+  lifetimeSummary,
   monthlySummaries,
   weeklySummaries,
   roleTags,
@@ -48,6 +52,7 @@ export function ProfileCopyButton({
   dailyActivity,
   userBadges,
   badgeProgress,
+  linkedWallets,
   className,
 }: ProfileCopyButtonProps) {
   const [includeStats, setIncludeStats] = useState(true);
@@ -64,6 +69,7 @@ export function ProfileCopyButton({
         totalLevel,
         totalXp,
         stats,
+        lifetimeSummary,
         monthlySummaries,
         weeklySummaries,
         roleTags,
@@ -72,6 +78,7 @@ export function ProfileCopyButton({
         dailyActivity,
         userBadges,
         badgeProgress,
+        linkedWallets,
       };
 
       const formattedData = formatProfileForLLM(profileData, {
@@ -84,10 +91,13 @@ export function ProfileCopyButton({
 
       await navigator.clipboard.writeText(formattedData);
 
+      // Calculate character and token count
+      const charCount = formattedData.length;
+      const tokenCount = Math.ceil(charCount / 4); // Rough estimate: ~4 chars per token
+
       setCopied(true);
       toast.success("Profile copied to clipboard", {
-        description:
-          "The formatted profile data is ready to paste into an LLM.",
+        description: `Ready to paste into an LLM. ~${charCount.toLocaleString()} chars (~${tokenCount.toLocaleString()} tokens)`,
       });
 
       setTimeout(() => setCopied(false), 2000);

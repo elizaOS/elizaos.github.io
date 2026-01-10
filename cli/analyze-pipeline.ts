@@ -46,7 +46,7 @@ import { storeOverallSummary } from "@/lib/pipelines/summarize/mutations";
 import { overallSummaries } from "@/lib/data/schema";
 import { db } from "@/lib/data/db";
 import { and, eq } from "drizzle-orm";
-import { IntervalType } from "@/lib/date-utils";
+import { IntervalType, RepoIntervalType } from "@/lib/date-utils";
 import { readdir, readFile } from "fs/promises";
 import { existsSync } from "fs";
 
@@ -448,7 +448,7 @@ program
         },
       });
 
-      const intervalType = options.interval as IntervalType;
+      const intervalType = options.interval as RepoIntervalType;
       if (!["day", "week", "month"].includes(intervalType)) {
         rootLogger.error(
           `Invalid interval type: ${options.interval}. Must be day, week, or month.`,
@@ -472,7 +472,7 @@ program
        */
       async function checkExistingSummary(
         date: string,
-        interval: IntervalType,
+        interval: RepoIntervalType,
       ): Promise<boolean> {
         const existingSummary = await db.query.overallSummaries.findFirst({
           where: and(
@@ -786,10 +786,10 @@ program
         options.type === "all"
           ? (["overall", "repository", "contributor"] as const)
           : ([options.type] as const);
-      const intervalsToExport: IntervalType[] =
+      const intervalsToExport: RepoIntervalType[] =
         options.interval === "all"
           ? ["day", "week", "month"]
-          : [options.interval as IntervalType];
+          : [options.interval as RepoIntervalType];
 
       let totalExported = 0;
 

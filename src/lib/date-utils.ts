@@ -83,7 +83,10 @@ export function toUTCMidnight(date: string | number | Date): UTCDate {
     new UTCDate(date).toISOString().split("T")[0] + "T00:00:00.000Z",
   );
 }
-export type IntervalType = "day" | "week" | "month";
+export type IntervalType = "day" | "week" | "month" | "lifetime";
+
+// Type for repo/overall summaries (excludes lifetime)
+export type RepoIntervalType = "day" | "week" | "month";
 
 export interface TimeInterval {
   intervalStart: UTCDate;
@@ -234,7 +237,7 @@ export function formatReadableDate(date: string | Date) {
 /**
  * Formats a date into a human-readable timeframe title based on interval type
  * @param date - The date to format
- * @param intervalType - The type of interval (day, week, month)
+ * @param intervalType - The type of interval (day, week, month, lifetime)
  * @returns Formatted timeframe title
  */
 export function formatTimeframeTitle(
@@ -244,6 +247,10 @@ export function formatTimeframeTitle(
     compact?: boolean;
   },
 ): string {
+  if (intervalType === "lifetime") {
+    return "All Time";
+  }
+
   const utcDate = date instanceof UTCDate ? date : new UTCDate(date);
 
   if (intervalType === "month") {

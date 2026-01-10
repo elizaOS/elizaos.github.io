@@ -107,6 +107,26 @@ export async function getUserSummaries(
   return summaries.filter((summary) => !!summary.summary);
 }
 
+/**
+ * Get the lifetime summary for a user.
+ * @param username - GitHub username of the user
+ * @returns The most recent lifetime summary or null if not found
+ */
+export async function getUserLifetimeSummary(username: string) {
+  const summary = await db.query.userSummaries.findFirst({
+    where: and(
+      eq(userSummaries.username, username),
+      eq(userSummaries.intervalType, "lifetime"),
+    ),
+    orderBy: desc(userSummaries.date),
+    columns: {
+      date: true,
+      summary: true,
+    },
+  });
+  return summary && summary.summary ? summary : null;
+}
+
 // Define an extended type for the profile page data
 // This combines your existing return type with new wallet fields
 export type UserProfileData = NonNullable<
@@ -129,6 +149,10 @@ export async function getUserProfile(username: string) {
   // Get all monthly and 12 most recent weekly summaries
   const monthlySummaries = await getUserSummaries(username, "month");
   const weeklySummaries = await getUserSummaries(username, "week", 12);
+
+  // Get lifetime summary
+  const lifetimeSummary = await getUserLifetimeSummary(username);
+
   // Get PR metrics
   const prStats = await db
     .select({
@@ -160,6 +184,7 @@ export async function getUserProfile(username: string) {
   return {
     username,
     score: userScore.totalScore,
+    lifetimeSummary,
     monthlySummaries,
     weeklySummaries,
     roleTags: tagsData.roleTags,

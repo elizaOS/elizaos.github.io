@@ -5,7 +5,12 @@ import {
   generateAggregatedRepoSummary,
 } from "./aiRepoSummary";
 import { generateTimeIntervals } from "../generateTimeIntervals";
-import { IntervalType, TimeInterval, toDateString } from "@/lib/date-utils";
+import {
+  IntervalType,
+  RepoIntervalType,
+  TimeInterval,
+  toDateString,
+} from "@/lib/date-utils";
 import { storeRepoSummary } from "./mutations";
 import { isNotNullOrUndefined } from "@/lib/typeHelpers";
 import { getRepoMetrics } from "../export/queries";
@@ -26,7 +31,7 @@ import { getActiveReposForInterval } from "./getActiveRepos";
 async function checkExistingSummary(
   repoId: string,
   date: string | Date,
-  intervalType: IntervalType,
+  intervalType: RepoIntervalType,
 ): Promise<boolean> {
   const summary = await db.query.repoSummaries.findFirst({
     where: and(
@@ -73,7 +78,7 @@ export const generateDailyRepoSummaryForInterval = createStep(
         const summaryExists = await checkExistingSummary(
           repoId,
           dateRange.startDate,
-          interval.intervalType,
+          interval.intervalType as RepoIntervalType,
         );
         if (summaryExists) {
           intervalLogger?.debug(
@@ -94,7 +99,7 @@ export const generateDailyRepoSummaryForInterval = createStep(
         metrics,
         aiSummaryConfig,
         dateRange,
-        interval.intervalType,
+        interval.intervalType as RepoIntervalType,
       );
 
       if (!summary) {
@@ -109,7 +114,7 @@ export const generateDailyRepoSummaryForInterval = createStep(
         repoId,
         toDateString(interval.intervalStart),
         summary,
-        interval.intervalType,
+        interval.intervalType as RepoIntervalType,
       );
 
       // Export summary as markdown file

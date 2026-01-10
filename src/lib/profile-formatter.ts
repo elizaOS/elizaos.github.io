@@ -3,12 +3,14 @@ import type { Summary } from "@/components/summary-card";
 import type { UserActivityHeatmap } from "@/lib/scoring/queries";
 import type { UserBadge } from "@/lib/badges/types";
 import type { UserStats } from "@/app/profile/[username]/components/UserProfile";
+import type { LinkedWallet } from "@/lib/walletLinking/readmeUtils";
 
 export interface ProfileData {
   username: string;
   totalLevel: number;
   totalXp: number;
   stats: UserStats;
+  lifetimeSummary?: { date: string; summary: string | null } | null;
   monthlySummaries: Summary[];
   weeklySummaries: Summary[];
   roleTags: TagData[];
@@ -17,6 +19,7 @@ export interface ProfileData {
   dailyActivity: UserActivityHeatmap[];
   userBadges: UserBadge[];
   badgeProgress: Record<string, number>;
+  linkedWallets: LinkedWallet[];
 }
 
 export interface ProfileFormatOptions {
@@ -35,6 +38,11 @@ export function formatProfileForLLM(
 
   // Metadata Section (always included)
   parts.push("## Profile Metadata");
+  parts.push(
+    `**Profile URL:** https://elizaos.github.io/profile/${data.username}`,
+  );
+  parts.push(`**GitHub:** https://github.com/${data.username}`);
+  parts.push("");
   parts.push("```json");
   parts.push(
     JSON.stringify(
@@ -49,6 +57,27 @@ export function formatProfileForLLM(
   );
   parts.push("```");
   parts.push("");
+
+  // Wallet Addresses (if available)
+  if (data.linkedWallets.length > 0) {
+    parts.push("### Linked Wallets");
+    for (const wallet of data.linkedWallets) {
+      parts.push(`- **${wallet.chain}:** \`${wallet.address}\``);
+    }
+    parts.push("");
+  }
+
+  // Lifetime Summary Section (if available and summaries are enabled)
+  if (
+    options.includeSummaries &&
+    data.lifetimeSummary?.summary &&
+    data.lifetimeSummary.summary.trim() !== ""
+  ) {
+    parts.push("## Lifetime Contribution Summary");
+    parts.push("");
+    parts.push(data.lifetimeSummary.summary);
+    parts.push("");
+  }
 
   // Statistics Section
   if (options.includeStats) {

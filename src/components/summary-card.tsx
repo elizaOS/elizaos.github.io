@@ -9,6 +9,7 @@ import {
   getIntervalTypeTitle,
   IntervalType,
 } from "@/lib/date-utils";
+import { cn } from "@/lib/utils";
 
 export type Summary = {
   date: string;
@@ -17,24 +18,38 @@ export type Summary = {
 
 type SummaryCardProps = {
   summaries: Summary[];
-  intervalType: IntervalType;
+  intervalType: IntervalType | "lifetime";
   className?: string;
+  prominent?: boolean;
 };
 
 export function SummaryCard({
   summaries,
   intervalType,
   className,
+  prominent = false,
 }: SummaryCardProps) {
   const [currentIndex, setCurrentIndex] = React.useState(0);
+  const [isExpanded, setIsExpanded] = React.useState(false);
 
   if (!summaries || summaries.length === 0) {
     return null;
   }
 
+  const isLifetime = intervalType === "lifetime";
+  const showCarousel = !isLifetime && summaries.length > 1;
+
   const currentSummary = summaries[currentIndex];
   const hasPrevious = currentIndex < summaries.length - 1;
   const hasNext = currentIndex > 0;
+
+  // Truncate long summaries
+  const summaryText = currentSummary.summary || "No summary available";
+  const shouldTruncate = isLifetime && summaryText.length > 300;
+  const displayText =
+    shouldTruncate && !isExpanded
+      ? summaryText.slice(0, 300) + "..."
+      : summaryText;
 
   const handlePrevious = () => {
     if (hasPrevious) {
@@ -48,46 +63,68 @@ export function SummaryCard({
     }
   };
 
-  const timeframeTitle = formatTimeframeTitle(
-    currentSummary.date,
-    intervalType,
-    { compact: true },
-  );
+  const cardTitle = isLifetime
+    ? "Lifetime Contribution Summary"
+    : `${getIntervalTypeTitle(intervalType)} Summary`;
+
+  const timeframeTitle = isLifetime
+    ? "All Time"
+    : formatTimeframeTitle(currentSummary.date, intervalType, {
+        compact: true,
+      });
 
   return (
-    <Card className={className}>
+    <Card
+      className={cn(
+        className,
+        prominent &&
+          "border-yellow-500/30 bg-gradient-to-br from-background to-yellow-500/5",
+      )}
+    >
       <CardHeader className="flex flex-row items-center justify-between p-3">
-        <CardTitle className="text-lg font-medium">
-          {getIntervalTypeTitle(intervalType)} Summary
-        </CardTitle>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handlePrevious}
-            disabled={!hasPrevious}
-            className="h-8 w-8"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            <span className="sr-only">Previous {intervalType}</span>
-          </Button>
+        <CardTitle className="text-lg font-medium">{cardTitle}</CardTitle>
+        {showCarousel ? (
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handlePrevious}
+              disabled={!hasPrevious}
+              className="h-8 w-8"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              <span className="sr-only">Previous {intervalType}</span>
+            </Button>
+            <span className="text-sm">{timeframeTitle}</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleNext}
+              disabled={!hasNext}
+              className="h-8 w-8"
+            >
+              <ChevronRight className="h-4 w-4" />
+              <span className="sr-only">Next {intervalType}</span>
+            </Button>
+          </div>
+        ) : (
           <span className="text-sm">{timeframeTitle}</span>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleNext}
-            disabled={!hasNext}
-            className="h-8 w-8"
-          >
-            <ChevronRight className="h-4 w-4" />
-            <span className="sr-only">Next {intervalType}</span>
-          </Button>
-        </div>
+        )}
       </CardHeader>
       <CardContent className="p-3 pt-0">
-        <p className="text-sm text-muted-foreground">
-          {currentSummary.summary || "No summary available"}
+        <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+          {displayText}
         </p>
+        {shouldTruncate && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="mt-2 h-auto p-0 text-xs text-primary hover:bg-transparent"
+          >
+            {isExpanded ? "Show less" : "Show more"}
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
