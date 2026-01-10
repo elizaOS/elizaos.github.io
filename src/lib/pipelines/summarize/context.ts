@@ -19,7 +19,9 @@ export interface SummarizerPipelineContext extends RepoPipelineContext {
   /** Date range for filtering data */
   dateRange: { startDate: string; endDate?: string };
   /** Which interval types are enabled for summary generation */
-  enabledIntervals: Record<IntervalType, boolean>;
+  enabledIntervals: Record<IntervalType | "lifetime", boolean>;
+  /** Filter to a specific username (for testing) */
+  usernameFilter?: string;
 }
 
 interface CreateContributorSummaryContextOptions {
@@ -30,7 +32,8 @@ interface CreateContributorSummaryContextOptions {
   aiSummaryConfig: AISummaryConfig;
   overwrite?: boolean;
   dateRange: { startDate: string; endDate?: string };
-  enabledIntervals: Record<IntervalType, boolean>;
+  enabledIntervals: Record<IntervalType | "lifetime", boolean>;
+  usernameFilter?: string;
 }
 
 /**
