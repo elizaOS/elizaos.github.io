@@ -91,7 +91,7 @@ const generateLifetimeSummaryForContributor = createStep(
           intervalLogger?.debug(
             `Lifetime summary already exists for ${username}, skipping generation`,
           );
-          return;
+          return null;
         }
       }
 
@@ -114,7 +114,7 @@ const generateLifetimeSummaryForContributor = createStep(
         intervalLogger?.debug(
           `No activity for ${username}, skipping lifetime summary generation`,
         );
-        return;
+        return null;
       }
 
       // Store in database with "lifetime" interval type

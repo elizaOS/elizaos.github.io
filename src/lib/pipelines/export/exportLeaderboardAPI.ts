@@ -215,7 +215,8 @@ function calculateFocusAreaRankings(
 }
 
 /**
- * Get top expertise areas (focus areas) for users with rankings and percentages
+ * Get top expertise areas (focus areas) for users with GLOBAL rankings and percentages
+ * Rankings are calculated across ALL users, not just the requested subset
  */
 async function getUserFocusAreas(
   usernames: string[],
@@ -225,37 +226,32 @@ async function getUserFocusAreas(
     return new Map();
   }
 
-  const tagScores = await db
+  // Fetch ALL tag scores to calculate GLOBAL rankings
+  const allTagScores = await db
     .select({
       username: userTagScores.username,
       tag: userTagScores.tag,
       score: userTagScores.score,
     })
     .from(userTagScores)
-    .where(
-      sql`${userTagScores.username} IN (${sql.join(
-        usernames.map((u) => sql`${u}`),
-        sql`, `,
-      )})`,
-    )
     .orderBy(desc(userTagScores.score))
     .all();
 
-  // Calculate rankings across all contributors in each tag
-  const rankings = calculateFocusAreaRankings(tagScores);
+  // Calculate global rankings across ALL contributors in each tag
+  const globalRankings = calculateFocusAreaRankings(allTagScores);
 
   const focusAreasMap = new Map<string, FocusAreaDetail[]>();
 
-  // Group by username and take top N tags
+  // Filter to requested users and take top N tags
   for (const username of usernames) {
-    const userTags = tagScores.filter((t) => t.username === username);
+    const userTags = allTagScores.filter((t) => t.username === username);
 
     // Calculate total score for this user across all their tags
     const totalUserScore = userTags.reduce((sum, t) => sum + t.score, 0);
 
-    // Take top N and enrich with rankings and percentages
+    // Take top N and enrich with GLOBAL rankings and percentages
     const topTags = userTags.slice(0, topN).map((t) => {
-      const rankInfo = rankings.get(t.tag)?.get(username) || {
+      const rankInfo = globalRankings.get(t.tag)?.get(username) || {
         rank: 0,
         total: 0,
       };
@@ -291,12 +287,13 @@ function calculateTier(score: number): ScoreBreakdown["tier"] {
 
 /**
  * Calculate percentile ranking (what % of contributors this user outscores)
+ * Uses rank and total user count for accurate calculation even with limit
  */
-function calculatePercentile(score: number, allScores: number[]): number {
-  if (allScores.length === 0) return 0;
-
-  const rank = allScores.filter((s) => s < score).length;
-  return (rank / allScores.length) * 100;
+function calculatePercentile(rank: number, totalUsers: number): number {
+  if (totalUsers === 0) return 0;
+  // Rank 1 of 100 = 99% (beats 99 of 100)
+  // Rank 100 of 100 = 0% (beats 0 of 100)
+  return ((totalUsers - rank) / totalUsers) * 100;
 }
 
 /**
@@ -595,12 +592,14 @@ async function getTotalUserCount(
 
 /**
  * Get leaderboard data for a specific time period
+ * @param totalUserCount - Total count of all users for accurate percentile calculation
  */
 async function getLeaderboardData(
   startDate?: string,
   endDate?: string,
   limit?: number,
   baseUrl?: string,
+  totalUserCount?: number,
 ): Promise<LeaderboardEntry[]> {
   // Build conditions
   const conditions = [
@@ -654,8 +653,8 @@ async function getLeaderboardData(
     ""
   ).replace(/\/$/, "");
 
-  // Collect all scores for percentile calculation
-  const allScores = results.map((r) => Number(r.totalScore || 0));
+  // Use total user count for accurate percentile calculation (even with limit)
+  const effectiveTotalUsers = totalUserCount ?? results.length;
 
   // Format results with all enrichment data
   return results.map((row, index) => {
@@ -693,11 +692,12 @@ async function getLeaderboardData(
     };
 
     const userFocusAreas = focusAreasMap.get(row.username);
+    const rank = index + 1; // 1-based rank
     const scoreBreakdown: ScoreBreakdown = {
       total: score,
       distribution,
       tier: calculateTier(score),
-      percentile: calculatePercentile(score, allScores),
+      percentile: calculatePercentile(rank, effectiveTotalUsers),
       characterClass: deriveCharacterClass(
         distribution,
         userFocusAreas,
@@ -792,7 +792,7 @@ export async function exportLeaderboardAPI(
     contributionStartDate,
   );
 
-  // Get total count of users
+  // Get total count of users for accurate percentile calculation
   const totalCount = await getTotalUserCount(startDate, endDate);
 
   // Get leaderboard data (top N if limit specified)
@@ -801,6 +801,7 @@ export async function exportLeaderboardAPI(
     endDate,
     limit,
     baseUrl,
+    totalCount, // Pass total for accurate percentiles even when limited
   );
 
   // Build response
@@ -941,6 +942,7 @@ async function getUserRanks(
 
 /**
  * Export individual user profile as JSON API endpoint
+ * @param prefetchedEntry - Optional pre-fetched leaderboard entry to avoid O(U²) queries
  */
 export async function exportUserProfile(
   outputDir: string,
@@ -949,6 +951,7 @@ export async function exportUserProfile(
     contributionStartDate: string;
     logger?: Logger;
     baseUrl?: string;
+    prefetchedEntry?: LeaderboardEntry; // Performance: reuse entry from exportAllUserProfiles
   },
 ): Promise<void> {
   const logger = options?.logger;
@@ -965,17 +968,21 @@ export async function exportUserProfile(
 
   logger?.debug(`Generating profile for ${username}...`);
 
-  // Get user data from lifetime leaderboard (has most complete data)
-  const now = new UTCDate();
-  const endDate = toDateString(now);
-  const leaderboard = await getLeaderboardData(
-    contributionStartDate,
-    endDate,
-    undefined,
-    baseUrl,
-  );
+  // Use prefetched entry if available (avoids O(U²) when called from exportAllUserProfiles)
+  let userEntry = options?.prefetchedEntry;
 
-  const userEntry = leaderboard.find((entry) => entry.username === username);
+  if (!userEntry) {
+    // Fallback: fetch from database (for standalone calls)
+    const now = new UTCDate();
+    const endDate = toDateString(now);
+    const leaderboard = await getLeaderboardData(
+      contributionStartDate,
+      endDate,
+      undefined,
+      baseUrl,
+    );
+    userEntry = leaderboard.find((entry) => entry.username === username);
+  }
 
   if (!userEntry) {
     logger?.warn(
@@ -1087,9 +1094,12 @@ export async function exportAllUserProfiles(
 
   logger?.info(`Found ${leaderboard.length} users to export profiles for`);
 
-  // Export each user's profile
+  // Export each user's profile with prefetched data (avoids O(U²) queries)
   for (const entry of leaderboard) {
-    await exportUserProfile(outputDir, entry.username, options);
+    await exportUserProfile(outputDir, entry.username, {
+      ...options,
+      prefetchedEntry: entry, // Pass pre-fetched entry to avoid redundant queries
+    });
   }
 
   logger?.info(`✓ Exported ${leaderboard.length} user profiles successfully`);
