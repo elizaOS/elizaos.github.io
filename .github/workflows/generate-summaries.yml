@@ -37,6 +37,15 @@ on:
         type: boolean
         default: true
         required: false
+      lifetime_summaries:
+        description: "Generate lifetime (all-time) contributor summaries"
+        type: boolean
+        default: false
+        required: false
+      username:
+        description: "Filter to specific username (for lifetime testing, leave blank for all)"
+        type: string
+        required: false
       startDate:
         description: "Start date for data processing (format: YYYY-MM-DD)"
         type: string
@@ -94,10 +103,15 @@ jobs:
             MONTHLY_ARG=""
           fi
           INTERVAL_ARGS="$DAILY_ARG$WEEKLY_ARG$MONTHLY_ARG"
+          # Lifetime and username filter (manual only)
+          LIFETIME_ARG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lifetime_summaries == 'true' && ' --lifetime' || '' }}"
+          USERNAME_ARG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.username != '' && format(' -u {0}', github.event.inputs.username) || '' }}"
           echo "start_date_arg=$START_DATE_ARG" >> $GITHUB_ENV
           echo "end_date_arg=$END_DATE_ARG" >> $GITHUB_ENV
           echo "force_summaries_arg=$FORCE_SUMMARIES_ARG" >> $GITHUB_ENV
           echo "interval_args=$INTERVAL_ARGS" >> $GITHUB_ENV
+          echo "lifetime_arg=$LIFETIME_ARG" >> $GITHUB_ENV
+          echo "username_arg=$USERNAME_ARG" >> $GITHUB_ENV
 
       # Set up pipeline-data branch worktree
       - name: Setup pipeline-data branch
@@ -174,6 +188,11 @@ jobs:
         run: |
           bun run pipeline summarize -t contributors -f -d 1
 
+      - name: Generate lifetime contributor summaries
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lifetime_summaries == 'true' }}
+        run: |
+          bun run pipeline summarize -t contributors${{ env.lifetime_arg }}${{ env.username_arg }}${{ env.force_summaries_arg }} -v
+
       # Export all summaries to JSON API format (backfills any missing JSON files)
       - name: Export summaries to JSON API
         run: bun run pipeline export-summaries
@@ -192,7 +211,7 @@ jobs:
         with:
           operation: update
           data_dir: ${{ env.DATA_DIR }}
-          commit_message: "Summary generation (${{ steps.summary-check.outputs.run_contributor == 'true' && 'contributor ' || '' }} ${{ steps.summary-check.outputs.run_project == 'true' && 'project ' || '' }}): $(date -u +'%Y-%m-%d %H:%M')"
+          commit_message: "Summary generation (${{ steps.summary-check.outputs.run_contributor == 'true' && 'contributor ' || '' }}${{ steps.summary-check.outputs.run_project == 'true' && 'project ' || '' }}${{ github.event.inputs.lifetime_summaries == 'true' && 'lifetime ' || '' }}): $(date -u +'%Y-%m-%d %H:%M')"
           branch_name: ${{ env.PIPELINE_DATA_BRANCH }}
 
       # Cleanup worktree (always runs)
