@@ -1,4 +1,4 @@
-import { eq, and, inArray, isNotNull } from "drizzle-orm";
+import { eq, and, inArray, isNotNull, sql, ne } from "drizzle-orm";
 import { db } from "@/lib/data/db";
 import {
   users,
@@ -11,6 +11,7 @@ import {
   rawPullRequestFiles,
   userSummaries,
   repoSummaries,
+  prClosingIssueReferences,
 } from "@/lib/data/schema";
 import {
   buildAreaMap,
@@ -317,6 +318,150 @@ export async function getContributorMetrics({
   );
   const commitFrequency = uniqueDaysWithCommits / totalDays;
 
+  // === STRATEGIC METRICS FOR LIFETIME BRIEFINGS ===
+
+  // 1. Bus Factor: Get total merged PRs per repo to compute this user's ownership %
+  const userRepos = [...new Set(mergedPRs.map((pr) => pr.repository))];
+  const busFactorByRepo: Array<{
+    repo: string;
+    userPRs: number;
+    totalPRs: number;
+    percentage: number;
+  }> = [];
+
+  if (userRepos.length > 0) {
+    // Get total merged PRs per repo (all contributors)
+    const repoTotals = await db
+      .select({
+        repository: rawPullRequests.repository,
+        totalPRs: sql<number>`COUNT(*)`,
+      })
+      .from(rawPullRequests)
+      .where(
+        and(
+          inArray(rawPullRequests.repository, userRepos),
+          eq(rawPullRequests.merged, 1),
+        ),
+      )
+      .groupBy(rawPullRequests.repository);
+
+    const repoTotalsMap = new Map(
+      repoTotals.map((r) => [r.repository, r.totalPRs]),
+    );
+
+    // Calculate percentage for each repo
+    const userPRsByRepo = new Map<string, number>();
+    for (const pr of mergedPRs) {
+      userPRsByRepo.set(
+        pr.repository,
+        (userPRsByRepo.get(pr.repository) || 0) + 1,
+      );
+    }
+
+    for (const [repo, userPRCount] of userPRsByRepo) {
+      const totalPRs = repoTotalsMap.get(repo) || userPRCount;
+      busFactorByRepo.push({
+        repo,
+        userPRs: userPRCount,
+        totalPRs,
+        percentage: Math.round((userPRCount / totalPRs) * 100),
+      });
+    }
+
+    // Sort by percentage descending
+    busFactorByRepo.sort((a, b) => b.percentage - a.percentage);
+  }
+
+  // 2. Issue-PR Linkage: How many of their PRs close tracked issues?
+  const prIdsForLinkage = mergedPRs.map((pr) => pr.id);
+  let issuesLinkedCount = 0;
+  let linkedIssues: Array<{
+    prNumber: number;
+    issueNumber: number;
+    issueTitle: string;
+  }> = [];
+
+  if (prIdsForLinkage.length > 0) {
+    const linkages = await db
+      .select({
+        prId: prClosingIssueReferences.prId,
+        issueNumber: prClosingIssueReferences.issueNumber,
+        issueTitle: prClosingIssueReferences.issueTitle,
+      })
+      .from(prClosingIssueReferences)
+      .where(inArray(prClosingIssueReferences.prId, prIdsForLinkage));
+
+    issuesLinkedCount = new Set(linkages.map((l) => l.prId)).size;
+
+    // Get PR numbers for the linked PRs
+    const prIdToNumber = new Map(mergedPRs.map((pr) => [pr.id, pr.number]));
+    linkedIssues = linkages.map((l) => ({
+      prNumber: prIdToNumber.get(l.prId) || 0,
+      issueNumber: l.issueNumber,
+      issueTitle: l.issueTitle,
+    }));
+  }
+
+  const issueLinkageRate =
+    mergedPRs.length > 0
+      ? Math.round((issuesLinkedCount / mergedPRs.length) * 100)
+      : 0;
+
+  // 3. Collaboration Network: Who reviews their PRs?
+  const reviewersOfTheirPRs: Array<{
+    reviewer: string;
+    reviewCount: number;
+    approvals: number;
+    changeRequests: number;
+  }> = [];
+
+  if (allPrIds.length > 0) {
+    const reviewsOnTheirPRs = await db
+      .select({
+        reviewer: prReviews.author,
+        state: prReviews.state,
+      })
+      .from(prReviews)
+      .where(
+        and(
+          inArray(prReviews.prId, allPrIds),
+          isNotNull(prReviews.author),
+          ne(prReviews.author, username), // Exclude self-reviews
+        ),
+      );
+
+    // Aggregate by reviewer
+    const reviewerStats = new Map<
+      string,
+      { count: number; approvals: number; changeRequests: number }
+    >();
+
+    for (const review of reviewsOnTheirPRs) {
+      if (!review.reviewer) continue;
+      const stats = reviewerStats.get(review.reviewer) || {
+        count: 0,
+        approvals: 0,
+        changeRequests: 0,
+      };
+      stats.count++;
+      if (review.state === "APPROVED") stats.approvals++;
+      if (review.state === "CHANGES_REQUESTED") stats.changeRequests++;
+      reviewerStats.set(review.reviewer, stats);
+    }
+
+    for (const [reviewer, stats] of reviewerStats) {
+      reviewersOfTheirPRs.push({
+        reviewer,
+        reviewCount: stats.count,
+        approvals: stats.approvals,
+        changeRequests: stats.changeRequests,
+      });
+    }
+
+    // Sort by review count descending
+    reviewersOfTheirPRs.sort((a, b) => b.reviewCount - a.reviewCount);
+  }
+
   return {
     username,
     pullRequests: {
@@ -358,6 +503,20 @@ export async function getContributorMetrics({
       daysActive: uniqueDaysWithCommits,
       totalDays,
       frequency: commitFrequency,
+    },
+    // Strategic metrics for lifetime briefings
+    strategicMetrics: {
+      busFactor: busFactorByRepo,
+      issueLinkage: {
+        linkedPRs: issuesLinkedCount,
+        totalMergedPRs: mergedPRs.length,
+        rate: issueLinkageRate,
+        linkedIssues,
+      },
+      collaborationNetwork: {
+        reviewersOfTheirPRs,
+        totalReviewers: reviewersOfTheirPRs.length,
+      },
     },
   };
 }

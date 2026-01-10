@@ -7,11 +7,7 @@ import { db } from "@/lib/data/db";
 import { userSummaries, users } from "@/lib/data/schema";
 import { eq, and } from "drizzle-orm";
 import { isNotNullOrUndefined } from "@/lib/typeHelpers";
-import {
-  getContributorSummaryFilePath,
-  writeToFile,
-  writeSummaryToAPI,
-} from "@/lib/fsHelpers";
+import { writeToFile, writeSummaryToAPI } from "@/lib/fsHelpers";
 
 /**
  * Check if a lifetime summary already exists for a user
@@ -124,19 +120,12 @@ const generateLifetimeSummaryForContributor = createStep(
       // Store in database with "lifetime" interval type
       await storeLifetimeSummary(username, currentDate, summary);
 
-      // Export summary as markdown file
-      const mdFilename = `lifetime.md`;
-      // Use "month" interval for file path structure (lifetime uses similar structure)
-      const mdPath = getContributorSummaryFilePath(
-        context.outputDir,
-        username,
-        "month",
-        mdFilename,
-      );
+      // Export summary as markdown file - directly in summaries folder
+      const mdPath = `${context.outputDir}/contributors/${username}/summaries/lifetime.md`;
       await writeToFile(mdPath, summary);
 
       // Export summary as JSON API artifact at simplified path
-      await writeSummaryToAPI(
+      const jsonPath = await writeSummaryToAPI(
         context.outputDir,
         "contributor",
         "lifetime",
@@ -150,6 +139,7 @@ const generateLifetimeSummaryForContributor = createStep(
         `Generated and exported lifetime summary for ${username}`,
         {
           mdPath,
+          jsonPath,
         },
       );
       return { username, summary };
@@ -171,7 +161,23 @@ export const generateLifetimeContributorSummaries = pipe(
     }
 
     // Get all active contributors from database
-    const usernames = await getAllActiveContributors();
+    let usernames = await getAllActiveContributors();
+
+    // Apply username filter if provided (for testing single contributors)
+    if (context.usernameFilter) {
+      const filterUsername = context.usernameFilter.toLowerCase();
+      usernames = usernames.filter((u) => u.toLowerCase() === filterUsername);
+      if (usernames.length === 0) {
+        context.logger?.warn(
+          `Username filter "${context.usernameFilter}" not found in active contributors`,
+        );
+      } else {
+        context.logger?.info(
+          `Filtering to single user: ${context.usernameFilter}`,
+        );
+      }
+    }
+
     return usernames.map((username) => ({ username }));
   },
   mapStep(generateLifetimeSummaryForContributor),
