@@ -4,25 +4,94 @@ import { generateAISummaryForContributor } from "./aiContributorSummary";
 import { getContributorMetrics } from "./queries";
 import { toDateString } from "@/lib/date-utils";
 import { db } from "@/lib/data/db";
-import { userSummaries, users } from "@/lib/data/schema";
-import { eq, and } from "drizzle-orm";
+import {
+  userSummaries,
+  users,
+  rawPullRequests,
+  rawIssues,
+  issueComments,
+} from "@/lib/data/schema";
+import { eq, and, or, gt } from "drizzle-orm";
 import { isNotNullOrUndefined } from "@/lib/typeHelpers";
 import { writeToFile, writeSummaryToAPI } from "@/lib/fsHelpers";
 
 /**
- * Check if a lifetime summary already exists for a user
+ * Check if a lifetime summary already exists for a user and return its last updated date
  */
-async function checkExistingLifetimeSummary(
+async function getExistingLifetimeSummary(
   username: string,
-): Promise<boolean> {
+): Promise<{ exists: boolean; lastUpdated?: string }> {
   const existingSummary = await db.query.userSummaries.findFirst({
     where: and(
       eq(userSummaries.username, username),
       eq(userSummaries.intervalType, "lifetime"),
     ),
+    columns: {
+      summary: true,
+      lastUpdated: true,
+    },
   });
 
-  return !!existingSummary?.summary;
+  return {
+    exists: !!existingSummary?.summary,
+    lastUpdated: existingSummary?.lastUpdated,
+  };
+}
+
+/**
+ * Check if a user has had any activity since a given date
+ */
+async function hasActivitySince(
+  username: string,
+  sinceDate: string,
+): Promise<boolean> {
+  // Check for recent PRs
+  const recentPRs = await db
+    .select({ id: rawPullRequests.id })
+    .from(rawPullRequests)
+    .where(
+      and(
+        eq(rawPullRequests.author, username),
+        or(
+          gt(rawPullRequests.createdAt, sinceDate),
+          gt(rawPullRequests.updatedAt, sinceDate),
+        ),
+      ),
+    )
+    .limit(1);
+
+  if (recentPRs.length > 0) return true;
+
+  // Check for recent issues
+  const recentIssues = await db
+    .select({ id: rawIssues.id })
+    .from(rawIssues)
+    .where(
+      and(
+        eq(rawIssues.author, username),
+        or(
+          gt(rawIssues.createdAt, sinceDate),
+          gt(rawIssues.updatedAt, sinceDate),
+        ),
+      ),
+    )
+    .limit(1);
+
+  if (recentIssues.length > 0) return true;
+
+  // Check for recent comments
+  const recentComments = await db
+    .select({ id: issueComments.id })
+    .from(issueComments)
+    .where(
+      and(
+        eq(issueComments.author, username),
+        gt(issueComments.createdAt, sinceDate),
+      ),
+    )
+    .limit(1);
+
+  return recentComments.length > 0;
 }
 
 /**
@@ -86,12 +155,30 @@ const generateLifetimeSummaryForContributor = createStep(
 
     try {
       if (!overwrite) {
-        const summaryExists = await checkExistingLifetimeSummary(username);
-        if (summaryExists) {
-          intervalLogger?.debug(
-            `Lifetime summary already exists for ${username}, skipping generation`,
-          );
-          return null;
+        const existingSummary = await getExistingLifetimeSummary(username);
+        if (existingSummary.exists) {
+          // Check if user has had any activity since last summary update
+          if (existingSummary.lastUpdated) {
+            const hasRecentActivity = await hasActivitySince(
+              username,
+              existingSummary.lastUpdated,
+            );
+            if (!hasRecentActivity) {
+              intervalLogger?.debug(
+                `No activity for ${username} since ${existingSummary.lastUpdated}, skipping regeneration (cached)`,
+              );
+              return null;
+            }
+            intervalLogger?.info(
+              `Activity detected for ${username} since ${existingSummary.lastUpdated}, regenerating summary`,
+            );
+          } else {
+            // Summary exists but no lastUpdated date, skip to be safe
+            intervalLogger?.debug(
+              `Lifetime summary already exists for ${username}, skipping generation`,
+            );
+            return null;
+          }
         }
       }
 

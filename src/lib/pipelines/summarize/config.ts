@@ -10,6 +10,7 @@ export const AISummaryConfigSchema = z.object({
     day: z.string(),
     week: z.string(),
     month: z.string(),
+    lifetime: z.string().optional(),
   }),
   apiKey: z.string(),
   endpoint: z.string().default("https://openrouter.ai/api/v1/chat/completions"),

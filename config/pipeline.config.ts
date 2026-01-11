@@ -99,7 +99,8 @@ export default {
     models: {
       day: process.env.SMALL_MODEL || "google/gemini-2.5-flash",
       week: process.env.LARGE_MODEL || "google/gemini-3-flash-preview",
-      month: process.env.LARGE_MODEL || "google/gemini-3-pro-preview",
+      month: process.env.LARGE_MODEL || "google/gemini-3-flash-preview",
+      lifetime: "google/gemini-3-flash-preview",
     },
     temperature: 0.1,
     max_tokens: 2400,
