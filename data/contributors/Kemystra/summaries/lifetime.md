@@ -1,0 +1,11 @@
+# Kemystra
+
+## Activity Ledger
+- **Pull Requests Authored:** 0 merged, 0 open/closed
+- **Pull Requests Reviewed:** 0 total
+- **Issues:** 1 opened, 1 closed
+- **Avg Time to Merge:** 0 hours
+
+## Contribution Domains
+- **Build Infrastructure:** Reported environment setup and build execution failures.
+  - Issues: elizaos/eliza#5734 (Eliza CLI failed to build project)

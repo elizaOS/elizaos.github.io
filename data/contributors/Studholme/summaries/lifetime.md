@@ -1,0 +1,11 @@
+# Studholme
+
+## Activity Ledger
+- **Pull Requests Authored:** 0 merged, 0 open/closed
+- **Pull Requests Reviewed:** 0 total (0 approvals, 0 change requests, 0 comments)
+- **Issues:** 1 opened, 1 closed
+- **Avg Time to Merge:** 0 hours
+
+## Contribution Domains
+- **Feature Proposals:** Submitted a request regarding agent configuration and content settings.
+  - Issues: elizaos/eliza#873 (Give Eliza AI Agents the possibility of having their own NSFW...)

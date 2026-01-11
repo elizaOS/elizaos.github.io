@@ -1,0 +1,11 @@
+# FancyFishok
+
+## Activity Ledger
+- **Pull Requests Authored:** 0 merged, 0 open/closed
+- **Pull Requests Reviewed:** 0 total (0 approvals, 0 change requests, 0 comments)
+- **Issues:** 1 opened, 1 closed
+- **Avg Time to Merge:** 0 hours
+
+## Contribution Domains
+- **Issue Reporting:** Documented operational difficulties regarding bot integration with Twitter activity.
+  - Issues: elizaos/eliza#4588 (I can't get my bot to detect my twitter activity)

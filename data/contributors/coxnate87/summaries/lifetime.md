@@ -1,0 +1,11 @@
+# coxnate87
+
+## Activity Ledger
+- **Pull Requests Authored:** 0 merged, 0 open/closed
+- **Pull Requests Reviewed:** 0 total (0 approvals, 0 change requests, 0 comments)
+- **Issues:** 1 opened, 1 closed
+- **Avg Time to Merge:** 0 hours
+
+## Contribution Domains
+- **Feature Inquiry:** Opened discussion regarding moderation capabilities within the Eliza framework.
+  - Issues: elizaos/eliza#4117 (HOW do we block and ban interactions with specific accounts???)
