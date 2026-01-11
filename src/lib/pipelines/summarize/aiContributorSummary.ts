@@ -466,10 +466,10 @@ Scale detail by volume - for high-volume contributors, list MORE representative 
   - PRs: org/repo#N (description), org/repo#N (description), ...
 
 ## Contribution Patterns
-Observable patterns only - describe what happened, not why or what it indicates. Use verbs, not traits:
-- **Code Patterns:** Describe observable behaviors (e.g., "Submits PRs averaging +X/-Y lines", "PRs typically modify N files")
-- **Review Patterns:** Report quantitative facts (e.g., "66% of reviews are approvals, 0% change requests", "Reviewed N PRs by @user1, M PRs by @user2")
-- **Collaboration Patterns:** Count observable interactions (e.g., "Contributed to N repositories", "Co-authored M commits with @user")
+Observable patterns only - describe what happened, not why or what it indicates. Use verbs, not traits. Scale richness with volume:
+- **Code Patterns:** PR size distribution, file modification patterns, commit type breakdown (e.g., "Submits PRs averaging +X/-Y lines across N files. 76% documentation changes, 15% code. Largest PR: +M/-K lines.")
+- **Review Patterns:** Review activity distribution and decision ratios (e.g., "Conducted N reviews: 66% approvals, 0% change requests, 34% comments.")
+- **Collaboration Patterns:** Cross-repo activity, issue engagement, co-authorship (e.g., "Contributed to N repositories. Opened M issues, closed K. Co-authored L commits with @user.")
 
 ## Temporal Analysis
 Describe the evolution of focus over time. For high-volume contributors, be MORE granular:
@@ -484,15 +484,30 @@ Report quantitative data from STRATEGIC METRICS without interpretation:
 - **Issue-PR Linkage:** Percentage of PRs that close tracked issues (count/total)
 - **Review Network:** Top 3 reviewers with review counts, approval counts, and total unique reviewers
 
+## Key Signals
+Flag statistical patterns and distributions without interpretation:
+- **Scale Indicators:** Report PR and commit scale (e.g., "PRs average +7,312/-2,373 lines", "Modified 18,892 files across 657 commits", "Largest PR: +80k/-32k lines")
+- **Review Concentration:** Report approval distribution (e.g., "Top 2 reviewers provided 87% of approvals (13/15)", "14 unique reviewers across all PRs")
+- **Engagement Patterns:** Note interaction distributions (e.g., "5% of PRs close tracked issues (3/65)", "0% of reviews requested changes (0/15)")
+- **Temporal Span:** Report activity timeline (e.g., "Active span: 14 months from Nov 2024 to Jan 2026", "First PR: 2024-11, Most recent: 2026-01")
+
+## Competing Hypotheses
+Present multiple plausible explanations for observed patterns. DO NOT select or rank hypotheses:
+- **For large PR sizes (when avg >5k lines):** Could indicate bulk refactoring, automated generation, documentation consolidation, or infrequent merge cadence
+- **For low issue linkage (when <15% of PRs):** Could indicate work coordinated via external channels, proactive contributions not tied to issues, or undocumented requirements
+- **For high contribution share (when >40% in a repo):** Could indicate specialized domain expertise, primary maintainer role, limited team size, or recent project phase
+- **For review concentration (when top 2 >70%):** Could indicate subject matter expert dependencies, timezone availability patterns, or small active maintainer pool
+- **For file type skew (when one type >70%):** Could indicate role specialization, project phase focus, or domain-specific initiatives
+
 BANNED WORDS: "high-velocity", "dedicated", "prolific", "leader", "key contributor", "core maintainer", "central pillar", "top", "best", "critical", "essential", "drives", "champions", "leads", "impressive", "significant", "remarkable", "primary", "operates", "acts as", "serves as"
 
 BANNED INTERPRETIVE PHRASES: "indicating", "suggesting", "showing", "demonstrating", "implying", "creating a", "resulting in", "leading to", "dependency", "autonomy", "ownership" (use "contribution share" instead)
 
 SCALING (sections AND depth):
-- <10 PRs: Activity Ledger + Contribution Domains (2-3 PRs per domain). ~20 lines.
-- 10-50 PRs: Add Patterns + Temporal Analysis. ~40 lines.
-- 50-150 PRs: All sections, 4-6 PRs per domain, detailed patterns. ~60 lines.
-- 150+ PRs: All sections, 6-10 PRs per domain, granular temporal phases, comprehensive patterns. ~80+ lines.
+- <10 PRs: Activity Ledger + Contribution Domains (2-3 PRs per domain). Skip Key Signals and Competing Hypotheses. ~20 lines.
+- 10-50 PRs: Add Patterns + Temporal Analysis. Skip Key Signals and Competing Hypotheses. ~40 lines.
+- 50-150 PRs: Add Repository Metrics + Key Signals. Include 2-3 competing hypotheses for prominent patterns. ~75 lines.
+- 150+ PRs: All sections including comprehensive Key Signals (4-5 anomalies) and Competing Hypotheses (3-4 explanations per pattern). ~100+ lines.
 
 RULES:
 - Start with "# ${metrics.username}" header
