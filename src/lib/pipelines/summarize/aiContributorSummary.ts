@@ -466,10 +466,10 @@ Scale detail by volume - for high-volume contributors, list MORE representative 
   - PRs: org/repo#N (description), org/repo#N (description), ...
 
 ## Contribution Patterns
-Observable patterns (verbs, not traits). For high-volume contributors, include MORE patterns:
-- Code patterns: "Refactors X before adding Y", "Pairs bug fixes with test additions"
-- Review patterns: "Reviews PRs primarily in [areas]", "Approval-to-rejection ratio"
-- Collaboration patterns: "Works across N repositories", "Frequently co-authors with..."
+Observable patterns only - describe what happened, not why or what it indicates. Use verbs, not traits:
+- **Code Patterns:** Describe observable behaviors (e.g., "Submits PRs averaging +X/-Y lines", "PRs typically modify N files")
+- **Review Patterns:** Report quantitative facts (e.g., "66% of reviews are approvals, 0% change requests", "Reviewed N PRs by @user1, M PRs by @user2")
+- **Collaboration Patterns:** Count observable interactions (e.g., "Contributed to N repositories", "Co-authored M commits with @user")
 
 ## Temporal Analysis
 Describe the evolution of focus over time. For high-volume contributors, be MORE granular:
@@ -478,13 +478,15 @@ Describe the evolution of focus over time. For high-volume contributors, be MORE
 - **Shifts:** Any notable pivots between areas? (e.g., "shifted from client work to core runtime")
 - **Current:** Where is recent activity concentrated?
 
-## Organizational Signals
-Synthesize from STRATEGIC METRICS with confidence tags:
-- **Repo Ownership:** Repos where >30% of merged PRs are theirs (HIGH)
-- **Work Structure:** Issue linkage rate and what it indicates (MEDIUM)
-- **Review Dependencies:** Who reviews their work? Concentration risk? (HIGH)
+## Repository Metrics
+Report quantitative data from STRATEGIC METRICS without interpretation:
+- **PR Distribution:** List repos where ≥30% of merged PRs are theirs with exact percentages and PR counts
+- **Issue-PR Linkage:** Percentage of PRs that close tracked issues (count/total)
+- **Review Network:** Top 3 reviewers with review counts, approval counts, and total unique reviewers
 
-BANNED WORDS: "high-velocity", "dedicated", "prolific", "leader", "key contributor", "core maintainer", "central pillar", "top", "best", "critical", "essential", "drives", "champions", "leads", "impressive", "significant", "remarkable"
+BANNED WORDS: "high-velocity", "dedicated", "prolific", "leader", "key contributor", "core maintainer", "central pillar", "top", "best", "critical", "essential", "drives", "champions", "leads", "impressive", "significant", "remarkable", "primary", "operates", "acts as", "serves as"
+
+BANNED INTERPRETIVE PHRASES: "indicating", "suggesting", "showing", "demonstrating", "implying", "creating a", "resulting in", "leading to", "dependency", "autonomy", "ownership" (use "contribution share" instead)
 
 SCALING (sections AND depth):
 - <10 PRs: Activity Ledger + Contribution Domains (2-3 PRs per domain). ~20 lines.
