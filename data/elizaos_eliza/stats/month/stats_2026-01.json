@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-01-01 to 2026-02-01, elizaos/eliza had 16 new PRs (14 merged), 40 new issues, and 17 active contributors.",
+  "overview": "From 2026-01-01 to 2026-02-01, elizaos/eliza had 21 new PRs (15 merged), 40 new issues, and 18 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7Ki_w6",
@@ -94,6 +94,18 @@
       "deletions": 23
     },
     {
+      "id": "PR_kwDOMT5cIs69CGSx",
+      "title": "feat(v2.0.0): wasm agent runtime",
+      "author": "revlentless",
+      "number": 6363,
+      "body": "# Summary\r\n\r\nRust WASM implementation for elizaOS v2.0.0 - enabling the Rust core to run in browser/Node.js environments via WebAssembly.\r\n\r\n# Risks\r\n\r\n**Low risk.** This PR:\r\n- Makes no breaking API changes to existing Rust code\r\n- Uses conditional compilation (`#[cfg]`) so native builds are unaffected\r\n- All existing tests continue to pass\r\n- Adds new WASM-specific code paths that only activate when building for `wasm32-unknown-unknown`\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\nThis PR makes the elizaOS Rust core **fully WASM-compatible**, enabling it to run in browsers and Node.js via WebAssembly. The existing Rust crate had WASM bindings but they were stubs - the `WasmAgentRuntime` was a placeholder that didn't actually wrap the real `AgentRuntime`.\r\n\r\nThe key challenge was that Rust's `async_trait` and many traits require `Send + Sync` bounds for thread-safety, but WASM is single-threaded and doesn't support these traits. This PR implements platform-aware macros and conditional compilation to provide the correct bounds for each target.\r\n\r\n### Key Changes\r\n\r\n#### 1. Platform-Aware Macros (`src/platform.rs`)\r\n\r\n```rust\r\n// Native: #[async_trait] (requires Send)\r\n// WASM:   #[async_trait(?Send)] (no Send requirement)\r\nplatform_async_trait! {\r\n    pub trait MyTrait { ... }\r\n}\r\n\r\n// Native: pub trait MyTrait: Send + Sync { ... }\r\n// WASM:   pub trait MyTrait { ... }\r\ndefine_platform_trait! {\r\n    pub trait MyTrait { ... }\r\n}\r\n```\r\n\r\n#### 2. Core Trait Migration\r\n\r\nAll core traits now compile for both targets:\r\n- `ActionHandler`, `ProviderHandler`, `EvaluatorHandler`\r\n- `DatabaseAdapter`, `Service`, `IAgentRuntime`\r\n- Bootstrap traits: `Action`, `Provider`, `Evaluator`, `Service`\r\n\r\n#### 3. Real WasmAgentRuntime\r\n\r\nThe `WasmAgentRuntime` now wraps the actual `AgentRuntime` using WASM-appropriate primitives:\r\n\r\n```rust\r\npub struct WasmAgentRuntime {\r\n    inner: Rc<RefCell<Option<AgentRuntime>>>,  // Not Arc - WASM is single-threaded\r\n    character: RefCell<Character>,\r\n    agent_id: UUID,\r\n}\r\n```\r\n\r\n#### 4. Structured WASM Errors\r\n\r\nRich error objects for JavaScript consumers:\r\n\r\n```rust\r\npub struct WasmError {\r\n    pub code: String,      // \"VALIDATION_ERROR\", \"RUNTIME_ERROR\", etc.\r\n    pub message: String,   // Human-readable message\r\n    pub source: Option<String>,  // Field/component that caused error\r\n}\r\n```\r\n\r\n#### 5. JavaScript Shims\r\n\r\nType-safe wrappers for JS callbacks:\r\n\r\n```rust\r\npub struct JsModelHandler {\r\n    js_object: JsValue,\r\n    handle_func: Function,\r\n}\r\n```\r\n\r\n#### 6. Bug Fix: ChannelType Serialization\r\n\r\nFixed `ChannelType` enum to serialize correctly:\r\n- Before: `VoiceDm` → `\"VOICEDM\"` ❌\r\n- After: `VoiceDm` → `\"VOICE_DM\"` ✅\r\n\r\n## What kind of change is this?\r\n\r\n- **Features** (non-breaking change which adds functionality)\r\n- **Bug fixes** (ChannelType serialization)\r\n- **Improvements** (structured errors, better WASM integration)\r\n\r\n# Documentation changes needed?\r\n\r\nMy changes require a change to the project documentation:\r\n- Added `examples/README.md` with usage instructions for native and WASM examples\r\n- WASM module includes JSDoc comments for all exports\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n1. `src/platform.rs` - Platform macros (foundation of the approach)\r\n2. `src/types/components.rs` - Core handler traits with conditional compilation\r\n3. `src/wasm/mod.rs` - WasmAgentRuntime implementation\r\n4. `__tests__/wasm/` - TypeScript tests verifying WASM bindings\r\n\r\n## Detailed testing steps\r\n\r\n### Native Tests (Rust)\r\n```bash\r\ncd packages/rust\r\ncargo test --features native\r\n# Expected: 79 tests pass\r\n```\r\n\r\n### WASM Binding Tests (TypeScript/Vitest)\r\n```bash\r\ncd packages/rust\r\nnpx vitest run __tests__/wasm/wasm-bindings.test.ts\r\n# Expected: 16 tests pass\r\n```\r\n\r\n### Full Test Suite\r\n```bash\r\ncd packages/rust\r\n./run-all-tests.sh\r\n# Expected: 108 passed, 0 failed, 2 skipped\r\n```\r\n\r\n### Native Examples\r\n```bash\r\ncargo run --example basic_runtime --features native\r\ncargo run --example with_handlers --features native\r\n```\r\n\r\n### WASM Examples (Bun)\r\n```bash\r\nbun run examples/wasm/basic.ts\r\nbun run examples/wasm/runtime.ts\r\nbun run examples/wasm/chat.ts  # Interactive\r\n```\r\n\r\n## Test Coverage\r\n\r\n| Suite | Tests | Status |\r\n|-------|-------|--------|\r\n| Rust native (`cargo test`) | 79 | ✅ |\r\n| WASM bindings (Vitest) | 16 | ✅ |\r\n| Interop equivalence (Vitest) | 16 | ✅ |\r\n| Python serialization | 22 | ✅ |\r\n| **Total** | **133** | ✅ |\r\n\r\n# Commits\r\n\r\n| Commit | Description |\r\n|--------|-------------|\r\n| `2ea503d` | feat(rust): improved WASM foundation with structured errors and JS shims |\r\n| `d00b690` | chore(rust): add wasm-test.sh for running WASM tests |\r\n| `e2b9ff7` | fix(rust): gate tokio tests for native-only, fix WASM test imports |\r\n| `f74293d` | feat(rust): add platform-aware macros for native/WASM compatibility |\r\n| `90c3e0e` | fix(rust): correct ChannelType serialization to match TypeScript |\r\n| `9c87349` | feat(rust): make core traits WASM-compatible |\r\n| `fbffb3d` | test(rust): expand WASM test coverage |\r\n| `9c3bc11` | test(rust): add WASM tests for platform macros |\r\n| `368f0aa` | test(rust): add WASM tests for core handler traits |\r\n| `17bfad1` | feat(rust): make all async_trait impls WASM-compatible |\r\n| `15c96d4` | feat(rust): upgrade WasmAgentRuntime to wrap real AgentRuntime |\r\n| `a4f717e` | test(rust): add comprehensive WASM integration tests |\r\n| `629d30a` | style: apply cargo fmt across all files |\r\n| `6a58014` | docs(rust): add native and WASM examples |\r\n| `85a4043` | fix(rust): fix WASM tests to match Rust type definitions |\r\n| `cbaea5a` | fix(rust): fix TypeScript type errors in WASM tests |\r\n\r\n# Files Changed\r\n\r\n```\r\npackages/rust/\r\n├── src/\r\n│   ├── platform.rs                    # NEW: Platform macros\r\n│   ├── lib.rs                         # Export platform module\r\n│   ├── runtime.rs                     # Conditional Send+Sync on traits\r\n│   ├── types/\r\n│   │   ├── components.rs              # ActionHandler, ProviderHandler, EvaluatorHandler\r\n│   │   ├── service.rs                 # Service, TypedService traits\r\n│   │   └── environment.rs             # ChannelType serialization fix\r\n│   ├── bootstrap/\r\n│   │   ├── runtime.rs                 # IAgentRuntime trait\r\n│   │   ├── actions/mod.rs             # Action trait\r\n│   │   ├── providers/mod.rs           # Provider trait\r\n│   │   ├── evaluators/mod.rs          # Evaluator trait\r\n│   │   └── services/mod.rs            # Service trait\r\n│   └── wasm/\r\n│       ├── mod.rs                     # WasmAgentRuntime (upgraded)\r\n│       ├── error.rs                   # NEW: WasmError struct\r\n│       └── shims/\r\n│           ├── mod.rs                 # NEW: JS shim exports\r\n│           └── model_handler.rs       # NEW: JsModelHandler\r\n├── __tests__/\r\n│   └── wasm/\r\n│       ├── wasm-bindings.test.ts      # WASM binding tests\r\n│       └── interop-equivalence.test.ts # Serialization equivalence tests\r\n├── examples/\r\n│   ├── README.md                      # NEW: Examples documentation\r\n│   ├── basic_runtime.rs               # NEW: Native example\r\n│   ├── with_handlers.rs               # NEW: Native example\r\n│   └── wasm/\r\n│       ├── basic.ts                   # NEW: WASM/Bun example\r\n│       ├── runtime.ts                 # NEW: WASM/Bun example\r\n│       └── chat.ts                    # NEW: Interactive chat example\r\n├── Cargo.toml                         # Example entries\r\n├── package.json                       # npm scripts for examples\r\n├── run-all-tests.sh                   # Updated test runner\r\n└── wasm-test.sh                       # NEW: WASM test script\r\n```\r\n\r\n# Architecture\r\n\r\n```\r\n┌─────────────────────────────────────────────────────────────┐\r\n│                    Conditional Compilation                   │\r\n├─────────────────────────────────────────────────────────────┤\r\n│  #[cfg(not(target_arch = \"wasm32\"))]  │  #[cfg(wasm32)]     │\r\n├───────────────────────────────────────┼─────────────────────┤\r\n│  trait Foo: Send + Sync               │  trait Foo          │\r\n│  #[async_trait]                       │  #[async_trait(?Send)]│\r\n│  Arc<T>                               │  Rc<RefCell<T>>     │\r\n│  tokio runtime                        │  wasm-bindgen-futures│\r\n└───────────────────────────────────────┴─────────────────────┘\r\n                              │\r\n                              ▼\r\n┌─────────────────────────────────────────────────────────────┐\r\n│                     WasmAgentRuntime                         │\r\n├─────────────────────────────────────────────────────────────┤\r\n│  inner: Rc<RefCell<Option<AgentRuntime>>>                   │\r\n│                                                              │\r\n│  Methods:                                                    │\r\n│  - create(character_json) → WasmAgentRuntime                │\r\n│  - initialize() → Promise<void>                             │\r\n│  - handleMessage(msg_json) → Promise<response_json>         │\r\n│  - registerModelHandler(type, JsModelHandler)               │\r\n│  - stop()                                                    │\r\n└─────────────────────────────────────────────────────────────┘\r\n                              │\r\n                              ▼\r\n┌─────────────────────────────────────────────────────────────┐\r\n│                    JavaScript Usage                          │\r\n├─────────────────────────────────────────────────────────────┤\r\n│  import { WasmAgentRuntime, JsModelHandler } from 'elizaos';│\r\n│                                                              │\r\n│  const runtime = WasmAgentRuntime.create(characterJson);    │\r\n│  await runtime.initialize();                                 │\r\n│                                                              │\r\n│  runtime.registerModelHandler('TEXT_LARGE', new JsModelHandler({│\r\n│    handle: async (params) => { /* call LLM */ }             │\r\n│  }));                                                        │\r\n│                                                              │\r\n│  const response = await runtime.handleMessage(messageJson); │\r\n└─────────────────────────────────────────────────────────────┘\r\n```\n\n<!-- greptile_comment -->\n\n<h3># Greptile Summary</h3>\n\n\n- Implements comprehensive WASM compatibility for elizaOS Rust core, enabling the runtime to execute in browsers and Node.js environments via WebAssembly without breaking existing native functionality\n- Introduces platform-aware macros and conditional compilation patterns to handle Send+Sync trait differences between native (multi-threaded) and WASM (single-threaded) targets\n- Upgrades `WasmAgentRuntime` from a stub implementation to a fully functional wrapper around the real `AgentRuntime`, with structured error handling, JavaScript interop shims, and comprehensive test coverage\n\n# Important Files Changed\n\n| Filename | Overview |\n|----------|----------|\n| `packages/rust/src/platform.rs` | New platform abstraction module providing macros for conditional async_trait bounds and Send+Sync requirements |\n| `packages/rust/src/wasm/mod.rs` | Upgraded WasmAgentRuntime implementation wrapping real AgentRuntime with WASM-compatible primitives and structured errors |\n| `packages/rust/src/types/components.rs` | Core handler traits migrated to use platform-aware conditional compilation for ActionHandler, ProviderHandler, and EvaluatorHandler |\n| `packages/rust/tests/wasm_tests.rs` | New comprehensive WASM test suite with 1506 lines validating cross-platform compatibility and JavaScript interoperability |\n| `packages/rust/src/types/environment.rs` | Fixed ChannelType serialization to use SCREAMING_SNAKE_CASE format for TypeScript compatibility (\"VOICE_DM\" instead of \"VOICEDM\") |\n\n# Confidence score: 5/5\n\n- This PR is extremely safe to merge with minimal risk of production issues\n- Score reflects excellent architectural approach using conditional compilation, comprehensive test coverage (133 tests passing), and non-breaking changes that preserve all native functionality while adding new WASM capabilities\n- All files demonstrate consistent application of platform-aware patterns with proper error handling and thorough documentation\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant WasmAgentRuntime\n    participant JsModelHandler\n    participant AgentRuntime\n    participant Character\n    participant State\n    participant ModelHandler\n\n    User->>WasmAgentRuntime: create(characterJson)\n    WasmAgentRuntime->>Character: parse JSON\n    Character-->>WasmAgentRuntime: Character instance\n    WasmAgentRuntime-->>User: WasmAgentRuntime\n\n    User->>WasmAgentRuntime: initialize()\n    WasmAgentRuntime->>AgentRuntime: new(RuntimeOptions)\n    AgentRuntime-->>WasmAgentRuntime: AgentRuntime instance\n    WasmAgentRuntime-->>User: Promise<void>\n\n    User->>WasmAgentRuntime: registerModelHandler(type, handler)\n    WasmAgentRuntime->>JsModelHandler: store handler\n    JsModelHandler-->>WasmAgentRuntime: registered\n\n    User->>WasmAgentRuntime: handleMessage(messageJson)\n    WasmAgentRuntime->>Memory: parse message JSON\n    Memory-->>WasmAgentRuntime: Memory instance\n    WasmAgentRuntime->>AgentRuntime: compose_state(message)\n    AgentRuntime->>State: build state\n    State-->>AgentRuntime: State instance\n    WasmAgentRuntime->>Character: get character data\n    Character-->>WasmAgentRuntime: character info\n    WasmAgentRuntime->>WasmAgentRuntime: build prompt\n    WasmAgentRuntime->>JsModelHandler: call(params)\n    JsModelHandler->>ModelHandler: handle(paramsJson)\n    ModelHandler-->>JsModelHandler: responseJson\n    JsModelHandler-->>WasmAgentRuntime: response text\n    WasmAgentRuntime->>Memory: create response memory\n    Memory-->>WasmAgentRuntime: response memory\n    WasmAgentRuntime-->>User: Promise<responseJson>\n\n    User->>WasmAgentRuntime: stop()\n    WasmAgentRuntime->>JsModelHandler: clear handlers\n    WasmAgentRuntime->>AgentRuntime: cleanup\n    WasmAgentRuntime-->>User: stopped\n```\n\n<!-- greptile_other_comments_section -->\n\n<details><summary><h3>Context used (3)</h3></summary>\n\n- Context from `dashboard` - CLAUDE.md ([source](https://app.greptile.com/review/custom-context?memory=8ef4c9a3-e221-4aef-8556-8c9b88bf6bbb))\n- Context from `dashboard` - .cursorrules ([source](https://app.greptile.com/review/custom-context?memory=00074882-001f-44b1-89c4-859ed3656db9))\n- Context from `dashboard` - AGENTS.md ([source](https://app.greptile.com/review/custom-context?memory=51febe90-8918-4f18-be1f-d43bb68d696c))\n</details>\n\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-01-13T22:16:57Z",
+      "mergedAt": null,
+      "additions": 3834,
+      "deletions": 236
+    },
+    {
       "id": "PR_kwDOMT5cIs67Avaq",
       "title": "feat: unified hooks with multi-transport support (HTTP/SSE/WebSocket)",
       "author": "standujar",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 2594,
       "deletions": 7
-    },
-    {
-      "id": "PR_kwDOMT5cIs68hB9v",
-      "title": "feat: add plugin-blockrun for x402 micropayments",
-      "author": "1bcMax",
-      "number": 6355,
-      "body": "## Summary\n\nAdd **BlockRun plugin** enabling ElizaOS agents to make pay-per-request AI calls using [x402 micropayments](https://x402.org) on Base chain.\n\n- **BLOCKRUN_CHAT** action: Pay-per-request access to OpenAI, Anthropic, Google, and more\n- **BLOCKRUN_WALLET** provider: Wallet address and USDC balance on Base\n- Automatic x402 payment handling via EIP-712 signatures\n- No API keys required - just a wallet with USDC\n\n## How it works\n\n1. Agent makes an AI request via `BLOCKRUN_CHAT` action\n2. BlockRun gateway returns `402 Payment Required` with price\n3. Plugin signs USDC payment (EIP-712 TransferWithAuthorization)\n4. Request retries with payment signature\n5. AI response returned to agent\n\nTypical cost: **$0.001-0.01 per request**\n\n## Configuration\n\n```env\nBASE_CHAIN_WALLET_KEY=0x...  # Private key with USDC on Base\n```\n\n## Usage\n\n```typescript\nimport { blockrunPlugin } from '@elizaos/plugin-blockrun';\n\nconst agent = new Agent({\n  plugins: [blockrunPlugin],\n});\n```\n\n## Test plan\n\n- [x] Unit tests for plugin exports\n- [x] Wallet provider returns address and balance\n- [x] Action validates wallet configuration\n- [x] E2E test with real x402 payments (3 successful API calls)\n\n## Links\n\n- [BlockRun](https://blockrun.ai) - Pay-per-request AI gateway\n- [x402 Protocol](https://x402.org) - HTTP 402 micropayment standard\n- [@blockrun/llm SDK](https://github.com/BlockRunAI/blockrun-llm-ts)\n\n---\n\ncc @w1kke - discussed integration on Twitter\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n### Greptile Summary\n\nThis PR adds a BlockRun plugin that enables ElizaOS agents to make pay-per-request AI calls using the x402 micropayment protocol on Base chain. The plugin provides a `BLOCKRUN_CHAT` action for making AI API calls and a `BLOCKRUN_WALLET` provider for wallet context.\n\n## What Changed\n\nThe PR introduces a complete plugin package (`@elizaos/plugin-blockrun`) with:\n- **Action**: `BLOCKRUN_CHAT` - handles AI requests with automatic x402 payment flow\n- **Provider**: `BLOCKRUN_WALLET` - supplies wallet address and USDC balance on Base\n- **Dependencies**: Uses `@blockrun/llm` SDK for payment handling and `viem` for blockchain interactions\n- **Tests**: Comprehensive unit and E2E tests validating the payment flow\n\n## Architecture\n\nThe plugin follows ElizaOS patterns with proper action/provider structure:\n1. User sends message to agent\n2. Action validates wallet configuration\n3. LLMClient makes request to BlockRun gateway\n4. Gateway returns 402 Payment Required with price\n5. Client signs USDC payment via EIP-712\n6. Request retries with payment signature\n7. AI response returned to agent\n\n## Key Implementation Details\n\n- **Client Caching**: LLMClient instances are cached per agent ID to avoid recreating connections\n- **Wallet Configuration**: Supports `BASE_CHAIN_WALLET_KEY` and `BLOCKRUN_WALLET_KEY` settings\n- **Error Handling**: Comprehensive try-catch blocks with structured logging\n- **Model Support**: OpenAI, Anthropic, Google models via unified interface\n\n## Critical Issues Found\n\n1. **Hardcoded Path** (test-e2e.ts:9): Import uses absolute local path that breaks for other developers\n2. **Missing LICENSE**: Package.json references LICENSE file not included in PR\n3. **Git Dependency**: Uses git URL instead of published npm package for @blockrun/llm\n\n## Code Quality\n\nThe code is well-structured with:\n- Proper TypeScript typing throughout\n- Good error handling and logging\n- Clear documentation and examples\n- Comprehensive test coverage including real payment flows\n- Follows ElizaOS plugin architecture patterns\n\n### Confidence Score: 3/5\n\n- This PR has good functionality but contains a critical bug that breaks builds for other developers\n- Score reflects one critical syntax error (hardcoded local path) that will cause immediate build failures, plus two medium-priority issues (missing LICENSE file and git dependency). The core implementation is solid with proper error handling, validation, and comprehensive tests. Once the hardcoded path is fixed, this would be a 4/5.\n- test-e2e.ts requires immediate fix for hardcoded path. package.json needs LICENSE file added and consideration of publishing @blockrun/llm to npm.\n\n<h3>Important Files Changed</h3>\n\n\n\nFile Analysis\n\n\n\n| Filename | Score | Overview |\n|----------|-------|----------|\n| packages/plugin-blockrun/test-e2e.ts | 1/5 | Contains hardcoded local path that breaks for other developers - critical bug on line 9 |\n| packages/plugin-blockrun/package.json | 3/5 | Missing LICENSE file and uses git dependency instead of npm package version |\n| packages/plugin-blockrun/src/actions/chat.ts | 4/5 | Well-structured action with proper error handling and validation |\n| packages/plugin-blockrun/src/providers/wallet.ts | 4/5 | Properly implements wallet provider with balance checking and error handling |\n| packages/plugin-blockrun/src/__tests__/e2e.test.ts | 4/5 | Comprehensive test coverage with proper mocking and E2E tests |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Agent as ElizaOS Agent\n    participant Action as BLOCKRUN_CHAT Action\n    participant Client as LLMClient (@blockrun/llm)\n    participant Gateway as BlockRun Gateway\n    participant Base as Base Chain\n\n    Agent->>Action: User message (prompt)\n    Action->>Action: Validate wallet key configured\n    Action->>Client: getClient(runtime)\n    Note over Client: Cache client by agentId\n    \n    Action->>Client: chat(model, prompt, options)\n    Client->>Gateway: HTTP Request (AI query)\n    Gateway-->>Client: 402 Payment Required (price)\n    \n    Client->>Client: Sign USDC payment (EIP-712)\n    Note over Client: TransferWithAuthorization\n    \n    Client->>Gateway: Retry with payment signature\n    Gateway->>Base: Verify signature & transfer USDC\n    Base-->>Gateway: Payment confirmed\n    \n    Gateway->>Gateway: Process AI request\n    Gateway-->>Client: AI response\n    Client-->>Action: Response text\n    \n    Action->>Agent: ActionResult with response\n    Note over Agent: Display AI response to user\n```\n\n<!-- greptile_other_comments_section -->\n\n<sub>(2/5) Greptile learns from your feedback when you react with thumbs up/down!</sub>\n\n<!-- /greptile_comment -->",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-01-11T03:27:18Z",
-      "mergedAt": null,
-      "additions": 1000,
-      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 11760,
-    "deletions": 2498,
-    "files": 107,
-    "commitCount": 155
+    "additions": 14233,
+    "deletions": 3647,
+    "files": 134,
+    "commitCount": 224
   },
   "completedItems": [
     {
@@ -147,6 +147,64 @@
         "packages/cli/tests/test-timeouts.ts",
         "packages/core/src/__tests__/message-service.test.ts",
         "packages/core/src/services/default-message-service.ts"
+      ]
+    },
+    {
+      "title": "feat(core): enhance multi-step workflow with retry logic and parameter extraction",
+      "prNumber": 6286,
+      "type": "feature",
+      "body": "## Summary\n\nEnhances multi-step workflows with retry logic and parameter extraction capabilities.\n\n### Changes\n\n- **Retry logic for XML parsing**: Multi-step workflows now retry parsing up to 5 times (configurable via `MULTISTEP_PARSE_RETRI",
+      "files": [
+        "packages/core/src/prompts.ts",
+        "packages/core/src/services/default-message-service.ts",
+        "packages/plugin-bootstrap/src/__tests__/multi-step.test.ts",
+        "packages/plugin-bootstrap/src/providers/actions.ts",
+        "packages/core/src/runtime.ts",
+        ".cursor",
+        "examples/tsconfig.json",
+        "packages/core/src/__tests__/streaming-context.test.ts",
+        "packages/core/src/streaming-context.ts",
+        "packages/core/src/types/streaming.ts",
+        "packages/core/src/utils/streaming.ts",
+        "packages/cli/tests/unit/characters/README.md",
+        "bun.lock",
+        "lerna.json",
+        "packages/api-client/package.json",
+        "packages/app/package.json",
+        "packages/cli/package.json",
+        "packages/cli/src/commands/deploy/utils/docker-build.ts",
+        "packages/client/package.json",
+        "packages/client/src/components/chat.tsx",
+        "packages/config/package.json",
+        "packages/core/package.json",
+        "packages/core/src/__tests__/runtime.test.ts",
+        "packages/elizaos/package.json",
+        "packages/plugin-bootstrap/package.json",
+        "packages/plugin-bootstrap/src/__tests__/test-utils.ts",
+        "packages/plugin-bootstrap/src/actions/roles.ts",
+        "packages/plugin-bootstrap/src/providers/settings.ts",
+        "packages/plugin-dummy-services/package.json",
+        "packages/plugin-quick-starter/package.json",
+        "packages/plugin-sql/package.json",
+        "packages/plugin-sql/src/__tests__/integration/base-adapter-methods.test.ts",
+        "packages/plugin-sql/src/__tests__/integration/entity-crud.test.ts",
+        "packages/plugin-sql/src/__tests__/integration/memory.test.ts",
+        "packages/plugin-sql/src/__tests__/integration/world.test.ts",
+        "packages/plugin-sql/src/__tests__/migration/migration-before-1.6.5.test.ts",
+        "packages/plugin-sql/src/__tests__/unit/utils.test.ts",
+        "packages/plugin-sql/src/base.ts",
+        "packages/plugin-sql/src/neon/adapter.ts",
+        "packages/plugin-sql/src/pg/adapter.ts",
+        "packages/plugin-sql/src/pglite/adapter.ts",
+        "packages/plugin-starter/package.json",
+        "packages/project-starter/package.json",
+        "packages/project-starter/src/character.ts",
+        "packages/project-tee-starter/package.json",
+        "packages/server/package.json",
+        "packages/server/src/__tests__/unit/api/agents-runs.test.ts",
+        "packages/server/src/api/agents/runs.ts",
+        "packages/server/src/api/index.ts",
+        "packages/server/src/api/memory/rooms.ts"
       ]
     },
     {
@@ -382,6 +440,16 @@
   ],
   "topContributors": [
     {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 197.05223999227877,
+      "prScore": 173.55223999227877,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0,
+      "summary": "0xbbjoker: Focused on enhancing database reliability and performance within the elizaos/eliza repository, notably resolving a critical SQL parameterization issue in the SQL plugin via PR #6316 (+278/-1 lines). They further contributed to system scalability by proposing a new LRU caching layer for the database adapter in PR #6329 and maintained high code quality through two peer reviews. Their work involved extensive modifications across 378 files, demonstrating a significant commitment to bug fixes and testing infrastructure. Overall, their primary focus this month was on stabilizing and optimizing core database plugins and backend configurations."
+    },
+    {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
       "totalScore": 190.7724841541978,
@@ -404,12 +472,22 @@
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 136.238,
+      "totalScore": 158.938,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 135,
-      "commentScore": 1.238,
+      "reviewScore": 157.5,
+      "commentScore": 1.438,
       "summary": "greptile-apps: Focused exclusively on providing feedback and guidance through 14 code reviews and 4 pull request comments this month. Despite having no direct code changes or merged pull requests, they maintained a consistent presence in the review process to support team contributions. Their primary impact was centered on collaborative oversight and technical discussion within the pull request workflow."
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 113.33039351929094,
+      "prScore": 112.11439351929093,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.2159999999999997,
+      "summary": "odilitime: Focused on enhancing core plugin functionality and build system efficiency, notably merging a substantial update to the bootstrap plugin and SQL actions in elizaos/eliza (#6333) that involved over 6,900 lines of code changes. They also addressed infrastructure performance by optimizing build task inputs in turbo.json (#6349) and triaged a regression in Discord slash commands (elizaos-plugins/plugin-discord#15). Their work this month demonstrates a strong emphasis on system stability and configuration, with a primary focus on bug fixes and architectural improvements across code and test files."
     },
     {
       "username": "madjin",
@@ -420,26 +498,6 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": "madjin: Focused on expanding the functionality and user experience of the project's web presence, most notably by implementing a comprehensive MMORPG-style character system for the leaderboard API in elizaos/elizaos.github.io #193. This substantial contribution involved over 2,800 lines of code and established a foundation for complex features like class evolution and visual identity systems, which they further detailed through 11 new feature requests and bug reports. Beyond these gamification enhancements, they improved site accessibility by adding an XSL stylesheet for browser-rendered RSS feeds in #188 and identified critical performance bottlenecks regarding memory consumption in the build process. Their work this month primarily centered on feature development and configuration, significantly advancing the project's interactive and data-driven capabilities."
-    },
-    {
-      "username": "0xbbjoker",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
-      "totalScore": 91.91086777861814,
-      "prScore": 81.91086777861814,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": "0xbbjoker: Focused on enhancing database reliability and performance within the elizaos/eliza repository, notably resolving a critical SQL parameterization issue in the SQL plugin via PR #6316 (+278/-1 lines). They further contributed to system scalability by proposing a new LRU caching layer for the database adapter in PR #6329 and maintained high code quality through two peer reviews. Their work involved extensive modifications across 378 files, demonstrating a significant commitment to bug fixes and testing infrastructure. Overall, their primary focus this month was on stabilizing and optimizing core database plugins and backend configurations."
-    },
-    {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 69.34861962271484,
-      "prScore": 68.57061962271483,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.7779999999999999,
-      "summary": "odilitime: Focused on enhancing core plugin functionality and build system efficiency, notably merging a substantial update to the bootstrap plugin and SQL actions in elizaos/eliza (#6333) that involved over 6,900 lines of code changes. They also addressed infrastructure performance by optimizing build task inputs in turbo.json (#6349) and triaged a regression in Discord slash commands (elizaos-plugins/plugin-discord#15). Their work this month demonstrates a strong emphasis on system stability and configuration, with a primary focus on bug fixes and architectural improvements across code and test files."
     },
     {
       "username": "1bcMax",
@@ -460,6 +518,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "borisudovicic: Focused on refining the user experience and product logic for the Eliza platform, driving the resolution of 18 issues related to agent discovery, chat interface usability, and credit management. They played a key role in defining the \"SDK-first Hooks Mode\" (#5966) and \"Core Hooks\" (#5928) architecture while overseeing critical UI/UX polish, such as optimizing chat box dynamics (#6310) and improving the agent creation workflow (#6306, #6307). Their contributions centered on streamlining the onboarding process for non-signed-up users (#6312, #6353) and enhancing the public agent ecosystem through better state separation and knowledge transfer (#6313, #6303). Overall, their activity focused on product management and quality assurance to ensure a cohesive and scalable agent-building experience."
+    },
+    {
+      "username": "revlentless",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/215957173?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "lalalune",
@@ -542,9 +610,9 @@
       "summary": "GarrickBrown: Focused on identifying and reporting stability issues within the Telegram plugin ecosystem. They documented a critical TypeError occurring during image processing, opening issue #23 in elizaos-plugins/plugin-telegram to facilitate a fix for the crashing bug. Their primary focus this month was on bug reporting and improving the reliability of plugin-based image handling."
     }
   ],
-  "newPRs": 16,
-  "mergedPRs": 14,
+  "newPRs": 21,
+  "mergedPRs": 15,
   "newIssues": 40,
-  "closedIssues": 29,
-  "activeContributors": 17
+  "closedIssues": 32,
+  "activeContributors": 18
 }
