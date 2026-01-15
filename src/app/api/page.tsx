@@ -689,9 +689,11 @@ function EndpointBlock({
 
           <div className={showResponse ? "space-y-3" : "hidden space-y-3"}>
             {Object.entries(endpoint.responses).map(([code, response]) => {
-              const example = (response.content as Record<string, unknown>)?.[
-                "application/json"
-              ]?.example;
+              const contentData = response.content as Record<
+                string,
+                { example?: unknown }
+              >;
+              const example = contentData?.["application/json"]?.example;
 
               if (!example) return null;
 
