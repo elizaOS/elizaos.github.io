@@ -565,9 +565,9 @@ export class GitHubClient {
         maxTimeout: this.retryConfig.maxTimeout,
         factor: this.retryConfig.factor,
         randomize: true,
-        onFailedAttempt: async (error) => {
+        onFailedAttempt: async ({ error, attemptNumber, retriesLeft }) => {
           this.logger.warn(
-            `Attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
+            `Attempt ${attemptNumber} failed. ${retriesLeft} retries left`,
             { error: error.message },
           );
 
@@ -1089,9 +1089,9 @@ export class GitHubClient {
         maxTimeout: this.retryConfig.maxTimeout,
         factor: this.retryConfig.factor,
         randomize: true,
-        onFailedAttempt: async (error) => {
+        onFailedAttempt: async ({ error, attemptNumber, retriesLeft }) => {
           this.logger.warn(
-            `REST API attempt ${error.attemptNumber} failed. ${error.retriesLeft} retries left`,
+            `REST API attempt ${attemptNumber} failed. ${retriesLeft} retries left`,
             { error: error.message },
           );
 
