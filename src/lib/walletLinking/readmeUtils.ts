@@ -5,7 +5,10 @@ import {
 } from "@/lib/walletLinking/chainUtils";
 
 export const LinkedWalletSchema = z.object({
-  chain: z.string().min(1).toLowerCase(),
+  chain: z
+    .string()
+    .min(1)
+    .transform((val) => val.toLowerCase()),
   address: z.string().min(1),
   signature: z.string().min(1).optional(),
 });

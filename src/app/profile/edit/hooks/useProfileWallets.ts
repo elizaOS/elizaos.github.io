@@ -141,8 +141,8 @@ export function useProfileWallets() {
       } catch (err: unknown) {
         console.error("Error in handleLinkWallets:", err);
         if (err instanceof z.ZodError) {
-          const errors = err.errors
-            .map((e) => {
+          const errors = err.issues
+            .map((e: z.ZodIssue) => {
               const path = e.path.join(".");
               return `${path ? path + ": " : ""}${e.message}`;
             })
