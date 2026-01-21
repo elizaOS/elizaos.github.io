@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -48,7 +50,7 @@ export function SummaryCard({
   const shouldTruncate = isLifetime && summaryText.length > 300;
   const displayText =
     shouldTruncate && !isExpanded
-      ? summaryText.slice(0, 300) + "..."
+      ? summaryText.slice(0, summaryText.lastIndexOf(" ", 300)) + "..."
       : summaryText;
 
   const handlePrevious = () => {
@@ -112,9 +114,11 @@ export function SummaryCard({
         )}
       </CardHeader>
       <CardContent className="p-3 pt-0">
-        <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-          {displayText}
-        </p>
+        <div className="prose prose-sm max-w-none text-muted-foreground dark:prose-invert prose-headings:mb-2 prose-headings:mt-3 prose-headings:font-medium prose-headings:text-foreground prose-p:my-1 prose-strong:text-foreground prose-ul:my-1 prose-li:my-0">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {displayText}
+          </ReactMarkdown>
+        </div>
         {shouldTruncate && (
           <Button
             variant="ghost"
