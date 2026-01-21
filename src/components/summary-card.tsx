@@ -50,7 +50,7 @@ export function SummaryCard({
   const shouldTruncate = isLifetime && summaryText.length > 300;
   const displayText =
     shouldTruncate && !isExpanded
-      ? summaryText.slice(0, 300) + "..."
+      ? summaryText.slice(0, summaryText.lastIndexOf(" ", 300)) + "..."
       : summaryText;
 
   const handlePrevious = () => {
