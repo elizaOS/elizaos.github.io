@@ -69,25 +69,30 @@ export const generateOverallSummaryForInterval = createStep(
       }
 
       const repoSummaries = await getAllRepoSummariesForInterval(interval);
+
+      // Generate summary even if no repo summaries exist
+      let summary: string;
       if (repoSummaries.length === 0) {
         intervalLogger?.debug(
-          `No repository summaries found for ${intervalType} of ${startDate}, skipping overall summary generation.`,
+          `No repository summaries found for ${intervalType} of ${startDate}, generating no-activity summary.`,
         );
-        return null;
-      }
-
-      const summary = await generateOverallSummary(
-        repoSummaries,
-        aiSummaryConfig,
-        { startDate },
-        intervalType as RepoIntervalType,
-      );
-
-      if (!summary) {
-        intervalLogger?.debug(
-          `Overall summary generation resulted in no content for ${startDate}, skipping storage.`,
+        // Generate a simple no-activity message instead of skipping
+        summary = `No activity recorded for ${startDate}.`;
+      } else {
+        const generatedSummary = await generateOverallSummary(
+          repoSummaries,
+          aiSummaryConfig,
+          { startDate },
+          intervalType as RepoIntervalType,
         );
-        return;
+
+        if (!generatedSummary) {
+          intervalLogger?.debug(
+            `Overall summary generation resulted in no content for ${startDate}, skipping storage.`,
+          );
+          return;
+        }
+        summary = generatedSummary;
       }
 
       // Store the summary in database
