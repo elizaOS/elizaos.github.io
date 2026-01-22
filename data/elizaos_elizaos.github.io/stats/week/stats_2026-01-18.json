@@ -5,9 +5,58 @@
     "intervalType": "week"
   },
   "repository": "elizaos/elizaos.github.io",
-  "overview": "From 2026-01-18 to 2026-01-25, elizaos/elizaos.github.io had 9 new PRs (1 merged), 0 new issues, and 6 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-01-18 to 2026-01-25, elizaos/elizaos.github.io had 11 new PRs (2 merged), 3 new issues, and 6 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDONNAI987k6_O2",
+      "title": "fix: Overall summaries not generated for days with no repository activity",
+      "author": "madjin",
+      "number": 226,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "## Problem\n\nOverall summary API endpoints return 404 for dates with no repository activity:\n- `/api/summaries/overall/day/2026-01-01.json` → 404 ❌\n- `/api/summaries/overall/day/2026-01-02.json` → 200 ✅\n\n## Expected Behavior\n\nThe API should return a summary for **every day the pipeline runs**, even if there's no activity:\n\n```json\n{\n  \"version\": \"1.0\",\n  \"type\": \"overall\",\n  \"interval\": \"day\",\n  \"date\": \"2026-01-01\",\n  \"generatedAt\": \"2026-01-02T00:00:00.000Z\",\n  \"contentFormat\": \"markdown\",\n  \"content\": \"No activity recorded for January 1, 2026.\"\n}\n```\n\n## Root Cause\n\n[`generateOverallSummaryForInterval()`](https://github.com/elizaOS/elizaos.github.io/blob/main/src/lib/pipelines/summarize/generateOverallSummary.ts#L70-L76) returns `null` when no repository summaries exist:\n\n```typescript\nconst repoSummaries = await getAllRepoSummariesForInterval(interval);\nif (repoSummaries.length === 0) {\n  intervalLogger?.debug(\n    `No repository summaries found for ${intervalType} of ${startDate}, skipping overall summary generation.`,\n  );\n  return null; // ← This causes the 404\n}\n```\n\n## Evidence\n\n```bash\n# Jan 1 had ZERO activity (New Year's Day)\n$ sqlite3 data/db.sqlite \"SELECT COUNT(*) FROM raw_pull_requests WHERE DATE(created_at) = '2026-01-01';\"\n0\n\n$ sqlite3 data/db.sqlite \"SELECT COUNT(*) FROM raw_issues WHERE DATE(created_at) = '2026-01-01';\"\n0\n\n# Database has monthly summary but NO daily summary\n$ sqlite3 data/db.sqlite \"SELECT date, interval_type, LENGTH(summary) FROM overall_summaries WHERE date = '2026-01-01';\"\n2026-01-01|month|4320\n```\n\n## Solution\n\nAlways generate a summary, even when `repoSummaries.length === 0`:\n\n```typescript\nconst repoSummaries = await getAllRepoSummariesForInterval(interval);\n\n// Generate summary even if no repo summaries exist\nconst summary = repoSummaries.length > 0\n  ? await generateOverallSummary(\n      repoSummaries,\n      aiSummaryConfig,\n      { startDate },\n      intervalType as RepoIntervalType,\n    )\n  : `No activity recorded for ${intervalType} of ${startDate}.`;\n\nif (\\!summary) {\n  intervalLogger?.debug(\n    `Overall summary generation resulted in no content for ${startDate}, skipping storage.`,\n  );\n  return;\n}\n\n// Store and export the summary...\n```\n\n## Impact\n\n- API consumers can't distinguish between \"no data\" and \"endpoint not generated\"\n- 404s break API contract that promises daily summaries\n- Inconsistent API behavior (some days exist, others don't)\n- Downstream tools must handle unexpected 404s\n\n## Design Philosophy\n\nPer the API documentation:\n> \"404 responses indicate artifacts not yet published.\"\n\nBut this should mean \"pipeline hasn't run yet\", NOT \"no activity that day\". If the pipeline runs daily, every day should have a summary—even if it says \"no activity.\"\n\n## References\n\n- API Documentation: https://elizaos.github.io/api\n- Generation code: `src/lib/pipelines/summarize/generateOverallSummary.ts:70-76`\n- OpenAPI spec: https://elizaos.github.io/openapi.json",
+      "createdAt": "2026-01-22T00:42:43Z",
+      "closedAt": "2026-01-22T01:03:39Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDONNAI987k6-8z",
+      "title": "fix: API index and contributor profiles not exported due to missing SITE_URL in run-pipelines workflow",
+      "author": "madjin",
+      "number": 225,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "## Problem\n\nThe following API endpoints return 404 on production:\n- `/api/index.json`\n- `/api/contributors/{username}/profile.json` (all 1,433 contributor profiles)\n\nMeanwhile, these endpoints work fine:\n- `/api/leaderboard-*.json` ✅\n- `/api/summaries/**` ✅\n\n## Root Cause\n\nThe `run-pipelines.yml` workflow doesn't set the `SITE_URL` environment variable when running `bun run pipeline export-leaderboard`.\n\nWithout `SITE_URL`, the following functions skip exporting:\n- [`exportAPIIndex()`](https://github.com/elizaOS/elizaos.github.io/blob/main/src/lib/pipelines/export/exportLeaderboardAPI.ts#L1180-L1184) - skips with warning \"SITE_URL not configured\"\n- [`exportAllUserProfiles()`](https://github.com/elizaOS/elizaos.github.io/blob/main/src/lib/pipelines/export/exportLeaderboardAPI.ts#L1078-L1081) - skips with info \"Skipping user profiles: SITE_URL not configured\"\n\nThe files ARE generated locally during `deploy.yml` build (12MB of contributor profiles), but they're generated too late—after the pipelines have already run.\n\n## Evidence\n\n```bash\n# Files exist locally after build\n$ ls -lh out/api/\ndrwxr-xr-x 1435 jin jin   36M contributors/  # ← 404 on production\n-rw-r--r--    1 jin jin  4.0K index.json      # ← 404 on production\n-rw-r--r--    1 jin jin  2.6M leaderboard-lifetime.json  # ✅ works\n-rw-r--r--    1 jin jin   34K leaderboard-monthly.json   # ✅ works\ndrwxr-xr-x    5 jin jin  4.0K summaries/      # ✅ works\n```\n\n```bash\n# Production only has these\n$ curl -s https://elizaos.github.io/api/ | grep href\nhref=\"summaries/\"\nhref=\"leaderboard-lifetime.json\"\nhref=\"leaderboard-monthly.json\"\nhref=\"leaderboard-weekly.json\"\n```\n\n## Solution\n\nAdd SITE_URL to `run-pipelines.yml` env section:\n\n```yaml\nenv:\n  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}\n  PIPELINE_DATA_BRANCH: \"_data\"\n  DATA_DIR: \"data\"\n  SITE_URL: ${{ secrets.SITE_URL || 'https://elizaos.github.io' }}  # ← Add this\n  PIPELINE_CONFIG_FILE: ${{ secrets.PIPELINE_CONFIG_FILE || 'config/example.json' }}\n```\n\nOr detect it dynamically like `deploy.yml` does:\n```yaml\n- name: Determine site URL\n  id: site-config\n  run: |\n    if [[ \"${{ github.event.repository.name }}\" == *.github.io ]]; then\n      echo \"site_url=https://${{ github.repository_owner }}.github.io\" >> $GITHUB_OUTPUT\n    fi\n```\n\n## Impact\n\n- 12MB of contributor profile data not accessible via API\n- API discovery endpoint (`/api/index.json`) returns 404\n- Third-party tools can't discover API capabilities\n- Documentation references broken endpoints\n\n## References\n\n- API Documentation: https://elizaos.github.io/api\n- OpenAPI Spec: https://elizaos.github.io/openapi.json\n- Export code: `src/lib/pipelines/export/exportLeaderboardAPI.ts`",
+      "createdAt": "2026-01-22T00:42:10Z",
+      "closedAt": "2026-01-22T00:51:46Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDONNAI987k9GVL",
+      "title": "Stats files always have null contributor summaries due to pipeline ordering",
+      "author": "madjin",
+      "number": 228,
+      "repository": "elizaos/elizaos.github.io",
+      "body": "## Problem\n\nContributor summaries are always `null` in exported stats files (e.g., `data/elizaos_eliza/stats/day/stats_2026-01-20.json`), even when contributor summaries exist in the database.\n\n## Root Cause\n\nPipeline ordering issue in `.github/workflows/run-pipelines.yml`:\n\n1. **Job 1: `ingest-export`** (lines 60-146)\n   - Runs `bun run pipeline export` \n   - Generates stats files with `topContributors` array\n   - At this point, NO contributor summaries exist → all `summary` fields are `null`\n\n2. **Job 2: `generate-summaries`** (lines 148-340) \n   - Runs AFTER job 1 completes\n   - Generates contributor summaries and stores them in database\n   - Stats files are NEVER re-exported to pick up the new summaries\n\n## Evidence\n\n```bash\n# Stats file generated before summaries exist:\n$ cat data/elizaos_eliza/stats/day/stats_2026-01-16.json | jq '.topContributors[0]'\n{\n  \"username\": \"0xbbjoker\",\n  ...\n  \"summary\": null  # ← Always null\n}\n\n# But summary exists in database:\n$ sqlite3 data/db.sqlite \"SELECT LENGTH(summary) FROM user_summaries WHERE username = '0xbbjoker' AND date = '2026-01-16' AND interval_type = 'day';\"\n166  # ← Summary has 166 characters\n```\n\n## Solution\n\nRe-export stats files after contributor summaries are generated. Options:\n\n### Option 1: Add export step to generate-summaries job (Recommended)\nAfter line 261 in `.github/workflows/run-pipelines.yml`, add:\n```yaml\n- name: Re-export stats with contributor summaries\n  run: bun run pipeline export --days 7 -f\n```\n\n### Option 2: Separate job with dependency\nCreate a third job that runs after `generate-summaries` to re-export stats.\n\n## Impact\n\n- All contributor summaries in stats files are missing, even though they exist in the database\n- Frontend/API consumers see `summary: null` instead of rich contributor activity descriptions\n- Affects all interval types (day, week, month)\n\n## Related Files\n\n- `.github/workflows/run-pipelines.yml`\n- `src/lib/pipelines/export/queries.ts:114-165` (`getTopContributors` function)\n- `src/lib/pipelines/export/exportRepoStats.ts:17-97` (`exportRepoStatsForInterval` function)",
+      "createdAt": "2026-01-22T04:47:55Z",
+      "closedAt": "2026-01-22T05:50:04Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDONNAI986-leEh",
+      "title": "Fix API issues: missing files and no-activity summaries",
+      "author": "madjin",
+      "number": 227,
+      "body": "## Summary\nFixes #225 and #226\n\n**Issue #225: Missing API files** (`/api/index.json`, `/api/contributors/*`)\n- Root cause: `run-pipelines.yml` workflow didn't set `SITE_URL` env var\n- Fix: Added dynamic site URL detection step (copied pattern from `deploy.yml`)\n- Now exports API index and contributor profiles correctly\n\n**Issue #226: Missing summaries for no-activity days**\n- Root cause: `generateOverallSummaryForInterval()` returned early when no repo summaries found\n- Fix: Generate simple \"No activity recorded\" message instead of skipping\n- Ensures every valid date returns 200 instead of 404\n\n## Changes\n- `.github/workflows/run-pipelines.yml`: Added SITE_URL detection step before API exports\n- `src/lib/pipelines/summarize/generateOverallSummary.ts`: Generate no-activity summaries\n\n## Test Plan\n- [ ] CI checks pass (build, typecheck, lint)\n- [ ] Manual workflow_dispatch run after merge\n- [ ] Verify `/api/index.json` exists\n- [ ] Verify `/api/contributors/*` files exist\n- [ ] Verify no-activity days return 200 with simple message\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\n\nFixed two critical API issues preventing proper API functionality in production.\n\n**Issue #225 - Missing API Files**: Added dynamic `SITE_URL` detection step in `run-pipelines.yml` before API exports, mirroring the pattern already used in `deploy.yml`. Without this environment variable, the export functions (`exportAPIIndex()` and `exportAllUserProfiles()`) were silently skipping generation, resulting in 404s for `/api/index.json` and all 1,433 contributor profile endpoints. The fix correctly detects whether the repository is an org site (`*.github.io`) or project site and passes the appropriate URL to both export commands.\n\n**Issue #226 - Missing No-Activity Summaries**: Modified `generateOverallSummaryForInterval()` to generate simple \"No activity recorded for {date}\" messages instead of returning null when no repository summaries exist. This ensures consistent API behavior where every date the pipeline runs returns 200, distinguishing \"no activity that day\" from \"pipeline hasn't run yet\" (legitimate 404). The implementation correctly stores these no-activity summaries in the database and exports them to both markdown and JSON API formats.\n\nBoth fixes are minimal, well-targeted changes that address the root causes without introducing unnecessary complexity. The workflow change follows established patterns, and the summary generation maintains proper error handling and logging.\n\n<h3>Confidence Score: 5/5</h3>\n\n\n- Safe to merge - targeted fixes with minimal risk\n- Both changes are straightforward bug fixes addressing well-documented issues. The workflow change copies an established pattern from deploy.yml, and the summary generation logic correctly handles the empty-summaries case without affecting existing functionality. No breaking changes, security issues, or architectural concerns.\n- No files require special attention\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| .github/workflows/run-pipelines.yml | Added SITE_URL detection step before API exports to fix missing API files. Implementation correctly mirrors deploy.yml pattern and provides env vars to both export commands. |\n| src/lib/pipelines/summarize/generateOverallSummary.ts | Modified to generate \"No activity recorded\" summaries instead of returning null for days with no repository activity, ensuring 200 responses for all valid dates. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Workflow as run-pipelines.yml\n    participant SummaryStep as generateOverallSummary\n    participant ExportAPI as exportLeaderboardAPI\n    participant API as /api/* endpoints\n\n    Note over Workflow: Daily scheduled run (23:00 UTC)\n    \n    Workflow->>Workflow: Run summaries (repo → contributor → overall)\n    Workflow->>SummaryStep: Generate overall summaries\n    \n    alt No repository activity\n        SummaryStep->>SummaryStep: Check getAllRepoSummariesForInterval()\n        SummaryStep->>SummaryStep: repoSummaries.length === 0\n        SummaryStep->>SummaryStep: Generate \"No activity recorded\" message\n        SummaryStep->>API: Store summary (200 response)\n    else Has activity\n        SummaryStep->>SummaryStep: generateOverallSummary() with AI\n        SummaryStep->>API: Store summary (200 response)\n    end\n    \n    Workflow->>Workflow: Determine site URL (new step)\n    Note over Workflow: Detects *.github.io vs project repo\n    \n    Workflow->>ExportAPI: export-leaderboard (with SITE_URL env)\n    ExportAPI->>API: Generate /api/index.json\n    ExportAPI->>API: Generate /api/contributors/*/profile.json\n    ExportAPI->>API: Generate leaderboard-*.json\n    \n    Workflow->>ExportAPI: export-summaries (with SITE_URL env)\n    ExportAPI->>API: Export summary JSON files\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/elizaos.github.io",
+      "createdAt": "2026-01-22T01:31:37Z",
+      "mergedAt": null,
+      "additions": 38,
+      "deletions": 15
+    },
     {
       "id": "PR_kwDONNAI9868vKVf",
       "title": "fix: render markdown in profile summary card",
@@ -19,6 +68,18 @@
       "mergedAt": "2026-01-21T10:35:49Z",
       "additions": 8,
       "deletions": 4
+    },
+    {
+      "id": "PR_kwDONNAI986-nMi_",
+      "title": "Fix: re-export stats after contributor summaries are generated",
+      "author": "madjin",
+      "number": 229,
+      "body": "## Summary\nFixes #228 \n\nStats files (`data/elizaos_eliza/stats/day/stats_*.json`) always had `summary: null` for contributors, even when summaries existed in the database. This was due to a pipeline ordering issue.\n\n## Problem\n\nThe workflow had stats being exported BEFORE contributor summaries were generated:\n\n1. `ingest-export` job → exports stats files (summaries don't exist yet → `summary: null`)\n2. `generate-summaries` job → creates contributor summaries\n3. Stats files never re-exported to include summaries\n\n## Solution\n\nAdded a re-export step after summary generation completes (line 293):\n\n```yaml\n- name: Re-export stats with contributor summaries\n  run: bun run pipeline export${{ env.start_date_arg }}${{ env.end_date_arg }}${{ github.event_name == 'schedule' && ' --days 2' || '' }} -f\n```\n\n**Behavior:**\n- **Scheduled runs**: Re-export last 2 days only (`--days 2`)\n- **Manual runs with date range**: Re-export the specified date range\n- **Manual runs without dates**: Re-export everything missing\n\n## Why Three Export Steps?\n\nThe workflow now has three export commands, each serving a purpose:\n\n1. **Line 119**: Export everything missing (respects manual date ranges)\n2. **Line 120**: Force re-export last 2 days for data completeness (April 2025 \"overlap\" feature)\n3. **Line 293 (NEW)**: Force re-export WITH summaries after generation\n\nThis preserves the existing \"overlap\" safety feature while ensuring summaries are included when available.\n\n## Test Plan\n- [ ] CI checks pass\n- [ ] Manual workflow run to verify summary inclusion\n- [ ] Verify scheduled runs only re-export 2 days\n- [ ] Verify manual runs with date range respect inputs\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n<h3>Greptile Summary</h3>\n\nFixes stats files missing contributor summaries by adding a re-export step after summary generation completes.\n\n**Key changes:**\n- Added re-export command on line 293 after all summary generation completes\n- For scheduled runs: re-exports last 2 days only (`--days 2`)\n- For manual runs: respects date range inputs or re-exports everything if no dates specified\n- Preserves existing \"overlap\" safety feature (line 120) for data completeness\n\n**Why this works:**\nThe original workflow exported stats BEFORE summaries existed (lines 119-120 in `ingest-export` job), resulting in `summary: null`. The new re-export step runs AFTER contributor summaries are generated in the `generate-summaries` job, ensuring stats files include the actual summary text.\n\n**Implementation is correct:**\n- Uses same date range environment variables (`${{ env.start_date_arg }}${{ env.end_date_arg }}`)\n- Applies `-f` flag to force overwrite of existing stats files\n- Conditional logic for scheduled runs (`--days 2`) matches existing pattern on line 120\n\n<h3>Confidence Score: 5/5</h3>\n\n- This PR is safe to merge with minimal risk\n- The change is a simple, well-documented addition that fixes a clear pipeline ordering bug. The new export command follows established patterns (uses same env vars, flags, and conditional logic as existing exports on lines 119-120), ensuring consistency. No breaking changes or risky operations introduced.\n- No files require special attention\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| .github/workflows/run-pipelines.yml | Added re-export step after summary generation to include contributor summaries in stats files |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Workflow as GitHub Actions\n    participant IngestJob as ingest-export job\n    participant SummaryJob as generate-summaries job\n    participant DB as SQLite Database\n    participant DataFiles as Stats JSON Files\n\n    Note over Workflow: Workflow starts (scheduled/manual)\n    \n    Workflow->>IngestJob: Start job\n    activate IngestJob\n    \n    IngestJob->>DB: Run ingest pipeline\n    IngestJob->>DB: Run process pipeline\n    IngestJob->>DataFiles: Export stats (line 119)\n    Note right of DataFiles: summaries don't exist yet<br/>contributor.summary = null\n    \n    IngestJob->>DataFiles: Re-export last 2 days (line 120)\n    Note right of DataFiles: Still no summaries<br/>contributor.summary = null\n    \n    IngestJob->>Workflow: Job complete\n    deactivate IngestJob\n    \n    Workflow->>SummaryJob: Start job (needs: ingest-export)\n    activate SummaryJob\n    \n    SummaryJob->>DB: Import markdown summaries\n    SummaryJob->>DB: Generate repository summaries\n    SummaryJob->>DB: Generate contributor summaries\n    Note right of DB: Summaries now exist in DB\n    \n    SummaryJob->>DB: Generate overall summaries\n    \n    SummaryJob->>DataFiles: Re-export WITH summaries (line 293 NEW)\n    Note right of DataFiles: NOW includes summaries<br/>contributor.summary = actual text\n    \n    SummaryJob->>DataFiles: Export leaderboard JSON\n    SummaryJob->>DataFiles: Export summaries to JSON API\n    \n    SummaryJob->>Workflow: Job complete\n    deactivate SummaryJob\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/elizaos.github.io",
+      "createdAt": "2026-01-22T05:29:17Z",
+      "mergedAt": "2026-01-22T05:50:02Z",
+      "additions": 4,
+      "deletions": 0
     },
     {
       "id": "PR_kwDONNAI986-D0Ca",
@@ -43,37 +104,13 @@
       "mergedAt": null,
       "additions": 1,
       "deletions": 1
-    },
-    {
-      "id": "PR_kwDONNAI986-Dyy9",
-      "title": "chore(deps): bump better-sqlite3 from 11.10.0 to 12.6.2",
-      "author": "dependabot",
-      "number": 222,
-      "body": "Bumps [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) from 11.10.0 to 12.6.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/WiseLibs/better-sqlite3/releases\">better-sqlite3's releases</a>.</em></p>\n<blockquote>\n<h2>v12.6.2</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>fix build: update node-abi version in package.json to ^4.25.0 by <a href=\"https://github.com/mceachen\"><code>@​mceachen</code></a> in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1439\">WiseLibs/better-sqlite3#1439</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.6.1...v12.6.2\">https://github.com/WiseLibs/better-sqlite3/compare/v12.6.1...v12.6.2</a></p>\n<h2>v12.6.1</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>chore(build.yml): Update Electron build command to include version 40 by <a href=\"https://github.com/mceachen\"><code>@​mceachen</code></a> in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1438\">WiseLibs/better-sqlite3#1438</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.6.0...v12.6.1\">https://github.com/WiseLibs/better-sqlite3/compare/v12.6.0...v12.6.1</a></p>\n<h2>v12.6.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Update SQLite to version 3.51.2 in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1436\">WiseLibs/better-sqlite3#1436</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.5.0...v12.6.0\">https://github.com/WiseLibs/better-sqlite3/compare/v12.5.0...v12.6.0</a></p>\n<h2>v12.5.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Update SQLite to version 3.51.1 in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1424\">WiseLibs/better-sqlite3#1424</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.4.6...v12.5.0\">https://github.com/WiseLibs/better-sqlite3/compare/v12.4.6...v12.5.0</a></p>\n<h2>v12.4.6</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Fix npm publishing by <a href=\"https://github.com/mceachen\"><code>@​mceachen</code></a> in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1423\">WiseLibs/better-sqlite3#1423</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.4.5...v12.4.6\">https://github.com/WiseLibs/better-sqlite3/compare/v12.4.5...v12.4.6</a></p>\n<h2>v12.4.5</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Add support for Node v25 and Electron 39+ prebuilds by <a href=\"https://github.com/mceachen\"><code>@​mceachen</code></a> in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1422\">WiseLibs/better-sqlite3#1422</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.4.4...v12.4.5\">https://github.com/WiseLibs/better-sqlite3/compare/v12.4.4...v12.4.5</a></p>\n<h2>v12.4.4</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Switch to <code>macos-15-intel</code> runner from <code>macos-15-large</code> by <a href=\"https://github.com/m4heshd\"><code>@​m4heshd</code></a> in <a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/pull/1420\">WiseLibs/better-sqlite3#1420</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v12.4.3...v12.4.4\">https://github.com/WiseLibs/better-sqlite3/compare/v12.4.3...v12.4.4</a></p>\n<h2>v12.4.2</h2>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/27cb07b5926652ae0e601dc26a35714128692f18\"><code>27cb07b</code></a> 12.6.2</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/10bad9d0a0b947be02a11fbf41119458f3d0d312\"><code>10bad9d</code></a> fix build: update node-abi version in package.json to ^4.25.0 (<a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/issues/1439\">#1439</a>)</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/6c3899895398d97e90d235aa5806e4352e27b0e8\"><code>6c38998</code></a> 12.6.1</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/03df67030307a76787c39f215ecd79fc2161386e\"><code>03df670</code></a> chore(build.yml): Update Electron build command to include version 40 (<a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/issues/1438\">#1438</a>)</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/0d0d15f215f3ff5efefbd12ba26390d9b3a76978\"><code>0d0d15f</code></a> 12.6.0</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/8dccd81c07ac47b96fcd44418e10d7d5c209a9a3\"><code>8dccd81</code></a> Update SQLite to version 3.51.2 (<a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/issues/1436\">#1436</a>)</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/6209be238d6a1b181f516e4e636986604b0f62e1\"><code>6209be2</code></a> 12.5.0</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/34455619813d6ec83d00bf1db38b7d19a12a4e92\"><code>3445561</code></a> Update SQLite to version 3.51.1 (<a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/issues/1424\">#1424</a>)</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/b0d4562813b9dbb870a9e46184451579ba48d78f\"><code>b0d4562</code></a> 12.4.6</li>\n<li><a href=\"https://github.com/WiseLibs/better-sqlite3/commit/32030d81b85d8f1b939bff55ce0057b53b215405\"><code>32030d8</code></a> Fix npm publishing (<a href=\"https://redirect.github.com/WiseLibs/better-sqlite3/issues/1423\">#1423</a>)</li>\n<li>Additional commits viewable in <a href=\"https://github.com/WiseLibs/better-sqlite3/compare/v11.10.0...v12.6.2\">compare view</a></li>\n</ul>\n</details>\n<details>\n<summary>Maintainer changes</summary>\n<p>This version was pushed to npm by [GitHub Actions](<a href=\"https://www.npmjs.com/~GitHub\">https://www.npmjs.com/~GitHub</a> Actions), a new releaser for better-sqlite3 since your current version.</p>\n</details>\n<br />\n\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=better-sqlite3&package-manager=npm_and_yarn&previous-version=11.10.0&new-version=12.6.2)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after your CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge and block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating it. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)\n\n\n</details>\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\n\nDependabot PR bumping `better-sqlite3` from v11.10.0 to v12.6.2.\n\n- Upgrades SQLite binding to latest version (includes SQLite 3.51.2)\n- Only affects `src/lib/data/db-nextjs.ts` which uses standard APIs (constructor, `.pragma()`, `.close()`)\n- Existing `@types/better-sqlite3` v7.6.13 remains compatible with v12\n- No code changes required - the codebase's usage patterns are stable across versions\n\n<h3>Confidence Score: 5/5</h3>\n\n\n- This PR is safe to merge - standard dependency update with no breaking changes for the codebase's usage patterns.\n- Score reflects that this is a straightforward Dependabot dependency update. The codebase only uses basic, stable APIs from better-sqlite3 that haven't changed between v11 and v12.\n- No files require special attention.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| package.json | Major version bump of better-sqlite3 from v11 to v12. The upgrade is compatible with the codebase's minimal usage patterns (constructor, pragma, close methods). |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant NPM as package.json\n    participant Next as db-nextjs.ts\n    participant SQLite as better-sqlite3 v12\n\n    Note over NPM: Dependency updated<br/>v11.10.0 → v12.6.2\n    Next->>SQLite: new Database(path, {fileMustExist: false})\n    SQLite-->>Next: Database instance\n    Next->>SQLite: .pragma(\"journal_mode = WAL\")\n    SQLite-->>Next: WAL mode enabled\n    Note over Next,SQLite: Build-time queries via Drizzle ORM\n    Next->>SQLite: .close()\n    Note over SQLite: Connection closed on exit\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
-      "repository": "elizaos/elizaos.github.io",
-      "createdAt": "2026-01-19T17:54:19Z",
-      "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
-    },
-    {
-      "id": "PR_kwDONNAI986-DydI",
-      "title": "chore(deps-dev): bump eslint-config-next from 15.1.4 to 16.1.3",
-      "author": "dependabot",
-      "number": 221,
-      "body": "Bumps [eslint-config-next](https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next) from 15.1.4 to 16.1.3.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/vercel/next.js/releases\">eslint-config-next's releases</a>.</em></p>\n<blockquote>\n<h2>v16.1.3</h2>\n<blockquote>\n<p>[!NOTE]\nThis release is backporting bug fixes. It does <strong>not</strong> include all pending features/changes on canary.</p>\n</blockquote>\n<h3>Core Changes</h3>\n<ul>\n<li>Fix linked list bug in LRU deleteFromLru (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/88652\">#88652</a>)</li>\n<li>Fix relative same host redirects in node middleware (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/88253\">#88253</a>)</li>\n</ul>\n<h3>Credits</h3>\n<p>Huge thanks to <a href=\"https://github.com/acdlite\"><code>@​acdlite</code></a> and <a href=\"https://github.com/ijjk\"><code>@​ijjk</code></a> for helping!</p>\n<h2>v16.1.2</h2>\n<blockquote>\n<p>[!NOTE]\nThis release is backporting bug fixes. It does <strong>not</strong> include all pending features/changes on canary.</p>\n</blockquote>\n<h3>Core Changes</h3>\n<ul>\n<li>Turbopack: Update to swc_core v50.2.3 (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/87841\">#87841</a>) (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/88296\">#88296</a>)\n<ul>\n<li>Fixes a crash when processing mdx files with multibyte characters. (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/87713\">#87713</a>)</li>\n</ul>\n</li>\n<li>Turbopack: <a href=\"https://microsoft.github.io/mimalloc/\">mimalloc</a> upgrade and enabling it on musl (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/88503\">#88503</a>) (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/87815\">#87815</a>) (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/88426\">#88426</a>)\n<ul>\n<li>Fixes <a href=\"https://redirect.github.com/vercel/next.js/pull/88426\">a significant performance issue</a> on musl-based Linux distributions (e.g. Alpine in Docker) related to musl's allocator.</li>\n<li>Other platforms have always used mimalloc, but we previously did not use mimalloc on musl because of compilation issues that have since been resolved.</li>\n</ul>\n</li>\n</ul>\n<h3>Credits</h3>\n<p>Huge thanks to <a href=\"https://github.com/mischnic\"><code>@​mischnic</code></a> for helping!</p>\n<h2>v16.1.1</h2>\n<blockquote>\n<p>[!NOTE]\nThis release is backporting bug fixes. It does <strong>not</strong> include all pending features/changes on canary.</p>\n</blockquote>\n<h3>Core Changes</h3>\n<ul>\n<li>Turbopack: Create junction points instead of symlinks on Windows (<a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/87606\">#87606</a>)</li>\n</ul>\n<h3>Credits</h3>\n<p>Huge thanks to <a href=\"https://github.com/sokra\"><code>@​sokra</code></a> and <a href=\"https://github.com/ztanner\"><code>@​ztanner</code></a> for helping!</p>\n<h2>v16.1.1-canary.33</h2>\n<h3>Misc Changes</h3>\n<ul>\n<li>Revert &quot;[turbopack] Add bundling support for worker_threads&quot;: <a href=\"https://github.com/vercel/next.js/tree/HEAD/packages/eslint-config-next/issues/88725\">#88725</a></li>\n</ul>\n<h3>Credits</h3>\n<p>Huge thanks to <a href=\"https://github.com/sokra\"><code>@​sokra</code></a> for helping!</p>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/vercel/next.js/commit/f01cf07ab12a37259de42baa4bdae310b4328c72\"><code>f01cf07</code></a> v16.1.3</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/cb436b3613edb3f741a39fa00ac31d103a5a1518\"><code>cb436b3</code></a> v16.1.2</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/3aa53984e9d6bc4b5860c76e90cccfd6780989af\"><code>3aa5398</code></a> v16.1.1</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/34916762cdff14f27c7e3273d74af60eb6c23cb6\"><code>3491676</code></a> v16.1.0</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/58e8f8c7e541cbfa0764e582b0c1068bfdef32b2\"><code>58e8f8c</code></a> v16.1.0-canary.34</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/3284587f8ebeab67aa4659ef4873723654098916\"><code>3284587</code></a> v16.1.0-canary.33</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/04290ab7c4e48c7d903a68051e688a1238e4041d\"><code>04290ab</code></a> v16.1.0-canary.32</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/d36c03ed1bde059ddc81a31e44a4483aca6a33c6\"><code>d36c03e</code></a> v16.1.0-canary.31</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/b174155e8b4863e18805ca29aaa98a240667e2a9\"><code>b174155</code></a> v16.1.0-canary.30</li>\n<li><a href=\"https://github.com/vercel/next.js/commit/20da8eadc08f5a204234841aa67e3dc2f5271512\"><code>20da8ea</code></a> v16.1.0-canary.29</li>\n<li>Additional commits viewable in <a href=\"https://github.com/vercel/next.js/commits/v16.1.3/packages/eslint-config-next\">compare view</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=eslint-config-next&package-manager=npm_and_yarn&previous-version=15.1.4&new-version=16.1.3)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot merge` will merge this PR after your CI passes on it\n- `@dependabot squash and merge` will squash and merge this PR after your CI passes on it\n- `@dependabot cancel merge` will cancel a previously requested merge and block automerging\n- `@dependabot reopen` will reopen this PR if it is closed\n- `@dependabot close` will close this PR and stop Dependabot recreating it. You can achieve the same result by closing it manually\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)\n\n\n</details>\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\n\nBumps `eslint-config-next` from 15.1.4 to 16.1.3, upgrading to a major version designed for Next.js 16.\n\n- Creates a version mismatch: `eslint-config-next` 16.x expects Next.js 16, but the project uses Next.js 15.4.10\n- May cause ESLint configuration incompatibilities or unexpected linting warnings\n- Recommend keeping `eslint-config-next` at 15.x until Next.js is upgraded to v16\n\n<h3>Confidence Score: 2/5</h3>\n\n\n- This PR introduces a version mismatch that may cause ESLint configuration issues\n- Score reflects the major version mismatch between `eslint-config-next` 16.1.3 and Next.js 15.4.10. The ESLint config package is designed to match the Next.js major version, and using v16 config with v15 framework may cause incompatibilities, unexpected warnings, or missing/incorrect lint rules.\n- Check `package.json` for the version mismatch between `eslint-config-next` (16.1.3) and `next` (15.4.10)\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| package.json | Bumps `eslint-config-next` from 15.1.4 to 16.1.3, creating a version mismatch with Next.js 15.4.10 |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant D as Dependabot\n    participant P as package.json\n    participant E as ESLint Config\n    participant N as Next.js 15.4.10\n    \n    D->>P: Bump eslint-config-next 15.1.4 → 16.1.3\n    Note over P: devDependencies updated\n    P->>E: ESLint config extends next/core-web-vitals\n    E->>N: Version mismatch detected\n    Note over N,E: eslint-config-next v16 expects Next.js v16\n    Note over N,E: Current: Next.js v15.4.10\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
-      "repository": "elizaos/elizaos.github.io",
-      "createdAt": "2026-01-19T17:53:41Z",
-      "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
     }
   ],
   "codeChanges": {
-    "additions": 8,
+    "additions": 12,
     "deletions": 4,
-    "files": 1,
-    "commitCount": 12
+    "files": 2,
+    "commitCount": 18
   },
   "completedItems": [
     {
@@ -83,6 +120,15 @@
       "body": "<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n### Greptile Summary\n\nThis PR enhances the profile summary card by adding markdown rendering support using `react-markdown` and `remark-gfm`. The change replaces plain text rendering wi",
       "files": [
         "src/components/summary-card.tsx"
+      ]
+    },
+    {
+      "title": "Fix: re-export stats after contributor summaries are generated",
+      "prNumber": 229,
+      "type": "bugfix",
+      "body": "## Summary\nFixes #228 \n\nStats files (`data/elizaos_eliza/stats/day/stats_*.json`) always had `summary: null` for contributors, even when summaries existed in the database. This was due to a pipeline ordering issue.\n\n## Problem\n\nThe workflow",
+      "files": [
+        ".github/workflows/run-pipelines.yml"
       ]
     }
   ],
@@ -98,6 +144,16 @@
       "summary": null
     },
     {
+      "username": "madjin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32600939?u=cdcf89f44c7a50906c7a80d889efa85023af2049&v=4",
+      "totalScore": 66.33370300278133,
+      "prScore": 48.79370300278133,
+      "issueScore": 12.2,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
       "username": "odilitime",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
       "totalScore": 44.083773896576105,
@@ -105,16 +161,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "matomoniwano",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/47988393?u=2e31304db3ca7b0a1f62bc26443c25ec34bb519d&v=4",
-      "totalScore": 39.3337738965761,
-      "prScore": 39.3337738965761,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -128,12 +174,22 @@
       "summary": null
     },
     {
+      "username": "matomoniwano",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/47988393?u=2e31304db3ca7b0a1f62bc26443c25ec34bb519d&v=4",
+      "totalScore": 29.69251334905818,
+      "prScore": 29.69251334905818,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 18,
+      "totalScore": 22.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 18,
+      "reviewScore": 22.5,
       "commentScore": 0,
       "summary": null
     },
@@ -144,16 +200,6 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "madjin",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/32600939?u=cdcf89f44c7a50906c7a80d889efa85023af2049&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -176,11 +222,21 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
     }
   ],
-  "newPRs": 9,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
+  "newPRs": 11,
+  "mergedPRs": 2,
+  "newIssues": 3,
+  "closedIssues": 3,
   "activeContributors": 6
 }
