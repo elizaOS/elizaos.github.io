@@ -33,8 +33,43 @@ export function RepositoryCard({ repository }: { repository: Repository }) {
   const lastUpdated = new Date(repository.lastUpdated);
   const timeAgo = formatDistanceToNow(lastUpdated, { addSuffix: true });
 
+  // Check if repo has recent activity (updated within last 30 days)
+  const daysSinceUpdate = Math.floor(
+    (Date.now() - lastUpdated.getTime()) / (1000 * 60 * 60 * 24),
+  );
+  const hasRecentActivity = daysSinceUpdate <= 30;
+
+  // Color scheme based on activity level
+  const colors = hasRecentActivity
+    ? {
+        // Warm colors for active repos (current default)
+        card: "border-border/40 bg-background",
+        title: "text-primary",
+        star: "text-muted-foreground",
+        description: "text-muted-foreground",
+        issueIcon: "text-amber-600",
+        openPrIcon: "text-green-600",
+        mergedPrIcon: "text-purple-600",
+        contributors: "text-muted-foreground",
+        calendar: "text-muted-foreground",
+      }
+    : {
+        // Cool colors for inactive repos
+        card: "border-border/30 bg-muted/20",
+        title: "text-foreground/80",
+        star: "text-blue-400",
+        description: "text-muted-foreground/80",
+        issueIcon: "text-cyan-600",
+        openPrIcon: "text-blue-500",
+        mergedPrIcon: "text-slate-500",
+        contributors: "text-muted-foreground/80",
+        calendar: "text-muted-foreground/70",
+      };
+
   return (
-    <Card className="h-full border border-border/40 transition-colors hover:border-border/80">
+    <Card
+      className={`h-full border transition-colors hover:border-border/80 ${colors.card}`}
+    >
       <CardHeader className="pb-4">
         <div className="flex items-start justify-between">
           <div className="flex-1">
@@ -44,17 +79,19 @@ export function RepositoryCard({ repository }: { repository: Repository }) {
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                <CardTitle className="text-lg font-semibold text-primary hover:underline">
+                <CardTitle
+                  className={`text-lg font-semibold hover:underline ${colors.title}`}
+                >
                   {repository.owner}/{repository.name}
                 </CardTitle>
               </Link>
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
+              <div className={`flex items-center gap-1 text-sm ${colors.star}`}>
                 <Star className="h-4 w-4" />
                 <span>{formatCompactNumber(repository.stars)}</span>
               </div>
             </div>
             {repository.description && (
-              <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
+              <p className={`mt-1 line-clamp-2 text-sm ${colors.description}`}>
                 {repository.description}
               </p>
             )}

@@ -202,8 +202,10 @@ export async function getRepositories(): Promise<Repository[]> {
     }),
   );
 
+  // Sort by most recently updated first (active repos on top)
   return reposWithData.sort(
-    (a, b) => b.totalContributors - a.totalContributors,
+    (a, b) =>
+      new Date(b.lastUpdated).getTime() - new Date(a.lastUpdated).getTime(),
   );
 }
 
