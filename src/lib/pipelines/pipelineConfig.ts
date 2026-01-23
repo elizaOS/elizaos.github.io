@@ -83,6 +83,14 @@ export const RepositoryConfigSchema = z.object({
   defaultBranch: z.string().default("main"),
 });
 
+export const UntrackedReposConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  organizations: z.array(z.string()),
+  refreshIntervalDays: z.number().default(7),
+  excludeArchived: z.boolean().default(true),
+  excludePatterns: z.array(z.string()).default([]),
+});
+
 export const PipelineConfigSchema = z.object({
   contributionStartDate: z
     .string()
@@ -101,6 +109,7 @@ export const PipelineConfigSchema = z.object({
   walletAddresses: z.object({
     enabled: z.boolean().default(true),
   }),
+  untrackedRepos: UntrackedReposConfigSchema.optional(),
 });
 // Type exports
 
@@ -108,4 +117,5 @@ export type PipelineConfig = z.infer<typeof PipelineConfigSchema>;
 export type ScoringConfig = z.infer<typeof ScoringConfigSchema>;
 export type TagConfig = z.infer<typeof TagConfigSchema>;
 export type RepositoryConfig = z.infer<typeof RepositoryConfigSchema>;
+export type UntrackedReposConfig = z.infer<typeof UntrackedReposConfigSchema>;
 export type ScoringRules = ScoringConfig;

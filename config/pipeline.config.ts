@@ -81,6 +81,25 @@ const getJsonConfig = <T>(key: string): T => {
   return value as T;
 };
 
+/**
+ * Get an optional JSON config value (returns undefined if not set)
+ */
+const getOptionalJsonConfig = <T>(key: string): T | undefined => {
+  const value = jsonConfig[key] ?? process.env[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch (e) {
+      console.warn(`Failed to parse ${key} as JSON: ${e}`);
+      return undefined;
+    }
+  }
+  return value as T;
+};
+
 // All data comes from external sources - no hardcoded org-specific values
 export default {
   contributionStartDate: getConfig("PIPELINE_START_DATE"),
@@ -92,6 +111,8 @@ export default {
   walletAddresses: {
     enabled: true,
   },
+
+  untrackedRepos: getOptionalJsonConfig("PIPELINE_UNTRACKED_REPOS"),
 
   aiSummary: {
     enabled: true,

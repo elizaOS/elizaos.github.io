@@ -6,6 +6,7 @@ import {
   userDailyScores,
   rawIssues,
   rawCommits,
+  untrackedRepositories,
 } from "@/lib/data/schema";
 import { and, eq, gte, sql, desc, inArray } from "drizzle-orm";
 import { UTCDate } from "@date-fns/utc";
@@ -204,4 +205,71 @@ export async function getRepositories(): Promise<Repository[]> {
   return reposWithData.sort(
     (a, b) => b.totalContributors - a.totalContributors,
   );
+}
+
+export type UntrackedRepository = {
+  id: string;
+  name: string;
+  owner: string;
+  description?: string;
+  stars: number;
+  forks: number;
+  watchers: number;
+  isArchived: boolean;
+  primaryLanguage?: string;
+  lastPushedAt?: string;
+  openPrCount: number;
+  mergedPrCount: number;
+  closedUnmergedPrCount: number;
+  openIssueCount: number;
+  closedIssueCount: number;
+  activityScore: number;
+  lastFetchedAt: string;
+};
+
+export async function getUntrackedRepositories(): Promise<
+  UntrackedRepository[]
+> {
+  const allUntracked = await db
+    .select()
+    .from(untrackedRepositories)
+    .orderBy(desc(untrackedRepositories.activityScore));
+
+  return allUntracked.map((repo) => ({
+    id: repo.repoId,
+    name: repo.name,
+    owner: repo.owner,
+    description: repo.description ?? undefined,
+    stars: repo.stars ?? 0,
+    forks: repo.forks ?? 0,
+    watchers: repo.watchers ?? 0,
+    isArchived: repo.isArchived ?? false,
+    primaryLanguage: repo.primaryLanguage ?? undefined,
+    lastPushedAt: repo.lastPushedAt ?? undefined,
+    openPrCount: repo.openPrCount ?? 0,
+    mergedPrCount: repo.mergedPrCount ?? 0,
+    closedUnmergedPrCount: repo.closedUnmergedPrCount ?? 0,
+    openIssueCount: repo.openIssueCount ?? 0,
+    closedIssueCount: repo.closedIssueCount ?? 0,
+    activityScore: repo.activityScore ?? 0,
+    lastFetchedAt: repo.lastFetchedAt,
+  }));
+}
+
+export async function getRepositoryCounts(): Promise<{
+  tracked: number;
+  untracked: number;
+}> {
+  const trackedCount = await db
+    .select({ count: sql<number>`count(*)`.as("count") })
+    .from(repositories);
+
+  const untrackedCount = await db
+    .select({ count: sql<number>`count(*)`.as("count") })
+    .from(untrackedRepositories);
+
+  return {
+    tracked: trackedCount[0]?.count || 0,
+    untracked: untrackedCount[0]?.count || 0,
+  };
 }
