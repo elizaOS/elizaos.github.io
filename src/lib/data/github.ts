@@ -1273,19 +1273,19 @@ export class GitHubClient {
           remaining
           resetAt
         }
-        openPrs: search(type: ISSUE, query: $openPrQuery, first: 0) {
+        openPrs: search(type: ISSUE, query: $openPrQuery, first: 1) {
           issueCount
         }
-        mergedPrs: search(type: ISSUE, query: $mergedPrQuery, first: 0) {
+        mergedPrs: search(type: ISSUE, query: $mergedPrQuery, first: 1) {
           issueCount
         }
-        closedUnmergedPrs: search(type: ISSUE, query: $closedUnmergedPrQuery, first: 0) {
+        closedUnmergedPrs: search(type: ISSUE, query: $closedUnmergedPrQuery, first: 1) {
           issueCount
         }
-        openIssues: search(type: ISSUE, query: $openIssueQuery, first: 0) {
+        openIssues: search(type: ISSUE, query: $openIssueQuery, first: 1) {
           issueCount
         }
-        closedIssues: search(type: ISSUE, query: $closedIssueQuery, first: 0) {
+        closedIssues: search(type: ISSUE, query: $closedIssueQuery, first: 1) {
           issueCount
         }
       }
