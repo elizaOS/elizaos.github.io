@@ -19,7 +19,7 @@ export function UntrackedRepositoryList({ repositories }: Props) {
     return null;
   }
 
-  // Group by organization
+  // Group by organization and sort within each org by recency
   const byOrg = repositories.reduce(
     (acc, repo) => {
       if (!acc[repo.owner]) {
@@ -31,10 +31,19 @@ export function UntrackedRepositoryList({ repositories }: Props) {
     {} as Record<string, UntrackedRepository[]>,
   );
 
+  // Sort repos within each org by most recently pushed first
+  Object.keys(byOrg).forEach((org) => {
+    byOrg[org].sort((a, b) => {
+      const dateA = a.lastPushedAt ? new Date(a.lastPushedAt).getTime() : 0;
+      const dateB = b.lastPushedAt ? new Date(b.lastPushedAt).getTime() : 0;
+      return dateB - dateA; // Most recent first
+    });
+  });
+
   const orgCount = Object.keys(byOrg).length;
 
   return (
-    <Accordion type="single" collapsible className="w-full">
+    <Accordion type="single" collapsible className="w-full" defaultValue="">
       <AccordionItem value="untracked" className="border-none">
         <AccordionTrigger className="py-0 hover:no-underline">
           <div className="flex items-center gap-2">
