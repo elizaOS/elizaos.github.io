@@ -1,6 +1,6 @@
 import { getRepositories, getUntrackedRepositories } from "../queries";
 import { RepositoryCard } from "./RepositoryCard";
-import type { Repository, UntrackedRepository } from "../queries";
+import type { Repository, UntrackedRepository } from "@/lib/data/types";
 
 type RepoItem =
   | { type: "tracked"; repo: Repository }

@@ -172,3 +172,55 @@ export interface DateRange {
   startDate?: string;
   endDate?: string;
 }
+
+// Repository Types
+export const RepositorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  owner: z.string(),
+  description: z.string().optional(),
+  stars: z.number(),
+  openIssues: z.number(),
+  openPullRequests: z.number(),
+  mergedPullRequests: z.number(),
+  totalContributors: z.number(),
+  topContributors: z.array(
+    z.object({
+      username: z.string(),
+      avatarUrl: z.string().nullable(),
+    }),
+  ),
+  weeklyCommitCounts: z.array(
+    z.object({
+      week: z.string(),
+      commitCount: z.number(),
+    }),
+  ),
+  lastUpdated: z.string(),
+  totalCommits: z.number(),
+  totalPullRequests: z.number(),
+  totalIssues: z.number(),
+});
+
+export const UntrackedRepositorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  owner: z.string(),
+  description: z.string().optional(),
+  stars: z.number(),
+  forks: z.number(),
+  watchers: z.number(),
+  isArchived: z.boolean(),
+  primaryLanguage: z.string().optional(),
+  lastPushedAt: z.string().optional(),
+  openPrCount: z.number(),
+  mergedPrCount: z.number(),
+  closedUnmergedPrCount: z.number(),
+  openIssueCount: z.number(),
+  closedIssueCount: z.number(),
+  activityScore: z.number(),
+  lastFetchedAt: z.string(),
+});
+
+export type Repository = z.infer<typeof RepositorySchema>;
+export type UntrackedRepository = z.infer<typeof UntrackedRepositorySchema>;

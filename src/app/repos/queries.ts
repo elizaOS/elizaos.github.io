@@ -12,30 +12,7 @@ import { and, eq, gte, sql, desc, inArray } from "drizzle-orm";
 import { UTCDate } from "@date-fns/utc";
 import { subDays } from "date-fns";
 import { toDateString } from "@/lib/date-utils";
-
-export type Repository = {
-  id: string;
-  name: string;
-  owner: string;
-  description?: string;
-  stars: number;
-  openIssues: number;
-  openPullRequests: number;
-  mergedPullRequests: number;
-  totalContributors: number;
-  topContributors: {
-    username: string;
-    avatarUrl: string | null;
-  }[];
-  weeklyCommitCounts: {
-    week: string;
-    commitCount: number;
-  }[];
-  lastUpdated: string;
-  totalCommits: number;
-  totalPullRequests: number;
-  totalIssues: number;
-};
+import type { Repository, UntrackedRepository } from "@/lib/data/types";
 
 export async function getRepositories(): Promise<Repository[]> {
   const ninetyDaysAgo = toDateString(subDays(new UTCDate(), 90));
@@ -208,27 +185,6 @@ export async function getRepositories(): Promise<Repository[]> {
       new Date(b.lastUpdated).getTime() - new Date(a.lastUpdated).getTime(),
   );
 }
-
-export type UntrackedRepository = {
-  id: string;
-  name: string;
-  owner: string;
-  description?: string;
-  stars: number;
-  forks: number;
-  watchers: number;
-  isArchived: boolean;
-  primaryLanguage?: string;
-  lastPushedAt?: string;
-  openPrCount: number;
-  mergedPrCount: number;
-  closedUnmergedPrCount: number;
-  openIssueCount: number;
-  closedIssueCount: number;
-  activityScore: number;
-  lastFetchedAt: string;
-};
-
 export async function getUntrackedRepositories(): Promise<
   UntrackedRepository[]
 > {
