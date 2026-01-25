@@ -1127,4 +1127,234 @@ export class GitHubClient {
       return null;
     }
   }
+
+  /**
+   * Fetch all repositories in an organization
+   */
+  async fetchOrganizationRepos(org: string): Promise<OrgRepository[]> {
+    const query = `
+      query($org: String!, $cursor: String) {
+        rateLimit {
+          cost
+          remaining
+          resetAt
+        }
+        organization(login: $org) {
+          repositories(
+            first: 100
+            after: $cursor
+            privacy: PUBLIC
+            orderBy: { field: UPDATED_AT, direction: DESC }
+          ) {
+            totalCount
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              name
+              description
+              stargazerCount
+              forkCount
+              watchers { totalCount }
+              isArchived
+              updatedAt
+              pushedAt
+              primaryLanguage { name }
+            }
+          }
+        }
+      }
+    `;
+
+    type OrgRepoNode = {
+      name: string;
+      description: string | null;
+      stargazerCount: number;
+      forkCount: number;
+      watchers: { totalCount: number };
+      isArchived: boolean;
+      updatedAt: string; // For delta detection
+      pushedAt: string | null;
+      primaryLanguage: { name: string } | null;
+    };
+
+    interface OrgReposResponse {
+      data: {
+        rateLimit: {
+          cost: number;
+          remaining: number;
+          resetAt: string;
+        };
+        organization: {
+          repositories: {
+            totalCount: number;
+            nodes: OrgRepoNode[];
+            pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          };
+        };
+      };
+    }
+
+    let allRepos: OrgRepository[] = [];
+    let hasNextPage = true;
+    let cursor: string | null = null;
+
+    while (hasNextPage) {
+      const response: OrgReposResponse =
+        await this.executeGraphQL<OrgReposResponse>(query, {
+          org,
+          cursor,
+        });
+
+      // Log rate limit info
+      const rateLimit = response.data.rateLimit;
+      if (rateLimit) {
+        this.logger.debug("GraphQL rate limit", {
+          cost: rateLimit.cost,
+          remaining: rateLimit.remaining,
+          resetAt: rateLimit.resetAt,
+        });
+      }
+
+      const { nodes, pageInfo, totalCount } =
+        response.data.organization.repositories;
+
+      const repos = nodes.map((node) => ({
+        owner: org,
+        name: node.name,
+        description: node.description,
+        stars: node.stargazerCount,
+        forks: node.forkCount,
+        watchers: node.watchers.totalCount,
+        isArchived: node.isArchived,
+        updatedAt: node.updatedAt,
+        pushedAt: node.pushedAt,
+        primaryLanguage: node.primaryLanguage?.name ?? null,
+      }));
+
+      allRepos = allRepos.concat(repos);
+      hasNextPage = pageInfo.hasNextPage;
+      cursor = pageInfo.endCursor;
+
+      this.logger.info(
+        `Fetched ${repos.length} repos from ${org} (total: ${allRepos.length}/${totalCount})`,
+      );
+    }
+
+    return allRepos;
+  }
+
+  /**
+   * Fetch recent activity counts for a repository using search queries with tri-split PRs
+   */
+  async fetchRecentActivityCounts(
+    owner: string,
+    name: string,
+    daysBack: number = 30,
+  ): Promise<{
+    openPrCount: number;
+    mergedPrCount: number;
+    closedUnmergedPrCount: number;
+    openIssueCount: number;
+    closedIssueCount: number;
+  }> {
+    const since = new Date();
+    since.setDate(since.getDate() - daysBack);
+    const sinceStr = since.toISOString().split("T")[0];
+
+    const query = `
+      query(
+        $openPrQuery: String!
+        $mergedPrQuery: String!
+        $closedUnmergedPrQuery: String!
+        $openIssueQuery: String!
+        $closedIssueQuery: String!
+      ) {
+        rateLimit {
+          cost
+          remaining
+          resetAt
+        }
+        openPrs: search(type: ISSUE, query: $openPrQuery, first: 1) {
+          issueCount
+        }
+        mergedPrs: search(type: ISSUE, query: $mergedPrQuery, first: 1) {
+          issueCount
+        }
+        closedUnmergedPrs: search(type: ISSUE, query: $closedUnmergedPrQuery, first: 1) {
+          issueCount
+        }
+        openIssues: search(type: ISSUE, query: $openIssueQuery, first: 1) {
+          issueCount
+        }
+        closedIssues: search(type: ISSUE, query: $closedIssueQuery, first: 1) {
+          issueCount
+        }
+      }
+    `;
+
+    type ActivityResponse = {
+      data: {
+        rateLimit: {
+          cost: number;
+          remaining: number;
+          resetAt: string;
+        };
+        openPrs: { issueCount: number };
+        mergedPrs: { issueCount: number };
+        closedUnmergedPrs: { issueCount: number };
+        openIssues: { issueCount: number };
+        closedIssues: { issueCount: number };
+      };
+    };
+
+    try {
+      const result = await this.executeGraphQL<ActivityResponse>(query, {
+        openPrQuery: `repo:${owner}/${name} is:pr is:open updated:>=${sinceStr}`,
+        mergedPrQuery: `repo:${owner}/${name} is:pr is:merged updated:>=${sinceStr}`,
+        closedUnmergedPrQuery: `repo:${owner}/${name} is:pr is:closed -is:merged updated:>=${sinceStr}`,
+        openIssueQuery: `repo:${owner}/${name} is:issue is:open updated:>=${sinceStr}`,
+        closedIssueQuery: `repo:${owner}/${name} is:issue is:closed updated:>=${sinceStr}`,
+      });
+
+      // Log rate limit info
+      const rateLimit = result.data.rateLimit;
+      if (rateLimit) {
+        this.logger.debug("GraphQL activity query cost", {
+          cost: rateLimit.cost,
+          remaining: rateLimit.remaining,
+        });
+      }
+
+      return {
+        openPrCount: result.data.openPrs.issueCount,
+        mergedPrCount: result.data.mergedPrs.issueCount,
+        closedUnmergedPrCount: result.data.closedUnmergedPrs.issueCount,
+        openIssueCount: result.data.openIssues.issueCount,
+        closedIssueCount: result.data.closedIssues.issueCount,
+      };
+    } catch (error) {
+      this.logger.warn(`Failed to fetch activity counts for ${owner}/${name}`, {
+        error,
+      });
+      return {
+        openPrCount: 0,
+        mergedPrCount: 0,
+        closedUnmergedPrCount: 0,
+        openIssueCount: 0,
+        closedIssueCount: 0,
+      };
+    }
+  }
+}
+
+export interface OrgRepository {
+  owner: string;
+  name: string;
+  description: string | null;
+  stars: number;
+  forks: number;
+  watchers: number;
+  isArchived: boolean;
+  updatedAt: string; // For delta detection
+  pushedAt: string | null;
+  primaryLanguage: string | null;
 }

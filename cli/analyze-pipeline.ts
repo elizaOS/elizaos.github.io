@@ -42,6 +42,7 @@ import { runPipeline } from "@/lib/pipelines/runPipeline";
 import { createLogger, LogLevel } from "@/lib/logger";
 import { createSummarizerContext } from "@/lib/pipelines/summarize/context";
 import { ingestPipeline, createIngestionContext } from "@/lib/pipelines/ingest";
+import { discoverUntrackedRepos } from "@/lib/pipelines/discoverUntrackedRepos";
 import { storeOverallSummary } from "@/lib/pipelines/summarize/mutations";
 import { overallSummaries } from "@/lib/data/schema";
 import { db } from "@/lib/data/db";
@@ -126,6 +127,85 @@ program
       rootLogger.info("✅ Ingestion completed successfully!");
     } catch (error: unknown) {
       console.error(chalk.red("Error fetching data:"), error);
+      process.exit(1);
+    }
+  });
+
+// Ingest untracked repos from organizations
+program
+  .command("ingest-untracked")
+  .description("Discover and ingest untracked repositories from organizations")
+  .option(
+    "-c, --config <path>",
+    "Path to pipeline config file",
+    DEFAULT_CONFIG_PATH,
+  )
+  .option("-v, --verbose", "Enable verbose logging", false)
+  .action(async (options) => {
+    // Validate required environment variables for ingestion
+    validateEnvVars(["GITHUB_TOKEN"]);
+
+    try {
+      // Dynamically import the config
+      const configPath = join(import.meta.dir, options.config);
+      const configFile = await import(configPath);
+      const pipelineConfig = PipelineConfigSchema.parse(configFile.default);
+
+      // Check if untracked repos feature is enabled
+      if (!pipelineConfig.untrackedRepos?.enabled) {
+        console.error(
+          chalk.yellow(
+            "Untracked repos feature is not enabled in config. Add PIPELINE_UNTRACKED_REPOS with enabled: true.",
+          ),
+        );
+        process.exit(1);
+      }
+
+      // Create a root logger with appropriate log level
+      const logLevel: LogLevel = options.verbose ? "debug" : "info";
+      const rootLogger = createLogger({
+        minLevel: logLevel,
+        context: {
+          command: "ingest-untracked",
+          config: options.config,
+        },
+      });
+
+      console.log(chalk.blue.bold("\n🔍 Discovering untracked repos...\n"));
+      console.log(
+        chalk.gray(
+          `Organizations: ${pipelineConfig.untrackedRepos.organizations.join(", ")}\n`,
+        ),
+      );
+
+      // Discover untracked repositories
+      const result = await discoverUntrackedRepos(
+        pipelineConfig,
+        rootLogger,
+        process.env.GITHUB_TOKEN!,
+      );
+
+      console.log(chalk.green.bold("\n✓ Discovery complete!\n"));
+      console.log(
+        chalk.gray(`Total untracked repos: ${result.totalUntracked}`),
+      );
+      console.log(chalk.gray(`  - Updated: ${result.totalUpdated}`));
+      console.log(chalk.gray(`  - Unchanged: ${result.totalSkipped}\n`));
+
+      console.log(chalk.gray("By organization:"));
+      for (const org of result.organizations) {
+        if (org.error) {
+          console.log(chalk.red(`  - ${org.org}: Error - ${org.error}`));
+        } else {
+          console.log(
+            chalk.gray(
+              `  - ${org.org}: ${org.total} total (${org.updated} updated, ${org.skipped} unchanged)`,
+            ),
+          );
+        }
+      }
+    } catch (error: unknown) {
+      console.error(chalk.red("Error ingesting untracked repos:"), error);
       process.exit(1);
     }
   });
@@ -702,9 +782,8 @@ program
       );
 
       // Dynamically import the export function
-      const { exportAllLeaderboardAPIs } = await import(
-        "@/lib/pipelines/export/exportLeaderboardAPI"
-      );
+      const { exportAllLeaderboardAPIs } =
+        await import("@/lib/pipelines/export/exportLeaderboardAPI");
 
       // Parse limit option (0 means no limit)
       const limit = parseInt(options.limit, 10);
@@ -753,12 +832,10 @@ program
   )
   .action(async (options) => {
     try {
-      const { writeSummaryToAPI, getAPISummaryPath } = await import(
-        "@/lib/fsHelpers"
-      );
-      const { repoSummaries, userSummaries } = await import(
-        "@/lib/data/schema"
-      );
+      const { writeSummaryToAPI, getAPISummaryPath } =
+        await import("@/lib/fsHelpers");
+      const { repoSummaries, userSummaries } =
+        await import("@/lib/data/schema");
 
       const logLevel: LogLevel = options.verbose ? "debug" : "info";
       const rootLogger = createLogger({

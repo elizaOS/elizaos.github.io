@@ -6,35 +6,13 @@ import {
   userDailyScores,
   rawIssues,
   rawCommits,
+  untrackedRepositories,
 } from "@/lib/data/schema";
 import { and, eq, gte, sql, desc, inArray } from "drizzle-orm";
 import { UTCDate } from "@date-fns/utc";
 import { subDays } from "date-fns";
 import { toDateString } from "@/lib/date-utils";
-
-export type Repository = {
-  id: string;
-  name: string;
-  owner: string;
-  description?: string;
-  stars: number;
-  openIssues: number;
-  openPullRequests: number;
-  mergedPullRequests: number;
-  totalContributors: number;
-  topContributors: {
-    username: string;
-    avatarUrl: string | null;
-  }[];
-  weeklyCommitCounts: {
-    week: string;
-    commitCount: number;
-  }[];
-  lastUpdated: string;
-  totalCommits: number;
-  totalPullRequests: number;
-  totalIssues: number;
-};
+import type { Repository, UntrackedRepository } from "@/lib/data/types";
 
 export async function getRepositories(): Promise<Repository[]> {
   const ninetyDaysAgo = toDateString(subDays(new UTCDate(), 90));
@@ -201,7 +179,55 @@ export async function getRepositories(): Promise<Repository[]> {
     }),
   );
 
+  // Sort by most recently updated first (active repos on top)
   return reposWithData.sort(
-    (a, b) => b.totalContributors - a.totalContributors,
+    (a, b) =>
+      new Date(b.lastUpdated).getTime() - new Date(a.lastUpdated).getTime(),
   );
+}
+export async function getUntrackedRepositories(): Promise<
+  UntrackedRepository[]
+> {
+  const allUntracked = await db
+    .select()
+    .from(untrackedRepositories)
+    .orderBy(desc(untrackedRepositories.activityScore));
+
+  return allUntracked.map((repo) => ({
+    id: repo.repoId,
+    name: repo.name,
+    owner: repo.owner,
+    description: repo.description ?? undefined,
+    stars: repo.stars ?? 0,
+    forks: repo.forks ?? 0,
+    watchers: repo.watchers ?? 0,
+    isArchived: repo.isArchived ?? false,
+    primaryLanguage: repo.primaryLanguage ?? undefined,
+    lastPushedAt: repo.lastPushedAt ?? undefined,
+    openPrCount: repo.openPrCount ?? 0,
+    mergedPrCount: repo.mergedPrCount ?? 0,
+    closedUnmergedPrCount: repo.closedUnmergedPrCount ?? 0,
+    openIssueCount: repo.openIssueCount ?? 0,
+    closedIssueCount: repo.closedIssueCount ?? 0,
+    activityScore: repo.activityScore ?? 0,
+    lastFetchedAt: repo.lastFetchedAt,
+  }));
+}
+
+export async function getRepositoryCounts(): Promise<{
+  tracked: number;
+  untracked: number;
+}> {
+  const trackedCount = await db
+    .select({ count: sql<number>`count(*)`.as("count") })
+    .from(repositories);
+
+  const untrackedCount = await db
+    .select({ count: sql<number>`count(*)`.as("count") })
+    .from(untrackedRepositories);
+
+  return {
+    tracked: trackedCount[0]?.count || 0,
+    untracked: untrackedCount[0]?.count || 0,
+  };
 }

@@ -10,7 +10,7 @@ export default async function ReposPage() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Repositories</h1>
         <p className="mt-1 text-muted-foreground">
-          An overview of repositories being tracked.
+          An overview of all repositories across tracked organizations.
         </p>
       </div>
       <Suspense fallback={<RepositoryListFallback />}>

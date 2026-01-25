@@ -855,3 +855,36 @@ export const userBadgesRelations = relations(userBadges, ({ one }) => ({
     references: [users.username],
   }),
 }));
+
+// Untracked repositories - repos in org not being fully tracked
+export const untrackedRepositories = sqliteTable(
+  "untracked_repositories",
+  {
+    repoId: text("repo_id").primaryKey(), // owner/name
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    stars: integer("stars").default(0),
+    forks: integer("forks").default(0),
+    watchers: integer("watchers").default(0),
+    isArchived: integer("is_archived", { mode: "boolean" }).default(false),
+    primaryLanguage: text("primary_language"),
+    lastUpdatedAt: text("last_updated_at"), // GitHub updatedAt for delta detection
+    lastPushedAt: text("last_pushed_at"),
+    // PR tri-split: open/merged/closed-unmerged
+    openPrCount: integer("open_pr_count").default(0),
+    mergedPrCount: integer("merged_pr_count").default(0),
+    closedUnmergedPrCount: integer("closed_unmerged_pr_count").default(0),
+    // Issue split: open/closed
+    openIssueCount: integer("open_issue_count").default(0),
+    closedIssueCount: integer("closed_issue_count").default(0),
+    activityScore: real("activity_score").default(0),
+    lastFetchedAt: text("last_fetched_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_untracked_repos_owner").on(table.owner),
+    index("idx_untracked_repos_activity_score").on(table.activityScore),
+  ],
+);
