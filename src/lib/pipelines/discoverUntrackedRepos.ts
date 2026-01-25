@@ -76,11 +76,12 @@ export function calculateActivityScore(
   // ONLY apply if there's actual activity (prevents metadata churn from floating to top)
   let recencyBonus = 0;
   if (totalActivity > 0 && lastUpdatedAt) {
-    const daysSinceUpdate = differenceInDays(
-      new UTCDate(),
-      new UTCDate(lastUpdatedAt),
-    );
-    recencyBonus = Math.max(0, 14 - daysSinceUpdate);
+    const updatedDate = new UTCDate(lastUpdatedAt);
+    // Validate date is not Invalid Date (prevents NaN propagation)
+    if (!isNaN(updatedDate.getTime())) {
+      const daysSinceUpdate = differenceInDays(new UTCDate(), updatedDate);
+      recencyBonus = Math.max(0, 14 - daysSinceUpdate);
+    }
   }
 
   // Archive penalty
