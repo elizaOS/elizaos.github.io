@@ -180,11 +180,11 @@ export function calculateDateRange(options: DateRangeOptions): DateRange {
   if (after) {
     startDate = new UTCDate(after);
   } else if (numDays) {
-    startDate = subDays(endDate, numDays);
+    startDate = new UTCDate(subDays(endDate, numDays));
   } else {
     startDate = defaultStartDate
       ? new UTCDate(defaultStartDate)
-      : subDays(endDate, 7);
+      : new UTCDate(subDays(endDate, 7));
   }
 
   return {
