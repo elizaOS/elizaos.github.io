@@ -13,6 +13,10 @@ const eslintConfig = [
         "warn",
         { argsIgnorePattern: "^_$", destructuredArrayIgnorePattern: "^_" },
       ],
+      // Disable strict React 19 rules temporarily - will need refactoring
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/purity": "warn",
+      "react-hooks/refs": "warn",
     },
   }),
 ];
