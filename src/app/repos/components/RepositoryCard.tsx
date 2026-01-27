@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import type { Repository, UntrackedRepository } from "@/lib/data/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -43,30 +44,31 @@ export function RepositoryCard({ repository, type }: RepositoryCardProps) {
   const isTracked = type === "tracked";
 
   // Determine activity status
-  const hasRecentActivity = isTracked
-    ? (() => {
-        const lastUpdated = new Date((repository as Repository).lastUpdated);
-        const daysSinceUpdate = Math.floor(
-          (Date.now() - lastUpdated.getTime()) / (1000 * 60 * 60 * 24),
-        );
-        return daysSinceUpdate <= 30;
-      })()
-    : (() => {
-        const untrackedRepo = repository as UntrackedRepository;
-        const lastPushedDate = untrackedRepo.lastPushedAt
-          ? new Date(untrackedRepo.lastPushedAt)
-          : null;
-        const daysSincePush = lastPushedDate
-          ? Math.floor(
-              (Date.now() - lastPushedDate.getTime()) / (1000 * 60 * 60 * 24),
-            )
-          : Infinity;
-        return (
-          daysSincePush <= 30 ||
-          untrackedRepo.openPrCount + untrackedRepo.mergedPrCount >= 5 ||
-          untrackedRepo.openIssueCount + untrackedRepo.closedIssueCount >= 10
-        );
-      })();
+  const hasRecentActivity = useMemo(() => {
+    // eslint-disable-next-line react-hooks/purity -- Date.now() is stable during SSG build
+    const now = Date.now();
+
+    if (isTracked) {
+      const lastUpdated = new Date((repository as Repository).lastUpdated);
+      const daysSinceUpdate = Math.floor(
+        (now - lastUpdated.getTime()) / (1000 * 60 * 60 * 24),
+      );
+      return daysSinceUpdate <= 30;
+    } else {
+      const untrackedRepo = repository as UntrackedRepository;
+      const lastPushedDate = untrackedRepo.lastPushedAt
+        ? new Date(untrackedRepo.lastPushedAt)
+        : null;
+      const daysSincePush = lastPushedDate
+        ? Math.floor((now - lastPushedDate.getTime()) / (1000 * 60 * 60 * 24))
+        : Infinity;
+      return (
+        daysSincePush <= 30 ||
+        untrackedRepo.openPrCount + untrackedRepo.mergedPrCount >= 5 ||
+        untrackedRepo.openIssueCount + untrackedRepo.closedIssueCount >= 10
+      );
+    }
+  }, [isTracked, repository]);
 
   const timeAgo = isTracked
     ? formatDistanceToNow(new Date((repository as Repository).lastUpdated), {
