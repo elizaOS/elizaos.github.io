@@ -194,8 +194,13 @@ export function RepositoryCard({ repository, type }: RepositoryCardProps) {
                       content={
                         <ChartTooltipContent
                           labelFormatter={(value, payload) => {
-                            const firstPayload = payload?.[0]?.payload;
-                            if (firstPayload) {
+                            const firstPayload = payload?.[0]?.payload as
+                              | Record<string, unknown>
+                              | undefined;
+                            if (
+                              firstPayload &&
+                              typeof firstPayload.week === "string"
+                            ) {
                               const [year, week] = firstPayload.week.split("-");
                               const date = parseISO(
                                 `${year}-W${week.padStart(2, "0")}`,
@@ -209,7 +214,7 @@ export function RepositoryCard({ repository, type }: RepositoryCardProps) {
                                 },
                               )}`;
                             }
-                            return value;
+                            return value as React.ReactNode;
                           }}
                         />
                       }
