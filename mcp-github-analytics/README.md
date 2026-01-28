@@ -1,14 +1,11 @@
 # MCP GitHub Analytics
 
-MCP server for GitHub contributor analytics. Queries SQLite database directly for full access to PRs, issues, contributors, and AI summaries.
+MCP server for GitHub contributor analytics. Queries SQLite database directly for PRs, issues, contributors, and AI summaries.
 
 ## Setup
 
 ```bash
-# Set path to your database
 export MCP_DB_PATH=/path/to/db.sqlite
-
-# Run
 npx mcp-github-analytics
 ```
 
@@ -38,6 +35,39 @@ npx mcp-github-analytics
 "Summarize what happened this week"
 ```
 
+## Data Coverage
+
+### Included
+
+| Data                     | Tools                                                       |
+| ------------------------ | ----------------------------------------------------------- |
+| **Contributors**         | `list_contributors`, `get_contributor`, `find_contributors` |
+| **Scores & Rankings**    | `get_contributor`, `list_contributors`                      |
+| **Focus Areas**          | `get_contributor`, `find_contributors`                      |
+| **Achievements/Badges**  | `get_contributor`                                           |
+| **Wallet Addresses**     | `get_contributor`                                           |
+| **Tracked Repositories** | `list_repos`                                                |
+| **Pull Requests**        | `list_prs`, `get_activity`                                  |
+| **Issues**               | `list_issues`, `get_activity`                               |
+| **AI Summaries**         | `get_summary`                                               |
+| **Project Stats**        | `get_stats`                                                 |
+
+### Not Yet Exposed
+
+| Data            | In Database                        | Notes                         |
+| --------------- | ---------------------------------- | ----------------------------- |
+| Untracked repos | `untracked_repositories`           | Repos in org not being scored |
+| Commits         | `raw_commits`                      | Commit messages, SHAs         |
+| File changes    | `raw_pr_files`, `raw_commit_files` | Which files changed           |
+| PR comments     | `pr_comments`                      | Discussion on PRs             |
+| Issue comments  | `issue_comments`                   | Discussion on issues          |
+| Reviews         | `pr_reviews`                       | Code review details           |
+| Reactions       | `*_reactions` tables               | Emoji reactions               |
+| Labels          | `labels`, `*_labels`               | Issue/PR labels               |
+| PR→Issue links  | `pr_closing_issue_references`      | PRs that close issues         |
+
+Want any of these exposed? Open an issue or PR.
+
 ## Config
 
 **Claude Desktop** (`~/.config/claude-desktop/config.json`):
@@ -58,24 +88,26 @@ npx mcp-github-analytics
 
 ## Database
 
-This server requires the SQLite database from the GitHub Analytics platform. Options:
+Requires the SQLite database from GitHub Analytics platform:
 
-1. **Local development**: Run `bun run data:sync` to download production data
-2. **From dump**: Download from the `_data` branch and import ndjson files
-3. **Fresh**: Run the pipeline to populate: `bun run pipeline ingest && bun run pipeline process`
+1. **Local dev**: `bun run data:sync` to download production data
+2. **From dump**: Download from `_data` branch
+3. **Fresh**: `bun run pipeline ingest && bun run pipeline process`
 
 ## vs GitHub MCP
 
-| Query                   | GitHub MCP       | This MCP              |
-| ----------------------- | ---------------- | --------------------- |
-| Real-time PR/issue data | ✅ All of GitHub | ✅ Tracked repos only |
-| Create/edit PRs         | ✅               | ❌ Read-only          |
-| Contributor rankings    | ❌               | ✅                    |
-| Focus areas/expertise   | ❌               | ✅                    |
-| AI activity summaries   | ❌               | ✅                    |
-| Tier/achievement system | ❌               | ✅                    |
+| Capability              | GitHub MCP | This MCP              |
+| ----------------------- | ---------- | --------------------- |
+| All of GitHub           | ✅         | ❌ Tracked repos only |
+| Create/edit PRs         | ✅         | ❌ Read-only          |
+| Real-time data          | ✅         | ⚠️ Updated daily      |
+| Contributor rankings    | ❌         | ✅                    |
+| Focus areas/expertise   | ❌         | ✅                    |
+| AI activity summaries   | ❌         | ✅                    |
+| Tier/achievement system | ❌         | ✅                    |
+| Wallet addresses        | ❌         | ✅                    |
 
-Use both: GitHub MCP for real-time operations, this MCP for analytics and finding experts.
+**Use both**: GitHub MCP for real-time operations, this MCP for analytics.
 
 ## License
 
