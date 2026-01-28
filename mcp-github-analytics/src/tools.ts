@@ -116,7 +116,7 @@ export function handleGetStats() {
     "SELECT COUNT(*) as count FROM raw_issues",
   );
 
-  // Tier distribution
+  // Tier distribution (exclude bots to match contributor count)
   const tiers = query<{ tier: string; count: number }>(`
     SELECT
       CASE
@@ -129,10 +129,11 @@ export function handleGetStats() {
       END as tier,
       COUNT(*) as count
     FROM (
-      SELECT username, SUM(score) as score
-      FROM user_daily_scores
-      WHERE category = 'day'
-      GROUP BY username
+      SELECT uds.username, SUM(uds.score) as score
+      FROM user_daily_scores uds
+      JOIN users u ON u.username = uds.username
+      WHERE uds.category = 'day' AND u.is_bot = 0
+      GROUP BY uds.username
     )
     GROUP BY tier
   `);

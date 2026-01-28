@@ -46,7 +46,7 @@ Tools for validating contribution quality and detecting gaming - essential for A
 
 ### Core Analytics
 
-```
+```text
 "What are the project stats?"
 "List the top 10 contributors this week"
 "Get wtfsayo's profile"
@@ -58,7 +58,7 @@ Tools for validating contribution quality and detecting gaming - essential for A
 
 ### Quality Validation
 
-```
+```text
 "Show @alice's reviews - what's her approval rate?"
 "Find reviewers who always approve without comments"
 "List comments shorter than 20 characters"
@@ -69,7 +69,7 @@ Tools for validating contribution quality and detecting gaming - essential for A
 
 ### Coverage & Discovery
 
-```
+```text
 "What repos in the org aren't being tracked?"
 "Show untracked repos with recent activity"
 "Find active TypeScript repos we're not scoring"
