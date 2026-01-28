@@ -7,10 +7,6 @@
  *
  * Configuration:
  *   MCP_API_BASE_URL - Base URL for the static API (default: https://elizaos.github.io)
- *
- * Usage:
- *   npx mcp-github-analytics
- *   MCP_API_BASE_URL=https://example.com npx mcp-github-analytics
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -24,69 +20,71 @@ import {
 
 import { APIClient } from "./api-client.js";
 import {
-  GetLeaderboardSchema,
-  GetProfileSchema,
+  GetStatsSchema,
+  ListReposSchema,
+  ListContributorsSchema,
+  GetContributorSchema,
   GetSummarySchema,
-  SearchSchema,
-  handleGetLeaderboard,
-  handleGetProfile,
+  FindContributorsSchema,
+  handleGetStats,
+  handleListRepos,
+  handleListContributors,
+  handleGetContributor,
   handleGetSummary,
-  handleSearch,
+  handleFindContributors,
   toolAnnotations,
 } from "./tools.js";
 
-// Initialize API client with configurable base URL
 const apiClient = new APIClient();
 
-// Create MCP server
 const server = new Server(
-  {
-    name: "mcp-github-analytics",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
+  { name: "mcp-github-analytics", version: "1.0.0" },
+  { capabilities: { tools: {} } },
 );
 
-// Tool definitions - optimized for developer experience
 const TOOLS = [
   {
-    name: "get_leaderboard",
+    name: "get_stats",
     description:
-      "Get contributor rankings. Returns ranked list with scores, tiers, classes, and focus areas.",
+      "Get project statistics: total contributors, activity counts, tier/class distribution.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "list_repos",
+    description: "List tracked repositories.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "list_contributors",
+    description:
+      "List top contributors by period. Returns ranked list with tier, class, score, focus areas.",
     inputSchema: {
       type: "object" as const,
       properties: {
         period: {
           type: "string",
           enum: ["weekly", "monthly", "lifetime"],
-          description: "Time period: 'weekly', 'monthly', or 'lifetime'",
+          description: "Time period (default: lifetime)",
         },
         limit: {
           type: "number",
-          description: "Max entries (default: 20, max: 100)",
-          minimum: 1,
-          maximum: 100,
+          description: "Max entries (default: 20)",
         },
       },
-      required: ["period"],
+      required: [],
     },
     annotations: toolAnnotations,
   },
   {
-    name: "get_profile",
+    name: "get_contributor",
     description:
-      "Get a contributor's profile. Returns their character sheet: tier, class, scores, focus areas, achievements, and wallets.",
+      "Get a contributor's profile: tier, class, scores, focus areas, achievements, wallets.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        username: {
-          type: "string",
-          description: "GitHub username",
-        },
+        username: { type: "string", description: "GitHub username" },
       },
       required: ["username"],
     },
@@ -95,50 +93,41 @@ const TOOLS = [
   {
     name: "get_summary",
     description:
-      "Get AI-generated summary. Can summarize a contributor's activity, a repository's changes, or the entire project.",
+      "Get AI-generated summary for a contributor, repository, or the whole project.",
     inputSchema: {
       type: "object" as const,
       properties: {
         type: {
           type: "string",
           enum: ["contributor", "repo", "project"],
-          description:
-            "What to summarize: 'contributor' (a person), 'repo' (a repository), or 'project' (all repos)",
+          description: "'contributor', 'repo', or 'project'",
         },
         username: {
           type: "string",
-          description: "GitHub username (required for type='contributor')",
+          description: "GitHub username (for contributor)",
         },
-        owner: {
-          type: "string",
-          description: "Repo owner (required for type='repo')",
-        },
-        repo: {
-          type: "string",
-          description: "Repo name (required for type='repo')",
-        },
+        owner: { type: "string", description: "Repo owner (for repo)" },
+        repo: { type: "string", description: "Repo name (for repo)" },
         interval: {
           type: "string",
           enum: ["day", "week", "month", "lifetime"],
-          description:
-            "Time interval: 'day', 'week', 'month', or 'lifetime' (lifetime only for contributors)",
+          description: "Time interval (default: week)",
         },
       },
-      required: ["type", "interval"],
+      required: ["type"],
     },
     annotations: toolAnnotations,
   },
   {
-    name: "search",
+    name: "find_contributors",
     description:
-      "Search contributors by criteria: tier (beginner→legend), class (Builder/Hunter/Scribe/etc), focus area (typescript/core/ui/etc), min score, or max rank.",
+      "Search contributors by tier, class, focus area, score, or rank.",
     inputSchema: {
       type: "object" as const,
       properties: {
         tier: {
           type: "string",
           enum: ["beginner", "regular", "active", "veteran", "elite", "legend"],
-          description: "Filter by tier",
         },
         class: {
           type: "string",
@@ -151,31 +140,18 @@ const TOOLS = [
             "Machine",
             "Contributor",
           ],
-          description: "Filter by class",
         },
         focus: {
           type: "string",
-          description:
-            "Filter by focus area (e.g., 'typescript', 'core', 'ui')",
+          description: "Focus area (e.g., 'typescript', 'core', 'ui')",
         },
-        minScore: {
-          type: "number",
-          description: "Minimum score",
-        },
-        maxRank: {
-          type: "number",
-          description: "Maximum rank (e.g., 50 = top 50)",
-        },
-        limit: {
-          type: "number",
-          description: "Max results (default: 20, max: 100)",
-          minimum: 1,
-          maximum: 100,
-        },
+        minScore: { type: "number" },
+        maxRank: { type: "number" },
+        limit: { type: "number", description: "Max results (default: 20)" },
         period: {
           type: "string",
           enum: ["weekly", "monthly", "lifetime"],
-          description: "Which leaderboard to search (default: lifetime)",
+          description: "Which leaderboard (default: lifetime)",
         },
       },
       required: [],
@@ -184,12 +160,10 @@ const TOOLS = [
   },
 ];
 
-// Handle list tools request
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: TOOLS };
-});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: TOOLS,
+}));
 
-// Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
@@ -197,102 +171,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let result: unknown;
 
     switch (name) {
-      case "get_leaderboard": {
-        const parsed = GetLeaderboardSchema.parse(args);
-        result = await handleGetLeaderboard(apiClient, parsed);
+      case "get_stats":
+        GetStatsSchema.parse(args);
+        result = await handleGetStats(apiClient);
         break;
-      }
-      case "get_profile": {
-        const parsed = GetProfileSchema.parse(args);
-        result = await handleGetProfile(apiClient, parsed);
+      case "list_repos":
+        ListReposSchema.parse(args);
+        result = await handleListRepos(apiClient);
         break;
-      }
-      case "get_summary": {
-        const parsed = GetSummarySchema.parse(args);
-        result = await handleGetSummary(apiClient, parsed);
+      case "list_contributors":
+        result = await handleListContributors(
+          apiClient,
+          ListContributorsSchema.parse(args),
+        );
         break;
-      }
-      case "search": {
-        const parsed = SearchSchema.parse(args);
-        result = await handleSearch(apiClient, parsed);
+      case "get_contributor":
+        result = await handleGetContributor(
+          apiClient,
+          GetContributorSchema.parse(args),
+        );
         break;
-      }
+      case "get_summary":
+        result = await handleGetSummary(
+          apiClient,
+          GetSummarySchema.parse(args),
+        );
+        break;
+      case "find_contributors":
+        result = await handleFindContributors(
+          apiClient,
+          FindContributorsSchema.parse(args),
+        );
+        break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
 
     return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(result, null, 2),
-        },
-      ],
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
   } catch (error) {
-    // Handle fetch errors (API not found, network issues)
-    if (
-      error instanceof Error &&
-      error.message.includes("API request failed")
-    ) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // Handle validation errors (missing required fields, etc.)
-    if (
-      error instanceof Error &&
-      (error.name === "ZodError" || error.message.includes("required"))
-    ) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Invalid arguments: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // Re-throw MCP errors
-    if (error instanceof McpError) {
-      throw error;
-    }
-
-    // Handle other errors
     const message = error instanceof Error ? error.message : String(error);
     return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${message}`,
-        },
-      ],
+      content: [{ type: "text", text: `Error: ${message}` }],
       isError: true,
     };
   }
 });
 
-// Start server
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-
-  // Log to stderr to avoid interfering with STDIO transport
-  const baseUrl = apiClient.getBaseUrl();
   process.stderr.write(`MCP GitHub Analytics server started\n`);
-  process.stderr.write(`API Base URL: ${baseUrl}\n`);
+  process.stderr.write(`API: ${apiClient.getBaseUrl()}\n`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`Fatal error: ${error}\n`);
+main().catch((e) => {
+  process.stderr.write(`Fatal: ${e}\n`);
   process.exit(1);
 });
