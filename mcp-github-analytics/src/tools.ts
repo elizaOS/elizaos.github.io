@@ -60,6 +60,39 @@ export const GetActivitySchema = z.object({
   limit: z.number().int().positive().max(100).optional(),
 });
 
+// ============ Quality Validation Schemas ============
+
+export const ListReviewsSchema = z.object({
+  author: z.string().optional(),
+  prAuthor: z.string().optional(),
+  state: z
+    .enum(["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "all"])
+    .optional(),
+  limit: z.number().int().positive().max(100).optional(),
+});
+
+export const ListCommentsSchema = z.object({
+  author: z.string().optional(),
+  type: z.enum(["pr", "issue", "all"]).optional(),
+  minLength: z.number().int().optional(),
+  maxLength: z.number().int().optional(),
+  limit: z.number().int().positive().max(100).optional(),
+});
+
+export const GetFileChangesSchema = z.object({
+  author: z.string().optional(),
+  path: z.string().optional(),
+  extension: z.string().optional(),
+  limit: z.number().int().positive().max(100).optional(),
+});
+
+export const GetReactionsSchema = z.object({
+  username: z.string().optional(),
+  type: z.enum(["pr", "issue", "all"]).optional(),
+  content: z.string().optional(),
+  limit: z.number().int().positive().max(100).optional(),
+});
+
 // ============ Handlers ============
 
 export function handleGetStats() {
@@ -587,6 +620,473 @@ export function handleGetActivity(args: z.infer<typeof GetActivitySchema>) {
       repo: a.repo,
       date: a.created_at,
     })),
+  };
+}
+
+// ============ Quality Validation Handlers ============
+
+export function handleListReviews(args: z.infer<typeof ListReviewsSchema>) {
+  const limit = args.limit || 50;
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (args.author) {
+    conditions.push("r.author = ?");
+    params.push(args.author);
+  }
+  if (args.prAuthor) {
+    conditions.push("pr.author = ?");
+    params.push(args.prAuthor);
+  }
+  if (args.state && args.state !== "all") {
+    conditions.push("r.state = ?");
+    params.push(args.state);
+  }
+
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const reviews = query<{
+    id: string;
+    state: string;
+    body: string;
+    created_at: string;
+    author: string;
+    pr_number: number;
+    pr_title: string;
+    pr_author: string;
+    repository: string;
+  }>(
+    `SELECT
+      r.id, r.state, r.body, r.created_at, r.author,
+      pr.number as pr_number, pr.title as pr_title, pr.author as pr_author, pr.repository
+     FROM pr_reviews r
+     JOIN raw_pull_requests pr ON r.pr_id = pr.id
+     ${where}
+     ORDER BY r.created_at DESC
+     LIMIT ?`,
+    [...params, limit],
+  );
+
+  // Calculate quality metrics
+  const byAuthor: Record<
+    string,
+    {
+      approved: number;
+      changes: number;
+      commented: number;
+      totalBodyLength: number;
+    }
+  > = {};
+  for (const r of reviews) {
+    if (!r.author) continue;
+    if (!byAuthor[r.author]) {
+      byAuthor[r.author] = {
+        approved: 0,
+        changes: 0,
+        commented: 0,
+        totalBodyLength: 0,
+      };
+    }
+    if (r.state === "APPROVED") byAuthor[r.author].approved++;
+    if (r.state === "CHANGES_REQUESTED") byAuthor[r.author].changes++;
+    if (r.state === "COMMENTED") byAuthor[r.author].commented++;
+    byAuthor[r.author].totalBodyLength += (r.body || "").length;
+  }
+
+  return {
+    total: reviews.length,
+    reviews: reviews.map((r) => ({
+      state: r.state,
+      bodyLength: (r.body || "").length,
+      author: r.author,
+      prNumber: r.pr_number,
+      prTitle: r.pr_title,
+      prAuthor: r.pr_author,
+      repo: r.repository,
+      createdAt: r.created_at,
+    })),
+    qualityMetrics: Object.entries(byAuthor).map(([author, stats]) => ({
+      author,
+      approvalRate:
+        stats.approved / (stats.approved + stats.changes + stats.commented) ||
+        0,
+      changesRequestedRate:
+        stats.changes / (stats.approved + stats.changes + stats.commented) || 0,
+      avgBodyLength: Math.round(
+        stats.totalBodyLength /
+          (stats.approved + stats.changes + stats.commented) || 0,
+      ),
+      reviewCount: stats.approved + stats.changes + stats.commented,
+    })),
+  };
+}
+
+export function handleListComments(args: z.infer<typeof ListCommentsSchema>) {
+  const limit = args.limit || 50;
+  const type = args.type || "all";
+
+  const results: Array<{
+    id: string;
+    body: string;
+    author: string;
+    created_at: string;
+    type: string;
+    context_id: string;
+  }> = [];
+
+  // PR comments
+  if (type === "pr" || type === "all") {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (args.author) {
+      conditions.push("author = ?");
+      params.push(args.author);
+    }
+    if (args.minLength) {
+      conditions.push("LENGTH(body) >= ?");
+      params.push(args.minLength);
+    }
+    if (args.maxLength) {
+      conditions.push("LENGTH(body) <= ?");
+      params.push(args.maxLength);
+    }
+
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const prComments = query<{
+      id: string;
+      body: string;
+      author: string;
+      created_at: string;
+      pr_id: string;
+    }>(
+      `SELECT id, body, author, created_at, pr_id
+       FROM pr_comments
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [...params, limit],
+    );
+
+    results.push(
+      ...prComments.map((c) => ({ ...c, type: "pr", context_id: c.pr_id })),
+    );
+  }
+
+  // Issue comments
+  if (type === "issue" || type === "all") {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (args.author) {
+      conditions.push("author = ?");
+      params.push(args.author);
+    }
+    if (args.minLength) {
+      conditions.push("LENGTH(body) >= ?");
+      params.push(args.minLength);
+    }
+    if (args.maxLength) {
+      conditions.push("LENGTH(body) <= ?");
+      params.push(args.maxLength);
+    }
+
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const issueComments = query<{
+      id: string;
+      body: string;
+      author: string;
+      created_at: string;
+      issue_id: string;
+    }>(
+      `SELECT id, body, author, created_at, issue_id
+       FROM issue_comments
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [...params, limit],
+    );
+
+    results.push(
+      ...issueComments.map((c) => ({
+        ...c,
+        type: "issue",
+        context_id: c.issue_id,
+      })),
+    );
+  }
+
+  // Sort by date and limit
+  results.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const limited = results.slice(0, limit);
+
+  // Calculate quality metrics by author
+  const byAuthor: Record<
+    string,
+    { count: number; totalLength: number; bodies: string[] }
+  > = {};
+  for (const c of limited) {
+    if (!c.author) continue;
+    if (!byAuthor[c.author]) {
+      byAuthor[c.author] = { count: 0, totalLength: 0, bodies: [] };
+    }
+    byAuthor[c.author].count++;
+    byAuthor[c.author].totalLength += (c.body || "").length;
+    byAuthor[c.author].bodies.push(c.body || "");
+  }
+
+  // Detect duplicate comments (potential spam)
+  const detectDuplicates = (bodies: string[]) => {
+    const counts: Record<string, number> = {};
+    for (const b of bodies) {
+      const normalized = b.trim().toLowerCase();
+      if (normalized.length > 0) {
+        counts[normalized] = (counts[normalized] || 0) + 1;
+      }
+    }
+    return Object.values(counts).filter((c) => c > 1).length;
+  };
+
+  return {
+    total: limited.length,
+    comments: limited.map((c) => ({
+      type: c.type,
+      bodyLength: (c.body || "").length,
+      bodyPreview: (c.body || "").substring(0, 100),
+      author: c.author,
+      createdAt: c.created_at,
+    })),
+    qualityMetrics: Object.entries(byAuthor).map(([author, stats]) => ({
+      author,
+      commentCount: stats.count,
+      avgLength: Math.round(stats.totalLength / stats.count),
+      duplicateCount: detectDuplicates(stats.bodies),
+      shortComments: stats.bodies.filter((b) => b.length < 20).length,
+    })),
+  };
+}
+
+export function handleGetFileChanges(
+  args: z.infer<typeof GetFileChangesSchema>,
+) {
+  const limit = args.limit || 50;
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (args.author) {
+    conditions.push("pr.author = ?");
+    params.push(args.author);
+  }
+  if (args.path) {
+    conditions.push("f.path LIKE ?");
+    params.push(`%${args.path}%`);
+  }
+  if (args.extension) {
+    conditions.push("f.path LIKE ?");
+    params.push(`%.${args.extension}`);
+  }
+
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const files = query<{
+    path: string;
+    additions: number;
+    deletions: number;
+    change_type: string;
+    pr_number: number;
+    pr_title: string;
+    author: string;
+    repository: string;
+    created_at: string;
+  }>(
+    `SELECT
+      f.path, f.additions, f.deletions, f.changeType as change_type,
+      pr.number as pr_number, pr.title as pr_title, pr.author, pr.repository, pr.created_at
+     FROM raw_pr_files f
+     JOIN raw_pull_requests pr ON f.pr_id = pr.id
+     ${where}
+     ORDER BY pr.created_at DESC
+     LIMIT ?`,
+    [...params, limit],
+  );
+
+  // Aggregate by author and file type
+  const byAuthor: Record<
+    string,
+    {
+      files: Set<string>;
+      additions: number;
+      deletions: number;
+      extensions: Record<string, number>;
+    }
+  > = {};
+  for (const f of files) {
+    if (!f.author) continue;
+    if (!byAuthor[f.author]) {
+      byAuthor[f.author] = {
+        files: new Set(),
+        additions: 0,
+        deletions: 0,
+        extensions: {},
+      };
+    }
+    byAuthor[f.author].files.add(f.path);
+    byAuthor[f.author].additions += f.additions || 0;
+    byAuthor[f.author].deletions += f.deletions || 0;
+
+    const ext = f.path.split(".").pop() || "none";
+    byAuthor[f.author].extensions[ext] =
+      (byAuthor[f.author].extensions[ext] || 0) + 1;
+  }
+
+  // Identify file type distribution
+  const getTopExtensions = (exts: Record<string, number>) => {
+    return Object.entries(exts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([ext, count]) => ({ ext, count }));
+  };
+
+  return {
+    total: files.length,
+    files: files.map((f) => ({
+      path: f.path,
+      additions: f.additions,
+      deletions: f.deletions,
+      changeType: f.change_type,
+      author: f.author,
+      prNumber: f.pr_number,
+      repo: f.repository,
+    })),
+    authorMetrics: Object.entries(byAuthor).map(([author, stats]) => ({
+      author,
+      uniqueFiles: stats.files.size,
+      totalAdditions: stats.additions,
+      totalDeletions: stats.deletions,
+      topExtensions: getTopExtensions(stats.extensions),
+      docsOnly:
+        stats.extensions["md"] ===
+        Object.values(stats.extensions).reduce((a, b) => a + b, 0),
+    })),
+  };
+}
+
+export function handleGetReactions(args: z.infer<typeof GetReactionsSchema>) {
+  const limit = args.limit || 100;
+  const type = args.type || "all";
+
+  const results: Array<{
+    content: string;
+    user: string;
+    target_type: string;
+    target_id: string;
+  }> = [];
+
+  // PR reactions
+  if (type === "pr" || type === "all") {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (args.username) {
+      conditions.push("user = ?");
+      params.push(args.username);
+    }
+    if (args.content) {
+      conditions.push("content = ?");
+      params.push(args.content);
+    }
+
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const prReactions = query<{
+      content: string;
+      user: string;
+      pr_id: string;
+    }>(`SELECT content, user, pr_id FROM pr_reactions ${where} LIMIT ?`, [
+      ...params,
+      limit,
+    ]);
+
+    results.push(
+      ...prReactions.map((r) => ({
+        ...r,
+        target_type: "pr",
+        target_id: r.pr_id,
+      })),
+    );
+  }
+
+  // Issue reactions
+  if (type === "issue" || type === "all") {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (args.username) {
+      conditions.push("user = ?");
+      params.push(args.username);
+    }
+    if (args.content) {
+      conditions.push("content = ?");
+      params.push(args.content);
+    }
+
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const issueReactions = query<{
+      content: string;
+      user: string;
+      issue_id: string;
+    }>(`SELECT content, user, issue_id FROM issue_reactions ${where} LIMIT ?`, [
+      ...params,
+      limit,
+    ]);
+
+    results.push(
+      ...issueReactions.map((r) => ({
+        ...r,
+        target_type: "issue",
+        target_id: r.issue_id,
+      })),
+    );
+  }
+
+  // Aggregate by content type
+  const byConte: Record<string, number> = {};
+  const byUser: Record<string, Record<string, number>> = {};
+  for (const r of results) {
+    byConte[r.content] = (byConte[r.content] || 0) + 1;
+    if (!byUser[r.user]) byUser[r.user] = {};
+    byUser[r.user][r.content] = (byUser[r.user][r.content] || 0) + 1;
+  }
+
+  return {
+    total: results.length,
+    reactions: results.slice(0, limit).map((r) => ({
+      content: r.content,
+      user: r.user,
+      targetType: r.target_type,
+    })),
+    summary: {
+      byContent: Object.entries(byConte)
+        .sort((a, b) => b[1] - a[1])
+        .map(([content, count]) => ({ content, count })),
+      byUser: Object.entries(byUser)
+        .map(([user, reactions]) => ({
+          user,
+          total: Object.values(reactions).reduce((a, b) => a + b, 0),
+          breakdown: reactions,
+        }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 20),
+    },
   };
 }
 

@@ -1,6 +1,6 @@
 # MCP GitHub Analytics
 
-MCP server for GitHub contributor analytics. Queries SQLite database directly for PRs, issues, contributors, and AI summaries.
+MCP server for GitHub contributor analytics. Queries SQLite database directly for PRs, issues, contributors, and AI summaries. Includes quality validation tools for detecting gaming and validating contribution quality.
 
 ## Setup
 
@@ -9,7 +9,9 @@ export MCP_DB_PATH=/path/to/db.sqlite
 npx mcp-github-analytics
 ```
 
-## Tools (9)
+## Tools (13)
+
+### Core Analytics
 
 | Tool                | Description                                         |
 | ------------------- | --------------------------------------------------- |
@@ -23,7 +25,20 @@ npx mcp-github-analytics
 | `list_issues`       | Query issues                                        |
 | `get_activity`      | Recent activity feed                                |
 
+### Quality Validation
+
+Tools for validating contribution quality and detecting gaming - essential for AI agents approving class/tier promotions.
+
+| Tool               | Description                       | Detects                                          |
+| ------------------ | --------------------------------- | ------------------------------------------------ |
+| `list_reviews`     | Code reviews with quality metrics | Rubber-stamping, low-effort approvals            |
+| `list_comments`    | Comments with spam detection      | Duplicate comments, short/low-effort comments    |
+| `get_file_changes` | File changes from PRs             | Docs-only contributors, code padding, PR farming |
+| `get_reactions`    | Emoji reactions on PRs/issues     | Community sentiment, engagement patterns         |
+
 ## Examples
+
+### Core Analytics
 
 ```
 "What are the project stats?"
@@ -33,6 +48,17 @@ npx mcp-github-analytics
 "Show me recent activity in elizaos/eliza"
 "Find legend-tier contributors who focus on TypeScript"
 "Summarize what happened this week"
+```
+
+### Quality Validation
+
+```
+"Show @alice's reviews - what's her approval rate?"
+"Find reviewers who always approve without comments"
+"List comments shorter than 20 characters"
+"What file types does @bob typically change? Is it all docs?"
+"Find contributors whose PRs get the most positive reactions"
+"Before promoting @carol to Maintainer, validate her review quality"
 ```
 
 ## Data Coverage
@@ -51,20 +77,19 @@ npx mcp-github-analytics
 | **Issues**               | `list_issues`, `get_activity`                               |
 | **AI Summaries**         | `get_summary`                                               |
 | **Project Stats**        | `get_stats`                                                 |
+| **Code Reviews**         | `list_reviews`                                              |
+| **PR/Issue Comments**    | `list_comments`                                             |
+| **File Changes**         | `get_file_changes`                                          |
+| **Reactions**            | `get_reactions`                                             |
 
 ### Not Yet Exposed
 
-| Data            | In Database                        | Notes                         |
-| --------------- | ---------------------------------- | ----------------------------- |
-| Untracked repos | `untracked_repositories`           | Repos in org not being scored |
-| Commits         | `raw_commits`                      | Commit messages, SHAs         |
-| File changes    | `raw_pr_files`, `raw_commit_files` | Which files changed           |
-| PR comments     | `pr_comments`                      | Discussion on PRs             |
-| Issue comments  | `issue_comments`                   | Discussion on issues          |
-| Reviews         | `pr_reviews`                       | Code review details           |
-| Reactions       | `*_reactions` tables               | Emoji reactions               |
-| Labels          | `labels`, `*_labels`               | Issue/PR labels               |
-| PR→Issue links  | `pr_closing_issue_references`      | PRs that close issues         |
+| Data            | In Database                   | Notes                         |
+| --------------- | ----------------------------- | ----------------------------- |
+| Untracked repos | `untracked_repositories`      | Repos in org not being scored |
+| Commits         | `raw_commits`                 | Commit messages, SHAs         |
+| Labels          | `labels`, `*_labels`          | Issue/PR labels               |
+| PR→Issue links  | `pr_closing_issue_references` | PRs that close issues         |
 
 Want any of these exposed? Open an issue or PR.
 
@@ -106,8 +131,9 @@ Requires the SQLite database from GitHub Analytics platform:
 | AI activity summaries   | ❌         | ✅                    |
 | Tier/achievement system | ❌         | ✅                    |
 | Wallet addresses        | ❌         | ✅                    |
+| Quality validation      | ❌         | ✅                    |
 
-**Use both**: GitHub MCP for real-time operations, this MCP for analytics.
+**Use both**: GitHub MCP for real-time operations, this MCP for analytics and quality validation.
 
 ## License
 

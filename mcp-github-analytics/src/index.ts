@@ -27,6 +27,10 @@ import {
   ListPRsSchema,
   ListIssuesSchema,
   GetActivitySchema,
+  ListReviewsSchema,
+  ListCommentsSchema,
+  GetFileChangesSchema,
+  GetReactionsSchema,
   handleGetStats,
   handleListRepos,
   handleListContributors,
@@ -36,6 +40,10 @@ import {
   handleListPRs,
   handleListIssues,
   handleGetActivity,
+  handleListReviews,
+  handleListComments,
+  handleGetFileChanges,
+  handleGetReactions,
   toolAnnotations,
 } from "./tools.js";
 
@@ -203,6 +211,102 @@ const TOOLS = [
     },
     annotations: toolAnnotations,
   },
+  // Quality Validation Tools
+  {
+    name: "list_reviews",
+    description:
+      "List code reviews with quality metrics. Detect rubber-stamping, review thoroughness, approval rates.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        author: { type: "string", description: "Filter by reviewer username" },
+        prAuthor: {
+          type: "string",
+          description: "Filter by PR author (who is being reviewed)",
+        },
+        state: {
+          type: "string",
+          enum: ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "all"],
+          description: "Filter by review state",
+        },
+        limit: { type: "number", description: "Max results (default: 50)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "list_comments",
+    description:
+      "List PR and issue comments with spam detection. Find low-effort or duplicate comments.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        author: { type: "string", description: "Filter by comment author" },
+        type: {
+          type: "string",
+          enum: ["pr", "issue", "all"],
+          description: "Comment type (default: all)",
+        },
+        minLength: {
+          type: "number",
+          description: "Minimum comment length in chars",
+        },
+        maxLength: {
+          type: "number",
+          description: "Maximum comment length (find short/spam comments)",
+        },
+        limit: { type: "number", description: "Max results (default: 50)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "get_file_changes",
+    description:
+      "Get file changes from PRs. Identify code ownership, detect docs-only contributors, find experts by path.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        author: { type: "string", description: "Filter by PR author" },
+        path: {
+          type: "string",
+          description: "Filter by file path pattern (e.g., 'src/lib/auth')",
+        },
+        extension: {
+          type: "string",
+          description: "Filter by file extension (e.g., 'ts', 'md')",
+        },
+        limit: { type: "number", description: "Max results (default: 50)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "get_reactions",
+    description:
+      "Get emoji reactions on PRs and issues. Measure community sentiment and engagement.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        username: { type: "string", description: "Filter by user who reacted" },
+        type: {
+          type: "string",
+          enum: ["pr", "issue", "all"],
+          description: "Reaction target type (default: all)",
+        },
+        content: {
+          type: "string",
+          description: "Filter by reaction type (e.g., '+1', 'rocket', 'eyes')",
+        },
+        limit: { type: "number", description: "Max results (default: 100)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -243,6 +347,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "get_activity":
         result = handleGetActivity(GetActivitySchema.parse(args));
+        break;
+      case "list_reviews":
+        result = handleListReviews(ListReviewsSchema.parse(args));
+        break;
+      case "list_comments":
+        result = handleListComments(ListCommentsSchema.parse(args));
+        break;
+      case "get_file_changes":
+        result = handleGetFileChanges(GetFileChangesSchema.parse(args));
+        break;
+      case "get_reactions":
+        result = handleGetReactions(GetReactionsSchema.parse(args));
         break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
