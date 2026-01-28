@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 /**
- * MCP Server for GitHub Analytics Platform
+ * MCP Server for GitHub Analytics (DB-direct)
  *
- * A generic, fork-friendly MCP server that provides access to contributor
- * rankings, profiles, and AI-generated summaries via static JSON API.
+ * Queries SQLite database directly for contributor data, PRs, issues, and summaries.
  *
- * Configuration:
- *   MCP_API_BASE_URL - Base URL for the static API (default: https://elizaos.github.io)
+ * Required: MCP_DB_PATH=/path/to/db.sqlite
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -18,7 +16,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { APIClient } from "./api-client.js";
+import { closeDb } from "./db.js";
 import {
   GetStatsSchema,
   ListReposSchema,
@@ -26,16 +24,20 @@ import {
   GetContributorSchema,
   GetSummarySchema,
   FindContributorsSchema,
+  ListPRsSchema,
+  ListIssuesSchema,
+  GetActivitySchema,
   handleGetStats,
   handleListRepos,
   handleListContributors,
   handleGetContributor,
   handleGetSummary,
   handleFindContributors,
+  handleListPRs,
+  handleListIssues,
+  handleGetActivity,
   toolAnnotations,
 } from "./tools.js";
-
-const apiClient = new APIClient();
 
 const server = new Server(
   { name: "mcp-github-analytics", version: "1.0.0" },
@@ -46,32 +48,34 @@ const TOOLS = [
   {
     name: "get_stats",
     description:
-      "Get project statistics: total contributors, activity counts, tier/class distribution.",
+      "Get project statistics: contributor count, repos, PRs, issues, tier distribution",
     inputSchema: { type: "object" as const, properties: {}, required: [] },
     annotations: toolAnnotations,
   },
   {
     name: "list_repos",
-    description: "List tracked repositories.",
-    inputSchema: { type: "object" as const, properties: {}, required: [] },
+    description: "List tracked repositories with stars and forks",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        limit: { type: "number", description: "Max results (default: 20)" },
+      },
+      required: [],
+    },
     annotations: toolAnnotations,
   },
   {
     name: "list_contributors",
-    description:
-      "List top contributors by period. Returns ranked list with tier, class, score, focus areas.",
+    description: "List top contributors by score for a time period",
     inputSchema: {
       type: "object" as const,
       properties: {
         period: {
           type: "string",
-          enum: ["weekly", "monthly", "lifetime"],
+          enum: ["day", "week", "month", "lifetime"],
           description: "Time period (default: lifetime)",
         },
-        limit: {
-          type: "number",
-          description: "Max entries (default: 20)",
-        },
+        limit: { type: "number", description: "Max results (default: 20)" },
       },
       required: [],
     },
@@ -80,7 +84,7 @@ const TOOLS = [
   {
     name: "get_contributor",
     description:
-      "Get a contributor's profile: tier, class, scores, focus areas, achievements, wallets.",
+      "Get a contributor's full profile: scores, focus areas, achievements, wallets",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -93,7 +97,7 @@ const TOOLS = [
   {
     name: "get_summary",
     description:
-      "Get AI-generated summary for a contributor, repository, or the whole project.",
+      "Get AI-generated summary for a contributor, repo, or the whole project",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -106,8 +110,10 @@ const TOOLS = [
           type: "string",
           description: "GitHub username (for contributor)",
         },
-        owner: { type: "string", description: "Repo owner (for repo)" },
-        repo: { type: "string", description: "Repo name (for repo)" },
+        repo: {
+          type: "string",
+          description: "Repo as 'owner/name' (for repo)",
+        },
         interval: {
           type: "string",
           enum: ["day", "week", "month", "lifetime"],
@@ -120,8 +126,7 @@ const TOOLS = [
   },
   {
     name: "find_contributors",
-    description:
-      "Search contributors by tier, class, focus area, score, or rank.",
+    description: "Search contributors by tier, focus area, or minimum score",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -129,30 +134,70 @@ const TOOLS = [
           type: "string",
           enum: ["beginner", "regular", "active", "veteran", "elite", "legend"],
         },
-        class: {
-          type: "string",
-          enum: [
-            "Builder",
-            "Hunter",
-            "Scribe",
-            "Maintainer",
-            "Pathfinder",
-            "Machine",
-            "Contributor",
-          ],
-        },
         focus: {
           type: "string",
-          description: "Focus area (e.g., 'typescript', 'core', 'ui')",
+          description: "Focus area tag (e.g., 'typescript', 'core')",
         },
-        minScore: { type: "number" },
-        maxRank: { type: "number" },
+        minScore: { type: "number", description: "Minimum total score" },
         limit: { type: "number", description: "Max results (default: 20)" },
-        period: {
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "list_prs",
+    description:
+      "List pull requests, optionally filtered by author, repo, or state",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        author: { type: "string", description: "Filter by author username" },
+        repo: { type: "string", description: "Filter by repository" },
+        state: {
           type: "string",
-          enum: ["weekly", "monthly", "lifetime"],
-          description: "Which leaderboard (default: lifetime)",
+          enum: ["open", "closed", "merged", "all"],
+          description: "Filter by state (default: all)",
         },
+        limit: { type: "number", description: "Max results (default: 20)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "list_issues",
+    description: "List issues, optionally filtered by author, repo, or state",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        author: { type: "string", description: "Filter by author username" },
+        repo: { type: "string", description: "Filter by repository" },
+        state: {
+          type: "string",
+          enum: ["open", "closed", "all"],
+          description: "Filter by state (default: all)",
+        },
+        limit: { type: "number", description: "Max results (default: 20)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
+  {
+    name: "get_activity",
+    description:
+      "Get recent activity feed: PRs, issues, reviews across the project",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        username: { type: "string", description: "Filter by username" },
+        repo: { type: "string", description: "Filter by repository" },
+        days: {
+          type: "number",
+          description: "Days of history (default: 7, max: 90)",
+        },
+        limit: { type: "number", description: "Max results (default: 50)" },
       },
       required: [],
     },
@@ -173,35 +218,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "get_stats":
         GetStatsSchema.parse(args);
-        result = await handleGetStats(apiClient);
+        result = handleGetStats();
         break;
       case "list_repos":
-        ListReposSchema.parse(args);
-        result = await handleListRepos(apiClient);
+        result = handleListRepos(ListReposSchema.parse(args));
         break;
       case "list_contributors":
-        result = await handleListContributors(
-          apiClient,
-          ListContributorsSchema.parse(args),
-        );
+        result = handleListContributors(ListContributorsSchema.parse(args));
         break;
       case "get_contributor":
-        result = await handleGetContributor(
-          apiClient,
-          GetContributorSchema.parse(args),
-        );
+        result = handleGetContributor(GetContributorSchema.parse(args));
         break;
       case "get_summary":
-        result = await handleGetSummary(
-          apiClient,
-          GetSummarySchema.parse(args),
-        );
+        result = handleGetSummary(GetSummarySchema.parse(args));
         break;
       case "find_contributors":
-        result = await handleFindContributors(
-          apiClient,
-          FindContributorsSchema.parse(args),
-        );
+        result = handleFindContributors(FindContributorsSchema.parse(args));
+        break;
+      case "list_prs":
+        result = handleListPRs(ListPRsSchema.parse(args));
+        break;
+      case "list_issues":
+        result = handleListIssues(ListIssuesSchema.parse(args));
+        break;
+      case "get_activity":
+        result = handleGetActivity(GetActivitySchema.parse(args));
         break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
@@ -221,9 +262,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 async function main() {
   const transport = new StdioServerTransport();
+
+  process.on("SIGINT", () => {
+    closeDb();
+    process.exit(0);
+  });
+
   await server.connect(transport);
-  process.stderr.write(`MCP GitHub Analytics server started\n`);
-  process.stderr.write(`API: ${apiClient.getBaseUrl()}\n`);
+  process.stderr.write(
+    `MCP GitHub Analytics server started (DB-direct mode)\n`,
+  );
+  process.stderr.write(`Database: ${process.env.MCP_DB_PATH || "NOT SET"}\n`);
 }
 
 main().catch((e) => {
