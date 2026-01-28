@@ -93,6 +93,13 @@ export const GetReactionsSchema = z.object({
   limit: z.number().int().positive().max(100).optional(),
 });
 
+export const ListUntrackedReposSchema = z.object({
+  minActivityScore: z.number().optional(),
+  hasRecentActivity: z.boolean().optional(),
+  language: z.string().optional(),
+  limit: z.number().int().positive().max(100).optional(),
+});
+
 // ============ Handlers ============
 
 export function handleGetStats() {
@@ -1087,6 +1094,79 @@ export function handleGetReactions(args: z.infer<typeof GetReactionsSchema>) {
         .sort((a, b) => b.total - a.total)
         .slice(0, 20),
     },
+  };
+}
+
+export function handleListUntrackedRepos(
+  args: z.infer<typeof ListUntrackedReposSchema>,
+) {
+  const limit = args.limit || 50;
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (args.minActivityScore) {
+    conditions.push("activity_score >= ?");
+    params.push(args.minActivityScore);
+  }
+  if (args.hasRecentActivity) {
+    // Recent = pushed in last 30 days
+    conditions.push("last_pushed_at >= datetime('now', '-30 days')");
+  }
+  if (args.language) {
+    conditions.push("primary_language = ?");
+    params.push(args.language);
+  }
+
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const repos = query<{
+    repo_id: string;
+    owner: string;
+    name: string;
+    description: string;
+    stars: number;
+    forks: number;
+    is_archived: number;
+    primary_language: string;
+    last_pushed_at: string;
+    open_pr_count: number;
+    merged_pr_count: number;
+    open_issue_count: number;
+    activity_score: number;
+  }>(
+    `SELECT repo_id, owner, name, description, stars, forks, is_archived,
+            primary_language, last_pushed_at, open_pr_count, merged_pr_count,
+            open_issue_count, activity_score
+     FROM untracked_repositories
+     ${where}
+     ORDER BY activity_score DESC
+     LIMIT ?`,
+    [...params, limit],
+  );
+
+  const total = queryOne<{ count: number }>(
+    `SELECT COUNT(*) as count FROM untracked_repositories ${where}`,
+    params,
+  );
+
+  return {
+    total: total?.count || 0,
+    returned: repos.length,
+    repos: repos.map((r) => ({
+      id: r.repo_id,
+      name: `${r.owner}/${r.name}`,
+      description: r.description,
+      language: r.primary_language,
+      stars: r.stars,
+      forks: r.forks,
+      isArchived: !!r.is_archived,
+      lastPushed: r.last_pushed_at,
+      openPRs: r.open_pr_count,
+      mergedPRs: r.merged_pr_count,
+      openIssues: r.open_issue_count,
+      activityScore: Math.round(r.activity_score * 10) / 10,
+    })),
   };
 }
 

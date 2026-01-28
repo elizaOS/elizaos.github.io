@@ -9,7 +9,7 @@ export MCP_DB_PATH=/path/to/db.sqlite
 npx mcp-github-analytics
 ```
 
-## Tools (13)
+## Tools (14)
 
 ### Core Analytics
 
@@ -36,6 +36,12 @@ Tools for validating contribution quality and detecting gaming - essential for A
 | `get_file_changes` | File changes from PRs             | Docs-only contributors, code padding, PR farming |
 | `get_reactions`    | Emoji reactions on PRs/issues     | Community sentiment, engagement patterns         |
 
+### Coverage & Discovery
+
+| Tool                   | Description                               |
+| ---------------------- | ----------------------------------------- |
+| `list_untracked_repos` | Repos in org not being scored (286 total) |
+
 ## Examples
 
 ### Core Analytics
@@ -61,6 +67,14 @@ Tools for validating contribution quality and detecting gaming - essential for A
 "Before promoting @carol to Maintainer, validate her review quality"
 ```
 
+### Coverage & Discovery
+
+```
+"What repos in the org aren't being tracked?"
+"Show untracked repos with recent activity"
+"Find active TypeScript repos we're not scoring"
+```
+
 ## Data Coverage
 
 ### Included
@@ -81,15 +95,15 @@ Tools for validating contribution quality and detecting gaming - essential for A
 | **PR/Issue Comments**    | `list_comments`                                             |
 | **File Changes**         | `get_file_changes`                                          |
 | **Reactions**            | `get_reactions`                                             |
+| **Untracked Repos**      | `list_untracked_repos`                                      |
 
 ### Not Yet Exposed
 
-| Data            | In Database                   | Notes                         |
-| --------------- | ----------------------------- | ----------------------------- |
-| Untracked repos | `untracked_repositories`      | Repos in org not being scored |
-| Commits         | `raw_commits`                 | Commit messages, SHAs         |
-| Labels          | `labels`, `*_labels`          | Issue/PR labels               |
-| PR→Issue links  | `pr_closing_issue_references` | PRs that close issues         |
+| Data           | In Database                   | Notes                 |
+| -------------- | ----------------------------- | --------------------- |
+| Commits        | `raw_commits`                 | Commit messages, SHAs |
+| Labels         | `labels`, `*_labels`          | Issue/PR labels       |
+| PR→Issue links | `pr_closing_issue_references` | PRs that close issues |
 
 Want any of these exposed? Open an issue or PR.
 

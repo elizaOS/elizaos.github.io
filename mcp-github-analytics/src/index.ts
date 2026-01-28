@@ -31,6 +31,7 @@ import {
   ListCommentsSchema,
   GetFileChangesSchema,
   GetReactionsSchema,
+  ListUntrackedReposSchema,
   handleGetStats,
   handleListRepos,
   handleListContributors,
@@ -44,6 +45,7 @@ import {
   handleListComments,
   handleGetFileChanges,
   handleGetReactions,
+  handleListUntrackedRepos,
   toolAnnotations,
 } from "./tools.js";
 
@@ -307,6 +309,31 @@ const TOOLS = [
     },
     annotations: toolAnnotations,
   },
+  {
+    name: "list_untracked_repos",
+    description:
+      "List repositories in the org that aren't being scored. Find active repos that should be tracked.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        minActivityScore: {
+          type: "number",
+          description: "Minimum activity score to filter by",
+        },
+        hasRecentActivity: {
+          type: "boolean",
+          description: "Only repos with pushes in last 30 days",
+        },
+        language: {
+          type: "string",
+          description: "Filter by primary language (e.g., 'TypeScript')",
+        },
+        limit: { type: "number", description: "Max results (default: 50)" },
+      },
+      required: [],
+    },
+    annotations: toolAnnotations,
+  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -359,6 +386,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "get_reactions":
         result = handleGetReactions(GetReactionsSchema.parse(args));
+        break;
+      case "list_untracked_repos":
+        result = handleListUntrackedRepos(ListUntrackedReposSchema.parse(args));
         break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
