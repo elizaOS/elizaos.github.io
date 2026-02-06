@@ -5,17 +5,123 @@
     "intervalType": "week"
   },
   "repository": "elizaos-plugins/plugin-mcp",
-  "overview": "From 2026-02-01 to 2026-02-08, elizaos-plugins/plugin-mcp had 0 new PRs (0 merged), 0 new issues, and 2 active contributors.",
+  "overview": "From 2026-02-01 to 2026-02-08, elizaos-plugins/plugin-mcp had 2 new PRs (1 merged), 0 new issues, and 4 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOqp3ps7CDzE6",
+      "title": "fix: eliminate shared-state MCP mutation for multi-tenant safety",
+      "author": "0xbbjoker",
+      "number": 24,
+      "body": "## Summary\n- Make all HTTP MCP connections lazy after schema fetch (connect → fetch schemas → disconnect → register lazy). `ensureConnected()` creates per-entity connections with correct API keys from request context.\n- Add `MCP_ENABLED_SERVERS` check in `validate()` via `runtime.getSetting()` for per-user OAuth tool filtering. Fail-open when unset for CLI/non-cloud compatibility.\n- Remove all `as any` casts; add `StreamableHTTPClientTransport` to transport union type.\n- Make `getRequestContext` import optional with info/warn logging when unavailable (not in all `@elizaos/core` versions).\n\n## Context\nIn the multi-tenant cloud environment, a shared `AgentRuntime` is cached per `agentId:orgId`. Previously, HTTP MCP connections were established at init with the first user's API key baked in, and `validate()` returned `true` for all lazy connections regardless of the user's OAuth connections. This allowed User B to invoke MCP tools using User A's OAuth tokens.\n\n## Changes\n- `src/service.ts` — HTTP connections now lazy after schema fetch; optional `getRequestContext` import with logging\n- `src/actions/dynamic-tool-actions.ts` — `validate()` checks `MCP_ENABLED_SERVERS` from request context\n- `src/types.ts` — `StreamableHTTPClientTransport` added to `McpConnection.transport` union\n- `tests/dynamic-tool-actions.test.ts` — 3 new tests for MCP_ENABLED_SERVERS filtering (include, exclude, unset)\n\n## Test plan\n- [x] 207 tests pass, 0 fail\n- [x] Pre-existing TS errors unchanged (6, all in untouched files)\n- [x] Biome clean on all changed files\n- [ ] Verify in cloud environment that User A's OAuth tools are not accessible to User B\n- [ ] Verify CLI/standalone usage unaffected (MCP_ENABLED_SERVERS unset → all tools available)\n\n## Companion PR\n- eliza-cloud-v2: elizaOS/eliza-cloud-v2#315 (cross-instance cache invalidation + request context wiring)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches core MCP connection lifecycle and action validation logic; mistakes could cause connection churn or incorrectly deny/allow tool access in multi-tenant deployments.\n> \n> **Overview**\n> **Fixes a multi-tenant MCP isolation issue** by changing HTTP server initialization to connect only long enough to fetch schemas, then disconnect and mark the server as lazy so real tool/resource usage reconnects per request/entity with the correct credentials.\n> \n> Adds per-user OAuth gating via new `checkMcpOAuthAccess()` (driven by request-context `MCP_ENABLED_SERVERS`) and wires it into dynamic tool action `validate()` and `READ_MCP_RESOURCE` validation, with fail-open behavior when the setting is absent. Also hardens `McpService` with an optional `getRequestContext` dynamic import, per-connection locking to avoid duplicate connects, and transport typing updates (adds `StreamableHTTPClientTransport`), plus accompanying unit tests for the new access checks.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 868a2606ea08f6370bf21e0be745c5a23d8a6c2c. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **New Features**\n  * OAuth-based access gating for MCP tool and resource access.\n  * Per-user (per-entity) connection isolation with lazy initialization and restart capability.\n\n* **Refactor**\n  * Broadened transport support and hardened connection lifecycle, error handling, and logging.\n  * Tool action metadata and returned payloads standardized for clearer diagnostics.\n\n* **Tests**\n  * Improved test resilience by safely handling optional action properties and new access checks.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n<h3>Greptile Summary</h3>\n\nThis PR addresses a critical multi-tenant security vulnerability where HTTP MCP connections shared state across users, allowing User B to invoke tools with User A's OAuth tokens.\n\n**Key Changes:**\n- Made HTTP MCP connections lazy after schema fetch (connect → fetch schemas → disconnect → register lazy) so `ensureConnected()` creates per-user connections with correct credentials from request context\n- Added `MCP_ENABLED_SERVERS` validation check in `validate()` to filter tools based on user's OAuth connections (fail-open when unset for CLI compatibility)\n- Removed all `as any` casts by adding `StreamableHTTPClientTransport` to the transport union type in `src/types.ts:83`\n- Made `getRequestContext` import optional with graceful fallback logging for older `@elizaos/core` versions\n- Improved type safety in `getSettings()` by explicitly handling all return types from `getSetting()`\n\n**Tests:**\n- Added 3 new tests covering `MCP_ENABLED_SERVERS` filtering (include, exclude, unset scenarios)\n- All 207 tests pass\n\n**Security Impact:**\nThis PR successfully eliminates the shared-state vulnerability that allowed cross-user OAuth token access in multi-tenant environments.\n\n<h3>Confidence Score: 4/5</h3>\n\n- This PR is safe to merge with one minor issue to address\n- Score reflects strong security improvements and comprehensive test coverage, but has one logic issue: missing try-catch around JSON.parse in the MCP_ENABLED_SERVERS validation that could cause validate() to throw instead of returning false on malformed JSON\n- src/actions/dynamic-tool-actions.ts needs JSON.parse error handling at line 61\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| src/service.ts | Implements lazy HTTP connections with per-user isolation using optional getRequestContext. Removes 'as any' casts and adds proper type handling for transport union. |\n| src/actions/dynamic-tool-actions.ts | Adds MCP_ENABLED_SERVERS validation check to prevent cross-user OAuth token access. Formatting improvements throughout. |\n| src/types.ts | Adds StreamableHTTPClientTransport to McpConnection.transport union type, fixing previous type cast requirement. |\n| tests/dynamic-tool-actions.test.ts | Adds 3 new tests for MCP_ENABLED_SERVERS filtering behavior (include, exclude, unset). Updates existing tests to mock getSetting. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant UA as User A\n    participant UB as User B\n    participant Act as MCP Action\n    participant RT as Runtime\n    participant Svc as McpService\n    participant Srv as HTTP Server\n\n    Note over Svc,Srv: Init: HTTP servers become lazy\n    Svc->>Srv: Connect & fetch schemas\n    Srv-->>Svc: Tools/schemas\n    Svc->>Svc: Disconnect & mark lazy\n    Svc->>Svc: Register actions\n\n    Note over UA,Srv: User A invokes tool\n    UA->>Act: Invoke tool\n    Act->>RT: validate()\n    RT-->>Act: MCP_ENABLED_SERVERS=[\"google\"]\n    Act->>Svc: isLazyConnection(\"google\")?\n    Svc-->>Act: true\n    Act-->>UA: Valid\n    \n    Act->>Svc: callTool(google, search)\n    Svc->>Svc: ensureConnected(google)\n    Svc->>Svc: getRequestContext()->userA\n    Svc->>Srv: Connect as google:userA\n    Srv-->>Svc: Connected\n    Svc->>Srv: Execute tool\n    Srv-->>Svc: Result\n    Svc-->>UA: Success\n\n    Note over UB,Srv: User B attempts same tool\n    UB->>Act: Invoke tool\n    Act->>RT: validate()\n    RT-->>Act: MCP_ENABLED_SERVERS=[\"notion\"]\n    Act->>Act: Check google in list\n    Act-->>UB: OAuth check denied\n    \n    Note over Act: User B blocked from User A tools\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-mcp",
+      "createdAt": "2026-02-06T18:34:54Z",
+      "mergedAt": null,
+      "additions": 573,
+      "deletions": 161
+    },
+    {
+      "id": "PR_kwDOOqp3ps7BfMi2",
+      "title": "feat: per-user MCP connections with dynamic API key injection",
+      "author": "0xbbjoker",
+      "number": 23,
+      "body": "<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Medium Risk**\n> Changes MCP connection lifecycle and request headers, which can affect multi-tenant isolation and connectivity behavior if request context or URL-origin checks are misconfigured. Also shifts `@elizaos/core` to a peer dependency, which may impact consumers’ dependency resolution.\n> \n> **Overview**\n> Adds **per-user MCP HTTP connections** by keying connections with `serverName:entityId` (via `getRequestContext()`), while keeping `stdio` transports shared; `ensureConnected`, `callTool`, `readResource`, and `restartConnection` now resolve the appropriate user-specific connection.\n> \n> For HTTP transports, automatically injects an `X-API-Key` header from runtime setting `ELIZAOS_API_KEY` when not already provided, but only for same-origin requests to avoid leaking credentials.\n> \n> Bumps package version to `1.8.2` and updates packaging so `@elizaos/core` is a `peerDependency` (and dev dependency) rather than a runtime dependency.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit b57beee934f1e2d75cfa407ccb2af4e0aa90b657. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Automatic API key injection for secure HTTP requests\n  * Per-user connection isolation for improved multi-user support\n\n* **Chores**\n  * Version bumped to 1.8.2\n  * Dependency management restructured\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n<h3>Greptile Summary</h3>\n\nThis PR enables per-user MCP server connections in multi-tenant environments by leveraging request context to create isolated connections per entity. It moves `@elizaos/core` to peerDependencies to ensure request context is shared, and implements dynamic API key injection from context into HTTP headers.\n\n**Key Changes:**\n- Per-user connection isolation: Connection keys now include entityId for HTTP/SSE transports (e.g., `serverName:entityId`)\n- Dynamic API key injection: Reads `ELIZAOS_API_KEY` from request context and injects into `X-API-Key` header for same-origin requests\n- Peer dependency change: Moved `@elizaos/core` to peerDependencies to share singleton request context\n\n**Critical Issues Found:**\n- Connection key logic fails for eagerly-connected servers: `getConnectionKey()` only checks `lazyConnections` to determine transport type, so eagerly-connected HTTP servers won't get per-user isolation\n- `restartConnection` bug: Uses `getConnectionKey()` to get user-specific key but connection may exist under base key, causing disconnect/reconnect to target wrong connection\n- Environment variable fallback risk: Origin check defaults to `http://localhost:3000` if env vars aren't set, which could cause issues in production\n\n<h3>Confidence Score: 2/5</h3>\n\n- This PR has critical logic bugs that will break connection management in production multi-tenant deployments\n- The per-user isolation feature is well-intentioned but has multiple implementation bugs: getConnectionKey() fails for eagerly-connected HTTP servers, restartConnection() targets wrong connection keys, and environment variable handling is fragile. These issues will cause connection leaks and incorrect routing in production.\n- src/service.ts requires immediate attention to fix connection key management logic\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| package.json | Version bump to 1.8.2 and moved `@elizaos/core` to peerDependencies to share request context |\n| src/service.ts | Implements per-user MCP connections with dynamic API key injection; contains critical bugs in connection key management |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant UserA\n    participant UserB\n    participant McpService\n    participant Context\n    participant Server\n    \n    Note over McpService: Initialization\n    McpService->>McpService: init() creates base connections\n    McpService->>Server: connect(baseName)\n    \n    Note over UserA,Server: First User Request\n    UserA->>Context: Set entity context\n    UserA->>McpService: callTool(serverName)\n    McpService->>McpService: ensureConnected(serverName)\n    McpService->>Context: getRequestContext()\n    Context-->>McpService: entity context returned\n    McpService->>McpService: getConnectionKey(serverName)<br/>returns user-specific key\n    McpService->>McpService: Check connection map\n    Note over McpService: No user-specific connection<br/>exists, create new one\n    McpService->>McpService: Inject headers from context\n    McpService->>Server: New connection with headers\n    McpService->>Server: Execute tool\n    \n    Note over UserB,Server: Second User Request\n    UserB->>Context: Set different entity context\n    UserB->>McpService: callTool(serverName)\n    McpService->>McpService: ensureConnected(serverName)\n    McpService->>Context: getRequestContext()\n    Context-->>McpService: different entity returned\n    McpService->>McpService: getConnectionKey(serverName)<br/>returns different key\n    McpService->>McpService: Check connection map\n    Note over McpService: Separate connection created<br/>per entity\n    McpService->>Server: New connection with<br/>different headers\n    McpService->>Server: Execute tool\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-mcp",
+      "createdAt": "2026-02-04T14:53:32Z",
+      "mergedAt": "2026-02-04T14:56:32Z",
+      "additions": 54,
+      "deletions": 15
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 54,
+    "deletions": 15,
+    "files": 2,
+    "commitCount": 7
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "feat: per-user MCP connections with dynamic API key injection",
+      "prNumber": 23,
+      "type": "feature",
+      "body": "<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **Medium Risk**\n> Changes MCP connection lifecycle and request headers, which can affect multi-tenant isolation and connectivity behavior if request context or URL-origin checks are misconfigured. Also sh",
+      "files": [
+        "package.json",
+        "src/service.ts"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 255.3033606936588,
+      "prScore": 250.10336069365877,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 122.52868371689756,
+      "prScore": 120.52868371689756,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "anchapin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6326294?u=2864a5f885294da5b54b95865b6bf6b82781e688&v=4",
+      "totalScore": 72.99868671293827,
+      "prScore": 72.99868671293827,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 58.9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 58.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "borisudovicic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
+      "totalScore": 42,
+      "prScore": 0,
+      "issueScore": 42,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hanzlamateen",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/10975502?u=53f23921078d9a27d96751373bb44f4bd2d58bf4&v=4",
+      "totalScore": 34.39669771918965,
+      "prScore": 34.39669771918965,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bytes0xcr6",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102038261?u=45bcd82b0f6cc2f6c6f8db5bdc01949b3afe7560&v=4",
+      "totalScore": 23.546573590279973,
+      "prScore": 14.346573590279972,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "erdGeclaw",
       "avatarUrl": "https://avatars.githubusercontent.com/u/258411179?u=4607f14fd9d7eb4b4e6d2c26964d37b47937a49c&v=4",
@@ -27,22 +133,32 @@
       "summary": null
     },
     {
-      "username": "borisudovicic",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
-      "totalScore": 12,
-      "prScore": 0,
-      "issueScore": 12,
+      "username": "ATHLSolutions",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6761719?u=3517709343c7ed9e4e80cd95304fff0c357e58e0&v=4",
+      "totalScore": 14,
+      "prScore": 14,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "greptile-apps",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 9,
-      "prScore": 0,
+      "username": "10inchdev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/226776904?u=f8556423cfa0bd4464d64395c6c0d526050ba553&v=4",
+      "totalScore": 12.874147180559946,
+      "prScore": 12.874147180559946,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "puncar-dev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72890404?v=4",
+      "totalScore": 8,
+      "prScore": 0,
+      "issueScore": 8,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -55,11 +171,31 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "fiv3fingers",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/59544796?u=58c2849a3bd9087a4d2e0a5d31ba3cba75babfd6&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "basedmereum",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/223933470?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 2,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 2
+  "activeContributors": 4
 }

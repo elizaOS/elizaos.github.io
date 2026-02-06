@@ -1,0 +1,254 @@
+{
+  "interval": {
+    "intervalStart": "2026-02-04T00:00:00.000Z",
+    "intervalEnd": "2026-02-05T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-02-04 to 2026-02-05, elizaos/eliza had 0 new PRs (4 merged), 2 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs68iWIi",
+      "title": "EVENT MESSAGE SENT not working",
+      "author": "Srenonno",
+      "number": 5216,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nthe sendAgentResponseToBus doens't emit event EventType.MESSAGE_SENT when Sending payload to central server API endpoint (/api/messaging/submit).\n \n**To Reproduce**\n\nCreate a plugin with Message_sent event and it worn't get triggred\n**Expected behavior**\nthe vent need to be emmitted for every message submitted to the central channel\n",
+      "createdAt": "2025-06-20T12:13:56Z",
+      "closedAt": "2026-02-04T19:22:01Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7BduHW",
+      "title": "feat(scenarios): Enhance LLM Judge with multi-level evaluation",
+      "author": "monilpat",
+      "number": 5637,
+      "repository": "elizaos/eliza",
+      "body": "#### **Description**\n\nCurrently, the `llm_judge` evaluator provides a binary `PASS`/`FAIL` outcome. This is effective for clear-cut cases but doesn't capture the nuance of Large Language Model (LLM) responses, which can often be partially correct, contain good information but have poor formatting, or be conceptually right but incomplete.\n\nThis ticket proposes an enhancement to the `llm_judge` evaluator to support a multi-level evaluation scale (e.g., `FAIL`, `PARTIAL PASS`, `PASS`). This will enable more granular and realistic testing of LLM behavior, providing more insightful feedback on an agent's performance. It allows scenario creators to define what constitutes a full pass versus a partial one, leading to more sophisticated agent evaluations.\n\n#### **Acceptance Criteria**\n\n1.  The `LLMJudgeEvaluationSchema` in `packages/cli/src/scenarios/schema.ts` is updated to allow the `expected` field to be an array of strings, representing the possible evaluation levels (e.g., `['FAIL', 'PARTIAL', 'PASS']`).\n2.  The `LLMJudgeEvaluator` in `packages/cli/src/scenarios/EvaluationEngine.ts` is refactored to instruct the LLM judge to respond with one of the provided evaluation levels.\n3.  The `EvaluationResult` interface is updated to include the specific `level` (e.g., 'PARTIAL') returned by an evaluator, in addition to the overall `success` boolean.\n4.  The `Reporter` class in `packages/cli/src/scenarios/Reporter.ts` is updated to display the evaluation level in its output, using distinct icons and colors for each level (e.g., ✅ PASS, 🟠 PARTIAL, ❌ FAIL).\n5.  The final `judgment` logic in `packages/cli/src/commands/scenario.ts` is enhanced to accommodate the new levels. For example, an `all_pass` strategy should require all evaluations to achieve the highest success level (e.g., 'PASS').\n6.  The process exit code logic remains `0` for an overall scenario pass and `1` for a fail, based on the final judgment.\n\n#### **Technical Approach**\n\n**1. Update Scenario Schema (`schema.ts`)**\n\nModify the `LLMJudgeEvaluationSchema` to accept an array of strings for the `expected` field. This array defines the custom evaluation scale for the judge. The system prompt for the LLM will be dynamically constructed from this array.\n\n```typescript\n// packages/cli/src/scenarios/schema.ts\n// ...\nconst LLMJudgeEvaluationSchema = BaseEvaluationSchema.extend({\n  type: z.literal('llm_judge'),\n  prompt: z.string(),\n  // Change from z.string() to z.array(z.string()) to define the evaluation scale.\n  // Default to a binary scale if not provided.\n  expected: z.array(z.string()).optional().default(['FAIL', 'PASS']),\n});\n// ...\n```\n\n**2. Refactor Evaluation Engine (`EvaluationEngine.ts`)**\n\nThe `LLMJudgeEvaluator` must be updated to pass the new evaluation scale to the LLM. The general `EvaluationResult` type will also be updated to include the `level`.\n\n```typescript\n// packages/cli/src/scenarios/EvaluationEngine.ts\n// ...\nexport interface EvaluationResult {\n    success: boolean; // True if not the lowest evaluation level\n    level: string;    // The specific outcome, e.g., 'PASS', 'FAIL', 'PARTIAL'\n    message: string;\n}\n\ninterface Evaluator {\n    // This method will now return the string level of the outcome.\n    evaluate(runtime: IAgentRuntime, result: ScenarioResult): Promise<string>;\n    getMessage(level: string): string;\n    // Helper to get the expected levels\n    getLevels(): string[];\n}\n\nclass LLMJudgeEvaluator implements Evaluator {\n    constructor(private prompt: string, private expected: string[]) {}\n\n    async evaluate(runtime: IAgentRuntime, result: ScenarioResult): Promise<string> {\n        const systemPrompt = `You are an AI assistant that judges the output of a command. Based on the prompt and the command output, respond with ONLY one of the following values: [${this.expected.join(', ')}].`;\n\n        const llmResult = await runtime.useModel('TEXT_LARGE', {\n            system: systemPrompt,\n            messages: [{\n                role: 'user',\n                content: `Prompt: ${this.prompt}\\nOutput: ${result.stdout}`\n            }]\n        });\n        \n        const response = llmResult.trim().toUpperCase();\n        // Validate the LLM's response against the expected levels.\n        if (this.expected.map(e => e.toUpperCase()).includes(response)) {\n            return response;\n        }\n        // Default to the first (lowest) level if the LLM's response is invalid.\n        return this.expected[0].toUpperCase();\n    }\n    \n    getLevels(): string[] {\n        return this.expected;\n    }\n    // ... getMessage remains similar ...\n}\n\nexport class EvaluationEngine {\n    // ...\n    async run(runtime: IAgentRuntime, result: ScenarioResult): Promise<EvaluationResult[]> {\n        const results: EvaluationResult[] = [];\n        for (const evaluator of this.evaluators) {\n            const level = await evaluator.evaluate(runtime, result);\n            const levels = evaluator.getLevels();\n            // \"Success\" is defined as any outcome that is not the lowest possible level.\n            const success = level !== levels[0].toUpperCase();\n            results.push({ success, level, message: evaluator.getMessage(level) });\n        }\n        return results;\n    }\n}\n```\n\n**3. Enhance Reporter (`Reporter.ts`)**\n\nUpdate the reporter to handle and display the new evaluation levels with distinct formatting.\n\n```typescript\n// packages/cli/src/scenarios/Reporter.ts\n// ...\n  public reportEvaluationResults(results: EvaluationResult[]) {\n    // ...\n    results.forEach(res => {\n      let status;\n      // Use a switch to handle different levels, with default for unknown levels.\n      switch(res.level.toUpperCase()) {\n        case 'PASS':\n          status = chalk.green('✅ PASS');\n          break;\n        case 'PARTIAL':\n        case 'PARTIAL PASS':\n          status = chalk.yellow('🟠 PARTIAL');\n          break;\n        case 'FAIL':\n        default:\n          status = chalk.red('❌ FAIL');\n          break;\n      }\n      console.log(`${status}: ${res.message}`);\n    });\n    // ...\n  }\n// ...\n```\n\n**4. Update Judgment Logic (`scenario.ts`)**\n\nThe logic for determining the final outcome must be updated to be aware of the different levels.\n\n```typescript\n// packages/cli/src/commands/scenario.ts\n// ...\n// --- JUDGMENT ---\nif (scenario.judgment?.pass?.all) {\n    // Strictest strategy: all evaluations must be the highest possible level.\n    finalStatus = evalResults.every(res => res.level === 'PASS'); // Assuming 'PASS' is the highest\n}\n// Potentially add new strategies here in the future, e.g., 'all_pass_or_partial'\n// ...\n```\n\n#### **Testing Strategy**\n\n1.  **Create a new scenario file**: `llm-judge-partial-pass.scenario.yaml`.\n2.  **Define a multi-level evaluation**:\n    ```yaml\n    # ...\n    evaluations:\n      - type: llm_judge\n        prompt: \"Respond with the capital of France in a complete sentence.\"\n        expected: ['FAIL', 'PARTIAL', 'PASS']\n    judgment:\n      pass:\n        all: true # This will require a 'PASS' result\n    ```\n3.  **Run with an input that yields a partial pass** (e.g., `input: \"echo 'Paris'\"`).\n    *   **Verify**: The reporter shows `🟠 PARTIAL`, the final status is `❌ FAIL`, and the exit code is `1`.\n4.  **Run with an input that yields a full pass** (e.g., `input: \"echo 'The capital of France is Paris.'\"`).\n    *   **Verify**: The reporter shows `✅ PASS`, the final status is `✅ PASS`, and the exit code is `0`.",
+      "createdAt": "2025-07-20T00:26:09Z",
+      "closedAt": "2026-02-04T23:28:26Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7l6pbQ",
+      "title": "[Infra] Implement Secrets Management for User Services",
+      "author": "borisudovicic",
+      "number": 6410,
+      "repository": "elizaos/eliza",
+      "body": "## Description\n\nCreate system for users to securely authenticate their personal services (Gmail, GitHub, etc.) through chat-initiated OAuth flows.\n\n## Acceptance Criteria\n\n- [ ] OAuth flow initiated from chat (\"enable Gmail\")\n- [ ] Secure token storage per user\n- [ ] Web link sent to user for OAuth completion\n- [ ] Token refresh handling\n- [ ] Clear UX for which services are connected\n\n## Technical Notes\n\n* Some secrets managed by Eliza Labs (Twilio, messaging platforms)\n* User secrets for personal services (Gmail, Calendar, GitHub)\n* Reference existing org-level OAuth patterns\n* User says \"connect my Gmail\" → gets link → completes OAuth → back to chat\n\n## Priority\n\n**P0 - Day 3-4**",
+      "createdAt": "2026-01-26T19:34:18Z",
+      "closedAt": "2026-02-04T21:23:51Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7oXh6-",
+      "title": "[Research] SMTP Alternative to Gmail OAuth",
+      "author": "borisudovicic",
+      "number": 6460,
+      "repository": "elizaos/eliza",
+      "body": "## Description\n\nResearch alternative email sending methods that don't require Google OAuth verification, specifically SMTP configuration for users.\n\n## Context (Feb 4 meeting)\n\n**Shaw:** \"We're blocked on Gmail because of our own stuff. Right, but is there like, if you think like, is there a way to configure SMTP for the user without having the Gmail OAuth stuff? Is that possible? Is there a way around this or a way to user credentials?\"\n\n**Ben:** \"I don't know how that work with N8N I don't think.\"\n\n**Shaw:** \"Yeah.\"\n\n**Ben:** \"So that's an issue.\"\n\n## Problem Statement\n\nGoogle OAuth for Gmail requires OASP security audit (2-6 weeks, paid audit required). Need to explore alternatives for email functionality at launch.\n\n## Research Questions\n\n1. Can N8N support SMTP configuration per user?\n2. What SMTP providers could work as alternatives?\n3. Can users bring their own SMTP credentials?\n4. Are there other email APIs that don't require Google-level verification?\n\n## Potential Alternatives\n\n* Microsoft Outlook (confirmed no OASP audit required)\n* User-provided SMTP credentials\n* SendGrid/Mailgun for outbound only\n* Other email providers with simpler OAuth\n\n## Acceptance Criteria\n\n- [ ] Research N8N SMTP node capabilities\n- [ ] Document alternative email providers\n- [ ] Recommend approach for MVP launch\n- [ ] Implementation plan if viable",
+      "createdAt": "2026-02-04T21:24:46Z",
+      "closedAt": "2026-02-05T10:20:54Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs7oXhnp",
+      "title": "[QA] Bug Bashing Session - Pre-Launch Testing",
+      "author": "borisudovicic",
+      "number": 6459,
+      "repository": "elizaos/eliza",
+      "body": "## Description\n\nCoordinate a bug bashing session once integrations are ready for testing. Focus on end-to-end testing before launch.\n\n## Context (Feb 4 meeting)\n\n**Amelia:** \"No, nothing on my side. And also I suggested this to OD yesterday. Might be good to do like a bug bashing session once we're ready to get testing, but I don't know if we're quite there yet. Maybe after the Linear Notion are set up.\"\n\n## Prerequisites\n\nBefore starting bug bashing:\n\n- [ ] Sam's OAuth integrations PR merged (GitHub, Linear, Slack, Notion, [X.com](<http://X.com>))\n- [ ] Ben's staging environment ready for testing\n- [ ] Microsoft OAuth integration complete (Rayan)\n- [ ] Discord hybrid gateway tested (Hanzla)\n\n## Testing Scope\n\n1. **OAuth Integrations**\n   * GitHub OAuth flow\n   * Linear OAuth flow\n   * Slack OAuth flow\n   * Notion OAuth flow\n   * [X.com](<http://X.com>) OAuth flow\n   * Microsoft OAuth flow\n2. **Messaging Platforms**\n   * iMessage/Blue.io\n   * Telegram\n   * Discord\n   * SMS/Twilio\n3. **Workflow Execution**\n   * N8N workflow triggers\n   * Calendar operations (via Microsoft)\n   * Email operations (via Microsoft)\n   * Linear ticket creation/updates\n   * Notion page creation\n\n## Acceptance Criteria\n\n- [ ] Bug bashing session scheduled\n- [ ] Test cases documented\n- [ ] All critical flows tested\n- [ ] Bugs documented in Linear\n- [ ] Blocking bugs resolved before launch",
+      "createdAt": "2026-02-04T21:24:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs64E0uE",
+      "title": "Eliza Cloud Integration, add MCP + A2A service starter, integrate CLI and starter projects tight",
+      "author": "lalalune",
+      "number": 6216,
+      "body": "The goal of this PR is to tightly integrate the elizaos cloud plugin, which now can use cloud as a db and storage provider, and encourage users through the CLI to get up and running with elizaos cloud. CLI should auto log them in, provision API key and make sure project is set up.\r\n\r\nPlease thoroughly review and understand the create -> deploy -> publish and monetize flow, may still need some work",
+      "repository": "elizaos/eliza",
+      "createdAt": "2025-12-10T07:26:45Z",
+      "mergedAt": null,
+      "additions": 9989,
+      "deletions": 101
+    },
+    {
+      "id": "PR_kwDOMT5cIs7BRAcH",
+      "title": "feat(core): add request context for per-user entity settings",
+      "author": "0xbbjoker",
+      "number": 6457,
+      "body": "## Summary\n- Adds `RequestContext` using AsyncLocalStorage to propagate per-request entity settings\n- Enables runtime methods to access the originating entity context without explicit parameter passing\n- Includes helper methods: `withEntityContext()`, `getRequestContext()`, `getEntitySettings()`\n\n## Test plan\n- [x] Unit tests for `RequestContext` class\n- [x] Integration tests for runtime context propagation\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes `AgentRuntime.getSetting()` resolution to prefer request-scoped entity settings (including `null` as an explicit override), which can affect how secrets/config are sourced in multi-tenant flows. Uses global AsyncLocalStorage state in Node, so regressions would show up as mis-scoped settings across concurrent requests if misused.\n> \n> **Overview**\n> Introduces a new request-scoped `RequestContext` API (`runWithRequestContext`, `getRequestContext`, and a pluggable `IRequestContextManager`) to propagate per-entity settings through async execution.\n> \n> Adds a Node.js implementation backed by `AsyncLocalStorage` and initializes it from `index.node.ts`, while exporting the new utilities from both `index.ts` and `index.node.ts`.\n> \n> Updates `AgentRuntime.getSetting()` to check `requestCtx.entitySettings` first (treating `undefined` as fallthrough and `null` as an explicit return) and return entity values without `decryptSecret`, with new unit/integration tests covering async propagation, concurrency isolation, and precedence over character settings/secrets.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit a0e2d2d3a74a829c2edaf7e5f848a5ba1aea788f. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n<h3>Greptile Summary</h3>\n\nThis PR adds `RequestContext` infrastructure to enable per-entity settings in multi-tenant deployments, allowing multiple users to share a single agent runtime while maintaining isolated settings (API keys, OAuth tokens, etc.).\n\n**Key Changes:**\n- New `RequestContext` interface and `runWithRequestContext()` API for propagating per-request entity settings\n- AsyncLocalStorage-based implementation for Node.js (`request-context.node.ts`) ensuring proper async context isolation\n- Modified `runtime.getSetting()` to check request context first before falling back to character settings\n- Comprehensive test coverage (28 tests) covering context isolation, concurrency, priority, and integration with runtime\n\n**Design:**\n- Follows OpenTelemetry ContextManager pattern (consistent with existing `streaming-context.ts`)\n- NoopContextManager fallback ensures backward compatibility\n- Entity settings are pre-decrypted, avoiding duplicate decryption\n- Clear priority chain: entity settings → character settings → null\n\n**Testing:**\n- Unit tests verify context isolation across 10 concurrent requests\n- Integration tests confirm proper `getSetting()` behavior and priority\n- Edge cases covered: null vs undefined, nested contexts, error propagation\n\n**Issue Found:**\n- `package.json` version changed to local development version (`1.0.0-local.1768325621`) - must be reverted before merge\n\n<h3>Confidence Score: 4/5</h3>\n\n- Safe to merge after reverting package.json version change\n- High-quality implementation with excellent test coverage and clear design patterns. The only issue is the unintentional version change in package.json which must be fixed. Code follows project conventions, includes comprehensive documentation, and all new tests pass.\n- `packages/core/package.json` needs version reverted to 1.7.2-alpha.1\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/core/package.json | Version changed to local development version (1.0.0-local.1768325621), should be reverted before merge |\n| packages/core/src/request-context.ts | Well-designed context management pattern following OpenTelemetry style, with comprehensive documentation and type safety |\n| packages/core/src/runtime.ts | Added request context check to getSetting() with proper fallback chain and clear comments |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User as User/Entity\n    participant Server as Server/Handler\n    participant RC as RequestContext\n    participant ALS as AsyncLocalStorage\n    participant Runtime as AgentRuntime\n    participant DB as Database\n\n    User->>Server: Send message/request\n    Note over Server: Fetch entity settings\n    Server->>DB: Query entity settings for userId\n    DB-->>Server: Return settings Map\n    \n    Server->>RC: runWithRequestContext(context, fn)\n    Note over RC: context = {entityId, agentId, entitySettings}\n    RC->>ALS: storage.run(context, fn)\n    Note over ALS: Store context in AsyncLocalStorage\n    \n    ALS->>Runtime: Execute fn() → runtime.handleMessage()\n    Runtime->>Runtime: getSetting(key)\n    Runtime->>RC: getRequestContext()\n    RC->>ALS: storage.getStore()\n    ALS-->>RC: Return active context\n    RC-->>Runtime: Return context\n    \n    alt Entity setting exists\n        Runtime-->>Runtime: Return entitySettings.get(key)\n        Note over Runtime: Pre-decrypted, return as-is\n    else Fallback to character settings\n        Runtime-->>Runtime: Check character.settings/secrets\n        Note over Runtime: Apply decryption if needed\n    end\n    \n    Runtime-->>Server: Complete message processing\n    Server-->>User: Send response\n    \n    Note over ALS: Context automatically cleared after fn() completes\n\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-02-03T18:44:06Z",
+      "mergedAt": "2026-02-04T12:50:24Z",
+      "additions": 1037,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs68h8nN",
+      "title": "docs: core documentation guides",
+      "author": "wtfsayo",
+      "number": 6356,
+      "body": "## Summary\n- Adds core documentation pages: architecture, core concepts, plugin development, interop, deployment, and API reference.\n\n## Test plan\n- [ ] Review rendered markdown formatting and links.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> Introduces comprehensive core docs and refines interop contract wording. No runtime or API code changes.\n> \n> - Adds `docs/ARCHITECTURE.md`, `docs/CORE_CONCEPTS.md`, `docs/PLUGIN_DEVELOPMENT.md`, `docs/DEPLOYMENT_GUIDE.md`, `docs/API_REFERENCE.md`, and `docs/INTEROP_GUIDE.md`\n> - Updates `packages/interop/README.md` to describe the plugin interface as a documented contract and relax strict `plugin.json` requirement\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 38427d0d3da35f9da04f5bb8505eb61812635a7b. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n### Greptile Summary\n\nThis PR adds comprehensive core documentation covering architecture, concepts, plugin development, interop, deployment, and API reference. The documentation is well-structured and provides valuable guidance for developers working with ElizaOS.\n\n**Strengths:**\n- Accurate file path references throughout most documentation\n- Clear explanation of the message processing pipeline and plugin lifecycle\n- Practical examples for common use cases (deployment patterns, plugin development)\n- Good coverage of multi-language interop patterns (TypeScript/Rust/Python)\n\n**Issues Found:**\n1. **Route handler signature error** (PLUGIN_DEVELOPMENT.md): Missing required `runtime` parameter in route handler example\n2. **Non-existent file reference** (INTEROP_GUIDE.md): References `plugin.schema.json` which doesn't exist in the repository\n3. **Markdown formatting issue** (CORE_CONCEPTS.md): Malformed bold syntax with extra asterisks in ProviderResult description\n\nThe documentation is mostly accurate and comprehensive, with only minor syntax/reference issues that should be corrected before merge.\n\n### Confidence Score: 4/5\n\n- This PR is safe to merge after addressing the code example syntax error\n- Score of 4 reflects high-quality documentation with thorough verification against the codebase. One syntax error (missing parameter) should be fixed, and one file reference issue noted. No code changes means no runtime risk. The markdown formatting issue is cosmetic but should be corrected for professional presentation.\n- docs/PLUGIN_DEVELOPMENT.md requires correction of the route handler example; docs/INTEROP_GUIDE.md has a reference to a non-existent file that should be addressed\n\n<h3>Important Files Changed</h3>\n\n\n\nFile Analysis\n\n\n\n| Filename | Score | Overview |\n|----------|-------|----------|\n| docs/ARCHITECTURE.md | 5/5 | Excellent high-level architecture overview with accurate repository mapping, core abstractions, and detailed end-to-end data flow. All file paths reference existing files. |\n| docs/CORE_CONCEPTS.md | 4/5 | Clear explanation of core concepts including runtime, state, providers, models, actions, and evaluators. Minor markdown formatting issue with extra asterisks in bullet points (lines 59-61). |\n| docs/INTEROP_GUIDE.md | 3/5 | Documents cross-language interop via WASM, FFI, and IPC. References non-existent plugin.schema.json file. Otherwise accurate with correct file paths for existing TypeScript, Rust, and Python interop code. |\n| docs/PLUGIN_DEVELOPMENT.md | 3/5 | Comprehensive plugin development guide with examples for actions, providers, services, models, routes, and events. Route handler example missing required runtime parameter (line 129). |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Client\n    participant Runtime as AgentRuntime\n    participant MsgSvc as MessageService\n    participant Providers\n    participant LLM as Model\n    participant Actions\n    participant DB as DatabaseAdapter\n    participant Evaluators\n\n    Client->>Runtime: handleMessage(message)\n    Runtime->>DB: createMemory(message)\n    DB-->>Runtime: message persisted\n    Runtime->>Runtime: queueEmbeddingGeneration()\n    \n    Runtime->>MsgSvc: handleMessage(runtime, message, callback)\n    MsgSvc->>Runtime: composeState(message)\n    Runtime->>Providers: get(runtime, message, state)\n    Providers-->>Runtime: ProviderResult (text, values, data)\n    Runtime-->>MsgSvc: State (cached)\n    \n    MsgSvc->>MsgSvc: shouldRespond?\n    \n    alt Should Respond\n        MsgSvc->>LLM: useModel(TEXT_LARGE, prompt)\n        LLM-->>MsgSvc: XML response (thought, actions, text)\n        \n        opt Actions Requested\n            MsgSvc->>Runtime: processActions(message, responses, state)\n            Runtime->>Actions: handler(runtime, message, state, options)\n            Actions-->>Runtime: ActionResult\n            Runtime->>DB: createMemory(actionResult)\n        end\n        \n        MsgSvc->>Client: callback(responseContent)\n        MsgSvc->>DB: createMemory(response)\n        \n        MsgSvc->>Runtime: evaluate(message, state, responses)\n        Runtime->>Evaluators: handler(runtime, message, state)\n        Evaluators-->>Runtime: evaluation results\n    end\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-01-11T09:16:00Z",
+      "mergedAt": "2026-02-04T19:16:34Z",
+      "additions": 815,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDOMT5cIs6-wiqR",
+      "title": "V2.0.0: fixed avatar example and elevenlabs plugin",
+      "author": "hanzlamateen",
+      "number": 6387,
+      "body": "# Relates to\r\n\r\nFixes ElevenLabs API integration issues in `examples/avatar` (formerly `vrm` example) and consolidates the project structure.\r\n\r\n# Risks\r\n\r\nLow. Changes are isolated to the `examples/avatar` directory and the `plugin-elevenlabs` browser build configuration. Security risk is low as API key handling was improved (added trimming) and browser-side key usage is now explicitly opted-in via setting.\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n1.  **Consolidates VRM/Avatar Examples**: Merged the latest fixes from `examples/vrm` into `examples/avatar` and removed the `examples/vrm` directory to eliminate duplication.\r\n2.  **Fixes ElevenLabs Integration**:\r\n    *   Switched the default model from the deprecated `eleven_monolingual_v1` to `eleven_multilingual_v2`. ([reference](https://elevenlabs.io/docs/overview/models#deprecated-models))\r\n    *   Updated `App.tsx` to handle `Uint8Array` outputs from the browser plugin (previously it only supported `ReadableStream` which caused \"stream.getReader is not a function\" errors).\r\n3.  **Fixes Index.html**: Removed duplicated HTML content in `index.html` that was causing parsing issues.\r\n\r\n## What kind of change is this?\r\n\r\n*   Bug fixes (non-breaking change which fixes an issue)\r\n*   Improvements (misc. changes to existing features)\r\n\r\n# Documentation changes needed?\r\n\r\nMy changes do not require a change to the project documentation.\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n*   `examples/avatar/src/App.tsx`: See the updated logic to handle binary audio buffers.\r\n\r\n## Detailed testing steps\r\n\r\n1.  Navigate to `examples/avatar`.\r\n2.  Run `bun install`.\r\n3.  Run `bun run dev`.\r\n4.  Open the application in the browser (e.g., `http://localhost:5173`).\r\n5.  Open Settings and select **ElevenLabs** as the voice provider.\r\n6.  Enter a valid ElevenLabs API key (make sure Restrict Key toggle of OFF).\r\n7.  Verify that text-to-speech works correctly (the avatar speaks) and no 401 or stream errors appear in the console.\r\n\r\n# Discord username\r\n\r\n@hanzlamateen\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\n\nFixed ElevenLabs TTS integration in the avatar example and updated the plugin to use the newer `eleven_multilingual_v2` model across TypeScript, Python, and Rust implementations.\n\n- Fixed browser plugin compatibility by handling both `Uint8Array` and `ReadableStream` return types from the TTS model\n- Removed duplicate HTML content in `index.html` that was causing parsing issues\n- Updated default model from deprecated `eleven_monolingual_v1` to `eleven_multilingual_v2` across all language implementations\n- Added `.trim()` to API key handling for better reliability\n- Removed deprecated models from documentation and model lists\n\n<h3>Confidence Score: 4/5</h3>\n\n\n- This PR is safe to merge with minimal risk\n- The changes are well-contained and address specific bugs. The model upgrade is necessary due to deprecation, and the browser plugin fix resolves a real runtime error. One minor suggestion for using useEffect instead of setTimeout for more predictable timing.\n- No files require special attention\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| examples/avatar/src/App.tsx | Fixed ElevenLabs TTS to handle both Uint8Array and ReadableStream responses, added config ref for settings updates |\n| examples/avatar/index.html | Removed duplicate HTML content that was causing parsing issues |\n| plugins/plugin-elevenlabs/typescript/src/index.ts | Updated default model from deprecated eleven_monolingual_v1 to eleven_multilingual_v2 |\n| plugins/plugin-elevenlabs/typescript/src/index.browser.ts | Updated default model to eleven_multilingual_v2 for browser build |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant App\n    participant Settings\n    participant Runtime\n    participant ElevenLabs\n    participant LipSync\n\n    User->>App: Close settings modal\n    App->>Settings: handleCloseSettings()\n    Settings->>App: setSettingsOpen(false)\n    Settings->>Runtime: setTimeout(getOrCreateRuntime)\n    Runtime->>Runtime: applySettings(config)\n    \n    User->>App: Speak text\n    App->>Runtime: speakText(text)\n    App->>Runtime: getOrCreateRuntime(config)\n    Runtime-->>App: RuntimeBundle\n    \n    alt ElevenLabs provider\n        App->>App: Get API key and trim\n        App->>Runtime: setSetting(\"ELEVENLABS_API_KEY\")\n        App->>Runtime: useModel(TEXT_TO_SPEECH, chunk)\n        Runtime->>ElevenLabs: fetchSpeech()\n        ElevenLabs-->>Runtime: Uint8Array (browser) or ReadableStream (node)\n        \n        alt Response is Uint8Array/ArrayBuffer\n            Runtime-->>App: buffer\n        else Response is ReadableStream\n            Runtime->>Runtime: Read stream chunks\n            Runtime->>Runtime: Merge chunks to Uint8Array\n            Runtime-->>App: buffer\n        end\n        \n        App->>LipSync: playWav(buffer)\n        LipSync-->>User: Audio playback\n    else SAM provider\n        App->>Runtime: synthesizeSamWav()\n        Runtime-->>App: wav buffer\n        App->>LipSync: playWav(wav)\n        LipSync-->>User: Audio playback\n    end\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-01-22T18:05:11Z",
+      "mergedAt": "2026-02-04T19:12:34Z",
+      "additions": 60,
+      "deletions": 657
+    },
+    {
+      "id": "PR_kwDOMT5cIs69w4_H",
+      "title": "fix(server): emit MESSAGE_SENT event after sending to central server",
+      "author": "YuriNachos",
+      "number": 6378,
+      "body": "This PR fixes #5216 - EventType.MESSAGE_SENT event not being emitted when agent responses are sent to the central server API.\n\n## Problem\n\nThe `sendAgentResponseToBus` function in `packages/server/src/services/message.ts` sends agent responses to the central server API endpoint (`/api/messaging/submit`), but it does not emit the `EventType.MESSAGE_SENT` event.\n\nThis means that plugins with handlers for the `MESSAGE_SENT` event never get triggered when messages are submitted to the central channel.\n\n## Solution\n\nAdded `EventType.MESSAGE_SENT` event emission after a successful response from the central server API.\n\n## Changes\n\n1. Added `EventType` import from `@elizaos/core`\n2. Emit `MESSAGE_SENT` event with proper payload:\n   - `runtime`: The agent runtime instance\n   - `content`: The message content being sent\n   - `roomId`: The room ID where the message was sent\n   - `worldId`: The world ID\n   - `userId`: The user ID (agent ID in this case)\n   - `agentId`: The agent ID\n\n## Testing\n\nAll existing tests pass (532 pass, 0 fail).\n\nCloses #5216\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\n\nAdded `EventType.MESSAGE_SENT` event emission after successfully sending agent responses to the central server API. This fixes issue #5216 where plugins with `MESSAGE_SENT` event handlers were not triggered when messages were submitted to the central channel.\n\n**Changes made:**\n- Added `EventType` import from `@elizaos/core`\n- Emitted `MESSAGE_SENT` event after successful response from central server API in `sendAgentResponseToBus` function\n\n**Issue found:**\n- The event payload structure doesn't match the `MessagePayload` interface - it's passing individual fields instead of the required `message: Memory` field. The memory was already created earlier (line 681) and should be retrieved and included in the event payload.\n\n<h3>Confidence Score: 3/5</h3>\n\n\n- This PR addresses a real bug but has an implementation issue that will cause runtime errors\n- The PR correctly identifies the missing event emission and adds it in the right location, but the event payload structure is incorrect and doesn't match the TypeScript interface, which will cause type errors or runtime failures when plugins try to access `payload.message`\n- Pay close attention to `packages/server/src/services/message.ts` - the event payload structure needs to be fixed\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/server/src/services/message.ts | Added EventType import and emitted MESSAGE_SENT event, but payload structure doesn't match MessagePayload interface |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant InternalMessageBus\n    participant MessageBusService\n    participant ElizaOS\n    participant Runtime\n    participant CentralServer\n    participant Plugin\n\n    User->>InternalMessageBus: Send message\n    InternalMessageBus->>MessageBusService: new_message event\n    MessageBusService->>MessageBusService: handleIncomingMessage()\n    MessageBusService->>MessageBusService: Validate subscription & permissions\n    MessageBusService->>Runtime: ensureWorldExists()\n    MessageBusService->>Runtime: ensureRoomExists()\n    MessageBusService->>Runtime: ensureAuthorEntityExists()\n    MessageBusService->>ElizaOS: handleMessage()\n    ElizaOS->>Runtime: Process message\n    Runtime->>Runtime: Generate response\n    Runtime->>MessageBusService: onResponse callback\n    MessageBusService->>Runtime: createMemory()\n    Runtime-->>MessageBusService: Memory created\n    MessageBusService->>MessageBusService: sendAgentResponseToBus()\n    MessageBusService->>CentralServer: POST /api/messaging/submit\n    CentralServer-->>MessageBusService: 200 OK\n    MessageBusService->>Runtime: emitEvent(MESSAGE_SENT)\n    Runtime->>Plugin: Trigger MESSAGE_SENT handlers\n    Plugin-->>Runtime: Event handled\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-01-17T10:23:58Z",
+      "mergedAt": "2026-02-04T19:21:59Z",
+      "additions": 29,
+      "deletions": 13
+    }
+  ],
+  "codeChanges": {
+    "additions": 1941,
+    "deletions": 673,
+    "files": 34,
+    "commitCount": 4
+  },
+  "completedItems": [
+    {
+      "title": "docs: core documentation guides",
+      "prNumber": 6356,
+      "type": "docs",
+      "body": "## Summary\n- Adds core documentation pages: architecture, core concepts, plugin development, interop, deployment, and API reference.\n\n## Test plan\n- [ ] Review rendered markdown formatting and links.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n",
+      "files": [
+        "docs/API_REFERENCE.md",
+        "docs/ARCHITECTURE.md",
+        "docs/CORE_CONCEPTS.md",
+        "docs/DEPLOYMENT_GUIDE.md",
+        "docs/INTEROP_GUIDE.md",
+        "docs/PLUGIN_DEVELOPMENT.md",
+        "packages/interop/README.md"
+      ]
+    },
+    {
+      "title": "fix(server): emit MESSAGE_SENT event after sending to central server",
+      "prNumber": 6378,
+      "type": "bugfix",
+      "body": "This PR fixes #5216 - EventType.MESSAGE_SENT event not being emitted when agent responses are sent to the central server API.\n\n## Problem\n\nThe `sendAgentResponseToBus` function in `packages/server/src/services/message.ts` sends agent respon",
+      "files": [
+        "packages/server/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "V2.0.0: fixed avatar example and elevenlabs plugin",
+      "prNumber": 6387,
+      "type": "bugfix",
+      "body": "# Relates to\r\n\r\nFixes ElevenLabs API integration issues in `examples/avatar` (formerly `vrm` example) and consolidates the project structure.\r\n\r\n# Risks\r\n\r\nLow. Changes are isolated to the `examples/avatar` directory and the `plugin-elevenl",
+      "files": [
+        "examples/avatar/README.md",
+        "examples/avatar/index.html",
+        "examples/avatar/src/App.tsx",
+        "examples/vrm/src/App.tsx",
+        "plugins/plugin-elevenlabs/README.md",
+        "plugins/plugin-elevenlabs/python/README.md",
+        "plugins/plugin-elevenlabs/python/src/eliza_plugin_elevenlabs/types.py",
+        "plugins/plugin-elevenlabs/python/tests/conftest.py",
+        "plugins/plugin-elevenlabs/python/tests/test_types.py",
+        "plugins/plugin-elevenlabs/rust/README.md",
+        "plugins/plugin-elevenlabs/rust/src/services/elevenlabs_service.rs",
+        "plugins/plugin-elevenlabs/rust/src/types.rs",
+        "plugins/plugin-elevenlabs/rust/tests/integration_tests.rs",
+        "plugins/plugin-elevenlabs/rust/tests/tts_integration.rs",
+        "plugins/plugin-elevenlabs/typescript/README.md",
+        "plugins/plugin-elevenlabs/typescript/package.json",
+        "plugins/plugin-elevenlabs/typescript/src/index.browser.ts",
+        "plugins/plugin-elevenlabs/typescript/src/index.ts",
+        "plugins/plugin-s3-storage/README.md"
+      ]
+    },
+    {
+      "title": "feat(core): add request context for per-user entity settings",
+      "prNumber": 6457,
+      "type": "feature",
+      "body": "## Summary\n- Adds `RequestContext` using AsyncLocalStorage to propagate per-request entity settings\n- Enables runtime methods to access the originating entity context without explicit parameter passing\n- Includes helper methods: `withEntity",
+      "files": [
+        "packages/core/src/__tests__/request-context.test.ts",
+        "packages/core/src/__tests__/runtime-request-context.test.ts",
+        "packages/core/src/index.node.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/request-context.node.ts",
+        "packages/core/src/request-context.ts",
+        "packages/core/src/runtime.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "0xbbjoker",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54844437?u=90fe1762420de6ad493a1c1582f1f70c0d87d8e2&v=4",
+      "totalScore": 34.24849524204936,
+      "prScore": 34.24849524204936,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bytes0xcr6",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102038261?u=45bcd82b0f6cc2f6c6f8db5bdc01949b3afe7560&v=4",
+      "totalScore": 23.546573590279973,
+      "prScore": 14.346573590279972,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "borisudovicic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31806472?u=8935f4d43fd7e4eb9bf5ff92d54d4d2f8ac8a786&v=4",
+      "totalScore": 6,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 4,
+  "newIssues": 2,
+  "closedIssues": 3,
+  "activeContributors": 9
+}
