@@ -1,0 +1,94 @@
+{
+  "interval": {
+    "intervalStart": "2026-02-08T00:00:00.000Z",
+    "intervalEnd": "2026-02-09T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-mcp",
+  "overview": "From 2026-02-08 to 2026-02-09, elizaos-plugins/plugin-mcp had 0 new PRs (1 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOqp3ps7CDzE6",
+      "title": "fix: eliminate shared-state MCP mutation for multi-tenant safety",
+      "author": "0xbbjoker",
+      "number": 24,
+      "body": "## Summary\n- Make all HTTP MCP connections lazy after schema fetch (connect → fetch schemas → disconnect → register lazy). `ensureConnected()` creates per-entity connections with correct API keys from request context.\n- Add `MCP_ENABLED_SERVERS` check in `validate()` via `runtime.getSetting()` for per-user OAuth tool filtering. Fail-open when unset for CLI/non-cloud compatibility.\n- Remove all `as any` casts; add `StreamableHTTPClientTransport` to transport union type.\n- Make `getRequestContext` import optional with info/warn logging when unavailable (not in all `@elizaos/core` versions).\n\n## Context\nIn the multi-tenant cloud environment, a shared `AgentRuntime` is cached per `agentId:orgId`. Previously, HTTP MCP connections were established at init with the first user's API key baked in, and `validate()` returned `true` for all lazy connections regardless of the user's OAuth connections. This allowed User B to invoke MCP tools using User A's OAuth tokens.\n\n## Changes\n- `src/service.ts` — HTTP connections now lazy after schema fetch; optional `getRequestContext` import with logging\n- `src/actions/dynamic-tool-actions.ts` — `validate()` checks `MCP_ENABLED_SERVERS` from request context\n- `src/types.ts` — `StreamableHTTPClientTransport` added to `McpConnection.transport` union\n- `tests/dynamic-tool-actions.test.ts` — 3 new tests for MCP_ENABLED_SERVERS filtering (include, exclude, unset)\n\n## Test plan\n- [x] 207 tests pass, 0 fail\n- [x] Pre-existing TS errors unchanged (6, all in untouched files)\n- [x] Biome clean on all changed files\n- [ ] Verify in cloud environment that User A's OAuth tools are not accessible to User B\n- [ ] Verify CLI/standalone usage unaffected (MCP_ENABLED_SERVERS unset → all tools available)\n\n## Companion PR\n- eliza-cloud-v2: elizaOS/eliza-cloud-v2#315 (cross-instance cache invalidation + request context wiring)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches core MCP connection lifecycle and action validation logic; mistakes could cause connection churn or incorrectly deny/allow tool access in multi-tenant deployments.\n> \n> **Overview**\n> **Fixes a multi-tenant MCP isolation issue** by changing HTTP server initialization to connect only long enough to fetch schemas, then disconnect and mark the server as lazy so real tool/resource usage reconnects per request/entity with the correct credentials.\n> \n> Adds per-user OAuth gating via new `checkMcpOAuthAccess()` (driven by request-context `MCP_ENABLED_SERVERS`) and wires it into dynamic tool action `validate()` and `READ_MCP_RESOURCE` validation, with fail-open behavior when the setting is absent. Also hardens `McpService` with an optional `getRequestContext` dynamic import, per-connection locking to avoid duplicate connects, and transport typing updates (adds `StreamableHTTPClientTransport`), plus accompanying unit tests for the new access checks.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 868a2606ea08f6370bf21e0be745c5a23d8a6c2c. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **New Features**\n  * OAuth-based access gating for MCP tool and resource access.\n  * Per-user (per-entity) connection isolation with lazy initialization and restart capability.\n\n* **Refactor**\n  * Broadened transport support and hardened connection lifecycle, error handling, and logging.\n  * Tool action metadata and returned payloads standardized for clearer diagnostics.\n\n* **Tests**\n  * Improved test resilience by safely handling optional action properties and new access checks.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n<h3>Greptile Summary</h3>\n\nThis PR addresses a critical multi-tenant security vulnerability where HTTP MCP connections shared state across users, allowing User B to invoke tools with User A's OAuth tokens.\n\n**Key Changes:**\n- Made HTTP MCP connections lazy after schema fetch (connect → fetch schemas → disconnect → register lazy) so `ensureConnected()` creates per-user connections with correct credentials from request context\n- Added `MCP_ENABLED_SERVERS` validation check in `validate()` to filter tools based on user's OAuth connections (fail-open when unset for CLI compatibility)\n- Removed all `as any` casts by adding `StreamableHTTPClientTransport` to the transport union type in `src/types.ts:83`\n- Made `getRequestContext` import optional with graceful fallback logging for older `@elizaos/core` versions\n- Improved type safety in `getSettings()` by explicitly handling all return types from `getSetting()`\n\n**Tests:**\n- Added 3 new tests covering `MCP_ENABLED_SERVERS` filtering (include, exclude, unset scenarios)\n- All 207 tests pass\n\n**Security Impact:**\nThis PR successfully eliminates the shared-state vulnerability that allowed cross-user OAuth token access in multi-tenant environments.\n\n<h3>Confidence Score: 4/5</h3>\n\n- This PR is safe to merge with one minor issue to address\n- Score reflects strong security improvements and comprehensive test coverage, but has one logic issue: missing try-catch around JSON.parse in the MCP_ENABLED_SERVERS validation that could cause validate() to throw instead of returning false on malformed JSON\n- src/actions/dynamic-tool-actions.ts needs JSON.parse error handling at line 61\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| src/service.ts | Implements lazy HTTP connections with per-user isolation using optional getRequestContext. Removes 'as any' casts and adds proper type handling for transport union. |\n| src/actions/dynamic-tool-actions.ts | Adds MCP_ENABLED_SERVERS validation check to prevent cross-user OAuth token access. Formatting improvements throughout. |\n| src/types.ts | Adds StreamableHTTPClientTransport to McpConnection.transport union type, fixing previous type cast requirement. |\n| tests/dynamic-tool-actions.test.ts | Adds 3 new tests for MCP_ENABLED_SERVERS filtering behavior (include, exclude, unset). Updates existing tests to mock getSetting. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant UA as User A\n    participant UB as User B\n    participant Act as MCP Action\n    participant RT as Runtime\n    participant Svc as McpService\n    participant Srv as HTTP Server\n\n    Note over Svc,Srv: Init: HTTP servers become lazy\n    Svc->>Srv: Connect & fetch schemas\n    Srv-->>Svc: Tools/schemas\n    Svc->>Svc: Disconnect & mark lazy\n    Svc->>Svc: Register actions\n\n    Note over UA,Srv: User A invokes tool\n    UA->>Act: Invoke tool\n    Act->>RT: validate()\n    RT-->>Act: MCP_ENABLED_SERVERS=[\"google\"]\n    Act->>Svc: isLazyConnection(\"google\")?\n    Svc-->>Act: true\n    Act-->>UA: Valid\n    \n    Act->>Svc: callTool(google, search)\n    Svc->>Svc: ensureConnected(google)\n    Svc->>Svc: getRequestContext()->userA\n    Svc->>Srv: Connect as google:userA\n    Srv-->>Svc: Connected\n    Svc->>Srv: Execute tool\n    Srv-->>Svc: Result\n    Svc-->>UA: Success\n\n    Note over UB,Srv: User B attempts same tool\n    UB->>Act: Invoke tool\n    Act->>RT: validate()\n    RT-->>Act: MCP_ENABLED_SERVERS=[\"notion\"]\n    Act->>Act: Check google in list\n    Act-->>UB: OAuth check denied\n    \n    Note over Act: User B blocked from User A tools\n```\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-mcp",
+      "createdAt": "2026-02-06T18:34:54Z",
+      "mergedAt": "2026-02-08T18:15:51Z",
+      "additions": 573,
+      "deletions": 161
+    }
+  ],
+  "codeChanges": {
+    "additions": 573,
+    "deletions": 161,
+    "files": 7,
+    "commitCount": 1
+  },
+  "completedItems": [
+    {
+      "title": "fix: eliminate shared-state MCP mutation for multi-tenant safety",
+      "prNumber": 24,
+      "type": "bugfix",
+      "body": "## Summary\n- Make all HTTP MCP connections lazy after schema fetch (connect → fetch schemas → disconnect → register lazy). `ensureConnected()` creates per-entity connections with correct API keys from request context.\n- Add `MCP_ENABLED_SER",
+      "files": [
+        "src/actions/dynamic-tool-actions.ts",
+        "src/actions/readResourceAction.ts",
+        "src/service.ts",
+        "src/types.ts",
+        "src/utils/mcp.ts",
+        "tests/dynamic-tool-actions.test.ts",
+        "tests/mcp-utils.test.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 288.52580791948094,
+      "prScore": 288.08780791948095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 103.0875477931522,
+      "prScore": 103.0875477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 58.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 58.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "tdnupe3",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25161668?u=94680b6bcbcfce954c7a9dd09d667a3919953041&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
