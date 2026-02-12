@@ -5,8 +5,20 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-02-01 to 2026-03-01, elizaos/eliza had 21 new PRs (17 merged), 30 new issues, and 25 active contributors.",
+  "overview": "From 2026-02-01 to 2026-03-01, elizaos/eliza had 22 new PRs (18 merged), 30 new issues, and 26 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs7FcGAc",
+      "title": "feat(scenarios): Add Cost Evaluator",
+      "author": "monilpat",
+      "number": 5759,
+      "repository": "elizaos/eliza",
+      "body": "# feat(scenarios): Add Cost Evaluator\n\nLinks: [Issue #5726](https://github.com/elizaOS/eliza/issues/5726)\n\n## Summary\nIntroduce an evaluator that asserts the estimated dollar cost of LLM usage per step. Cost is derived from token counts and a model price table.\n\n## Goals\n- Estimate cost (USD) for each step from recorded token metrics\n- Allow thresholds (`max_cost_usd`) to fail expensive runs\n- Support multiple models within a single step\n\n## Acceptance Criteria\n1. New evaluator type `llm_cost`\n2. Price table configurable via env or default map\n3. Evaluator passes if total step cost <= `max_cost_usd`\n4. Detailed message with model breakdown and total\n\n## Schema Changes\nEdit `packages/cli/src/commands/scenario/src/schema.ts`:\n\n```ts\nconst LlmCostEvaluationSchema = BaseEvaluationSchema.extend({\n  type: z.literal('llm_cost'),\n  max_cost_usd: z.number(),\n});\n```\n\n## Pricing Source\nAdd a small utility `packages/cli/src/commands/scenario/src/pricing.ts`:\n\n```ts\nexport type ModelPricing = {\n  inputPer1K: number;    // USD per 1000 input tokens\n  outputPer1K: number;   // USD per 1000 output tokens\n};\n\nexport const DEFAULT_MODEL_PRICING: Record<string, ModelPricing> = {\n  TEXT_SMALL: { inputPer1K: 0.15, outputPer1K: 0.60 },\n  TEXT_LARGE: { inputPer1K: 0.50, outputPer1K: 1.50 },\n  OBJECT_SMALL: { inputPer1K: 0.50, outputPer1K: 1.50 },\n};\n\nexport function getPricing(modelType: string, overrides?: Record<string, ModelPricing>): ModelPricing | null {\n  const table = overrides ?? DEFAULT_MODEL_PRICING;\n  return table[modelType] ?? null;\n}\n```\n\nAllow overrides via `SCENARIO_MODEL_PRICING` env (JSON string) in a follow-up.\n\n## Evaluation Implementation\nAdd to `EvaluationEngine`:\n\n```ts\nclass LlmCostEvaluator implements Evaluator {\n  async evaluate(params: EvaluationSchema, runResult: ExecutionResult): Promise<EvaluationResult> {\n    if (params.type !== 'llm_cost') throw new Error('Mismatched evaluator');\n    const llm = runResult.metrics?.llm ?? [];\n    if (!llm.length) return { success: false, message: 'No LLM metrics found for cost calculation' };\n\n    const pricingOverrides = process.env.SCENARIO_MODEL_PRICING ? JSON.parse(process.env.SCENARIO_MODEL_PRICING) : undefined;\n    let total = 0;\n    for (const m of llm) {\n      const pricing = getPricing(m.modelType, pricingOverrides);\n      if (!pricing) continue;\n      const inTok = m.promptTokens ?? 0;\n      const outTok = m.completionTokens ?? 0;\n      total += (inTok / 1000) * pricing.inputPer1K + (outTok / 1000) * pricing.outputPer1K;\n    }\n\n    const success = total <= params.max_cost_usd;\n    return { success, message: `Estimated cost: $${total.toFixed(4)} (limit $${params.max_cost_usd.toFixed(4)})` };\n  }\n}\n```\n\nRegister:\n\n```ts\nthis.register('llm_cost', new LlmCostEvaluator());\n```\n\n## Example Usage\n\n```yaml\nevaluations:\n  - type: llm_cost\n    max_cost_usd: 0.05\n```\n\n## Tests\n- Unit: price math with multiple model records\n- Integration: with token_count metrics present and absent\n\n## Notes\nThis builds on the Token Count evaluator and shared metrics capture. It complements mocking enhancements described in [Issue #5726](https://github.com/elizaOS/eliza/issues/5726).\n\n\n",
+      "createdAt": "2025-08-12T04:27:23Z",
+      "closedAt": "2026-02-12T22:43:04Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDOMT5cIs7nsf3_",
       "title": "[Agent] Eliza Character File & Prompt Engineering",
@@ -54,18 +66,6 @@
       "closedAt": "2026-02-04T19:22:01Z",
       "state": "CLOSED",
       "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs7BduHW",
-      "title": "feat(scenarios): Enhance LLM Judge with multi-level evaluation",
-      "author": "monilpat",
-      "number": 5637,
-      "repository": "elizaos/eliza",
-      "body": "#### **Description**\n\nCurrently, the `llm_judge` evaluator provides a binary `PASS`/`FAIL` outcome. This is effective for clear-cut cases but doesn't capture the nuance of Large Language Model (LLM) responses, which can often be partially correct, contain good information but have poor formatting, or be conceptually right but incomplete.\n\nThis ticket proposes an enhancement to the `llm_judge` evaluator to support a multi-level evaluation scale (e.g., `FAIL`, `PARTIAL PASS`, `PASS`). This will enable more granular and realistic testing of LLM behavior, providing more insightful feedback on an agent's performance. It allows scenario creators to define what constitutes a full pass versus a partial one, leading to more sophisticated agent evaluations.\n\n#### **Acceptance Criteria**\n\n1.  The `LLMJudgeEvaluationSchema` in `packages/cli/src/scenarios/schema.ts` is updated to allow the `expected` field to be an array of strings, representing the possible evaluation levels (e.g., `['FAIL', 'PARTIAL', 'PASS']`).\n2.  The `LLMJudgeEvaluator` in `packages/cli/src/scenarios/EvaluationEngine.ts` is refactored to instruct the LLM judge to respond with one of the provided evaluation levels.\n3.  The `EvaluationResult` interface is updated to include the specific `level` (e.g., 'PARTIAL') returned by an evaluator, in addition to the overall `success` boolean.\n4.  The `Reporter` class in `packages/cli/src/scenarios/Reporter.ts` is updated to display the evaluation level in its output, using distinct icons and colors for each level (e.g., ✅ PASS, 🟠 PARTIAL, ❌ FAIL).\n5.  The final `judgment` logic in `packages/cli/src/commands/scenario.ts` is enhanced to accommodate the new levels. For example, an `all_pass` strategy should require all evaluations to achieve the highest success level (e.g., 'PASS').\n6.  The process exit code logic remains `0` for an overall scenario pass and `1` for a fail, based on the final judgment.\n\n#### **Technical Approach**\n\n**1. Update Scenario Schema (`schema.ts`)**\n\nModify the `LLMJudgeEvaluationSchema` to accept an array of strings for the `expected` field. This array defines the custom evaluation scale for the judge. The system prompt for the LLM will be dynamically constructed from this array.\n\n```typescript\n// packages/cli/src/scenarios/schema.ts\n// ...\nconst LLMJudgeEvaluationSchema = BaseEvaluationSchema.extend({\n  type: z.literal('llm_judge'),\n  prompt: z.string(),\n  // Change from z.string() to z.array(z.string()) to define the evaluation scale.\n  // Default to a binary scale if not provided.\n  expected: z.array(z.string()).optional().default(['FAIL', 'PASS']),\n});\n// ...\n```\n\n**2. Refactor Evaluation Engine (`EvaluationEngine.ts`)**\n\nThe `LLMJudgeEvaluator` must be updated to pass the new evaluation scale to the LLM. The general `EvaluationResult` type will also be updated to include the `level`.\n\n```typescript\n// packages/cli/src/scenarios/EvaluationEngine.ts\n// ...\nexport interface EvaluationResult {\n    success: boolean; // True if not the lowest evaluation level\n    level: string;    // The specific outcome, e.g., 'PASS', 'FAIL', 'PARTIAL'\n    message: string;\n}\n\ninterface Evaluator {\n    // This method will now return the string level of the outcome.\n    evaluate(runtime: IAgentRuntime, result: ScenarioResult): Promise<string>;\n    getMessage(level: string): string;\n    // Helper to get the expected levels\n    getLevels(): string[];\n}\n\nclass LLMJudgeEvaluator implements Evaluator {\n    constructor(private prompt: string, private expected: string[]) {}\n\n    async evaluate(runtime: IAgentRuntime, result: ScenarioResult): Promise<string> {\n        const systemPrompt = `You are an AI assistant that judges the output of a command. Based on the prompt and the command output, respond with ONLY one of the following values: [${this.expected.join(', ')}].`;\n\n        const llmResult = await runtime.useModel('TEXT_LARGE', {\n            system: systemPrompt,\n            messages: [{\n                role: 'user',\n                content: `Prompt: ${this.prompt}\\nOutput: ${result.stdout}`\n            }]\n        });\n        \n        const response = llmResult.trim().toUpperCase();\n        // Validate the LLM's response against the expected levels.\n        if (this.expected.map(e => e.toUpperCase()).includes(response)) {\n            return response;\n        }\n        // Default to the first (lowest) level if the LLM's response is invalid.\n        return this.expected[0].toUpperCase();\n    }\n    \n    getLevels(): string[] {\n        return this.expected;\n    }\n    // ... getMessage remains similar ...\n}\n\nexport class EvaluationEngine {\n    // ...\n    async run(runtime: IAgentRuntime, result: ScenarioResult): Promise<EvaluationResult[]> {\n        const results: EvaluationResult[] = [];\n        for (const evaluator of this.evaluators) {\n            const level = await evaluator.evaluate(runtime, result);\n            const levels = evaluator.getLevels();\n            // \"Success\" is defined as any outcome that is not the lowest possible level.\n            const success = level !== levels[0].toUpperCase();\n            results.push({ success, level, message: evaluator.getMessage(level) });\n        }\n        return results;\n    }\n}\n```\n\n**3. Enhance Reporter (`Reporter.ts`)**\n\nUpdate the reporter to handle and display the new evaluation levels with distinct formatting.\n\n```typescript\n// packages/cli/src/scenarios/Reporter.ts\n// ...\n  public reportEvaluationResults(results: EvaluationResult[]) {\n    // ...\n    results.forEach(res => {\n      let status;\n      // Use a switch to handle different levels, with default for unknown levels.\n      switch(res.level.toUpperCase()) {\n        case 'PASS':\n          status = chalk.green('✅ PASS');\n          break;\n        case 'PARTIAL':\n        case 'PARTIAL PASS':\n          status = chalk.yellow('🟠 PARTIAL');\n          break;\n        case 'FAIL':\n        default:\n          status = chalk.red('❌ FAIL');\n          break;\n      }\n      console.log(`${status}: ${res.message}`);\n    });\n    // ...\n  }\n// ...\n```\n\n**4. Update Judgment Logic (`scenario.ts`)**\n\nThe logic for determining the final outcome must be updated to be aware of the different levels.\n\n```typescript\n// packages/cli/src/commands/scenario.ts\n// ...\n// --- JUDGMENT ---\nif (scenario.judgment?.pass?.all) {\n    // Strictest strategy: all evaluations must be the highest possible level.\n    finalStatus = evalResults.every(res => res.level === 'PASS'); // Assuming 'PASS' is the highest\n}\n// Potentially add new strategies here in the future, e.g., 'all_pass_or_partial'\n// ...\n```\n\n#### **Testing Strategy**\n\n1.  **Create a new scenario file**: `llm-judge-partial-pass.scenario.yaml`.\n2.  **Define a multi-level evaluation**:\n    ```yaml\n    # ...\n    evaluations:\n      - type: llm_judge\n        prompt: \"Respond with the capital of France in a complete sentence.\"\n        expected: ['FAIL', 'PARTIAL', 'PASS']\n    judgment:\n      pass:\n        all: true # This will require a 'PASS' result\n    ```\n3.  **Run with an input that yields a partial pass** (e.g., `input: \"echo 'Paris'\"`).\n    *   **Verify**: The reporter shows `🟠 PARTIAL`, the final status is `❌ FAIL`, and the exit code is `1`.\n4.  **Run with an input that yields a full pass** (e.g., `input: \"echo 'The capital of France is Paris.'\"`).\n    *   **Verify**: The reporter shows `✅ PASS`, the final status is `✅ PASS`, and the exit code is `0`.",
-      "createdAt": "2025-07-20T00:26:09Z",
-      "closedAt": "2026-02-04T23:28:26Z",
-      "state": "CLOSED",
-      "commentCount": 0
     }
   ],
   "topPRs": [
@@ -82,6 +82,18 @@
       "deletions": 298813
     },
     {
+      "id": "PR_kwDOMT5cIs7CUyZi",
+      "title": "feat: next generation multi-language Eliza with Rust, Python and TypeScript support",
+      "author": "lalalune",
+      "number": 6485,
+      "body": "This is the next version of eliza\r\n\r\nRust, python and typescript\r\n\r\n\r\n# Major Updates\r\n\r\n- Add complete Python and Rust core packages, extending Eliza to these languages\r\n- Add Python and Rust native versions of popular plugins\r\n- Remove default application, client and server infrastructure\r\n- Add examples for all major frameworks\r\n- Bootstrap is integrated into core, enabled with basicCapabilities by default and optionally extendedCapabiltiies\r\n- Core plugins are also rust, python and typescript\r\n- Comes with a WIP code agent\r\n\r\n# Minor updates\r\n\r\n- Agents can now respond without needing a roomId or worldId\r\n- Initial message memory is created inside the message handler service (was confusing and not that way)\r\n- Can running planningMode true or false, on false skips planning and calls single action (good for games and simple agents)\r\n- Actions can have arguments, and can be called with arguments. This way they can be called like tools without needing a separate step\r\n\r\nTODO\r\n- LLM mode -- can be SMALL, LARGE or DEFAULT -- SMALL and LARGE override the LLM small or large so all use the small or all use the large\r\n- checkShouldRespond defaults to true but can be turned off for ChatGPT mode",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-02-08T18:44:21Z",
+      "mergedAt": null,
+      "additions": 666385,
+      "deletions": 303173
+    },
+    {
       "id": "PR_kwDOMT5cIs7CJoKo",
       "title": "next",
       "author": "lalalune",
@@ -92,18 +104,6 @@
       "mergedAt": null,
       "additions": 591239,
       "deletions": 282388
-    },
-    {
-      "id": "PR_kwDOMT5cIs7CUyZi",
-      "title": "feat: next generation multi-language Eliza with Rust, Python and TypeScript support",
-      "author": "lalalune",
-      "number": 6485,
-      "body": "This is the next version of eliza\r\n\r\nRust, python and typescript\r\n\r\n\r\n# Major Updates\r\n\r\n- Add complete Python and Rust core packages, extending Eliza to these languages\r\n- Add Python and Rust native versions of popular plugins\r\n- Remove default application, client and server infrastructure\r\n- Add examples for all major frameworks\r\n- Bootstrap is integrated into core, enabled with basicCapabilities by default and optionally extendedCapabiltiies\r\n- Core plugins are also rust, python and typescript\r\n- Comes with a WIP code agent\r\n\r\n# Minor updates\r\n\r\n- Agents can now respond without needing a roomId or worldId\r\n- Initial message memory is created inside the message handler service (was confusing and not that way)\r\n- Can running planningMode true or false, on false skips planning and calls single action (good for games and simple agents)\r\n- Actions can have arguments, and can be called with arguments. This way they can be called like tools without needing a separate step\r\n\r\nTODO\r\n- LLM mode -- can be SMALL, LARGE or DEFAULT -- SMALL and LARGE override the LLM small or large so all use the small or all use the large\r\n- checkShouldRespond defaults to true but can be turned off for ChatGPT mode",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-02-08T18:44:21Z",
-      "mergedAt": null,
-      "additions": 588697,
-      "deletions": 303204
     },
     {
       "id": "PR_kwDOMT5cIs64E0uE",
@@ -132,9 +132,9 @@
   ],
   "codeChanges": {
     "additions": 18576,
-    "deletions": 3784,
-    "files": 159,
-    "commitCount": 77
+    "deletions": 3807,
+    "files": 160,
+    "commitCount": 84
   },
   "completedItems": [
     {
@@ -434,9 +434,28 @@
         "packages/typescript/src/services/cosine-similarity.ts",
         "packages/typescript/src/types/plugin.ts"
       ]
+    },
+    {
+      "title": "chore(changelog): remove references",
+      "prNumber": 6495,
+      "type": "other",
+      "body": "## Summary\r\n- remove all references from `CHANGELOG.md`\r\n\r\n## Testing\r\n- not run (content-only change)\r\n",
+      "files": [
+        "CHANGELOG.md"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 358.4651565201822,
+      "prScore": 353.26515652018213,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": "standujar: Focused on enhancing the stability and functionality of the n8n-workflow plugin, notably improving multi-step loop control by introducing the awaitingUserInput flag in PR #13. They addressed critical integration issues by ensuring cloud compatibility through state management updates in PR #12 and standardizing success status reporting across all action callbacks in PR #11 (+388/-40 lines). Additionally, they streamlined the development lifecycle by automating node crawling in the publish workflow (PR #10) and integrating the plugin into the project's tracked repositories. Their work this month primarily centered on bug fixes and feature development for workflow automation, with a strong emphasis on code reliability and CI/CD improvements."
+    },
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
@@ -446,16 +465,6 @@
       "reviewScore": 0,
       "commentScore": 0.7779999999999999,
       "summary": "lalalune: Focused on expanding core infrastructure and cross-chain capabilities, notably implementing a multi-provider RPC system in elizaos-plugins/plugin-evm (#25) and cloud proxy routing for Solana services (#26). They delivered a significant architectural enhancement with the ActionFilterService in elizaos/eliza (#6475), which introduced vector search and BM25 reranking to improve action selection. Their work involved a massive scale of code modifications across over 4,500 files, signaling a deep involvement in systemic refactors and next-generation multi-language support. Overall, their contributions centered on infrastructure scalability, authentication frameworks, and enhancing the developer experience through CLI and documentation improvements."
-    },
-    {
-      "username": "standujar",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 277.10966683799285,
-      "prScore": 271.90966683799286,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": "standujar: Focused on enhancing the stability and functionality of the n8n-workflow plugin, notably improving multi-step loop control by introducing the awaitingUserInput flag in PR #13. They addressed critical integration issues by ensuring cloud compatibility through state management updates in PR #12 and standardizing success status reporting across all action callbacks in PR #11 (+388/-40 lines). Additionally, they streamlined the development lifecycle by automating node crawling in the publish workflow (PR #10) and integrating the plugin into the project's tracked repositories. Their work this month primarily centered on bug fixes and feature development for workflow automation, with a strong emphasis on code reliability and CI/CD improvements."
     },
     {
       "username": "odilitime",
@@ -480,10 +489,10 @@
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 140.84,
+      "totalScore": 145.34,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 139.5,
+      "reviewScore": 144,
       "commentScore": 1.34,
       "summary": "greptile-apps: Focused exclusively on providing feedback and technical oversight through 28 reviews and 5 pull request comments. Despite no direct code changes or merged pull requests this month, they maintained a high level of engagement in the review process to ensure code quality across the codebase. Their primary impact was centered on collaborative peer review and providing detailed commentary on open contributions."
     },
@@ -518,6 +527,16 @@
       "summary": "borisudovicic: Focused on driving the architectural roadmap and infrastructure readiness for the Eliza App MVP launch, creating 31 issues to coordinate critical tasks across cloud integrations and user experience. They played a key role in defining infrastructure requirements for Telegram and Discord deployments (#6425, #6424), secrets management (#6410), and the implementation of a multi-tenant serverless architecture (#6415). Their contributions also spanned essential product milestones, including the rollout of OAuth providers (#6437), billing system integration (#6445), and performance optimizations to address cold start latency (#6450). Overall, their activity centered on high-level project management, infrastructure provisioning, and security auditing to ensure a stable pre-launch environment."
     },
     {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 36.63501911726088,
+      "prScore": 36.63501911726088,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "hanzlamateen",
       "avatarUrl": "https://avatars.githubusercontent.com/u/10975502?u=53f23921078d9a27d96751373bb44f4bd2d58bf4&v=4",
       "totalScore": 34.39669771918965,
@@ -546,6 +565,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "erdGeclaw: Focused on expanding ecosystem integrations by initiating the addition of the Base L2 smart money signals plugin to the registry. This contribution, currently tracked in open PR #253, aims to integrate @erdgecrawl/plugin-base-signals into the elizaos-plugins repository. Their primary focus this month has been on enhancing signal-based functionality within the Base L2 environment."
+    },
+    {
+      "username": "mcp97",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15067321?v=4",
+      "totalScore": 21.901026915173976,
+      "prScore": 21.901026915173976,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "arthur-orderly",
@@ -668,9 +697,9 @@
       "summary": null
     }
   ],
-  "newPRs": 21,
-  "mergedPRs": 17,
+  "newPRs": 22,
+  "mergedPRs": 18,
   "newIssues": 30,
-  "closedIssues": 32,
-  "activeContributors": 25
+  "closedIssues": 37,
+  "activeContributors": 26
 }
