@@ -1,0 +1,78 @@
+{
+  "interval": {
+    "intervalStart": "2026-02-14T00:00:00.000Z",
+    "intervalEnd": "2026-02-15T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-openai",
+  "overview": "From 2026-02-14 to 2026-02-15, elizaos-plugins/plugin-openai had 1 new PRs (0 merged), 0 new issues, and 2 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDON0mV_87D1Sql",
+      "title": "feat(plugin-openai): add rate limiter, improve embeddings, and update…",
+      "author": "odilitime",
+      "number": 24,
+      "body": "… types\r\n\r\nAdd rate-limiter utility with per-endpoint backoff and retry logic. Improve embedding handler with better error handling and fallback support. Refactor init, audio, image, object, and text model handlers for @elizaos/core API compatibility. Expand types and add banner. Update README with comprehensive documentation.\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Touches all OpenAI model call paths and introduces new retry/throttling and 429 classification logic, which could impact latency and error handling behavior under load. Startup behavior and TypeScript typing are also changed, but mostly in a controlled, additive way.\n> \n> **Overview**\n> Adds a new process-wide rate limiter (`withRateLimit`/`acquireRateLimit`) with per-category sliding-window throttling, exponential backoff using `Retry-After`, one-shot tier logging, and **fail-fast billing/quota 429 detection** via `QuotaExceededError`.\n> \n> Updates embeddings/images/audio/object/text handlers to use the limiter and to `await throwIfRateLimited()` for typed 429 handling; embeddings also gain synthetic fast-paths (null/empty/`\"test\"`) to avoid startup probe API calls and return fallback vectors on dimension mismatch.\n> \n> Changes plugin init to be non-blocking and purely synchronous (removes eager `GET /models` validation), adds a startup config banner (`src/banner.ts`), introduces local core-compat streaming shims (`StreamingTextParams`/`TextStreamResult`), DRYs model registration with a `Plugin[\"models\"]` type assertion, switches `@elizaos/core` dependency to `workspace:*`, and expands docs with a new `CHANGELOG.md` and README sections for banner/rate limiting/compatibility.\n> \n> <sup>Written by [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot) for commit 7542c671110256a1e1b24627b90870f414fd9b92. This will update automatically on new commits. Configure [here](https://cursor.com/dashboard?tab=bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Startup banner displaying API key status, base URL, and models\n  * Automatic account tier detection on first API call\n  * Built-in rate limiting with automatic retries and exponential backoff\n  * Billing quota error detection with direct dashboard link\n  * Optimized embeddings to avoid unnecessary API calls\n\n* **Bug Fixes**\n  * Faster startup by removing unnecessary API validation\n\n* **Documentation**\n  * Expanded README with rate limiting details, billing handling, configuration options, examples, and architecture overview\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h2>Greptile Overview</h2>\n\n<h3>Greptile Summary</h3>\n\nThis PR adds a comprehensive rate limiting system to prevent 429 errors from OpenAI's API and improves model handlers with better error handling and caching.\n\n**Major Changes:**\n- New sliding-window rate limiter with per-category tracking (embeddings, chat, images, audio) and exponential backoff with automatic retry logic\n- Removed eager API validation during initialization to prevent race conditions with embedding dimension probes\n- Enhanced embedding handler with synthetic vectors for test probes, avoiding unnecessary API calls during startup\n- Added persistent caching for image descriptions and transcriptions with content-based hashing\n- Refactored all model handlers to use rate limiting wrapper with quota detection\n- Added forward-compatibility type shims for streaming support across `@elizaos/core` versions\n- New startup banner displaying configuration status\n\n**Technical Highlights:**\n- Rate limiter uses module-level singleton pattern to preserve state across agent reinitializations\n- Image description caching includes ETag/Last-Modified headers for content-aware cache keys\n- Transcription caching uses optimized blob sampling (start/middle/end slices) to minimize memory usage\n- Quota exhaustion (billing) errors are distinguished from transient rate limit errors to fail fast\n- Comprehensive documentation with detailed rationale comments throughout\n\n<h3>Confidence Score: 4/5</h3>\n\n- Safe to merge with one minor logic issue in rate-limiter retry-after header parsing\n- Comprehensive implementation with excellent documentation and clear architectural decisions. One minor bug in `retry-after` header parsing that could pass NaN to backoff logic. All other code is well-structured with proper error handling, caching strategies, and type safety\n- Pay attention to `src/utils/rate-limiter.ts:338` - the retry-after header parsing needs the parentheses fix to handle invalid header values correctly\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| src/utils/rate-limiter.ts | New rate limiter with sliding window, exponential backoff, and per-category tracking. Well-documented implementation with quota detection. |\n| src/models/embedding.ts | Enhanced with rate limiting and improved error handling. Synthetic embeddings for test probes avoid unnecessary API calls. |\n| src/models/image.ts | Added rate limiting, caching with content-aware keys, and size validation. Comprehensive error handling for image operations. |\n| src/models/text.ts | Refactored to use rate limiter with different strategies for streaming vs non-streaming calls. Clean implementation. |\n| src/models/audio.ts | Added transcription caching with content-based hashing and rate limiting. Efficient blob sampling for cache keys. |\n| src/init.ts | Removed eager API validation to avoid startup race conditions. Synchronous config validation only. |\n\n</details>\n\n\n\n<h3>Flowchart</h3>\n\n```mermaid\nflowchart TD\n    Start[API Call Request] --> CheckCategory{Determine Category<br/>chat/embeddings/images/audio}\n    CheckCategory --> AcquireSlot[Acquire Rate Limit Slot]\n    \n    AcquireSlot --> CheckBackoff{Active Backoff?}\n    CheckBackoff -->|Yes| WaitBackoff[Wait for Backoff]\n    CheckBackoff -->|No| CheckWindow{Within RPM Limit?}\n    \n    WaitBackoff --> CheckWindow\n    CheckWindow -->|No| WaitWindow[Wait for Window Slot]\n    CheckWindow -->|Yes| RecordRequest[Record Request Timestamp]\n    \n    WaitWindow --> RecordRequest\n    RecordRequest --> MakeCall[Execute API Call]\n    \n    MakeCall --> CheckResponse{Response Status}\n    CheckResponse -->|200 OK| Success[Return Result]\n    CheckResponse -->|429 Quota| QuotaError[Throw QuotaExceededError<br/>No Retry]\n    CheckResponse -->|429 Rate Limit| RateError{Retries Left?}\n    CheckResponse -->|Other Error| OtherError[Throw Error]\n    \n    RateError -->|Yes| RecordBackoff[Record Backoff Deadline<br/>Exponential + Jitter]\n    RateError -->|No| MaxRetries[Throw Max Retries Error]\n    \n    RecordBackoff --> Sleep[Sleep with Backoff]\n    Sleep --> AcquireSlot\n    \n    Success --> End[Complete]\n    QuotaError --> End\n    OtherError --> End\n    MaxRetries --> End\n```\n\n<sub>Last reviewed commit: 7542c67</sub>\n\n<!-- greptile_other_comments_section -->\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-openai",
+      "createdAt": "2026-02-14T22:30:12Z",
+      "mergedAt": null,
+      "additions": 1360,
+      "deletions": 422
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 1
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lawyered0",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4802498?u=f45773fb7440d77e5c12ea1560122dd6d26632eb&v=4",
+      "totalScore": 10.40435169073515,
+      "prScore": 10.40435169073515,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aite550659-max",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258900948?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 2
+}
