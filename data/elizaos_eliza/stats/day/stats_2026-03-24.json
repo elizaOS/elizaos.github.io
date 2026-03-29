@@ -1,0 +1,110 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-24T00:00:00.000Z",
+    "intervalEnd": "2026-03-25T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-03-24 to 2026-03-25, elizaos/eliza had 1 new PRs (0 merged), 0 new issues, and 5 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7M1WER",
+      "title": "fix(electron): expose getAppVersion to renderer via preload",
+      "author": "BillionClaw",
+      "number": 6660,
+      "body": "## Summary\n\nThe `desktop:getVersion` IPC handler was registered in `desktop.ts` (line 751) but was never exposed in the `electronAPI` object in `preload.ts`, causing `window.electronAPI.getAppVersion()` to be `undefined` in the renderer.\n\n## Fix\n\nAdded `getAppVersion` method to `electronAPI` in `packages/milaidy/apps/app/electron/src/preload.ts` that calls `ipcRenderer.invoke('desktop:getVersion')`.\n\nThe method returns:\n```ts\n{\n  version: string;\n  name: string;\n  electron: string;\n  chrome: string;\n  node: string;\n}\n```\n\n## Testing\n\nCall from renderer:\n```ts\nconst versionInfo = await window.electronAPI.getAppVersion();\nconsole.log(versionInfo.version);\n```\n\nFixes elizaOS/eliza#6617",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-23T22:59:59Z",
+      "mergedAt": null,
+      "additions": 21465,
+      "deletions": 7708
+    },
+    {
+      "id": "PR_kwDOMT5cIs7NHRJa",
+      "title": "fix(core): parse XML action tags instead of comma-splitting actions",
+      "author": "HaruHunab1320",
+      "number": 6661,
+      "body": "## Summary\n- `parseKeyValueXml` blindly comma-splits `<actions>` content, breaking when action params contain commas\n- Example: `<task>Add orange, black, and red colors, hex grids</task>` splits into separate \"action\" names like `\"its architecture\"`, `\"and red colors\"`, etc.\n- Fix: when `<actions>` content contains `<action>` XML tags, extract `<name>` elements via regex into an array instead of comma-splitting\n- Legacy plain comma-separated format (`REPLY, START_CODING_TASK`) still works as before\n\n## Test plan\n- [x] 4 new tests: XML action extraction, commas in params, attribute variant, plain comma-split fallback\n- [x] All 92 existing utils tests pass\n- [ ] Multi-agent spawn with task descriptions containing commas no longer fragments into \"Action not found\" errors\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **Tests**\n  * Added tests validating XML parsing of the actions field with nested tags.\n\n* **Bug Fixes**\n  * System now correctly preserves raw XML content in the actions field and extracts action names from nested XML tags instead of splitting by commas.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a real bug in `parseKeyValueXml` where action names were corrupted by comma-splitting when an LLM response embedded commas inside `<params>` content (e.g. `<task>Add orange, black, and red colors</task>`). The fix detects `<action>` XML tags in the value and, instead of splitting, preserves the raw XML string so the downstream `message.ts` `normalizedActions` handler (which already expects `typeof === \"string\"`) can extract names and params correctly.\n\nKey points:\n- The fix correctly handles the primary `message.ts` consumption path\n- **The `basic-capabilities/index.ts` caller is not updated**: it wraps any non-array `actionsRaw` directly in `[value]` (line 566), so an LLM response with `<action>` tags through that code path would produce a single action whose \"name\" is the entire XML string, silently failing all action lookups\n- Six new unit tests are added (PR description mentions four — minor discrepancy) covering XML extraction, commas in params, attributes, legacy fallback, malformed blocks, and params preservation\n- Prior review concerns (providers/evaluators parity, `\\s>/` detection breadth, action-without-name edge case) have been addressed in this revision\n\n<h3>Confidence Score: 3/5</h3>\n\n- Not safe to merge as-is: the return-type change in `parseKeyValueXml` breaks an unconverted caller in `basic-capabilities/index.ts`.\n- The core logic in `utils.ts` is sound and the `message.ts` path works correctly. However, `basic-capabilities/index.ts` was not updated and will wrap the entire raw XML string as a single action name, causing silent action-dispatch failures in that code path. Fixing that one caller (mirroring the `message.ts` guard) would bring this to merge-ready.\n- packages/typescript/src/basic-capabilities/index.ts — the `actionsRaw` handling at line ~563 must be updated to handle the new `typeof === \"string\"` case the same way `message.ts` does.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/typescript/src/utils.ts | Core fix: when `<action>` XML tags are detected inside `<actions>`, preserves the raw XML string instead of comma-splitting. Fix is correct for the `message.ts` consumer path, but the change in return type (string instead of string[]) breaks the `basic-capabilities/index.ts` caller which wraps any non-array string in `[value]`, producing a garbage single-element actions array. |\n| packages/typescript/src/__tests__/utils.test.ts | Six new tests added (PR description says four — minor discrepancy). Tests cover: XML detection, comma-in-params, attributed action tags, legacy fallback, malformed actions, and params preservation. Coverage is comprehensive for the `parseKeyValueXml` function in isolation. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[LLM response string] --> B[parseKeyValueXml]\n    B --> C{actions value contains\\n'<action...' tag?}\n    C -- Yes --> D[result.actions = raw XML string]\n    C -- No --> E[result.actions = comma-split array]\n\n    D --> F{Which caller?}\n    E --> F\n\n    F -- message.ts --> G{\"typeof parsedXml.actions\\n=== 'string'?\"}\n    G -- Yes --> H[matchAll /<action>...<\\/action>/g\\nextract names + params ✅]\n    G -- No / Array --> I[Use array directly ✅]\n\n    F -- basic-capabilities/index.ts --> J{\"Array.isArray(actionsRaw)?\"}\n    J -- Yes --> K[Use array directly ✅]\n    J -- No, string --> L[\"[actionsRaw] — entire XML\\nbecomes one action name ❌\"]\n```\n\n<sub>Reviews (2): Last reviewed commit: [\"fix: simplify — preserve raw XML string ...\"](https://github.com/elizaos/eliza/commit/7d43487a40b18da71222385bc5b2df7dccb3f8cf) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26218480)</sub>\n\n> Greptile also left **1 inline comment** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-24T19:29:45Z",
+      "mergedAt": "2026-03-25T02:12:57Z",
+      "additions": 149,
+      "deletions": 6
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 7
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 76.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 76.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 44.31297516513483,
+      "prScore": 44.31297516513483,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "HaruHunab1320",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/51176775?u=e51de0edfe50f67a1a5dca3bf3fa3053811dfb7e&v=4",
+      "totalScore": 42.91478401087431,
+      "prScore": 42.5747840108743,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "plagtech",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/237668165?u=c3846cc033d3ea0f2fcdca51c2e2fb2f53c76f4d&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "BillionClaw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/267901332?v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 5
+}

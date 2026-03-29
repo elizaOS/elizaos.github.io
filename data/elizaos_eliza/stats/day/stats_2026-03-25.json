@@ -1,0 +1,226 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-25T00:00:00.000Z",
+    "intervalEnd": "2026-03-26T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-03-25 to 2026-03-26, elizaos/eliza had 6 new PRs (7 merged), 1 new issues, and 2 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs72fCjN",
+      "title": "Integration: Pyrimid x402 Agent Commerce via MCP",
+      "author": "henrimahal",
+      "number": 6668,
+      "repository": "elizaos/eliza",
+      "body": "## What\n\n[Pyrimid](https://pyrimid.ai) — onchain commerce infrastructure for AI agents on Base. MCP server with 7 tools for agent-to-agent payments using x402.\n\n## For ElizaOS Agents\n\n- Discover paid APIs via MCP catalog\n- Pay per-call in USDC on Base (x402 protocol) — zero API keys needed\n- Earn 50% affiliate commissions by routing traffic to vendors\n- ERC-8004 onchain identity for agents\n\n## Status\n\nMCP server live on [Glama](https://glama.ai/mcp/servers/pyrimid-ai/pyrimid) + Smithery. 4 verified Base contracts.\n\nAlso built [MonetizeYourAgent](https://monetizeyouragent.fun) — agent directory with 80+ entries and MCP integration (11 tools).\n\n## Links\n- https://pyrimid.ai\n- https://github.com/pyrimid-ai/pyrimid\n- https://monetizeyouragent.fun\n- https://x402scan.com\n\nHappy to discuss integration patterns for Eliza agents.",
+      "createdAt": "2026-03-25T13:11:19Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7NHRJa",
+      "title": "fix(core): parse XML action tags instead of comma-splitting actions",
+      "author": "HaruHunab1320",
+      "number": 6661,
+      "body": "## Summary\n- `parseKeyValueXml` blindly comma-splits `<actions>` content, breaking when action params contain commas\n- Example: `<task>Add orange, black, and red colors, hex grids</task>` splits into separate \"action\" names like `\"its architecture\"`, `\"and red colors\"`, etc.\n- Fix: when `<actions>` content contains `<action>` XML tags, extract `<name>` elements via regex into an array instead of comma-splitting\n- Legacy plain comma-separated format (`REPLY, START_CODING_TASK`) still works as before\n\n## Test plan\n- [x] 4 new tests: XML action extraction, commas in params, attribute variant, plain comma-split fallback\n- [x] All 92 existing utils tests pass\n- [ ] Multi-agent spawn with task descriptions containing commas no longer fragments into \"Action not found\" errors\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **Tests**\n  * Added tests validating XML parsing of the actions field with nested tags.\n\n* **Bug Fixes**\n  * System now correctly preserves raw XML content in the actions field and extracts action names from nested XML tags instead of splitting by commas.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a real bug in `parseKeyValueXml` where action names were corrupted by comma-splitting when an LLM response embedded commas inside `<params>` content (e.g. `<task>Add orange, black, and red colors</task>`). The fix detects `<action>` XML tags in the value and, instead of splitting, preserves the raw XML string so the downstream `message.ts` `normalizedActions` handler (which already expects `typeof === \"string\"`) can extract names and params correctly.\n\nKey points:\n- The fix correctly handles the primary `message.ts` consumption path\n- **The `basic-capabilities/index.ts` caller is not updated**: it wraps any non-array `actionsRaw` directly in `[value]` (line 566), so an LLM response with `<action>` tags through that code path would produce a single action whose \"name\" is the entire XML string, silently failing all action lookups\n- Six new unit tests are added (PR description mentions four — minor discrepancy) covering XML extraction, commas in params, attributes, legacy fallback, malformed blocks, and params preservation\n- Prior review concerns (providers/evaluators parity, `\\s>/` detection breadth, action-without-name edge case) have been addressed in this revision\n\n<h3>Confidence Score: 3/5</h3>\n\n- Not safe to merge as-is: the return-type change in `parseKeyValueXml` breaks an unconverted caller in `basic-capabilities/index.ts`.\n- The core logic in `utils.ts` is sound and the `message.ts` path works correctly. However, `basic-capabilities/index.ts` was not updated and will wrap the entire raw XML string as a single action name, causing silent action-dispatch failures in that code path. Fixing that one caller (mirroring the `message.ts` guard) would bring this to merge-ready.\n- packages/typescript/src/basic-capabilities/index.ts — the `actionsRaw` handling at line ~563 must be updated to handle the new `typeof === \"string\"` case the same way `message.ts` does.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/typescript/src/utils.ts | Core fix: when `<action>` XML tags are detected inside `<actions>`, preserves the raw XML string instead of comma-splitting. Fix is correct for the `message.ts` consumer path, but the change in return type (string instead of string[]) breaks the `basic-capabilities/index.ts` caller which wraps any non-array string in `[value]`, producing a garbage single-element actions array. |\n| packages/typescript/src/__tests__/utils.test.ts | Six new tests added (PR description says four — minor discrepancy). Tests cover: XML detection, comma-in-params, attributed action tags, legacy fallback, malformed actions, and params preservation. Coverage is comprehensive for the `parseKeyValueXml` function in isolation. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[LLM response string] --> B[parseKeyValueXml]\n    B --> C{actions value contains\\n'<action...' tag?}\n    C -- Yes --> D[result.actions = raw XML string]\n    C -- No --> E[result.actions = comma-split array]\n\n    D --> F{Which caller?}\n    E --> F\n\n    F -- message.ts --> G{\"typeof parsedXml.actions\\n=== 'string'?\"}\n    G -- Yes --> H[matchAll /<action>...<\\/action>/g\\nextract names + params ✅]\n    G -- No / Array --> I[Use array directly ✅]\n\n    F -- basic-capabilities/index.ts --> J{\"Array.isArray(actionsRaw)?\"}\n    J -- Yes --> K[Use array directly ✅]\n    J -- No, string --> L[\"[actionsRaw] — entire XML\\nbecomes one action name ❌\"]\n```\n\n<sub>Reviews (2): Last reviewed commit: [\"fix: simplify — preserve raw XML string ...\"](https://github.com/elizaos/eliza/commit/7d43487a40b18da71222385bc5b2df7dccb3f8cf) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26218480)</sub>\n\n> Greptile also left **1 inline comment** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-24T19:29:45Z",
+      "mergedAt": "2026-03-25T02:12:57Z",
+      "additions": 149,
+      "deletions": 6
+    },
+    {
+      "id": "PR_kwDOMT5cIs7NMxmN",
+      "title": "fix: computeruse Linux Rust build errors",
+      "author": "HaruHunab1320",
+      "number": 6664,
+      "body": "## Summary\nRelease CI fails on computeruse Rust build with 6 compilation errors:\n\n1. Missing `set_selected` trait implementation on `LinuxUIElement`\n2. Named field access on tuple type (`extents.x` → `extents.0`) — atspi returns `(i32, i32, i32, i32)` not a struct\n3. `AccessibilityConnection` doesn't impl `Into<zbus::Connection>` — use `.connection().clone()` instead\n4. Unused variable warnings (`app_ref`, `state_set`, `mut states`)\n\n## Test plan\n- [ ] Release CI `@elizaos/computeruse` Rust build passes\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes 6 Rust compilation errors in the Linux AT-SPI2 accessibility backend (`packages/computeruse/crates/computeruse/src/platforms/linux/mod.rs`) that were blocking CI for the `@elizaos/computeruse` package.\n\nKey fixes:\n- **Missing trait method**: Adds a `set_selected` stub to `LinuxUIElement` returning `UnsupportedOperation`, matching the existing pattern used by `StubElement` and other unimplemented methods on Linux.\n- **Tuple index fix**: Corrects `extents.x/y/width/height` → `extents.0/1/2/3` since `atspi::ComponentProxy::get_extents` returns a plain `(i32, i32, i32, i32)` tuple, not a named struct.\n- **`zbus::Connection` fix**: Replaces `connection.into()` (which `AccessibilityConnection` does not implement) with `connection.connection().clone()` to properly extract the underlying `ZbusConnection`.\n- **Unused variable warnings**: Prefixes `app_ref` and `state_set` with `_` and removes `mut` from `states` (the `HashSet` is created empty and never mutated), silencing the four remaining compiler warnings.\n\nAll changes are mechanical correctness fixes with no behavioral change — the states and PID extraction were already stub/incomplete implementations before this PR.\n\n<h3>Confidence Score: 5/5</h3>\n\n- This PR is safe to merge — all changes are targeted compiler error fixes with no behavioral regressions.\n- Every change directly corresponds to a documented compilation error. The `set_selected` stub follows the established pattern for unimplemented Linux methods. The tuple index fix matches the atspi API signature. The `connection().clone()` pattern is the idiomatic way to extract a `ZbusConnection` from `AccessibilityConnection`. The unused variable fixes are trivially correct. No logic is changed beyond what was already a stub or incomplete implementation prior to this PR.\n- No files require special attention — the single changed file has straightforward, targeted fixes.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/computeruse/crates/computeruse/src/platforms/linux/mod.rs | Fixes 6 Rust compilation errors: adds missing `set_selected` stub on `LinuxUIElement`, corrects tuple index access for atspi extents (`extents.0/1/2/3`), replaces invalid `connection.into()` with `connection.connection().clone()`, and silences unused variable warnings (`_app_ref`, `_state_set`, `mut states` → `states`). |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[AccessibilityConnection::new] --> B[\"connection.connection().clone()\"]\n    B --> C[\"Arc ZbusConnection\"]\n    C --> D[\"AccessibleProxy builder\"]\n    D --> E[\"get_extents CoordType::Screen\"]\n    E --> F[\"Tuple i32 i32 i32 i32\"]\n    F --> G[\"extents.0 x, extents.1 y, extents.2 width, extents.3 height\"]\n    G --> H[\"Some f64 f64 f64 f64\"]\n\n    I[\"UIElementImpl trait\"] --> J[\"LinuxUIElement\"]\n    I --> K[\"StubElement\"]\n    J --> L[\"set_selected returns UnsupportedOperation\"]\n    K --> M[\"set_selected returns UnsupportedOperation\"]\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix: computeruse Linux build errors\"](https://github.com/elizaos/eliza/commit/eeef3d4eb220cb40f1ed0e8b7e1d39f027706c11) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26262112)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-25T03:16:06Z",
+      "mergedAt": "2026-03-25T03:18:36Z",
+      "additions": 13,
+      "deletions": 8
+    },
+    {
+      "id": "PR_kwDOMT5cIs7NVpGw",
+      "title": "fix(ci): ensure @elizaos/core dist-tag is updated in release",
+      "author": "HaruHunab1320",
+      "number": 6667,
+      "body": "Release publishes @elizaos/core successfully but the dist-tag fix loop skips it because lerna ls doesn't list it. The verification then fails: \"dist-tag still not pointing to alpha.105\".\n\nExplicitly adds @elizaos/core to the package list used for dist-tag updates.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a CI release workflow bug where the dist-tag verification step would fail for `@elizaos/core` because `lerna ls` does not list it (since it is published from `packages/typescript` rather than a standard lerna-managed package directory).\n\n**Key change:**\n- In `.github/workflows/release.yaml`, the forced dist-tag fix loop now builds its package list using a `Set` seeded from `lerna ls` output and then explicitly inserts `@elizaos/core` before iterating. This ensures `@elizaos/core`'s dist-tag is always updated even when it is absent from `lerna ls`.\n\n**Observations:**\n- The use of `Set` correctly deduplicates in case `@elizaos/core` ever does appear in `lerna ls` output in the future.\n- The fix is scoped only to the forced-update fallback path (i.e. it only runs when the dist-tag is already stale), so it does not affect normal publish flow.\n- The rest of the workflow logic (re-verification, error exit) is unchanged and remains correct.\n\n<h3>Confidence Score: 5/5</h3>\n\n- Safe to merge — minimal, targeted fix that correctly addresses the reported dist-tag update failure for `@elizaos/core`.\n- The change is a single-file, three-line tweak in a fallback/recovery code path. It correctly uses a `Set` to deduplicate and explicitly adds the missing `@elizaos/core` package. No logic in the happy path is affected, and the deduplication ensures no regressions if package tracking changes in the future.\n- No files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| .github/workflows/release.yaml | Targeted fix in the \"Verify dist-tag\" step: `@elizaos/core` (published from `packages/typescript`, not tracked by lerna) is now explicitly added to the package list used when forcing dist-tag updates, preventing the post-publish verification from failing. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant LR as lerna publish\n    participant ND as NPM Registry\n    participant VD as Verify dist-tag step\n    participant FX as Fix loop\n\n    LR->>ND: \"publish all packages (from-package)\"\n    LR-->>VD: \"publish outcome = success\"\n\n    VD->>ND: \"npm view @elizaos/core@DIST_TAG version\"\n    alt dist-tag already correct\n        ND-->>VD: \"VERSION matches - done\"\n    else dist-tag stale\n        ND-->>VD: \"VERSION mismatch - forcing update\"\n        VD->>FX: \"begin forced dist-tag update\"\n\n        FX->>FX: \"bunx lerna ls --json --no-private\"\n        Note over FX: Before fix - @elizaos/core absent from lerna ls\n        FX->>FX: \"names = Set(lerna pkgs) + add('@elizaos/core')\"\n        loop for each PKG in names\n            FX->>ND: \"npm view PKG@VERSION\"\n            FX->>ND: \"npm dist-tag add PKG@VERSION DIST_TAG\"\n        end\n\n        FX->>ND: \"npm view @elizaos/core@DIST_TAG version\"\n        alt re-verify passes\n            ND-->>VD: \"dist-tag updated successfully\"\n        else still wrong\n            ND-->>VD: \"exit 1 - dist-tag update failed\"\n        end\n    end\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(ci): ensure @elizaos/core dist-tag i...\"](https://github.com/elizaos/eliza/commit/315b3735a45064e274c75f5b4173c08b79c9a7e9) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26301536)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-25T12:47:11Z",
+      "mergedAt": "2026-03-25T12:50:19Z",
+      "additions": 6,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDOMT5cIs7NM7mk",
+      "title": "fix(ci): add libgbm/xcb/ssl system deps, suppress dead_code warnings",
+      "author": "HaruHunab1320",
+      "number": 6665,
+      "body": "Release CI linker fails: `unable to find library -lgbm`. Adds `libgbm-dev`, `libxcb1-dev`, `libssl-dev` to the release workflow apt-get install. Also suppresses dead_code warnings on two Linux structs.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a broken release CI pipeline by adding three missing system libraries (`libgbm-dev`, `libxcb1-dev`, `libssl-dev`) to the apt-get install step in `release.yaml`, and suppresses spurious `dead_code` Rust compiler warnings on two Linux-specific structs (`LinuxUIElement`, `LinuxATSPIElement`) in the `computeruse` crate.\n\n- **`release.yaml`**: Appends `libgbm-dev`, `libxcb1-dev`, and `libssl-dev` to the existing `apt-get install` line. These are required link-time dependencies for the `computeruse` crate on Ubuntu runners (`libgbm` for GPU buffer management, `libxcb1` for X11 client bindings, `libssl` for OpenSSL-based crates).\n- **`linux/mod.rs`**: Adds `#[allow(dead_code)]` to `LinuxUIElement` and `LinuxATSPIElement`. These structs have fields that are defined but not yet consumed by all code paths; the attribute is a well-scoped, struct-level suppression rather than a crate-wide lint disable.\n\nBoth changes are minimal, targeted, and address the stated CI failure. No logic or API changes are included.\n\n<h3>Confidence Score: 5/5</h3>\n\n- This PR is safe to merge — it is a pure CI / build-fix with no runtime logic changes.\n- Both changes are narrowly scoped infrastructure fixes: adding well-known Ubuntu system libraries to an apt install line and adding struct-level dead_code suppressions. There is no new business logic, no API surface changes, and no risk of regression. The fixes directly match the stated failure mode.\n- No files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| .github/workflows/release.yaml | Adds three missing system libraries (libgbm-dev, libxcb1-dev, libssl-dev) to apt-get install in the release job, directly fixing the reported `-lgbm` linker error. |\n| packages/computeruse/crates/computeruse/src/platforms/linux/mod.rs | Adds #[allow(dead_code)] to LinuxUIElement (line 71) and LinuxATSPIElement (line 699) structs to suppress Rust dead_code warnings that were likely causing CI noise or hard warnings. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant GH as GitHub Actions\n    participant APT as apt-get\n    participant Rust as Rust Compiler\n    participant NPM as NPM Registry\n\n    GH->>APT: sudo apt-get install -y ...<br/>libgbm-dev libxcb1-dev libssl-dev (NEW)\n    APT-->>GH: System deps installed\n    GH->>Rust: cargo build (computeruse crate)\n    Note over Rust: #[allow(dead_code)] suppresses<br/>LinuxUIElement / LinuxATSPIElement warnings\n    Rust-->>GH: Build succeeds (no -lgbm linker error)\n    GH->>NPM: lerna publish\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(ci): add libgbm-dev, libxcb1-dev, li...\"](https://github.com/elizaos/eliza/commit/21f09184dd880efd29cd2b68646b084b2ceccf95) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26263108)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-25T03:32:24Z",
+      "mergedAt": "2026-03-25T03:33:12Z",
+      "additions": 3,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs7NNZap",
+      "title": "fix(ci): remove stale packages/agent dist check from release",
+      "author": "HaruHunab1320",
+      "number": 6666,
+      "body": "packages/agent no longer exists — was deleted during the app-core/autonomous merge. Release fails with \"Critical package packages/agent failed to build (no dist/ directory)\" even though all 15 turbo tasks succeed.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis is a targeted, one-line CI fix that removes the stale `packages/agent` entry from the critical-package dist-check loop in the release workflow. `packages/agent` was deleted during the app-core/autonomous merge but was never cleaned up from the release gate, causing every release job to fail with `\"Critical package packages/agent failed to build (no dist/ directory)\"` despite all 15 turbo build tasks succeeding.\n\n**Key change:**\n- `.github/workflows/release.yaml`: `packages/agent` removed from the `for pkg in ...` loop that asserts a `dist/` directory exists after the build step. `packages/typescript` (published as `@elizaos/core`) remains as the sole critical-package check.\n\n<h3>Confidence Score: 5/5</h3>\n\n- Safe to merge — the deleted directory is confirmed absent from the repo; removing it from the CI gate unblocks releases with no side-effects.\n- Single-line removal of a reference to a non-existent directory. The remaining check (`packages/typescript`) is unaffected. No logic changes, no new risk introduced.\n- No files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| .github/workflows/release.yaml | Removes stale `packages/agent` from the post-build dist/ check loop; the directory was deleted during the app-core/autonomous merge and no longer exists in the repo, causing every release run to fail. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[turbo run build --continue] --> B{Critical package dist/ check}\n    B -->|BEFORE: packages/typescript AND packages/agent| C{packages/agent exists?}\n    C -->|No — deleted| D[❌ exit 1 — release fails]\n    B -->|AFTER: packages/typescript only| E{packages/typescript dist/ exists?}\n    E -->|Yes| F[✅ All critical packages built]\n    F --> G[Replace workspace references]\n    G --> H[Publish to NPM]\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(ci): remove packages/agent from dist...\"](https://github.com/elizaos/eliza/commit/5d4b26b777cd78bf5643f00f859dbcbe7c8f223c) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26265983)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-25T04:19:35Z",
+      "mergedAt": "2026-03-25T04:22:01Z",
+      "additions": 1,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 174,
+    "deletions": 20,
+    "files": 5,
+    "commitCount": 14
+  },
+  "completedItems": [
+    {
+      "title": "fix(ci): ensure @elizaos/core dist-tag is updated in release",
+      "prNumber": 6667,
+      "type": "bugfix",
+      "body": "Release publishes @elizaos/core successfully but the dist-tag fix loop skips it because lerna ls doesn't list it. The verification then fails: \"dist-tag still not pointing to alpha.105\".\n\nExplicitly adds @elizaos/core to the package list us",
+      "files": [
+        ".github/workflows/release.yaml"
+      ]
+    },
+    {
+      "title": "fix(ci): remove stale packages/agent dist check from release",
+      "prNumber": 6666,
+      "type": "bugfix",
+      "body": "packages/agent no longer exists — was deleted during the app-core/autonomous merge. Release fails with \"Critical package packages/agent failed to build (no dist/ directory)\" even though all 15 turbo tasks succeed.\n\n🤖 Generated with [Claude",
+      "files": [
+        ".github/workflows/release.yaml"
+      ]
+    },
+    {
+      "title": "fix(ci): add libgbm/xcb/ssl system deps, suppress dead_code warnings",
+      "prNumber": 6665,
+      "type": "bugfix",
+      "body": "Release CI linker fails: `unable to find library -lgbm`. Adds `libgbm-dev`, `libxcb1-dev`, `libssl-dev` to the release workflow apt-get install. Also suppresses dead_code warnings on two Linux structs.\n\n🤖 Generated with [Claude Code](https",
+      "files": [
+        ".github/workflows/release.yaml",
+        "packages/computeruse/crates/computeruse/src/platforms/linux/mod.rs"
+      ]
+    },
+    {
+      "title": "fix: computeruse Linux Rust build errors",
+      "prNumber": 6664,
+      "type": "bugfix",
+      "body": "## Summary\nRelease CI fails on computeruse Rust build with 6 compilation errors:\n\n1. Missing `set_selected` trait implementation on `LinuxUIElement`\n2. Named field access on tuple type (`extents.x` → `extents.0`) — atspi returns `(i32, i32,",
+      "files": [
+        "packages/computeruse/crates/computeruse/src/platforms/linux/mod.rs"
+      ]
+    },
+    {
+      "title": "fix(ci): add libegl-dev for computeruse khronos-egl build",
+      "prNumber": 6663,
+      "type": "bugfix",
+      "body": "Release CI fails after #6662 — `libpipewire-0.3-dev` was added but `libegl-dev` (required by `khronos-egl` Rust crate) was missed.\n\n```\nThe system library `egl` required by crate `khronos-egl` was not found.\n```\n\n🤖 Generated with [Claude C",
+      "files": [
+        ".github/workflows/release.yaml"
+      ]
+    },
+    {
+      "title": "fix(ci): add libpipewire-0.3-dev to release workflow",
+      "prNumber": 6662,
+      "type": "bugfix",
+      "body": "## Summary\n- Release CI fails on computeruse Rust build: `Cannot find libraries: libpipewire-0.3`\n- `libwayland-dev` was added in #6631 but `libpipewire-0.3-dev` (required by `libspa-sys` crate) was missed\n\n## Test plan\n- [ ] Release workfl",
+      "files": [
+        ".github/workflows/release.yaml"
+      ]
+    },
+    {
+      "title": "fix(core): parse XML action tags instead of comma-splitting actions",
+      "prNumber": 6661,
+      "type": "bugfix",
+      "body": "## Summary\n- `parseKeyValueXml` blindly comma-splits `<actions>` content, breaking when action params contain commas\n- Example: `<task>Add orange, black, and red colors, hex grids</task>` splits into separate \"action\" names like `\"its archi",
+      "files": [
+        "packages/typescript/src/__tests__/utils.test.ts",
+        "packages/typescript/src/basic-capabilities/index.ts",
+        "packages/typescript/src/utils.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "HaruHunab1320",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/51176775?u=e51de0edfe50f67a1a5dca3bf3fa3053811dfb7e&v=4",
+      "totalScore": 180.85248986078352,
+      "prScore": 180.85248986078352,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "flowlabassit-lgtm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257727732?v=4",
+      "totalScore": 14.693147180559945,
+      "prScore": 14.693147180559945,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "iJaack",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6631681?u=54dc1e9bed556a4078a3fcd13d347cdbcab89652&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "henrimahal",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35955148?u=53c0cbd44a96af660651d9c315cd3e4ceefa6bf6&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "fernsugi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44562587?u=3c4e56697ac3e9cd860e5674dc021431449be536&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "douglasborthwick-crypto",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/256362537?u=d2bcb713a5c90ba7d8bb079bbd0ea91041348838&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 6,
+  "mergedPRs": 7,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 2
+}
