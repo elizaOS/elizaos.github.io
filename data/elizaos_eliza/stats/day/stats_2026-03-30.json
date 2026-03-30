@@ -1,0 +1,68 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-30T00:00:00.000Z",
+    "intervalEnd": "2026-03-31T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-03-30 to 2026-03-31, elizaos/eliza had 1 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7OhlRZ",
+      "title": "fix(elizaos): use actual CLI version when rewriting workspace:* deps in scaffolded projects",
+      "author": "ninglinLiu",
+      "number": 6698,
+      "body": "## Problem\r\n\r\n`elizaos create` calls `fixPackageJson` to replace `workspace:*` references\r\nin a scaffolded project's `package.json`. The replacement was hardcoded to\r\n`\"^1.0.0\"` which is already behind the current release (`2.0.0-alpha.109`)\r\nand will grow more stale with every release.\r\n\r\nUsers scaffolding TypeScript examples that depend on elizaos packages receive\r\nan incorrect (stale) semver range, causing `bun install` / `npm install` to\r\nresolve the wrong version.\r\n\r\n## Fix\r\n\r\nRead the version from the CLI's own `package.json` at runtime — the same\r\napproach already used in `commands/version.ts`.\r\n\r\n## Changes\r\n\r\n- `packages/elizaos/src/commands/create.ts`: add `getCliVersion()` helper,\r\n  replace hardcoded `\"^1.0.0\"` with `` `^${getCliVersion()}` ``, export\r\n  `fixPackageJson` for testability\r\n- `packages/elizaos/src/__tests__/create.test.ts`: 5 new unit tests\r\n\r\n## Testing\r\n\r\n```bash\r\ncd packages/elizaos\r\nbun test   # 22 tests pass (17 pre-existing + 5 new)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a stale hardcoded `\"^1.0.0\"` semver range in `elizaos create` by reading the actual installed CLI version from `package.json` at runtime, ensuring scaffolded projects always get the correct version of elizaOS dependencies.\n\n**Key changes:**\n- Adds `getCliVersion()` helper in `create.ts` that resolves the CLI's `package.json` via `__dirname` (the same path strategy used in `version.ts`)\n- Replaces the hardcoded `\"^1.0.0\"` with `` `^${getCliVersion()}` `` in the `workspace:*` substitution loop\n- Exports `fixPackageJson` so it can be unit-tested\n- Adds 5 well-targeted unit tests covering the new behaviour as well as existing edge cases (devDeps/peerDeps, non-workspace values, `private` flag removal, missing file)\n\nThe fix is correct and the path resolution (`__dirname + ../../package.json`) resolves to the package root both from source (`src/commands/`) and from the compiled output (`dist/commands/`). Two minor style observations are noted inline: `getCliVersion()` lacks the error-handling fallback present in the sibling `version.ts`, and the version is re-read from disk on each `workspace:*` entry rather than once per `fixPackageJson` call.\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — the core fix is correct and all remaining findings are minor P2 style suggestions.\n\nBoth changed files are well-implemented: the version resolution path is correct for source and dist layouts, and the new tests give good coverage. The only open items are a missing error-handling fallback (a robustness suggestion matching `version.ts` style) and a trivial per-iteration file read, neither of which affect correctness in normal usage.\n\nNo files require special attention.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/elizaos/src/commands/create.ts | Adds `getCliVersion()` to read the CLI's own `package.json` at runtime and uses it to replace `workspace:*` dependencies; `fixPackageJson` is also exported for testability. Two minor style issues: missing fallback error handling (unlike `version.ts`) and the version is re-read from disk per dep entry instead of once. |\n| packages/elizaos/src/__tests__/create.test.ts | New test file with 5 unit tests covering workspace:* replacement, devDeps/peerDeps, non-workspace dep preservation, private flag removal, and no-op on missing file. Good coverage for the new behaviour. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant CLI as elizaos create\n    participant copy as copyExample()\n    participant fix as fixPackageJson()\n    participant ver as getCliVersion()\n    participant pkg as CLI package.json\n\n    User->>CLI: elizaos create\n    CLI->>copy: copyExample(name, lang, dest)\n    copy->>fix: fixPackageJson(dest/package.json)\n    fix->>ver: getCliVersion()\n    ver->>pkg: fs.readFileSync(__dirname/../../package.json)\n    pkg-->>ver: { version: \"2.0.0-alpha.109\" }\n    ver-->>fix: \"2.0.0-alpha.109\"\n    fix->>fix: replace workspace:* → ^2.0.0-alpha.109\n    fix->>fix: delete pkg.private\n    fix-->>copy: done\n    copy-->>CLI: done\n    CLI-->>User: Project scaffolded with correct version\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `packages/elizaos/src/commands/create.ts`, line 114-123 ([link](https://github.com/elizaos/eliza/blob/c4d1d3b333c00448015372371c0cb83856c256b1/packages/elizaos/src/commands/create.ts#L114-L123)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> **`getCliVersion()` invoked on every `workspace:*` entry**\n\n   `getCliVersion()` reads and parses `package.json` from disk on each loop iteration. For a scaffolded project with several `workspace:*` deps across `dependencies`, `devDependencies`, and `peerDependencies`, this means multiple redundant file-system reads. The version can be resolved once before the loop:\n\n   ```typescript\n   export function fixPackageJson(filePath: string): void {\n     if (!fs.existsSync(filePath)) return;\n\n     const content = fs.readFileSync(filePath, \"utf-8\");\n     const pkg = JSON.parse(content) as Record<string, unknown>;\n     const cliVersion = getCliVersion(); // resolve once\n\n     const fixDeps = (deps: Record<string, string> | undefined) => {\n       if (!deps) return;\n       for (const [key, value] of Object.entries(deps)) {\n         if (value === \"workspace:*\") {\n           deps[key] = `^${cliVersion}`;\n         }\n       }\n     };\n     // ...\n   }\n   ```\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(elizaos): replace hardcoded ^1.0.0 w...\"](https://github.com/elizaos/eliza/commit/c4d1d3b333c00448015372371c0cb83856c256b1) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26742149)</sub>\n\n> Greptile also left **1 inline comment** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-03-30T07:55:23Z",
+      "mergedAt": null,
+      "additions": 135,
+      "deletions": 3
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 1
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "ninglinLiu",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/224592858?v=4",
+      "totalScore": 23.93447393313069,
+      "prScore": 23.93447393313069,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "twzrd-sol",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33047129?u=29ae3734fadc4e599f005f1db496e01a4ea6fe5f&v=4",
+      "totalScore": 14.693147180559945,
+      "prScore": 14.693147180559945,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
