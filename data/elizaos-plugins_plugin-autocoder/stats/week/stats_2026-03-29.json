@@ -5,22 +5,55 @@
     "intervalType": "week"
   },
   "repository": "elizaos-plugins/plugin-autocoder",
-  "overview": "From 2026-03-29 to 2026-04-05, elizaos-plugins/plugin-autocoder had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "overview": "From 2026-03-29 to 2026-04-05, elizaos-plugins/plugin-autocoder had 1 new PRs (0 merged), 0 new issues, and 2 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOO65CGs7O0_bU",
+      "title": "security: pin axios to 1.7.8 — supply chain attack on 1.14.1",
+      "author": "Dexploarer",
+      "number": 3,
+      "body": "## Security: Pin axios to 1.7.8 — supply chain attack on 1.14.1\n\n### What happened\n\n`axios@1.14.1` and `axios@0.30.4` were published on **2026-03-31** from a compromised maintainer account (`jasonsaayman`, email changed to `ifstap@proton.me`). These versions inject `plain-crypto-js@4.2.1` as a runtime dependency, which runs a malicious `postinstall` hook (`node setup.js`) containing an obfuscated dropper.\n\n### Attack timeline\n\n| Time (UTC) | Event |\n|------------|-------|\n| 2026-03-30 05:57 | `plain-crypto-js@4.2.0` published (clean decoy to build publish history) |\n| 2026-03-30 23:59 | `plain-crypto-js@4.2.1` published (malicious payload added) |\n| 2026-03-31 00:21 | `axios@1.14.1` published (compromised, injects plain-crypto-js) |\n| 2026-03-31 01:00 | `axios@0.30.4` published (compromised, same injection) |\n\n### Why this plugin is affected\n\nThis package declares axios with a **caret range** (`^1.x`), which resolves to the latest 1.x — currently the compromised `1.14.1`. Any fresh `npm install` or `bun install` without a lockfile will pull the malicious version.\n\n### What this PR does\n\nPins `axios` to `1.7.8` (last known-safe release). Once the npm advisory is resolved and a verified clean version is published, the pin can be relaxed.\n\n### Recommendation\n\nAll elizaOS plugin maintainers should audit their lockfiles:\n```bash\ngrep axios package-lock.json  # or bun.lock / yarn.lock\n```\n\nIf you see `1.14.1` or `0.30.4`, delete your lockfile and reinstall with this pin in place.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR pins `axios` from `^1.6.5` to a fixed version in response to the confirmed supply-chain compromise of `axios@1.14.1` and `axios@0.30.4` (malicious `plain-crypto-js` dropper injected via a compromised maintainer account). The intent is correct and the urgency is justified, but the implementation has two blocking issues that prevent the fix from being effective.\n\n**Issues found:**\n\n- **Wrong pin target (P1):** `1.7.8` is below the `1.11.0` fix point for [CVE-2025-58754](https://github.com/axios/axios/security/advisories/GHSA-4hjh-wcwx-xvwj), a memory-exhaustion DoS where unbounded `data:` URI payloads bypass `maxContentLength`/`maxBodyLength` and can crash the Node.js process. The correct safe pin is `1.13.5` — the latest release that both predates the compromised `1.14.1` and includes all prior security patches.\n- **Lockfile not updated (P1):** `bun.lock` still resolves axios to `1.10.0` under the old `^1.6.5` range. Without regenerating and committing the lockfile, CI pipelines using `--frozen-lockfile` will break, and the audited resolution is not captured in source control — undermining the core goal of this PR.\n- **Minor:** The PR description states the original range was `^1.x`, but the actual diff shows `^1.6.5`.\n\n<h3>Confidence Score: 4/5</h3>\n\nNot safe to merge as-is: the chosen pin version carries a known DoS CVE, and the lockfile was not updated, making the fix incomplete.\n\nThe PR correctly identifies and responds to a real, confirmed supply-chain attack. However, the pin target (1.7.8) trades the malware risk for CVE-2025-58754 (DoS, present in all versions < 1.11.0), and the lockfile mismatch means CI will break and the safe version is not actually locked in source control. Both issues are straightforward to fix by changing the pin to 1.13.5 and committing a regenerated lockfile.\n\npackage.json and bun.lock both require updates before merging.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| package.json | Pins axios from ^1.6.5 to 1.7.8 to avoid supply chain attack on 1.14.1, but the chosen version carries CVE-2025-58754 (DoS, fixed in 1.11.0); 1.13.5 is the correct safe target. Lockfile was not updated alongside this change. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Dev as Developer\n    participant NPM as npm registry\n    participant CI as CI (--frozen-lockfile)\n    participant App as Runtime\n\n    Note over NPM: 2026-03-31: axios@1.14.1 published<br/>(compromised — injects plain-crypto-js@4.2.1)\n\n    Dev->>NPM: bun install (no lockfile, ^1.6.5)\n    NPM-->>Dev: axios@1.14.1 MALICIOUS\n\n    Note over Dev: This PR: pin to 1.7.8\n    Dev->>NPM: bun install (no lockfile, 1.7.8)\n    NPM-->>Dev: axios@1.7.8 clean, but CVE-2025-58754\n\n    Note over CI: bun.lock still resolves 1.10.0\n    CI->>CI: bun install --frozen-lockfile\n    CI-->>CI: FAIL — package.json vs lockfile mismatch\n\n    Note over Dev: Recommended: pin to 1.13.5 + regen lockfile\n    Dev->>NPM: bun install (1.13.5)\n    NPM-->>Dev: axios@1.13.5 clean, no active CVEs\n    Dev->>CI: commit updated bun.lock\n    CI->>CI: bun install --frozen-lockfile\n    CI-->>App: axios@1.13.5\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"security: pin axios to 1.7.8 — supply ch...\"](https://github.com/elizaos-plugins/plugin-autocoder/commit/740bcbe06e4a42e6f2004089e4e4819c31c47fb0) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=26862939)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-autocoder",
+      "createdAt": "2026-03-31T04:59:01Z",
+      "mergedAt": null,
+      "additions": 1,
+      "deletions": 1
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 1
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 24.36961228866811,
+      "prScore": 24.36961228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "ninglinLiu",
       "avatarUrl": "https://avatars.githubusercontent.com/u/224592858?v=4",
       "totalScore": 23.93447393313069,
       "prScore": 23.93447393313069,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "vjshaw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32026795?u=560997afe490518ad82db11a1a2d4b812d85854d&v=4",
+      "totalScore": 14.780879734614027,
+      "prScore": 14.780879734614027,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -49,10 +82,10 @@
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 9,
+      "totalScore": 13.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 13.5,
       "commentScore": 0,
       "summary": null
     },
@@ -75,11 +108,31 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "suitandclaw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/260769788?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jonathanbulkeley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258885064?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 2
 }
