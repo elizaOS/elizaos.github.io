@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-04-01 to 2026-05-01, elizaos/eliza had 0 new PRs (0 merged), 1 new issues, and 1 active contributors.",
+  "overview": "From 2026-04-01 to 2026-05-01, elizaos/eliza had 1 new PRs (0 merged), 1 new issues, and 4 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs75fdZO",
@@ -20,20 +20,53 @@
       "commentCount": 1
     }
   ],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7Pdfjt",
+      "title": "feat: add plugin-mnemopay — economic memory for AI agents",
+      "author": "t49qnsx7qt-kpanks",
+      "number": 6701,
+      "body": "## Summary\n\nAdds **plugin-mnemopay**, a new plugin that gives Eliza agents economic memory. Agents can remember payment outcomes, learn from settlements and refunds, and build reputation over time — making them smarter about financial interactions.\n\nThis is powered by [MnemoPay](https://github.com/t49qnsx7qt-kpanks/mnemopay-sdk) (`@mnemopay/sdk`), a TypeScript SDK for AI agent economic memory.\n\n### Why this matters\n\nStandard AI agents treat every financial interaction as a blank slate. With MnemoPay, agents:\n- **Remember** which providers delivered quality work and which didn't\n- **Learn** from payment disputes and successful settlements\n- **Build reputation** through consistent positive outcomes (capped at 2.0)\n- **Make informed decisions** by recalling past financial experiences before acting\n\n### Plugin components\n\n| Component | Name | Purpose |\n|-----------|------|---------|\n| **Service** | `MnemoPayService` | Manages the MnemoPayLite engine lifecycle |\n| **Actions** | `REMEMBER_OUTCOME` | Store a payment/interaction outcome in economic memory |\n| | `CHARGE_PAYMENT` | Create an escrow payment (wallet debit) |\n| | `SETTLE_PAYMENT` | Confirm delivery, reinforce reputation (+delta) |\n| | `REFUND_PAYMENT` | Reverse payment, dock reputation (-delta) |\n| | `RECALL_MEMORIES` | Query past financial experiences |\n| **Provider** | `MnemoPayProvider` | Injects wallet balance, reputation, recent transactions, and relevant memories into conversation context |\n| **Evaluator** | `MnemoPayEvaluator` | Auto-tracks financial outcomes after every agent response (passive learning loop) |\n\n### Architecture decisions\n\n- Follows the exact same patterns as `advanced-memory` and `basic-capabilities` plugins\n- Service extends `Service` base class with static `start()` factory\n- Actions return `ActionResult` with `success` field\n- Provider returns `ProviderResult` with `text`, `values`, and `data`\n- Evaluator uses `alwaysRun: true` for passive financial outcome detection\n- Built-in lightweight engine included — no external dependency required at runtime\n- Configurable via `MNEMOPAY_AGENT_ID` and `MNEMOPAY_REPUTATION_DELTA` env vars\n\n### Usage\n\n```typescript\nimport { createMnemoPayPlugin } from \"./plugin-mnemopay\";\n\nconst agent: ProjectAgent = {\n  character: myCharacter,\n  plugins: [createMnemoPayPlugin()],\n};\n```\n\n## Test plan\n\n- [ ] Verify `MnemoPayService` initializes correctly with default and custom config\n- [ ] Test each action (REMEMBER_OUTCOME, CHARGE_PAYMENT, SETTLE_PAYMENT, REFUND_PAYMENT, RECALL_MEMORIES) with valid and invalid inputs\n- [ ] Verify provider injects correct context (wallet, reputation, recent txs, relevant memories)\n- [ ] Verify evaluator auto-tracks financial keywords and stores with correct importance/tags\n- [ ] Confirm plugin registers correctly via `createMnemoPayPlugin()` factory\n- [ ] Test settle/refund reputation bounds (0.0 to 2.0)\n- [ ] Verify graceful degradation when service is not available\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR adds `plugin-mnemopay`, a new Eliza plugin that gives agents \\\"economic memory\\\" — tracking payment charges, settlements, refunds, reputation, and past financial interactions. The plugin follows the standard Eliza plugin shape (Service + Actions + Provider + Evaluator) and the code structure is clean and readable.\n\nHowever, there are several significant issues that should be resolved before merging:\n\n- **No state persistence** — the core `MnemoPayLiteEngine` stores all memories, transactions, and reputation in plain in-memory JavaScript structures. Every agent restart wipes the slate clean, which directly defeats the plugin's stated purpose of building reputation and memory over time.\n- **NaN reputation corruption** — if `MNEMOPAY_REPUTATION_DELTA` is set to any non-numeric string, `Number.parseFloat()` silently returns `NaN`, permanently corrupting the reputation score.\n- **Unsafe null casts in action handlers** — every `validate()` checks `if (!service) return false`, but every `handler()` casts the same `getService()` call without a null guard, creating a latent null dereference across all 5 actions and the evaluator.\n- **Ambiguous action validation** — both `RECALL_MEMORIES` and `REMEMBER_OUTCOME` match the keyword \\\"remember\\\", causing both actions to fire on messages like \\\"Remember that Provider X is excellent.\\\"\n- **Unbounded memory growth** — `this.memories.push(entry)` has no eviction policy; the evaluator fires on very common financial keywords after every agent response.\n- **Dead interface field** — `MnemoPayConfig.initialBalance` is declared in `types.ts` but never read by the engine or service initializer.\n- **No tests** — the test plan in the PR description is entirely unchecked; no test files are included in the changeset.\n\n<h3>Confidence Score: 1/5</h3>\n\nNot safe to merge — the plugin's core value proposition (persistent economic memory) is unimplemented, and there are several logic bugs that will silently corrupt state or cause null-dereference crashes.\n\nThe fundamental design flaw (all state is ephemeral in-memory) means the plugin cannot fulfill its stated purpose in any real deployment. Combined with the NaN-corruption bug for misconfigured reputation delta, unsafe null dereferences in every action handler, and absence of any tests, the PR needs substantial rework.\n\nmnemopay-service.ts requires the most attention (persistence, NaN guard, memory eviction). All action handler files need null-safety fixes. recall-memories.ts needs its validate keyword set de-conflicted from remember-outcome.ts.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/typescript/src/plugin-mnemopay/services/mnemopay-service.ts | Core engine stores all memory, transactions, and reputation in plain JS objects — no persistence; missing NaN guard for reputationDelta and no memory eviction cap. |\n| packages/typescript/src/plugin-mnemopay/actions/charge-payment.ts | Unsafe null cast of service in handler body, and overly broad amount extraction regex that can match non-payment numbers. |\n| packages/typescript/src/plugin-mnemopay/actions/recall-memories.ts | Validate keyword \"remember\" conflicts with REMEMBER_OUTCOME action; unsafe service cast in handler. |\n| packages/typescript/src/plugin-mnemopay/evaluators/mnemopay-evaluator.ts | Passive financial keyword detection is broadly correct; unsafe service cast in handler; combined with unbounded memory growth, every turn with words like \"cost\" or \"fee\" writes a memory entry. |\n| packages/typescript/src/plugin-mnemopay/providers/mnemopay-provider.ts | Cleanly injects wallet/reputation/recent-tx context; graceful degradation when service is absent; non-critical recall failures are swallowed appropriately. |\n| packages/typescript/src/plugin-mnemopay/types.ts | MnemoPayConfig.initialBalance is declared but never consumed by the engine or service initializer — dead interface field. |\n| packages/typescript/src/plugin-mnemopay/index.ts | Plugin registration and re-exports are clean and follow the expected Plugin interface pattern. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant Action\n    participant MnemoPayService\n    participant MnemoPayLiteEngine\n    participant Provider\n    participant Evaluator\n\n    Note over MnemoPayLiteEngine: In-memory only — no persistence\n\n    User->>Action: \"Charge $50 for design task\"\n    Action->>MnemoPayService: getEngine()\n    MnemoPayService->>MnemoPayLiteEngine: charge(50, \"design task\")\n    MnemoPayLiteEngine-->>Action: txId = \"tx_agent_1_1_...\"\n    Action-->>User: \"Payment charged. TX: tx_agent_1_1_...\"\n\n    User->>Action: \"Settle payment tx_agent_1_1_...\"\n    Action->>MnemoPayLiteEngine: settle(txId)\n    MnemoPayLiteEngine->>MnemoPayLiteEngine: reputation = min(2.0, rep + delta)\n    MnemoPayLiteEngine-->>Action: settled tx\n    Action-->>User: \"Settled. Reputation: 1.05\"\n\n    Note over Evaluator: alwaysRun — fires after every response\n    Evaluator->>MnemoPayLiteEngine: remember(\"[Auto-tracked] ...\", {importance, tags})\n    MnemoPayLiteEngine->>MnemoPayLiteEngine: memories.push(entry) — unbounded!\n\n    User->>Provider: (next conversation turn)\n    Provider->>MnemoPayLiteEngine: balance() + getRecentTransactions(5)\n    Provider->>MnemoPayLiteEngine: recall(messageText, 3)\n    MnemoPayLiteEngine-->>Provider: memories + balance\n    Provider-->>User: Economic memory context injected into prompt\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `packages/typescript/src/plugin-mnemopay/actions/charge-payment.ts`, line 162-165 ([link](https://github.com/elizaos/eliza/blob/fad58e46328b453c6bfa5bc21dd58c5c7726c938/packages/typescript/src/plugin-mnemopay/actions/charge-payment.ts#L162-L165)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Unsafe cast without null check in handlers — potential null dereference**\n\n   Every action's `validate()` defensively checks `if (!service) return false`, but the corresponding `handler()` immediately casts the result without any null guard. If the service is not registered, `runtime.getService(\"mnemopay\")` returns `null`, and `service.getEngine()` throws a `TypeError`. The same pattern appears in `settle-payment.ts`, `refund-payment.ts`, `remember-outcome.ts`, `recall-memories.ts`, and `mnemopay-evaluator.ts`.\n\n   Each handler should guard against this:\n   ```typescript\n   const service = runtime.getService(\"mnemopay\") as MnemoPayService | null;\n   if (!service) {\n       return { success: false, text: \"MnemoPayService is not available\" };\n   }\n   const engine = service.getEngine();\n   ```\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat: add plugin-mnemopay for AI agent e...\"](https://github.com/elizaos/eliza/commit/fad58e46328b453c6bfa5bc21dd58c5c7726c938) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=27129917)</sub>\n\n> Greptile also left **7 inline comments** on this PR.\n\n<sub>(2/5) Greptile learns from your feedback when you react with thumbs up/down!</sub>\n\n<!-- /greptile_comment -->\n---\n\n## Live Demo\n\n**Try it now:** [https://t49qnsx7qt-kpanks.github.io/mnemopay-demo/](https://t49qnsx7qt-kpanks.github.io/mnemopay-demo/)\n\n### The Feedback Loop in 30 Seconds\n\n```\nRound 1: Agent has NO memory. Picks randomly.\n  -> Hired Alice $80. Fast but buggy.\n  -> Settled. Reputation: 0.51 | Memories: 1\n\nRound 2: Agent tries Bob.\n  -> Hired Bob $120. Perfect quality, on time.\n  -> Settled. Reputation: 0.52 | Memories: 2\n\nRound 3: Agent tries Carol.\n  -> Hired Carol $95. Missed deadline by 3 days.\n  -> REFUNDED. Reputation: 0.52 | Memories: 3\n\n=== Agent recalls before Round 4 ===\n\n  1. [score: 0.900] Carol missed deadline — refund (high importance, decaying)\n  2. [score: 0.750] Bob: perfect quality, on time (reinforced by settle)\n  3. [score: 0.600] Alice: fast but buggy (neutral)\n\nResult: Agent now picks Bob. No LLM needed for this insight.\nsettle() reinforced the memory. refund() flagged the failure.\nThis IS the MnemoPay feedback loop.\n```\n\n### How it works\n\n```\nPayment succeeds → settle() → memories that led to decision get +0.05 importance\nPayment fails    → refund() → agent reputation docked -0.05\n                 → high-importance failure memory stored\nOver time        → agent consistently picks best value providers\n```\n\n### 5-line integration\n\n```typescript\nimport { MnemoPay } from '@mnemopay/sdk';\n\nconst agent = MnemoPay.quick('my-agent');\nawait agent.remember('Bob delivers perfect code');\nconst tx = await agent.charge(120, 'landing page');\nawait agent.settle(tx.id); // memories reinforced, reputation +0.01\n```",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-02T06:20:04Z",
+      "mergedAt": null,
+      "additions": 1644,
+      "deletions": 0
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 3
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "t49qnsx7qt-kpanks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263812192?v=4",
+      "totalScore": 43.8837738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
     {
       "username": "Dexploarer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
       "totalScore": 14.80471895621705,
       "prScore": 14.80471895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 14.693147180559945,
+      "prScore": 14.693147180559945,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -50,6 +83,16 @@
       "summary": null
     },
     {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "majorelalexis-stack",
       "avatarUrl": "https://avatars.githubusercontent.com/u/266517750?v=4",
       "totalScore": 2.44,
@@ -57,6 +100,16 @@
       "issueScore": 2.1,
       "reviewScore": 0,
       "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "edcet",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/94407827?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -70,9 +123,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
   "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 4
 }
