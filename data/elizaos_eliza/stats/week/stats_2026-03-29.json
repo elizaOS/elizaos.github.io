@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-03-29 to 2026-04-05, elizaos/eliza had 4 new PRs (0 merged), 2 new issues, and 10 active contributors.",
+  "overview": "From 2026-03-29 to 2026-04-05, elizaos/eliza had 4 new PRs (0 merged), 4 new issues, and 12 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs75fdZO",
@@ -27,6 +27,30 @@
       "repository": "elizaos/eliza",
       "body": "## Description\n\nRunning `elizaos create <project-name>` fails at the build step on macOS with:\n\n```\n$ bun run build.ts\nError: Bun's postinstall script was not run.\n\nThis occurs when using --ignore-scripts during installation, or when using a\npackage manager like pnpm that does not run postinstall scripts by default.\n\nTo fix this, run the postinstall script manually:\n  cd node_modules/bun && node install.js\n\nOr reinstall bun without the --ignore-scripts flag.\nerror: script \"build\" exited with code 1\n```\n\nThe CLI then cleans up the project directory and exits, leaving nothing behind.\n\n## Root Cause\n\n`@elizaos/cli` and `@elizaos/plugin-bootstrap` both list `\"bun\": \"^1.3.4\"` as a **runtime dependency**. When a new project installs these packages, the `bun` npm package becomes a transitive dependency.\n\nThe `bun` npm package has a `postinstall` script (`node install.js`) that:\n1. Looks for `node_modules/@oven/bun-darwin-aarch64/bin/bun` (on Apple Silicon)\n2. Copies it to `node_modules/bun/bin/bun.exe`\n\nHowever, **bun the package manager intentionally skips extracting its own 60MB binary** from `@oven/bun-darwin-aarch64` into node_modules (it's already installed system-wide). This leaves `node_modules/@oven/bun-darwin-aarch64/bin/` empty.\n\nWhen `install.js` runs, it can't find the binary and exits silently. `node_modules/bun/bin/` is left with Windows `.exe` stubs. When `bun run build.ts` executes, bun detects the stubs and throws the error above.\n\n## Steps to Reproduce\n\n1. Install bun via `curl -fsSL https://bun.sh/install | bash`\n2. Install elizaos CLI: `bun install -g @elizaos/cli`\n3. Run: `elizaos create my-first-agent`\n4. Follow prompts (any database/model choice)\n5. Observe failure at build step\n\n## Environment\n\n- macOS (Apple Silicon / darwin-aarch64)\n- bun 1.3.11\n- @elizaos/cli 1.7.2\n\n## Fix\n\nThe `bun` npm package should be removed from the runtime dependencies of `@elizaos/cli` and `@elizaos/plugin-bootstrap`. It is only needed as a devDependency for types (`@types/bun`). The bun runtime is already available system-wide when users install elizaos via bun.\n\n```diff\n# In @elizaos/cli and @elizaos/plugin-bootstrap package.json:\n- \"dependencies\": {\n-   \"bun\": \"^1.3.4\",\n+ \"devDependencies\": {\n+   \"@types/bun\": \"^1.x.x\",\n```\n\n## Workaround\n\nUntil fixed, users can create projects manually:\n\n```bash\ncp -r ~/.bun/install/global/node_modules/@elizaos/cli/templates/project-starter ~/my-first-agent\ncd ~/my-first-agent\nbun install\ncp ~/.bun/bin/bun node_modules/@oven/bun-darwin-aarch64/bin/bun\nchmod +x node_modules/@oven/bun-darwin-aarch64/bin/bun\nnode node_modules/bun/install.js\nbun run build.ts\n```",
       "createdAt": "2026-04-03T17:36:56Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs76q52a",
+      "title": "Plugin proposal: @sint/eliza-plugin — capability token enforcement for Eliza agent tool calls",
+      "author": "pshkv",
+      "number": 6707,
+      "repository": "elizaos/eliza",
+      "body": "## Context\n\nEliza agents execute tool calls — blockchain transactions, Twitter posts, file operations, and increasingly physical actions (robots, drones, IoT). Today there's no formal authorization layer between \"the LLM decided to call this tool\" and \"the tool executes.\"\n\nThe existing `GuardrailsService` and plugin system handle some of this, but without:\n- Cryptographic proof of authorization (who issued permission for this specific action)\n- Irreversibility-aware approval flows (on-chain transaction ≠ camera read)\n- Behavioral drift detection (agent acting anomalously → escalate before next action)\n- Physical constraint enforcement (for Eliza agents controlling robots)\n\n## Proposed: `@sint/eliza-plugin`\n\nA thin wrapper around [SINT Protocol](https://github.com/pshkv/sint-protocol) that intercepts Eliza tool calls:\n\n```typescript\n// eliza.config.ts\nimport { SintPlugin } from \"@sint/eliza-plugin\";\n\nexport default {\n  plugins: [\n    new SintPlugin({\n      resolveToken: (toolName, agentId) => tokenStore.get(`${agentId}:${toolName}`),\n      tierRules: [\n        // Blockchain transactions require human review\n        { resourcePattern: \"solana://*\", actions: [\"transfer\", \"swap\"], baseTier: \"T3_commit\" },\n        // Social posts need operator approval\n        { resourcePattern: \"twitter://*\", actions: [\"post\", \"retweet\"], baseTier: \"T2_act\" },\n        // Read-only ops auto-allow\n        { resourcePattern: \"twitter://*\", actions: [\"search\", \"read\"], baseTier: \"T0_observe\" },\n      ],\n      emitLedgerEvent: (event) => evidenceLedger.write(event),\n    })\n  ]\n}\n```\n\n## What this adds to Eliza\n\n| Feature | Benefit |\n|---|---|\n| Ed25519 capability tokens | Cryptographic proof of who authorized each tool call |\n| Tier-based approval (`T2_act`, `T3_commit`) | On-chain transactions pause for human sign-off |\n| CSML behavioral drift | Agent acting anomalously → auto-escalate before next action |\n| Rate limiting | Per-tool sliding window enforcement |\n| Evidence ledger | Hash-chained audit trail, TEE-attested |\n| Physical constraint enforcement | For Eliza agents controlling robots/drones |\n\n## Connection to #6688 (AgentID)\n\n@haroldmalikfrimpong-ops is proposing behavioral fingerprinting in #6688 — SINT's `AvatarRegistry` already does this via the CSML metric. If AgentID and SINT use compatible schemas, agents could port behavioral history across both systems.\n\n## Implementation\n\nThis would be a thin bridge — ~200 lines wrapping `@sint/gate-policy-gateway`. The hard part (policy engine, evidence ledger, approval flow) is already in SINT Protocol (950 tests).\n\nFull repo: https://github.com/pshkv/sint-protocol  \nWould the Eliza core team be open to this as a community plugin? Happy to build it.",
+      "createdAt": "2026-04-04T18:32:12Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs76qj66",
+      "title": "Plugin: SafeAgent — Token safety checks before trading (honeypot, scam, rug pull detection)",
+      "author": "CryptoGenesisSecurity",
+      "number": 6706,
+      "repository": "elizaos/eliza",
+      "body": "## Plugin: @elizaos/plugin-safeagent\n\n**Repo**: https://github.com/CryptoGenesisSecurity/plugin-safeagent\n\n### Problem\nElizaOS agents trading crypto have limited pre-trade safety checks. `plugin-base-signals` only covers Base L2. No comprehensive multi-chain token safety exists in the ElizaOS ecosystem.\n\n### Solution\nSafeAgent plugin provides two actions:\n\n**1. CHECK_TOKEN_SAFETY** — Full safety scan on demand\n```\nUser: \"Is 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 safe on base?\"\nAgent: 🟢 Token Safety Report — USDC (USDC) — Score: 90/100 — SAFE\n```\n\n**2. PRE_TRADE_SAFETY_CHECK** — Auto-blocks dangerous trades\n- Score < 40: **TRADE BLOCKED** (likely scam)\n- Score 40-70: **CAUTION** (reduce position)\n- Score > 70: proceed normally\n\n### Detection\n- Honeypot simulation (real DEX swap test on UniV2, V3, Aerodrome)\n- 17 scam pattern checks on source code\n- LP lock verification (Unicrypt, TeamFinance, PinkSale)\n- Owner analysis (renounced, privileged functions)\n- 6 EVM chains: Base, Ethereum, Arbitrum, Optimism, Polygon, BSC\n- Sub-second response (<1s cached, <1.5s fresh)\n\n### Standard\nImplements the **ERC Token Safety Score** — an open standard for on-chain token safety scoring.\n- Live oracle on Optimism: `0x3B8A6D696f2104A9aC617bB91e6811f489498047`\n- MCP SSE: `https://cryptogenesis.duckdns.org/mcp/sse`\n\n### Installation\n```bash\nnpm install CryptoGenesisSecurity/plugin-safeagent\n```\n\n```typescript\nimport safeAgentPlugin from \"@elizaos/plugin-safeagent\";\nconst agent = new AgentRuntime({ plugins: [safeAgentPlugin] });\n```\n\n### vs plugin-base-signals\n| Feature | plugin-base-signals | plugin-safeagent |\n|---------|-------------------|-----------------|\n| Chains | Base only | 6 EVM chains |\n| Honeypot sim | GoPlus API | Direct DEX swap simulation |\n| Scam patterns | Basic | 17 patterns |\n| LP lock check | No | Yes (5 lockers) |\n| On-chain oracle | No | Yes (Optimism) |\n| Response time | Variable | <1s (cached) |\n\nHappy to contribute this to the official elizaos-plugins registry.",
+      "createdAt": "2026-04-04T17:50:59Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 0
@@ -93,11 +117,11 @@
     {
       "username": "t49qnsx7qt-kpanks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/263812192?v=4",
-      "totalScore": 44.083773896576105,
+      "totalScore": 44.2837738965761,
       "prScore": 43.5437738965761,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.54,
+      "commentScore": 0.74,
       "summary": null
     },
     {
@@ -111,22 +135,22 @@
       "summary": null
     },
     {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 40.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Dexploarer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
       "totalScore": 39.17433124488516,
       "prScore": 39.17433124488516,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "greptile-apps",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 36,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 36,
       "commentScore": 0,
       "summary": null
     },
@@ -201,6 +225,16 @@
       "summary": null
     },
     {
+      "username": "goatgaucho",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253565951?v=4",
+      "totalScore": 13.808573590279972,
+      "prScore": 13.808573590279972,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "MoonSoon69",
       "avatarUrl": "https://avatars.githubusercontent.com/u/193276852?u=ae4dfec2ee87ce58e61ddf50d465a8df6618dd8e&v=4",
       "totalScore": 8.956573590279971,
@@ -221,6 +255,16 @@
       "summary": null
     },
     {
+      "username": "pshkv",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32749662?u=e47550332e8047fdf647b65102974ffda56c2c79&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "edcet",
       "avatarUrl": "https://avatars.githubusercontent.com/u/94407827?v=4",
       "totalScore": 2,
@@ -233,6 +277,16 @@
     {
       "username": "dirtybits",
       "avatarUrl": "https://avatars.githubusercontent.com/u/28834908?u=b8dc1929987e56622b91adf842c1499c4196210d&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "CryptoGenesisSecurity",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/83247083?u=8c9172a589d1dc3ecb7359ec620a0170f68e84e2&v=4",
       "totalScore": 2,
       "prScore": 0,
       "issueScore": 2,
@@ -283,7 +337,7 @@
   ],
   "newPRs": 4,
   "mergedPRs": 0,
-  "newIssues": 2,
+  "newIssues": 4,
   "closedIssues": 0,
-  "activeContributors": 10
+  "activeContributors": 12
 }
