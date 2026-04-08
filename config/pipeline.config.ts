@@ -116,12 +116,12 @@ export default {
 
   aiSummary: {
     enabled: true,
-    defaultModel: "google/gemini-2.5-flash",
+    defaultModel: "google/gemini-3.1-flash-lite-preview",
     models: {
-      day: process.env.SMALL_MODEL || "google/gemini-2.5-flash",
-      week: process.env.LARGE_MODEL || "google/gemini-3-flash-preview",
-      month: process.env.LARGE_MODEL || "google/gemini-3-flash-preview",
-      lifetime: "google/gemini-3-flash-preview",
+      day: process.env.SMALL_MODEL || "google/gemini-3.1-flash-lite-preview",
+      week: process.env.LARGE_MODEL || "google/gemini-3.1-flash-lite-preview",
+      month: process.env.LARGE_MODEL || "google/gemini-3.1-flash-lite-preview",
+      lifetime: "google/gemini-3.1-flash-lite-preview",
     },
     temperature: 0.1,
     max_tokens: 2400,
