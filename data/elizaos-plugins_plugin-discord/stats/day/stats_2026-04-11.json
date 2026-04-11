@@ -1,0 +1,68 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-11T00:00:00.000Z",
+    "intervalEnd": "2026-04-12T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-discord",
+  "overview": "From 2026-04-11 to 2026-04-12, elizaos-plugins/plugin-discord had 1 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOtXZkc7RmSeo",
+      "title": "fix: respect explicit MILADY_DISCORD_OWNER_USER_IDS_JSON setting",
+      "author": "NubsCarson",
+      "number": 47,
+      "body": "## what\n\nrefactors \\`refreshOwnerDiscordUserIds\\` to honor an explicit \\`MILADY_DISCORD_OWNER_USER_IDS_JSON\\` runtime setting. when the deployer pins the canonical owner mapping (even to an empty array), skip the auto-fetched discord application owner fallback.\n\n## why\n\nbefore this change, anyone whose personal discord account also owned the bot's discord application got automatically promoted to canonical owner. that's a surprise remap-to-admin-entity for solo deployers who happen to manage their own application from their personal account. opt-out via empty array (\\`\"[]\"\\`) is now possible without losing the application-owner fallback for deployments that want it.\n\n## how\n\n- new branch checks the setting first via \\`runtime.getSetting?.(...)\\`, parses the JSON array via the existing \\`parseDiscordOwnerUserIds\\` helper, falls back to the existing application-owner extraction only when the setting is unset\n- the existing \\`setConnectorAdminWhitelist\\` call (introduced on alpha) is preserved on top of the rebased branch so the canonical owner mapping still flows through to runtime role checks for deployments that don't opt out\n- factored out an \\`application\\` const inside the closure for readability (was an inlined ternary inside the array spread)\n\n## testing\n\n- explicit empty array \\`\"[]\"\\` → no auto-mapping, no canonical owner override (verified via local bot startup logs: no \\\"Resolved Discord owner identities\\\" line)\n- explicit single id \\`\"[\\\\\"123...\\\\\"]\"\\` → that id becomes the canonical owner\n- unset → existing application-owner behavior unchanged\n- typecheck clean\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Changes how Discord owner/admin identities are derived, which can affect authorization/role checks and who is treated as a connector admin. Risk is mitigated by keeping behavior the same when the setting is unset and only altering explicit-setting deployments.\n> \n> **Overview**\n> Updates `refreshOwnerDiscordUserIds` to **treat `MILADY_DISCORD_OWNER_USER_IDS_JSON` as the authoritative owner list when explicitly provided**, including allowing an explicit empty array to disable auto-detected owners.\n> \n> When the setting is not provided, it continues to fall back to fetching the Discord application owner(s), then synchronizes the resolved owner IDs into the connector admin whitelist without overwriting other configured admins.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit 04257a8468e209ac5ab44edac24120281d900946. Bugbot is set up for automated code reviews on this repo. Configure [here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Improved Discord owner ID detection to prioritize explicit configuration values. When configured, the system uses the provided owner list directly. When configuration is absent, it automatically detects owners from Discord application data, ensuring consistent and reliable owner identification across all deployment scenarios.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR refactors `refreshOwnerDiscordUserIds` so an explicit `MILADY_DISCORD_OWNER_USER_IDS_JSON` setting takes full precedence over the auto-detected application-owner fallback, rather than being merged with it. Deployers can now opt out entirely by setting the value to `\"[]\"`.\n\n- The move of `this.ownerDiscordUserIds = new Set(ownerIds)` to before the early-return is a deliberate semantic change: an explicit empty-array opt-out now actively clears the owner set rather than leaving a prior value in place. Since `refreshOwnerDiscordUserIds` is only called once (in `onReady`), this has no practical regression risk.\n- When `ownerIds` is empty the `setConnectorAdminWhitelist` call is skipped (matching the original early-return guard), so previously configured non-Discord admins are unaffected.\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — the change is narrow, well-scoped, and all three advertised cases (explicit list, explicit empty array, unset) behave as documented.\n\nNo P0 or P1 issues found. The logic is correct for every documented scenario: explicit non-empty list uses only those IDs; explicit empty array `\"[]\"` opts out without touching the whitelist; unset falls back to the existing application-owner path. `getSetting` consistently returns strings in this codebase, so the `typeof === \"string\"` guard in `hasExplicitSetting` is appropriate. The one semantic shift (setting `ownerDiscordUserIds` before the early return) is intentional and has no regression risk since `refreshOwnerDiscordUserIds` is called only once per client lifecycle.\n\nNo files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| typescript/service.ts | Correctly branches on explicit setting vs. fallback; `ownerDiscordUserIds` is now set unconditionally before the early return, which is intentional for the opt-out case. No regressions found. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[\"refreshOwnerDiscordUserIds(client)\"] --> B{\"getSetting\\n'MILADY_DISCORD_OWNER_USER_IDS_JSON'\"}\n    B -->|\"non-empty string\\n(explicit)\"| C[\"parseDiscordOwnerUserIds(explicitSetting)\"]\n    B -->|\"null / undefined /\\nwhitespace-only\"| D[\"client.application.fetch()\"]\n    D --> E[\"extractDiscordOwnerUserIds(application)\"]\n    C --> F[\"ownerIds\"]\n    E --> F\n    F --> G[\"this.ownerDiscordUserIds = new Set(ownerIds)\"]\n    G --> H{\"ownerIds.length === 0?\"}\n    H -->|yes| I[\"return early\\n(no whitelist update, no log)\"]\n    H -->|no| J[\"getConnectorAdminWhitelist\"]\n    J --> K[\"merge existing discord admins + ownerIds\"]\n    K --> L[\"setConnectorAdminWhitelist\"]\n    L --> M[\"logger.info — Resolved Discord owner identities\"]\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix: respect explicit MILADY\\_DISCORD\\_OWN...\"](https://github.com/elizaos-plugins/plugin-discord/commit/04257a8468e209ac5ab44edac24120281d900946) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=28066076)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-discord",
+      "createdAt": "2026-04-11T00:37:04Z",
+      "mergedAt": null,
+      "additions": 24,
+      "deletions": 13
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 1
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 15.818793079863193,
+      "prScore": 15.818793079863193,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jonathanbulkeley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258885064?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
