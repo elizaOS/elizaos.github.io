@@ -1,0 +1,142 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-14T00:00:00.000Z",
+    "intervalEnd": "2026-04-15T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-anthropic",
+  "overview": "From 2026-04-14 to 2026-04-15, elizaos-plugins/plugin-anthropic had 2 new PRs (2 merged), 0 new issues, and 4 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOjIiUc7Scog6",
+      "title": "feat: OAuth auth (Claude Max) + TEXT_REASONING handlers",
+      "author": "standujar",
+      "number": 17,
+      "body": "## Summary\n\n- **OAuth authentication**: Route LLM calls through Claude Max subscription instead of API keys. Reads credentials from macOS Keychain or `~/.claude/.credentials.json` (Linux/Windows), with `CLAUDE_CODE_OAUTH_TOKEN` env var fallback. Activated via `ANTHROPIC_AUTH_MODE=claude-max`.\n- **TEXT_REASONING_SMALL / TEXT_REASONING_LARGE handlers**: New model handlers with extended thinking support, using the existing `generateTextWithModel` infrastructure.\n- **Rate limit logging**: Logs 5h/7d quota utilization on every OAuth response, warns on 429 with reset time.\n\n## Usage\n\n```bash\n# API key (unchanged)\nANTHROPIC_API_KEY=sk-... bun test\n\n# Claude Max OAuth (auto-detect from OS credential store)\nANTHROPIC_AUTH_MODE=claude-max bun test\n\n# Claude Max OAuth (explicit token, CI)\nANTHROPIC_AUTH_MODE=claude-max CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... bun test\n```\n\n## Test plan\n\n- [x] Credential store reads token from macOS Keychain\n- [x] OAuth Bearer auth accepted by Anthropic API (Haiku tested successfully)\n- [x] Rate limit headers parsed and logged\n- [x] 401 retry with token re-read works\n- [ ] Linux/Windows credential file path (`~/.claude/.credentials.json`)\n- [ ] Full E2E test suite via ElizaOS runtime\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Added support for Claude reasoning models (small and large variants)\n  * Added OAuth authentication support as an alternative to API key authentication\n  * Extended configuration options for authentication mode and model selection\n\n* **Chores**\n  * Version bump to 2.0.0-alpha.15\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR adds OAuth authentication for Claude Max subscriptions (reading credentials from macOS Keychain or `~/.claude/.credentials.json`) and two new `TEXT_REASONING_SMALL/LARGE` model handlers that route to configurable reasoning models. The credential-store and config plumbing are clean, but there is one functional concern in the OAuth fetch layer worth addressing before merge.\n\n- **P1 (`anthropic.ts` line 27):** `headers.set(\"anthropic-beta\", \"oauth-2025-04-20\")` silently replaces any beta flag the `@ai-sdk/anthropic` SDK injects for extended thinking. Combined with the new reasoning handlers, this means OAuth + thinking will silently degrade to standard generation. Should merge the value instead of overwriting.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge after fixing the anthropic-beta header overwrite; all other findings are P2 style/usability items\n\nOne P1 issue exists: the OAuth fetch wrapper replaces the anthropic-beta header instead of merging it, which will break extended thinking when OAuth mode is active — exactly the combination the new reasoning handlers are designed for. The fix is a single-line change. All remaining findings (noisy logging, undrained response body, log message copy) are P2 and don't block correctness.\n\ntypescript/providers/anthropic.ts — the beta-header merge fix is needed here\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| typescript/providers/anthropic.ts | Adds OAuth fetch wrapper and 401 retry; P1 issue: headers.set(\"anthropic-beta\", ...) overwrites SDK-injected beta flags needed for extended thinking; P2: quota logs every response; P2: response body not drained before retry |\n| typescript/utils/credential-store.ts | New file implementing OAuth token retrieval from macOS Keychain, credentials file, and env vars; caching logic is correct; expiresAt: Infinity for env tokens is safe given guarded callers |\n| typescript/models/text.ts | Adds handleReasoningSmall and handleReasoningLarge handlers; thinking only activates when ANTHROPIC_COT_BUDGET* is set — this dependency is not documented or enforced in the handlers themselves |\n| typescript/init.ts | Extends initialization to validate OAuth token on startup; P2: log message names ANTHROPIC_OAUTH_TOKEN when CLAUDE_CODE_OAUTH_TOKEN is the primary env var |\n| typescript/utils/config.ts | Adds getAuthMode, getReasoningSmallModel, getReasoningLargeModel helpers and skips API key validation when OAuth mode is active; clean implementation |\n| typescript/index.ts | Registers the two new reasoning model type handlers and adds config entries for auth mode and reasoning models; purely additive |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant R as ElizaOS Runtime\n    participant P as anthropic.ts (createOAuthFetch)\n    participant CS as credential-store.ts\n    participant API as Anthropic API\n\n    R->>P: generateText / streamText\n    P->>CS: getClaudeOAuthToken()\n    alt env var set (CLAUDE_CODE_OAUTH_TOKEN)\n        CS-->>P: { accessToken, expiresAt: Infinity }\n    else cached token still valid\n        CS-->>P: cachedToken\n    else read from store\n        CS->>CS: readFromMacKeychain() / readCredentialsFile()\n        CS-->>P: { accessToken, expiresAt }\n    end\n    P->>P: delete x-api-key header\n    P->>P: set Authorization: Bearer token\n    P->>P: set anthropic-beta: oauth-2025-04-20 ⚠️ overwrites SDK betas\n    P->>API: HTTP request\n    API-->>P: response\n    alt status 200\n        P->>P: log quota utilization (5h/7d)\n        P-->>R: response\n    else status 429\n        P->>P: log rate-limit + reset time\n        P-->>R: 429 response\n    else status 401\n        P->>CS: clearTokenCache()\n        P->>CS: getClaudeOAuthToken() fresh read\n        CS-->>P: freshToken\n        P->>API: retry with fresh token\n        API-->>P: response\n        P-->>R: response\n    end\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `typescript/models/text.ts`, line 665-688 ([link](https://github.com/elizaos-plugins/plugin-anthropic/blob/c75493a5c00b66acd9d1898a35ffbea3b803dd53/typescript/models/text.ts#L665-L688)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> **Reasoning handlers require an additional env var to actually reason**\n\n   `handleReasoningSmall` and `handleReasoningLarge` delegate to `generateTextWithModel`, which only enables extended thinking when `getCoTBudget(runtime, modelSize) > 0` — i.e., when `ANTHROPIC_COT_BUDGET_SMALL/LARGE` or `ANTHROPIC_COT_BUDGET` is configured. Without that env var, both handlers call the reasoning model with standard (non-thinking) text generation, silently producing ordinary results.\n\n   Consider either (a) setting a sensible non-zero default `cotBudget` inside these handlers, or (b) making the dependency explicit in a code comment and the plugin README so callers know to set the budget.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat: add OAuth auth (Claude Max) and TE...\"](https://github.com/elizaos-plugins/plugin-anthropic/commit/c75493a5c00b66acd9d1898a35ffbea3b803dd53) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=28414788)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-anthropic",
+      "createdAt": "2026-04-14T21:42:59Z",
+      "mergedAt": "2026-04-14T22:01:39Z",
+      "additions": 461,
+      "deletions": 83
+    },
+    {
+      "id": "PR_kwDOOjIiUc7Sc_GE",
+      "title": "feat: add CLI auth mode (claude -p subprocess)",
+      "author": "standujar",
+      "number": 18,
+      "body": "## Summary\r\n\r\nAdds a third auth mode `ANTHROPIC_AUTH_MODE=claude-cli` that routes all model calls through `claude -p` (Claude Code CLI headless mode). Unlike direct OAuth token extraction (which Anthropic actively blocks for third-party tools), the CLI path uses Claude Code's own authenticated session.\r\n\r\n## How it works\r\n\r\nWhen `claude-cli` mode is active, `generateTextWithModel()` bypasses the AI SDK entirely and spawns `claude -p` for each call. The CLI handles auth via the user's existing Claude Code session.\r\n\r\n- **Non-streaming:** `claude -p --model <model> --output-format json` — parses `result` + `modelUsage` from JSON output\r\n- **Streaming:** `claude -p --model <model> --output-format stream-json --verbose --include-partial-messages` — yields `text_delta` events in real-time, returns a full `TextStreamResult` (textStream, text, usage, finishReason)\r\n\r\n## Three auth modes\r\n\r\n| Mode | Env var | Speed | Risk |\r\n|---|---|---|---|\r\n| Default | `ANTHROPIC_API_KEY=sk-...` | Fast | None (pay-per-token) |\r\n| `claude-cli` | `ANTHROPIC_AUTH_MODE=claude-cli` | ~3s/call | Grey area |\r\n| `oauth` | `ANTHROPIC_AUTH_MODE=oauth` | Fast | May be blocked |\r\n\r\n## Benchmarks\r\n\r\n| Test | Latency |\r\n|---|---|\r\n| Haiku sequential | ~3s |\r\n| Sonnet sequential | ~3s |\r\n| 5x Haiku parallel | ~4s total (0.8s/call avg) |\r\n| Sonnet streaming | ~4s (5 chunks, real-time text_delta) |\r\n\r\n## Files changed\r\n\r\n- `typescript/utils/claude-cli.ts` (NEW) — `generateViaCli()` + `streamViaCli()` \r\n- `typescript/utils/config.ts` — `getAuthMode()` now returns `\"cli\" | \"oauth\" | \"apikey\"`\r\n- `typescript/models/text.ts` — CLI path in `generateTextWithModel()` (streaming + non-streaming)\r\n- `typescript/init.ts` — CLI mode validation (checks `claude` command exists)\r\n- `typescript/package.json` — bump to `alpha.17`\r\n\r\n## Test plan\r\n\r\n- [x] Haiku via `claude -p` — works\r\n- [x] Sonnet via `claude -p` — works (no rate limit block unlike OAuth)\r\n- [x] Parallel calls — works, ~0.8s/call avg\r\n- [x] Streaming via CLI — works, real text_delta chunks\r\n- [x] Usage events emitted in both streaming and non-streaming\r\n- [ ] Opus with extended thinking via CLI\r\n- [ ] Integration with ElizaOS runtime",
+      "repository": "elizaos-plugins/plugin-anthropic",
+      "createdAt": "2026-04-14T22:11:21Z",
+      "mergedAt": "2026-04-14T22:50:36Z",
+      "additions": 279,
+      "deletions": 4
+    }
+  ],
+  "codeChanges": {
+    "additions": 740,
+    "deletions": 87,
+    "files": 10,
+    "commitCount": 20
+  },
+  "completedItems": [
+    {
+      "title": "feat: add CLI auth mode (claude -p subprocess)",
+      "prNumber": 18,
+      "type": "feature",
+      "body": "## Summary\r\n\r\nAdds a third auth mode `ANTHROPIC_AUTH_MODE=claude-cli` that routes all model calls through `claude -p` (Claude Code CLI headless mode). Unlike direct OAuth token extraction (which Anthropic actively blocks for third-party too",
+      "files": [
+        "package.json",
+        "typescript/init.ts",
+        "typescript/models/text.ts",
+        "typescript/package.json",
+        "typescript/utils/claude-cli.ts",
+        "typescript/utils/config.ts"
+      ]
+    },
+    {
+      "title": "feat: OAuth auth (Claude Max) + TEXT_REASONING handlers",
+      "prNumber": 17,
+      "type": "feature",
+      "body": "## Summary\n\n- **OAuth authentication**: Route LLM calls through Claude Max subscription instead of API keys. Reads credentials from macOS Keychain or `~/.claude/.credentials.json` (Linux/Windows), with `CLAUDE_CODE_OAUTH_TOKEN` env var fall",
+      "files": [
+        "package.json",
+        "typescript/index.ts",
+        "typescript/init.ts",
+        "typescript/models/index.ts",
+        "typescript/models/text.ts",
+        "typescript/package.json",
+        "typescript/providers/anthropic.ts",
+        "typescript/utils/config.ts",
+        "typescript/utils/credential-store.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 106.8524587904682,
+      "prScore": 106.8524587904682,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 56.928773896576104,
+      "prScore": 37.7287738965761,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "MBrassey",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16184941?u=87c48afc8151b232b200c707c4a3e3d216ca1b34&v=4",
+      "totalScore": 41.16472077083992,
+      "prScore": 40.82472077083992,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 40.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "dutchiono",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
+      "totalScore": 30.635577708624385,
+      "prScore": 30.635577708624385,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 4
+}
