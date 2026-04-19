@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-04-18 to 2026-04-19, elizaos/eliza had 12 new PRs (0 merged), 1 new issues, and 6 active contributors.",
+  "overview": "From 2026-04-18 to 2026-04-19, elizaos/eliza had 12 new PRs (0 merged), 1 new issues, and 7 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs7_ptfV",
@@ -32,6 +32,18 @@
       "mergedAt": null,
       "additions": 114,
       "deletions": 44
+    },
+    {
+      "id": "PR_kwDOMT5cIs7To_EL",
+      "title": "fix: clean discord chat UX — drop heartbeat + bump orchestrator pin",
+      "author": "RemilioNubilio",
+      "number": 6962,
+      "body": "Companion to https://github.com/elizaos-plugins/plugin-agent-orchestrator/pull/37. Silences five classes of runtime-internal messages that have been leaking into Discord as console-log-style dumps.\n\n## Changes\n\n### 1. Delete `packages/agent/src/runtime/task-heartbeat.ts` + wiring in `packages/agent/src/api/server.ts`\n\nThe heartbeat posted `still working — Xs in (Bash)` per PTY session. When a single user prompt spawns multiple sessions (the common case with the swarm coordinator), the 120s room-level rate limit lets a second session's 45s ping through unchanged because the gap between sessions usually exceeds 2 minutes. Users saw duplicate `45s in` messages for the same prompt, sometimes after the actual result had already been posted.\n\nSynthesis (`handleSwarmSynthesis`) already delivers the final answer on completion. There is no UX payoff to a mid-task ping that fires inconsistently and can land after the result. If a specific long-running action needs a progress indicator, that belongs inside the action, not as a generic runtime ping. Same rationale as a comparable upstream cleanup done a few weeks ago that got reverted when the submodule pin was bumped.\n\n### 2. Bump `plugins/plugin-agent-orchestrator`\n\nPicks up the chat-leak fixes in `START_CODING_TASK` / `SPAWN_AGENT` / coordinator / decision-loop / idle-watchdog (see the orchestrator PR).\n\n## Follows the 5 rules\n\n1. No wrappers — just delete + remove references.\n2. Reuses — nothing new to reuse.\n3. No new types.\n4. No new parameters.\n5. Responsibilities stay cleanly split — the WS broadcast path still reports session state; only the chat channel goes quiet.\n\n## Validation\n\nTested on a private Discord test channel via webhook. After the bump, \"make me a tiny dice roller page\" produces:\n1. `rolling` (LLM reply)\n2. Single synthesis summary after completion\n\nThe prior spam (launched-agents dump, 45s heartbeat, workspace path + task prompt dump, `Task finished. Code is at ...`, `Session lost`, `coordinator could not prove completion`) is gone.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR removes the `task-heartbeat` module that was posting inconsistent \\\"still working — 45s in\\\" pings to Discord chat per PTY session, and bumps the `plugin-agent-orchestrator` submodule to pick up companion chat-leak fixes. The deletion is clean — no remaining references to `installTaskHeartbeat` or `task-heartbeat` exist anywhere in the codebase, and the synthesis callback (`handleSwarmSynthesis`) continues to deliver the final answer on completion.\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — clean deletion with no dangling references and a well-scoped submodule bump.\n\nAll remaining findings are P2 (a dead export in subagent-output.ts). No logic errors, no broken wiring, and no unaddressed references were found. The heartbeat removal is complete and the synthesis path is unaffected.\n\npackages/agent/src/runtime/subagent-output.ts — readCurrentActivityFromJsonl is now a dead export worth pruning in a follow-up.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/agent/src/api/server.ts | Heartbeat import and wiring removed; no remaining task-heartbeat references; unrelated heartbeat identifiers (WebSocket, app-manager, SSE) are untouched. |\n| packages/agent/src/runtime/task-heartbeat.ts | File deleted cleanly; no remaining imports or re-exports reference it anywhere in the codebase. |\n| plugins/plugin-agent-orchestrator | Submodule pointer bumped from 920c2a1f4 to 911708224 on the alpha branch, picking up orchestrator chat-leak fixes. |\n\n</details>\n\n\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[User prompt via Discord] --> B[PTY sessions spawned]\n    B --> C{Before this PR}\n    B --> D{After this PR}\n\n    C --> C1[task-heartbeat fires after 45s per session]\n    C1 --> C2[Rate-limited per room — but second session often slips through]\n    C2 --> C3[User sees duplicate '45s in' pings, sometimes after the result]\n    C3 --> C4[handleSwarmSynthesis posts final answer]\n\n    D --> D2[Sessions run silently]\n    D2 --> D3[handleSwarmSynthesis posts final answer]\n\n    style C1 fill:#f88,stroke:#c00\n    style C2 fill:#f88,stroke:#c00\n    style C3 fill:#f88,stroke:#c00\n    style D2 fill:#8f8,stroke:#080\n    style D3 fill:#8f8,stroke:#080\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `packages/agent/src/runtime/subagent-output.ts`, line 125-155 ([link](https://github.com/elizaos/eliza/blob/7c15f9116268f25ee64d4586a9b8e6faca6f089d/packages/agent/src/runtime/subagent-output.ts#L125-L155)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> **Dead export after heartbeat removal**\n\n   `readCurrentActivityFromJsonl` was imported exclusively by `task-heartbeat.ts` (confirmed: no other callers exist in the codebase). Now that the heartbeat is gone, this function and its heartbeat-specific doc comment (`\"the user in a heartbeat\"`) are orphaned. It won't cause a runtime error, but it's dead code worth cleaning up in a follow-up.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"fix: clean up discord chat UX — drop hea...\"](https://github.com/elizaos/eliza/commit/7c15f9116268f25ee64d4586a9b8e6faca6f089d) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=28877413)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-18T21:49:27Z",
+      "mergedAt": null,
+      "additions": 30,
+      "deletions": 148
     },
     {
       "id": "PR_kwDOMT5cIs7Tgb9l",
@@ -68,25 +80,13 @@
       "mergedAt": null,
       "additions": 2,
       "deletions": 2
-    },
-    {
-      "id": "PR_kwDOMT5cIs7ThI9p",
-      "title": "chore(deps): update dependency @capacitor/docgen to ^0.3.0",
-      "author": "renovate",
-      "number": 6953,
-      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@capacitor/docgen](https://capacitorjs.com/) ([source](https://redirect.github.com/ionic-team/capacitor-docgen)) | [`^0.2.2` → `^0.3.0`](https://renovatebot.com/diffs/npm/@capacitor%2fdocgen/0.2.2/0.3.1) | ![age](https://developer.mend.io/api/mc/badges/age/npm/@capacitor%2fdocgen/0.3.1?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/npm/@capacitor%2fdocgen/0.2.2/0.3.1?slim=true) |\n\n---\n\n> [!WARNING]\n> Some dependencies could not be looked up. Check the [Dependency Dashboard](../issues/79) for more information.\n\n---\n\n### Release Notes\n\n<details>\n<summary>ionic-team/capacitor-docgen (@&#8203;capacitor/docgen)</summary>\n\n### [`v0.3.1`](https://redirect.github.com/ionic-team/capacitor-docgen/releases/tag/v0.3.1)\n\n[Compare Source](https://redirect.github.com/ionic-team/capacitor-docgen/compare/v0.3.0...v0.3.1)\n\n- chore: move [@&#8203;types/node](https://redirect.github.com/types/node) to dev dependencies ([#&#8203;56](https://redirect.github.com/ionic-team/capacitor-docgen/issues/56))  [`ff26b78`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/ff26b78)\n\n### [`v0.3.0`](https://redirect.github.com/ionic-team/capacitor-docgen/releases/tag/v0.3.0)\n\n[Compare Source](https://redirect.github.com/ionic-team/capacitor-docgen/compare/v0.2.2...v0.3.0)\n\n- chore: Update rimraf to 5.x ([#&#8203;54](https://redirect.github.com/ionic-team/capacitor-docgen/issues/54))  [`8197128`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/8197128)\n- chore: Update jest ([#&#8203;53](https://redirect.github.com/ionic-team/capacitor-docgen/issues/53))  [`51eacc8`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/51eacc8)\n- chore!: require node 18 ([#&#8203;52](https://redirect.github.com/ionic-team/capacitor-docgen/issues/52))  [`48e0cf3`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/48e0cf3)\n- chore: Update dev dependencies ([#&#8203;51](https://redirect.github.com/ionic-team/capacitor-docgen/issues/51))  [`10e29ec`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/10e29ec)\n- chore: Update dependencies ([#&#8203;50](https://redirect.github.com/ionic-team/capacitor-docgen/issues/50))  [`38586d0`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/38586d0)\n- chore: Update prettier ([#&#8203;49](https://redirect.github.com/ionic-team/capacitor-docgen/issues/49))  [`93a8242`](https://redirect.github.com/ionic-team/capacitor-docgen/commit/93a8242)\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR was generated by [Mend Renovate](https://mend.io/renovate/). View the [repository job log](https://developer.mend.io/github/elizaOS/eliza).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4xMjMuOCIsInVwZGF0ZWRJblZlciI6IjQzLjEyMy44IiwidGFyZ2V0QnJhbmNoIjoiZGV2ZWxvcCIsImxhYmVscyI6W119-->\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-04-18T04:20:43Z",
-      "mergedAt": null,
-      "additions": 2,
-      "deletions": 2
     }
   ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 64
+    "commitCount": 66
   },
   "completedItems": [],
   "topContributors": [
@@ -135,5 +135,5 @@
   "mergedPRs": 0,
   "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 6
+  "activeContributors": 7
 }
