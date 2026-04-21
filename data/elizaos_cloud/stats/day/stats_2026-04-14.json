@@ -1,0 +1,276 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-14T00:00:00.000Z",
+    "intervalEnd": "2026-04-15T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/cloud",
+  "overview": "From 2026-04-14 to 2026-04-15, elizaos/cloud had 7 new PRs (5 merged), 0 new issues, and 7 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOP6BTDM7Sce1X",
+      "title": "Shaw/live ai pricing",
+      "author": "lalalune",
+      "number": 455,
+      "body": "",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-14T21:33:30Z",
+      "mergedAt": "2026-04-17T22:23:16Z",
+      "additions": 53390,
+      "deletions": 1203
+    },
+    {
+      "id": "PR_kwDOP6BTDM7SeJ5o",
+      "title": "fix: patch pricing, privacy, and security issues in live-ai-pricing",
+      "author": "0xSolace",
+      "number": 456,
+      "body": "## Patches on top of #455\n\nFixes critical bugs and security issues found during audit of the live-ai-pricing PR.\n\n### Pricing fixes\n- **Implement Seedance 2.0 parser** + add Seedance 2.0 / 2.0 Fast to model catalog (was throwing unimplemented error)\n- **Restore partial charge on failed video gen** (~10% of quoted cost instead of full refund — prevents abuse)\n- **Error handling on `/api/v1/pricing/summary`** — one failing fal endpoint no longer 500s the whole route\n- **Cache eviction** for `third-partyCatalogCache` Map (was growing unbounded)\n- **HTML parser fallback** to last known DB price when fal.ai page scraping fails\n\n### Privacy / security fixes\n- **Add `is_public` column to generations** (default false) + filter explore gallery to only show opted-in content (was leaking ALL users' images)\n- **Remove anonymous fallback from image gen** — require auth, return 401 without it (was allowing free image gen)\n- **Document blob storage limitation** — Vercel Blob only supports public access currently, added TODO for auth-gated proxy\n\n### Damage context\nAudit found ~$957 in losses from the old flat $0.05/video pricing (301 Veo 3 gens at ~$3.20 actual cost each). Shaw's PR fixes the core pricing. These patches harden it.\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-14T23:42:05Z",
+      "mergedAt": "2026-04-15T01:47:49Z",
+      "additions": 25423,
+      "deletions": 139
+    },
+    {
+      "id": "PR_kwDOP6BTDM7Sa3JG",
+      "title": "fix: register org_rate_limit_overrides migration in Drizzle journal",
+      "author": "standujar",
+      "number": 454,
+      "body": "## Summary\n\nPR #452 wrote the migration SQL manually but never ran `bun run db:generate` to register it in Drizzle's journal (`_journal.json` + snapshot). This means `db:migrate` doesn't see it.\n\n- Removes the manual `0063_add_org_rate_limit_overrides.sql`\n- Adds Drizzle-generated `0060_zippy_joshua_kane.sql` with the same table + FK + CHECK constraint + composite index\n- Adds the journal entry and snapshot so `db:migrate` can apply it\n\n**After merge, run manually:**\n```bash\nbun run db:migrate\n```\n\n## Test plan\n\n- [ ] `bun run db:migrate` creates the `org_rate_limit_overrides` table\n- [ ] CHECK constraint `chk_rpm_positive` is applied\n- [ ] Index `idx_credit_transactions_org_type` is created",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-14T19:44:29Z",
+      "mergedAt": null,
+      "additions": 24763,
+      "deletions": 25
+    },
+    {
+      "id": "PR_kwDOP6BTDM7ST9P7",
+      "title": "feat: dynamic per-org rate limits based on cumulative spend",
+      "author": "standujar",
+      "number": 452,
+      "body": "## Summary\r\n\r\n- **Automatic tier-based rate limits** per org computed from paid credit purchases (Stripe)\r\n- **3 tiers**: free (60rpm completions), paid ≥$5 (120rpm), growth ≥$100 (300rpm)\r\n- **Enterprise overrides** via `org_rate_limit_overrides` DB table + admin API\r\n- **Follows existing MCP pattern** — `enforceOrgRateLimit()` called inside handlers after auth, `withRateLimit` stays as outer safety net\r\n- **Redis-cached** tier data (1h TTL), invalidated on Stripe payment webhook\r\n\r\n### Tier values\r\n\r\n| Tier | Condition | Completions | Embeddings | Standard | Strict |\r\n|------|-----------|-------------|------------|----------|--------|\r\n| free | $0 spend | 60 rpm | 100 rpm | 30 rpm | 5 rpm |\r\n| paid | ≥$5 | 120 rpm | 200 rpm | 60 rpm | 10 rpm |\r\n| growth | ≥$100 | 300 rpm | 600 rpm | 120 rpm | 30 rpm |\r\n| enterprise | Override | Custom | Custom | Custom | Custom |\r\n\r\n## Test plan\r\n\r\n- [ ] Run `bun run db:migrate` to apply migration 0063\r\n- [ ] Verify tier query: org with $0 paid → free (60rpm), with $5+ → paid (120rpm)\r\n- [ ] Test completions/embeddings endpoints return 429 when org exceeds tier RPM\r\n- [ ] Test anonymous users on `/responses` fall through to outer withRateLimit\r\n- [ ] Test admin PATCH override → verify immediate cache invalidation\r\n- [ ] Test Stripe webhook payment → verify tier cache is invalidated\r\n- [ ] Verify `X-RateLimit-*` headers on all responses",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-14T12:59:37Z",
+      "mergedAt": "2026-04-14T19:14:47Z",
+      "additions": 1592,
+      "deletions": 241
+    },
+    {
+      "id": "PR_kwDOP6BTDM7R07EO",
+      "title": "feat: steward auth integration, CI fixes, Railway deploy workflow",
+      "author": "0xSolace",
+      "number": 449,
+      "body": "## What changed\n\n### Steward Auth (original scope)\n- Wire `syncUserFromSteward` JIT sync in auth chain so first-time steward users get auto-provisioned in the eliza-cloud DB\n- Without this, steward JWT auth works for existing users but new users get 401\n\n### CI Fixes\n- Resolve lint, type, and test errors across the codebase\n- Revert agent.ts cast that broke `defaultAgent.character` access\n- Cast `characterSettings` to match `buildCharacter` expected type\n- Biome lint fixes\n- `@ts-nocheck` on test files with `@elizaos/core` type mismatches (6 files)\n\n### Railway Deploy Workflow (new)\n- `.github/workflows/deploy-steward.yml` — deploy steward Docker images to Railway via GraphQL API\n  - Manual dispatch with image tag + dry run\n  - Automated trigger via `repository_dispatch` from steward CI\n  - Polls health endpoint, creates GitHub deployment status\n- `docs/steward-deploy.md` — architecture diagram, deploy/rollback guide, env var reference\n\n### Infrastructure\n- Steward API deployed to Railway (`steward-api-production-115d.up.railway.app`)\n- Neon database: separate `steward` database within elizacloud's Neon project\n- Tenants created: `elizacloud` + `waifu`\n- Vercel env vars updated for Railway steward instance\n- GitHub secret `RAILWAY_STEWARD_TOKEN` set for deploy workflow\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-12T22:45:35Z",
+      "mergedAt": "2026-04-14T19:14:47Z",
+      "additions": 954,
+      "deletions": 168
+    }
+  ],
+  "codeChanges": {
+    "additions": 3518,
+    "deletions": 452,
+    "files": 58,
+    "commitCount": 84
+  },
+  "completedItems": [
+    {
+      "title": "feat: add OpenRouter as multi-provider inference gateway",
+      "prNumber": 453,
+      "type": "feature",
+      "body": "## Summary\n- Adds OpenRouter as an additional inference provider, expanding model coverage across 200+ models from multiple providers (OpenAI, Anthropic, Google, Meta, Mistral, etc.) through a single API key\n- Automatic provider failover — ",
+      "files": [
+        "app/api/v1/apps/[id]/chat/route.ts",
+        "app/api/v1/models/[...model]/route.ts",
+        "app/api/v1/models/status/route.ts",
+        "app/api/v1/responses/route.ts",
+        "packages/lib/cache/keys.ts",
+        "packages/lib/config/env-validator.ts",
+        "packages/lib/models/catalog.ts",
+        "packages/lib/models/index.ts",
+        "packages/lib/providers/failover.ts",
+        "packages/lib/providers/index.ts",
+        "packages/lib/providers/language-model.ts",
+        "packages/lib/providers/openrouter.ts",
+        "packages/lib/services/model-catalog.ts"
+      ]
+    },
+    {
+      "title": "feat: dynamic per-org rate limits based on cumulative spend",
+      "prNumber": 452,
+      "type": "feature",
+      "body": "## Summary\r\n\r\n- **Automatic tier-based rate limits** per org computed from paid credit purchases (Stripe)\r\n- **3 tiers**: free (60rpm completions), paid ≥$5 (120rpm), growth ≥$100 (300rpm)\r\n- **Enterprise overrides** via `org_rate_limit_ove",
+      "files": [
+        "app/api/stripe/webhook/route.ts",
+        "app/api/v1/admin/orgs/[orgId]/rate-limits/route.ts",
+        "app/api/v1/chat/completions/route.ts",
+        "app/api/v1/embeddings/route.ts",
+        "app/api/v1/responses/route.ts",
+        "packages/db/migrations/0063_add_org_rate_limit_overrides.sql",
+        "packages/db/repositories/index.ts",
+        "packages/db/repositories/org-rate-limit-overrides.ts",
+        "packages/db/schemas/index.ts",
+        "packages/db/schemas/org-rate-limit-overrides.ts",
+        "packages/lib/middleware/rate-limit.ts",
+        "packages/lib/services/org-rate-limits.ts",
+        "packages/tests/unit/org-rate-limits.test.ts"
+      ]
+    },
+    {
+      "title": "feat(#55): Gateway — enrich POST body with platform metadata",
+      "prNumber": 451,
+      "type": "feature",
+      "body": "## Summary\n- Enriches the gateway webhook → agent-server message pipeline with platform metadata (`platformName`, `senderName`, `chatId`) so the agent can personalize responses, identify the originating platform, and route proactive replies",
+      "files": [
+        "packages/services/gateway-webhook/__tests__/build-forward-body.test.ts",
+        "packages/services/gateway-webhook/src/server-router.ts",
+        "packages/services/gateway-webhook/src/webhook-handler.ts",
+        "services/agent-server/__tests__/unit/metadata-helpers.test.ts",
+        "services/agent-server/src/agent-manager.ts",
+        "services/agent-server/src/routes.ts"
+      ]
+    },
+    {
+      "title": "feat: steward wallet provisioning endpoints for desktop cloud login",
+      "prNumber": 450,
+      "type": "feature",
+      "body": "## Summary\n\n- **Idempotent wallet provisioning**: `POST /api/v1/user/wallets/provision` now catches `WalletAlreadyExistsError` and returns the existing wallet instead of a 500 error. This makes the desktop cloud login flow robust to repeate",
+      "files": [
+        "app/api/v1/steward/tenants/credentials/route.ts",
+        "app/api/v1/user/wallets/provision/route.ts",
+        "app/api/v1/user/wallets/route.ts"
+      ]
+    },
+    {
+      "title": "feat: steward auth integration, CI fixes, Railway deploy workflow",
+      "prNumber": 449,
+      "type": "feature",
+      "body": "## What changed\n\n### Steward Auth (original scope)\n- Wire `syncUserFromSteward` JIT sync in auth chain so first-time steward users get auto-provisioned in the eliza-cloud DB\n- Without this, steward JWT auth works for existing users but new ",
+      "files": [
+        ".github/workflows/deploy-steward.yml",
+        "app/api/auth/steward-debug/route.ts",
+        "app/api/auth/steward-session/route.ts",
+        "app/globals.css",
+        "app/login/page.tsx",
+        "app/login/steward-login-section.tsx",
+        "bun.lock",
+        "docs/steward-deploy.md",
+        "next.config.ts",
+        "package.json",
+        "packages/lib/auth.ts",
+        "packages/lib/eliza/agent-loader.ts",
+        "packages/lib/eliza/agent.ts",
+        "packages/lib/providers/StewardProvider.tsx",
+        "packages/tests/infrastructure/test-runtime.ts",
+        "packages/tests/integration/entity-settings-isolation.test.ts",
+        "packages/tests/playwright/fixtures/auth.fixture.ts",
+        "packages/tests/playwright/fixtures/page-helpers.ts",
+        "packages/tests/playwright/flows/agent-lifecycle.spec.ts",
+        "packages/tests/playwright/pages/public-pages.spec.ts",
+        "packages/tests/runtime/integration/runtime-factory/pool-closure-race.test.ts",
+        "packages/tests/unit/milady-gateway-relay.test.ts",
+        "packages/tests/unit/performance-optimizations.test.ts",
+        "proxy.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 106.8524587904682,
+      "prScore": 106.8524587904682,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "standujar: Drove significant feature development for the Anthropic plugin by implementing OAuth support and CLI authentication modes in PRs #17 and #18, resulting in over 1,500 lines of code changes. Their work today was primarily balanced between bugfixes and new feature implementation across 34 files."
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 102.32766051975898,
+      "prScore": 102.32766051975898,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 58.3867738965761,
+      "prScore": 53.3867738965761,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 56.928773896576104,
+      "prScore": 37.7287738965761,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0.2,
+      "summary": "odilitime: Drove significant architectural expansion by implementing pipeline hooks in elizaos/eliza (#6733), a major contribution involving extensive codebase modifications across 3,764 files. Their work balanced this feature development with active project maintenance, including four code reviews and a primary focus on general system improvements, bug fixes, and feature integration."
+    },
+    {
+      "username": "hanzlamateen",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/10975502?u=53f23921078d9a27d96751373bb44f4bd2d58bf4&v=4",
+      "totalScore": 52.658312094350464,
+      "prScore": 52.658312094350464,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "MBrassey",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16184941?u=87c48afc8151b232b200c707c4a3e3d216ca1b34&v=4",
+      "totalScore": 41.16472077083992,
+      "prScore": 40.82472077083992,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": "MBrassey: Focused on expanding the registry ecosystem by initiating three pull requests (#338, #339, #340) to integrate @blueprint.xyz/plugin-solentic. Their work today was centered entirely on configuration updates to support these new plugin additions."
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 40.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": "greptile-apps: No activity today."
+    },
+    {
+      "username": "dutchiono",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
+      "totalScore": 30.635577708624385,
+      "prScore": 30.635577708624385,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "dutchiono: Focused on enhancing system reliability and diagnostics, opening PRs to implement a legacy fallback for agent restarts (#6744) and add plugin state drift diagnostics (#6743). These contributions involved 830 additions across 4 commits, balancing bugfix efforts with diagnostic tooling improvements."
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": "lalalune: Executed a high-volume technical initiative involving 117 commits and extensive modifications across 13,940 files, while actively engaging in 19 issue discussions to facilitate project coordination. Their efforts were primarily balanced between general project maintenance and targeted bugfix work."
+    }
+  ],
+  "newPRs": 7,
+  "mergedPRs": 5,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 7
+}
