@@ -1,0 +1,240 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-22T00:00:00.000Z",
+    "intervalEnd": "2026-04-23T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/cloud",
+  "overview": "From 2026-04-22 to 2026-04-23, elizaos/cloud had 5 new PRs (3 merged), 0 new issues, and 5 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOP6BTDM7Ue5Lk",
+      "title": "fix(ai-pricing): store gateway token rows under language/embedding",
+      "author": "odilitime",
+      "number": 470,
+      "body": "Image-generation models (e.g. gemini-*-image) were classified as product family image for all pricing rows, including per-token input/output. Chat billing resolves language:input, so lookups failed after catalog refresh. Token and web_search entries now use embedding vs language only; image-specific rows remain under image.\r\n\r\ndeployment must: admin POST /api/v1/admin/ai-pricing\r\n\r\nMade-with: Cursor\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Refined how AI models are classified for token-based billing to ensure accurate pricing calculations.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Medium Risk**\n> Medium risk because it changes core pricing resolution (model family classification + alias-based lookup) and DB query patterns, which directly affects billing/cost calculations and could shift charges if mismatched.\n> \n> **Overview**\n> Fixes AI pricing ingestion and lookup for Vercel AI Gateway models so **token/web-search rows are stored and resolved under `language`/`embedding`**, preventing billing lookups from breaking on image-capable models.\n> \n> Adds **model-id alias expansion** (forward + reverse) for gateway renames, plus provider inference for cross-provider alias targets, and optimizes persisted lookups via a new `listActiveEntriesForProviderModelPairs` DB query.\n> \n> Includes follow-up hardening/compat work: switch agent character normalization to `parseCharacter`, make MCP action parameter types internal (and loosen runtime registration casts), add ambient `.d.ts` stubs for optional deps, and small safety/format fixes (e.g., STT duration optional chaining).\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit 366e7b26a431a10ec17594dd606365b469cbaa0c. Bugbot is set up for automated code reviews on this repo. Configure [here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-22T02:00:38Z",
+      "mergedAt": "2026-04-22T06:09:38Z",
+      "additions": 884,
+      "deletions": 391
+    },
+    {
+      "id": "PR_kwDOP6BTDM7Ue2De",
+      "title": "fix: auth + migrations consolidation (wallet buttons, journal drift, aggressive refresh)",
+      "author": "0xSolace",
+      "number": 469,
+      "body": "Consolidates PRs #465, #467, #468 into one clean merge.\n\n## 3 fixes in this PR\n\n### 1. Native Ethereum + Solana login buttons (was #465)\nReplaces `<WalletLogin />` with two native buttons matching the Google/Discord login card styling. One-click flow: button → wallet modal → auto-SIWE/SIWS → signed in.\n\nFiles: `app/login/wallet-buttons.tsx` (new), `app/login/steward-login-section.tsx`\n\n### 2. Migration journal drift repair (was #467)\nProd Neon DB was missing 10 tables (`affiliate_codes`, `user_affiliates`, `service_pricing`, `device_bus_*`, `twilio_inbound_calls`, `remote_sessions`, `org_rate_limit_overrides`, `n8n_workflow.credential_mappings`) + 3 columns (`referral_codes.parent_referral_id`, `referral_signups.{app_owner_id,creator_id}`). Both `/api/v1/affiliates` and `/api/v1/referrals` 500ing.\n\nRoot cause: `_journal.json` drifted from the migration files. 7 files had no journal entry so drizzle never ran them. 0067 + 0068 had duplicate `idx=63`.\n\nProd DB already repaired directly via psql (11 migrations applied in single transaction, verified via dry-run BEGIN/ROLLBACK first). `__drizzle_migrations` back-filled. This PR just fixes the journal so it doesn't regenerate in the broken state.\n\nFiles: `packages/db/migrations/meta/_journal.json`\n\n### 3. Aggressive session refresh (was #468)\nShadow reported signing out after exactly ~15min (access token TTL). Two gaps:\n\n- Server middleware only refreshed ALREADY-expired tokens. If the user navigated right as the token hit 0, was a race.\n- Client `setInterval` gets throttled to ~1/min in background tabs; can be fully suspended under memory pressure.\n\nFix:\n- **Server (proxy.ts):** preemptive refresh when <180s remain\n- **Client (StewardProvider):** add `visibilitychange` + `online` event handlers so tab-wakeup / network-reconnect triggers immediate refresh\n\nFiles: `proxy.ts`, `packages/lib/providers/StewardProvider.tsx`\n\n## verification\n\n- GitHub OAuth now `github: true` in `/auth/providers` (Shadow set Railway env for steward-api)\n- `/api/v1/affiliates` + `/api/v1/referrals` return 401 (unauth) instead of 500\n- GH creds used: client_id `Ov23libBNznAM7ZFCmn1` on elizaOS org GH OAuth app\n\n## closes\n\n- Closes #465\n- Closes #467\n- Closes #468\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-22T01:56:34Z",
+      "mergedAt": "2026-04-22T06:09:38Z",
+      "additions": 413,
+      "deletions": 92
+    },
+    {
+      "id": "PR_kwDOP6BTDM7UOf3I",
+      "title": "fix(login): native Ethereum + Solana buttons (match Google/Discord)",
+      "author": "0xSolace",
+      "number": 465,
+      "body": "Shadow shot screenshots after the 0.7.2 style fix: still shitty and not in line with existing UI. The @stwd/react <WalletLogin> component had a dev-tool aesthetic (mono font, sharp black embedded card) and a two-step UX (connect → then sign).\n\nRebuilds as two native buttons matching Google / Discord exactly:\n- Click → opens connect modal (RainbowKit or Solana wallet modal)\n- Wallet connects → auto-triggers SIWE / SIWS\n- Success → redirect\n\nOne-click like every other provider. Same Inter font, same rounded-lg corners, same hover states, same spinner.\n\nScreenshots before: https://discord.com/channels/... (the 'Select Wallet' wrap + purple Solana mismatch)\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-21T08:06:29Z",
+      "mergedAt": null,
+      "additions": 291,
+      "deletions": 50
+    },
+    {
+      "id": "PR_kwDOP6BTDM7Uem1K",
+      "title": "fix(db): repair _journal.json drift causing silent migration skips",
+      "author": "0xSolace",
+      "number": 467,
+      "body": "## tl;dr\n\nProd Neon had 10 tables missing (affiliate_codes, user_affiliates, service_pricing, device_bus_*, twilio_inbound_calls, remote_sessions, org_rate_limit_overrides, credential_mappings schema) + 3 columns missing (referral_codes.parent_referral_id, referral_signups.{app_owner_id,creator_id}). `/api/v1/affiliates` and `/api/v1/referrals` were 500ing.\n\nRoot cause: `_journal.json` drifted from the migration files. Seven migration files had no journal entry (drizzle never ran them), and 0067 + 0068 had duplicate idx=63 (integrity bug).\n\n## what I did\n\n**Prod DB (already done via psql):**\n- Ran the 11 actually-missing migrations in a single transaction, verified clean via dry-run BEGIN/ROLLBACK first\n- Back-filled `__drizzle_migrations` with 12 missing hash entries so future `drizzle-kit migrate` sees everything as applied (went from 60 → 72 tracked rows)\n\n**This PR:**\n- Adds 7 missing entries to `_journal.json` with synthetic timestamps\n- Fixes duplicate idx=63 — re-sequenced idx across all entries so each is unique and monotonically increasing\n- All 72 migration files now have a journal entry with unique idx\n\n## verification\n\n```bash\n# before\n$ cat meta/_journal.json | jq '.entries | length'\n65\n$ ls packages/db/migrations/*.sql | grep -v down | wc -l\n72\n\n# after\n$ cat meta/_journal.json | jq '.entries | length'\n72\n$ cat meta/_journal.json | jq '.entries | map(.idx) | length == (. | unique | length)'\ntrue\n```\n\n`curl https://www.elizacloud.ai/api/v1/affiliates` now returns 401 (unauthenticated, as expected) instead of 500.\n\n## out of scope\n\nThere's a pre-existing `drizzle-kit generate` error about duplicate snapshot parent (0064 ref'd by both 0065 variants). That's a generation-time snapshot issue, unrelated to migration tracking. File a separate issue if you want that cleaned up.\n\n## follow-up needed\n\nShould add a CI check: `drizzle-kit migrate --dry-run` against a prod-shaped test DB on every PR touching `packages/db/migrations/**`. Would've caught this years ago. Flagging as next-steps, not blocking this PR.\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-22T01:34:03Z",
+      "mergedAt": null,
+      "additions": 101,
+      "deletions": 52
+    },
+    {
+      "id": "PR_kwDOP6BTDM7UbRA0",
+      "title": "migrate app-auth/authorize to steward",
+      "author": "RemilioNubilio",
+      "number": 466,
+      "body": "## Summary\n- Switches the `/app-auth/authorize` page from Privy (`usePrivy` / `useLogin`) to Steward (`useAuth` + `<StewardLogin>` from `@stwd/react`), and wraps it in `StewardAuthProvider` so the page works independent of the global `NEXT_PUBLIC_STEWARD_AUTH_ENABLED` flag.\n- Collapses `/api/v1/app-auth/connect` and `/api/v1/app-auth/session` onto the existing `requireAuthOrApiKey` helper, which already supports both Privy and Steward JWTs (plus API keys), and routes errors through `nextJsonFromCaughtErrorWithHeaders` so CORS headers survive on 4xx/5xx.\n- Drops dead code in `authorize-content.tsx`: the unreachable \"Continue as {email}\" branch, the unused `AuthorizeFallback` export, and unused imports.\n\nNet result: **-257 / +56** across 4 files; one clean code path per endpoint, no Privy-specific logic on the authorize surface.\n\n## Why\nThe authorize page is the OAuth-style consent surface 3rd-party mini-apps (see `elizaOS/cloud-mini-apps`) redirect into. Steward is the new auth system; every new app built against cloud should receive a Steward-issued token. Everything downstream of the bearer token (`requireAuthOrApiKey` in `packages/lib/auth.ts`) already dual-verifies Privy and Steward JWTs, so swapping the issuer on this page is a surgical change that doesn't regress existing Privy users anywhere else in the app.\n\nOther Privy-using surfaces (`login/page.tsx`, user menu, account tab, `cli-login-content.tsx`, etc.) are **intentionally left alone** — they're part of the Phase-1 coexistence pattern gated by `NEXT_PUBLIC_STEWARD_AUTH_ENABLED`. Ripping Privy out of those would break users until the Steward JIT-sync TODO in `packages/lib/auth.ts:569` is resolved.\n\n## Files\n- `app/app-auth/authorize/page.tsx` — wrap in `StewardAuthProvider`\n- `packages/ui/src/components/auth/authorize-content.tsx` — Privy → Steward, remove dead branches\n- `app/api/v1/app-auth/connect/route.ts` — reuse `requireAuthOrApiKey`, use shared error helper\n- `app/api/v1/app-auth/session/route.ts` — same refactor\n\n## Known caveat (pre-existing, not introduced here)\nFirst-time Steward users will 401 at `/connect` until the Steward JIT sync stub in `packages/lib/auth.ts:569` is replaced with a real `syncUserFromSteward` implementation. That's a separate concern that also blocks Steward sign-ups elsewhere in the app.\n\n## Test plan\n- [ ] With `NEXT_PUBLIC_STEWARD_API_URL` set, visit `/app-auth/authorize?app_id=<uuid>&redirect_uri=<url>` while signed out → Steward login widget renders, consent copy still shows, Cancel still works.\n- [ ] Complete a Steward sign-in on the page → `/api/v1/app-auth/connect` succeeds, browser redirects back to `redirect_uri` with `token=` and optional `state=`.\n- [ ] Signed-in Steward user lands on the authorize page → auto-redirects to `redirect_uri` without a click.\n- [ ] Existing Privy-authenticated callers of `/api/v1/app-auth/connect` and `/api/v1/app-auth/session` (e.g. legacy mini-apps hitting these endpoints directly) still succeed — `requireAuthOrApiKey` dual-verifies both JWT issuers.\n- [ ] CORS preflight on both routes still returns the documented `Access-Control-*` headers; error responses on both routes now also carry them (they didn't on 500s before).\n- [ ] `/app-auth/authorize` with missing/invalid `app_id` or `redirect_uri` still surfaces the correct error UI.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-21T20:32:48Z",
+      "mergedAt": "2026-04-22T06:09:38Z",
+      "additions": 56,
+      "deletions": 257
+    }
+  ],
+  "codeChanges": {
+    "additions": 1052,
+    "deletions": 726,
+    "files": 59,
+    "commitCount": 32
+  },
+  "completedItems": [
+    {
+      "title": "migrate app-auth/authorize to steward",
+      "prNumber": 466,
+      "type": "other",
+      "body": "## Summary\n- Switches the `/app-auth/authorize` page from Privy (`usePrivy` / `useLogin`) to Steward (`useAuth` + `<StewardLogin>` from `@stwd/react`), and wraps it in `StewardAuthProvider` so the page works independent of the global `NEXT_",
+      "files": [
+        "app/api/v1/app-auth/connect/route.ts",
+        "app/api/v1/app-auth/session/route.ts",
+        "app/app-auth/authorize/page.tsx",
+        "packages/ui/src/components/auth/authorize-content.tsx"
+      ]
+    },
+    {
+      "title": "fix(ai-pricing): store gateway token rows under language/embedding",
+      "prNumber": 470,
+      "type": "bugfix",
+      "body": "Image-generation models (e.g. gemini-*-image) were classified as product family image for all pricing rows, including per-token input/output. Chat billing resolves language:input, so lookups failed after catalog refresh. Token and web_searc",
+      "files": [
+        "app/api/mcp/list/route.ts",
+        "app/api/mcp/tools/browser.ts",
+        "app/api/mcp/tools/search.ts",
+        "app/api/v1/browser/sessions/[id]/command/route.ts",
+        "app/api/v1/browser/sessions/[id]/snapshot/route.ts",
+        "app/api/v1/eliza/launch-sessions/[sessionId]/route.ts",
+        "app/api/v1/extract/route.ts",
+        "app/api/v1/milady/agents/[agentId]/provision/route.ts",
+        "app/api/v1/milady/agents/[agentId]/resume/route.ts",
+        "app/api/v1/milady/agents/route.ts",
+        "app/api/v1/milady/launch-sessions/[sessionId]/route.ts",
+        "app/api/v1/twilio/voice/inbound/route.ts",
+        "app/api/v1/voice/stt/route.ts",
+        "app/api/v1/x/dms/curate/route.ts",
+        "app/api/v1/x/dms/digest/route.ts",
+        "app/api/v1/x/dms/send/route.ts",
+        "app/api/v1/x/posts/route.ts",
+        "app/api/v1/x/status/route.ts",
+        "app/api/webhooks/twilio/[orgId]/route.ts",
+        "app/api/webhooks/whatsapp/[orgId]/route.ts",
+        "app/dashboard/containers/agents/[id]/page.tsx",
+        "app/dashboard/milady/agents/[id]/page.tsx",
+        "app/dashboard/milady/page.tsx",
+        "biome.json",
+        "packages/db/repositories/ai-pricing.ts",
+        "packages/lib/api/a2a/skills.ts",
+        "packages/lib/eliza-agent-web-ui.ts",
+        "packages/lib/eliza/agent-loader.ts",
+        "packages/lib/eliza/plugin-cloud-bootstrap/providers/actions.ts",
+        "packages/lib/eliza/plugin-cloud-bootstrap/providers/character.ts",
+        "packages/lib/eliza/plugin-cloud-bootstrap/types.ts",
+        "packages/lib/eliza/plugin-mcp/actions/dynamic-tool-actions.ts",
+        "packages/lib/eliza/plugin-mcp/actions/search-actions.ts",
+        "packages/lib/eliza/plugin-mcp/service.ts",
+        "packages/lib/eliza/plugin-mcp/utils/schema-converter.ts",
+        "packages/lib/eliza/plugin-web-search/src/services/searchService.ts",
+        "packages/lib/eliza/runtime-factory.ts",
+        "packages/lib/eliza/shared/providers/character.ts",
+        "packages/lib/services/ai-pricing-definitions.ts",
+        "packages/lib/services/ai-pricing.ts",
+        "packages/lib/services/browser-tools.ts",
+        "packages/lib/services/docker-sandbox-provider.ts",
+        "packages/lib/services/eliza-managed-launch.ts",
+        "packages/lib/services/eliza-sandbox.ts",
+        "packages/lib/services/milady-gateway-router.ts",
+        "packages/lib/services/steward-client.ts",
+        "packages/lib/services/x/index.ts",
+        "packages/scripts/provisioning-worker.ts",
+        "packages/services/billing/src/index.ts",
+        "packages/tests/runtime/integration/runtime-factory/pool-closure-race.test.ts"
+      ]
+    },
+    {
+      "title": "fix: auth + migrations consolidation (wallet buttons, journal drift, aggressive refresh)",
+      "prNumber": 469,
+      "type": "bugfix",
+      "body": "Consolidates PRs #465, #467, #468 into one clean merge.\n\n## 3 fixes in this PR\n\n### 1. Native Ethereum + Solana login buttons (was #465)\nReplaces `<WalletLogin />` with two native buttons matching the Google/Discord login card styling. One-",
+      "files": [
+        "app/login/steward-login-section.tsx",
+        "app/login/wallet-buttons.tsx",
+        "packages/db/migrations/meta/_journal.json",
+        "packages/lib/providers/StewardProvider.tsx",
+        "proxy.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 145.7773216897283,
+      "prScore": 127.0773216897283,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 80.72589926988157,
+      "prScore": 80.28789926988156,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "dutchiono",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
+      "totalScore": 67.6565494103885,
+      "prScore": 65.45654941038849,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 59.52637389219215,
+      "prScore": 59.52637389219215,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 40.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 21.110696122978826,
+      "prScore": 21.110696122978826,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "meanstackofdoom",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64149093?u=1a1540f5e733b8c122a2435890eb6f614fb6467c&v=4",
+      "totalScore": 17.31003660326518,
+      "prScore": 17.31003660326518,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 5,
+  "mergedPRs": 3,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 5
+}
