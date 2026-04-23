@@ -57,16 +57,16 @@
       "deletions": 52
     },
     {
-      "id": "PR_kwDOP6BTDM7UbRA0",
-      "title": "migrate app-auth/authorize to steward",
-      "author": "RemilioNubilio",
-      "number": 466,
-      "body": "## Summary\n- Switches the `/app-auth/authorize` page from Privy (`usePrivy` / `useLogin`) to Steward (`useAuth` + `<StewardLogin>` from `@stwd/react`), and wraps it in `StewardAuthProvider` so the page works independent of the global `NEXT_PUBLIC_STEWARD_AUTH_ENABLED` flag.\n- Collapses `/api/v1/app-auth/connect` and `/api/v1/app-auth/session` onto the existing `requireAuthOrApiKey` helper, which already supports both Privy and Steward JWTs (plus API keys), and routes errors through `nextJsonFromCaughtErrorWithHeaders` so CORS headers survive on 4xx/5xx.\n- Drops dead code in `authorize-content.tsx`: the unreachable \"Continue as {email}\" branch, the unused `AuthorizeFallback` export, and unused imports.\n\nNet result: **-257 / +56** across 4 files; one clean code path per endpoint, no Privy-specific logic on the authorize surface.\n\n## Why\nThe authorize page is the OAuth-style consent surface 3rd-party mini-apps (see `elizaOS/cloud-mini-apps`) redirect into. Steward is the new auth system; every new app built against cloud should receive a Steward-issued token. Everything downstream of the bearer token (`requireAuthOrApiKey` in `packages/lib/auth.ts`) already dual-verifies Privy and Steward JWTs, so swapping the issuer on this page is a surgical change that doesn't regress existing Privy users anywhere else in the app.\n\nOther Privy-using surfaces (`login/page.tsx`, user menu, account tab, `cli-login-content.tsx`, etc.) are **intentionally left alone** — they're part of the Phase-1 coexistence pattern gated by `NEXT_PUBLIC_STEWARD_AUTH_ENABLED`. Ripping Privy out of those would break users until the Steward JIT-sync TODO in `packages/lib/auth.ts:569` is resolved.\n\n## Files\n- `app/app-auth/authorize/page.tsx` — wrap in `StewardAuthProvider`\n- `packages/ui/src/components/auth/authorize-content.tsx` — Privy → Steward, remove dead branches\n- `app/api/v1/app-auth/connect/route.ts` — reuse `requireAuthOrApiKey`, use shared error helper\n- `app/api/v1/app-auth/session/route.ts` — same refactor\n\n## Known caveat (pre-existing, not introduced here)\nFirst-time Steward users will 401 at `/connect` until the Steward JIT sync stub in `packages/lib/auth.ts:569` is replaced with a real `syncUserFromSteward` implementation. That's a separate concern that also blocks Steward sign-ups elsewhere in the app.\n\n## Test plan\n- [ ] With `NEXT_PUBLIC_STEWARD_API_URL` set, visit `/app-auth/authorize?app_id=<uuid>&redirect_uri=<url>` while signed out → Steward login widget renders, consent copy still shows, Cancel still works.\n- [ ] Complete a Steward sign-in on the page → `/api/v1/app-auth/connect` succeeds, browser redirects back to `redirect_uri` with `token=` and optional `state=`.\n- [ ] Signed-in Steward user lands on the authorize page → auto-redirects to `redirect_uri` without a click.\n- [ ] Existing Privy-authenticated callers of `/api/v1/app-auth/connect` and `/api/v1/app-auth/session` (e.g. legacy mini-apps hitting these endpoints directly) still succeed — `requireAuthOrApiKey` dual-verifies both JWT issuers.\n- [ ] CORS preflight on both routes still returns the documented `Access-Control-*` headers; error responses on both routes now also carry them (they didn't on 500s before).\n- [ ] `/app-auth/authorize` with missing/invalid `app_id` or `redirect_uri` still surfaces the correct error UI.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "id": "PR_kwDOP6BTDM7Ui1eB",
+      "title": "fix(auth): send tenant_id (snake_case) to Steward oauth authorize",
+      "author": "0xSolace",
+      "number": 471,
+      "body": "## the bug\n\n`StewardLoginSection.handleOAuth()` was sending `tenantId=<id>` to `/auth/oauth/<provider>/authorize`. The Steward authorize route reads the query param as `tenant_id` (snake_case). Mismatch → server silently fell back to the user's personal tenant → refresh tokens scoped to `personal-<userId>` instead of `elizacloud`.\n\nWhen those wrong-tenant refresh tokens got used in elizacloud's proxy middleware later, auth failed → user signed out.\n\n**Shadow's DB has 4 stale `personal-<userId>` refresh tokens exactly at OAuth login attempt timestamps.** Smoking gun.\n\n## the fix\n\nOne-character change: `tenantId:` → `tenant_id:` in the URLSearchParams.\n\n## bonus\n\nShipping a companion PR on Steward that accepts BOTH variants going forward, so this class of bug can't silently happen for other consumers.\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
       "repository": "elizaos/cloud",
-      "createdAt": "2026-04-21T20:32:48Z",
-      "mergedAt": "2026-04-22T06:09:38Z",
-      "additions": 56,
-      "deletions": 257
+      "createdAt": "2026-04-22T07:49:12Z",
+      "mergedAt": null,
+      "additions": 64,
+      "deletions": 20
     }
   ],
   "codeChanges": {
