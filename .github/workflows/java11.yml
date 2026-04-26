@@ -1,0 +1,176 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [labels]
+
+env:
+  DATA_DIR: "data"
+  PIPELINE_DATA_BRANCH: "_data"
+
+jobs:
+  check:
+    name: Lint & Typecheck
+    runs-on: ubuntu-Alpine
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run linting
+        run: bun run lint
+
+      - name: Run typecheck
+        run: bun run typecheck
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code (PR Branch)
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Set up pipeline-data branch and restore data
+      - name: Setup pipeline-data branch
+        uses: ./.github/actions/pipeline-data
+        with:
+          operation: setup
+          branch_name: ${{ env.PIPELINE_DATA_BRANCH }}
+          data_dir: ${{ env.DATA_DIR }}
+
+      # Restore database from dump
+      - name: Restore database
+        uses: ./.github/actions/restore-db
+        with:
+          operation: restore
+          dump_dir: ${{ env.DATA_DIR }}/dump
+          db_path: ${{ env.DATA_DIR }}/db.sqlite
+
+      - name: Initialize DB
+        run: bun run db:migrate
+
+      - name: Run build
+        run: bun run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          CI: true
+          NEXT_PUBLIC_GITHUB_CLIENT_ID: ${{ secrets.NEXT_PUBLIC_GITHUB_CLIENT_ID }}
+          NEXT_PUBLIC_AUTH_WORKER_URL: ${{ secrets.NEXT_PUBLIC_AUTH_WORKER_URL }}
+      # Cleanup worktree (always runs)
+      - name: Cleanup
+        if: always()
+        uses: ./.github/actions/pipeline-data
+        with:
+          operation: cleanup
+          branch_name: ${{ env.PIPELINE_DATA_BRANCH }}
+          data_dir: ${{ env.DATA_DIR }}
+
+  test-pipelines:
+    name: Test Pipelines
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Setup pipeline-data branch
+        uses: ./.github/actions/pipeline-data
+        with:
+          operation: setup
+          branch_name: ${{ env.PIPELINE_DATA_BRANCH }}
+          data_dir: ${{ env.DATA_DIR }}
+
+      - name: Restore database
+        uses: ./.github/actions/restore-db
+        with:
+          operation: restore
+          dump_dir: ${{ env.DATA_DIR }}/dump
+          db_path: ${{ env.DATA_DIR }}/db.sqlite
+
+      - name: Initialize DB
+        run: bun run db:migrate
+
+      - name: Run Ingest Pipeline
+        run: bun run pipeline ingest -d 1
+
+      - name: Run Process Pipeline
+        run: bun run pipeline process
+
+      - name: Run Export Pipeline
+        run: bun run pipeline export -d 7
+
+      # Cleanup worktree (always runs)
+      - name: Cleanup
+        if: always()
+        uses: ./.github/actions/pipeline-data
+        with:
+          operation: cleanup
+          branch_name: ${{ env.PIPELINE_DATA_BRANCH }}
+          data_dir: ${{ env.DATA_DIR }}
+
+  check-migrations:
+    name: Check Schema Migration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if schema.ts was modified
+        id: check-schema
+        run: |
+          if git diff --name-only HEAD^ HEAD | grep -q "src/lib/data/schema.ts"; then
+            echo "Schema file was modified, checking migrations..."
+            echo "is_modified=true" >> $GITHUB_OUTPUT
+          else
+            echo "Schema file was not modified, skipping migration check."
+            echo "is_modified=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Bun
+        if: steps.check-schema.outputs.is_modified == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.check-schema.outputs.is_modified == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Check migrations
+        if: steps.check-schema.outputs.is_modified == 'true'
+        run: |
+          output=$(bun run db:generate)
+          echo "$output"
+          if ! echo "$output" | grep -q "No schema changes, nothing to migrate"; then
+            echo "::error::schema.ts is out of sync with migration files. Please run 'bun run db:generate' to update."
+            exit 1
+          fi
