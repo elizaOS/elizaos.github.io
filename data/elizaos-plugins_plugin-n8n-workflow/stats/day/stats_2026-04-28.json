@@ -1,0 +1,152 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-28T00:00:00.000Z",
+    "intervalEnd": "2026-04-29T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-n8n-workflow",
+  "overview": "From 2026-04-28 to 2026-04-29, elizaos-plugins/plugin-n8n-workflow had 3 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDORDL9tM7WY0dp",
+      "title": "feat(types,service): add TriggerContext for originating-conversation routing",
+      "author": "2-A-M",
+      "number": 26,
+      "body": "## Summary\n\nLets the host pass an opaque routing block (Discord channelId/guildId, Telegram chatId, Slack channelId/teamId, etc.) to the runtime context provider, so the LLM can target \"this channel\" / \"back to me\" without the user having to name an ID.\n\n## Why\n\nWhen a workflow is generated from inside a Discord DM (\"every weekday 9am post the day's calendar agenda back to this channel\"), the model has no way to know which Discord channel the user means. Today the generated `Discord Send` node ends up with a blank `channelId` or a placeholder. With `triggerContext` in the provider input, the host can derive the routing block from the inbound message's `MessageMetadata` and emit a fact line like:\n\n> This workflow was prompted from Discord channel #foo (id 9876543210) in \"Cozy Devs\" (id 1234567890). When the user references \"this channel\" or \"back to here\", target that channel ID.\n\n…which the LLM picks up as a `## Runtime Facts` line. The plugin itself stays prompt-agnostic — it just plumbs the field through.\n\n## Changes\n\n- **New `TriggerContext` interface** (`src/types/index.ts`):\n  ```ts\n  export interface TriggerContext {\n    source?: string;\n    discord?: { channelId?: string; guildId?: string; threadId?: string };\n    telegram?: { chatId?: string | number; threadId?: string | number };\n    slack?: { channelId?: string; teamId?: string };\n    resolvedNames?: { channel?: string; server?: string };\n  }\n  ```\n- `RuntimeContextProviderInput.triggerContext?: TriggerContext` — additive, forward-compatible. Hosts that don't know about it just omit the field.\n- `N8nWorkflowService.generateWorkflowDraft(prompt, opts?)` and `modifyWorkflowDraft(existing, request, opts?)` accept `{ triggerContext?: TriggerContext }`. Threaded into both `fetchRuntimeContext` calls (generate + modify paths).\n\n## Backward compatibility\n\n100% additive. Existing callers pass nothing, behavior unchanged. The host emits the trigger fact line into the existing `facts[]` array — the plugin's prompt-builder doesn't need to know about the wording.\n\n## Depends on\n\n**Stacked on #20** (RuntimeContextProvider extension point). Until that merges, this PR's diff includes the dependency. Once #20 merges, GitHub auto-rebases and the diff collapses to just the additive `TriggerContext` + opt argument.\n\n## Test plan\n\n- [ ] Calling `generateWorkflowDraft(prompt)` (no opts) produces the same workflow as today.\n- [ ] Calling `generateWorkflowDraft(prompt, { triggerContext: { source: \"discord\", discord: { channelId, guildId } } })` threads the trigger context to the registered runtime context provider's `getRuntimeContext` input.\n- [ ] Same for `modifyWorkflowDraft(workflow, request, { triggerContext })`.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Workflow generation now leverages runtime context, including user-specific and trigger-specific information for more accurate workflow creation.\n  * Enhanced credential handling in generated workflows with stricter validation and explicit credential block requirements.\n  * Improved constraint enforcement to prevent placeholder values and ensure proper field references in workflow expressions.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-04-28T15:13:37Z",
+      "mergedAt": null,
+      "additions": 238,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDORDL9tM7WYz6S",
+      "title": "feat(prompt,types): add RuntimeContextProvider extension point + harden credentials/runtime-facts/output-field rules",
+      "author": "2-A-M",
+      "number": 25,
+      "body": "## Summary\n\nAdds an optional `RuntimeContextProvider` service the host can register so the workflow-generation prompt gets two extra sections grounded in real values:\n\n- **`## Available Credentials`** — which credential types the host can resolve right now, so the LLM only references credentials that actually work and attaches the credentials block to every relevant node.\n- **`## Runtime Facts`** — real values like Discord guild/channel IDs, the user's Gmail address, etc. — the LLM substitutes them verbatim instead of emitting `{{YOUR_SERVER_ID}}` placeholders.\n\nPlus a few prompt hardening rules around output schema fields (already wired in this commit).\n\n## Why\n\nWithout this, the model emitted things like \\`guildId: \\\"={{YOUR_SERVER_ID}}\\\"\\`, which then required a manual fix-up step in the host before deploy. The plugin had no way to know what credentials the host could actually mint, so it would emit nodes referencing types the host couldn't satisfy. This extension point closes both gaps without changing the prompt's baseline behavior — when no provider is registered, the two extra sections are simply omitted.\n\n## Changes\n\n- **New types** (`src/types/index.ts`):\n  - `RuntimeContext { supportedCredentials, facts }` — what the provider returns.\n  - `RuntimeContextSupportedCredential { credType, friendlyName, nodeTypes[] }`.\n  - `RuntimeContextProviderInput { userId, relevantNodes, relevantCredTypes }`.\n  - `RuntimeContextProvider.getRuntimeContext(input): Promise<RuntimeContext>`.\n  - `isRuntimeContextProvider(service)` type guard.\n  - `N8N_RUNTIME_CONTEXT_PROVIDER_TYPE = 'n8n_runtime_context_provider'` service name.\n- **Service plumbing** (`src/services/n8n-workflow-service.ts`):\n  - `fetchRuntimeContext(nodeDefs, userId)` private helper looks up the provider, builds the `relevantCredTypes` set from node defs, and returns the context (or `undefined` on missing/throwing provider — generation degrades gracefully).\n  - Called from both `generateWorkflowDraft` and `modifyWorkflowDraft`.\n- **Prompt rendering** (`src/utils/generation.ts`, `src/prompts/workflowGeneration.ts`):\n  - `buildRuntimeContextSections(ctx?)` renders the two prompt sections — empty string when no context provided.\n  - Hardened output-field / credentials / runtime-facts directives in the system prompt to make the LLM use the new sections correctly.\n\n## Backward compatibility\n\n100% additive. Hosts that don't register a runtime context provider see the same prompt and behavior as before. The `getRuntimeContext` call returns `undefined` and the two sections are omitted.\n\n## Test plan\n\n- [ ] Without a registered provider: workflow generation produces the same prompt + workflow as `main` today.\n- [ ] With a stub provider returning `{ supportedCredentials: [...], facts: [...] }`: the prompt log shows both sections, and the LLM's output references the credentials by `credType`.\n- [ ] Provider that throws: warning is logged once, generation still completes.\n\nThis unblocks downstream PRs that pass real connector data into the generator (Discord guild/channel enumeration, Gmail account email, originating-conversation routing).",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-04-28T15:13:12Z",
+      "mergedAt": null,
+      "additions": 181,
+      "deletions": 16
+    },
+    {
+      "id": "PR_kwDORDL9tM7WYuOP",
+      "title": "feat(credential-store): add delete(userId, credType) for disconnect-purge",
+      "author": "2-A-M",
+      "number": 24,
+      "body": "## Summary\n\nLets the host app forget the cached n8n credential id for a given (userId, credType) pair when the user disconnects a connector. Without this, `credentialResolver.resolveOneCredential()` short-circuits at the `credStore.get()` lookup and returns a stale n8n credential id without re-validating against the host's `credProvider` — so a disconnected Gmail connector continues to deploy workflows successfully and any host-side missing-credentials banner never fires.\n\n## Changes\n\n- `N8nCredentialStoreApi.delete(userId, credType): Promise<void>` — additive, no breaking changes.\n- Drizzle delete on `credentialMappings` filtered by `(userId, credType)`. Idempotent: deleting a non-existent mapping is a no-op.\n\n## Notes\n\nThe matching purge call lives in the host (e.g. Milady's `connector-routes` `onConnectorDisconnect` cascade); this PR just opens the API on the credential store so any host can wire it.\n\n## Test plan\n\n- [ ] `set(userId, credType, n8nId)` then `delete(userId, credType)` → subsequent `get(userId, credType)` returns `null`.\n- [ ] `delete(userId, credType)` on a non-existent mapping resolves without throwing.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Improved credential management with the ability to invalidate cached credentials, enabling proper re-authentication flows when users disconnect and reconnect services.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-04-28T15:08:38Z",
+      "mergedAt": null,
+      "additions": 23,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 4
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 215.00061770784046,
+      "prScore": 214.80061770784047,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 180.01466737779978,
+      "prScore": 179.8146673777998,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 88.9442181402252,
+      "prScore": 88.9442181402252,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 87.0875477931522,
+      "prScore": 87.0875477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jqmwa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/95416268?u=0413977243f889f0e371484ed3d4a5f21969d8ca&v=4",
+      "totalScore": 83.23792449022048,
+      "prScore": 83.23792449022048,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 59.5437738965761,
+      "prScore": 59.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 49.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 49.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 44.3817738965761,
+      "prScore": 39.3817738965761,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sailorpepe",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/159828807?u=9298c48eb8b41b0a0b0968e987c029e307771855&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}

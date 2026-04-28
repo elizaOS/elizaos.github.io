@@ -1,0 +1,235 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-28T00:00:00.000Z",
+    "intervalEnd": "2026-04-29T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/cloud",
+  "overview": "From 2026-04-28 to 2026-04-29, elizaos/cloud had 3 new PRs (2 merged), 0 new issues, and 6 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOP6BTDM7WfWVT",
+      "title": "Push develop to production",
+      "author": "odilitime",
+      "number": 483,
+      "body": "<!-- CURSOR_SUMMARY -->\n> [!NOTE]\n> **High Risk**\n> High risk because it replaces the primary AI provider/routing layer (removing `@ai-sdk/gateway` and Vercel Gateway provider) and rewires chat, embeddings, image generation, pricing, and model-catalog flows, which can impact availability, billing accuracy, and model compatibility in production.\n> \n> **Overview**\n> **Moves the platform’s default AI routing from Vercel AI Gateway to OpenRouter.** Env/config/docs are updated to make `OPENROUTER_API_KEY` the principal provider, remove `AI_GATEWAY_API_KEY`, and treat `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` as *per-family* fallbacks.\n> \n> **Rewires API routes and services to use the new provider abstraction.** Most `streamText`/`generateText` call sites switch from `gateway.languageModel(...)` to `getLanguageModel(...)`; chat/embeddings default billingSource changes to `openrouter`; model catalog refresh/detail/status now read from an OpenRouter-backed cache.\n> \n> **Updates provider and pricing infrastructure.** Adds shared HTTP/error handling (`providerFetchWithTimeout`) plus new direct providers (`OpenAIDirectProvider`, `AnthropicDirectProvider`) used for 402/429 failover, removes `VercelGatewayProvider`, and adds model-id translation for OpenRouter prefix differences (xAI/Mistral) plus pricing catalog changes (OpenRouter-only refresh, embedding pricing fetched via `/models/{id}/endpoints`, and improved modality classification).\n> \n> **Fixes CLI login getting stuck on stale auth.** Adds `clearStaleStewardSession()` and adjusts `/auth/cli-login` state handling so 401s surface as recoverable errors with a “Sign In Again” path instead of looping/loading forever.\n> \n> <sup>Reviewed by [Cursor Bugbot](https://cursor.com/bugbot) for commit ce886784f6f573a6a5700a201433531ae3331524. Bugbot is set up for automated code reviews on this repo. Configure [here](https://www.cursor.com/dashboard/bugbot).</sup>\n<!-- /CURSOR_SUMMARY -->",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-28T21:05:29Z",
+      "mergedAt": null,
+      "additions": 1396,
+      "deletions": 1944
+    },
+    {
+      "id": "PR_kwDOP6BTDM7WXy8b",
+      "title": "refactor: replace Vercel AI Gateway with OpenRouter",
+      "author": "standujar",
+      "number": 482,
+      "body": "## Summary\r\n\r\nEliminates the Vercel AI Gateway dependency entirely. OpenRouter becomes the principal AI provider for all non-Groq traffic. OpenAI direct and Anthropic direct providers wired as per-family failover targets when their API keys are configured.\r\n\r\n**No legacy / no shims** — gateway code, env vars, env-validator branches, tests, and doc references all deleted in this PR. No backward-compat env aliasing.\r\n\r\n## Why\r\n\r\nConsolidate to a single non-Groq provider, drop the Vercel-managed proxy, simplify env configuration, and unify the pricing/catalog source.\r\n\r\n## Decisions taken (with rationale)\r\n\r\n- **OpenRouter primary.** Sole non-Groq path.\r\n- **Per-family fallback** when an OpenAI/Anthropic direct key is set (OpenAI for `openai/*`, Anthropic for `anthropic/*`, via Anthropic's OpenAI-compat endpoint).\r\n- **Drop the `/v1/responses` passthrough.** Always convert via AI SDK transform → chat/completions. OpenRouter's `/v1/responses` is still beta and the SSE-usage-extraction billing path is too risky to retain.\r\n- **Align `models/catalog.ts` to OpenRouter format** (`x-ai/`, `mistralai/`). Breaking change accepted.\r\n\r\n## Implementation phases (commits)\r\n\r\n1. `feat(providers): add model-id translation layer for OpenRouter` — `xai/`→`x-ai/`, `mistral/`→`mistralai/`, transparent pass-through for the rest.\r\n2. `refactor(providers): drop Vercel Gateway, OpenRouter primary + per-family fallback` — flip `getProvider()`/`getProviderForModelWithFallback()` and add `OpenAIDirectProvider` + `AnthropicDirectProvider`.\r\n3. `refactor: migrate all @ai-sdk/gateway call sites to getLanguageModel` — 13 sites swapped (messages route, agents A2A/MCP, mcp tools, skills, services memory/seo/app-promotion/app-promotion-assets/app-builder/twitter-automation/room-title/connection-enforcement). Hardcoded `gpt-4o-mini` → `openai/gpt-4o-mini`.\r\n4. `refactor(responses): drop /v1/responses passthrough, transform-only path` — deletes ~830 lines (`handleNativeResponsesPassthrough`, `wrapWithUsageExtraction`, etc.) and removes the optional `responses` method from `AIProvider`.\r\n5. `refactor(moderation): drop Vercel Gateway backend, OpenAI-only` — moderation now hits OpenAI directly when `OPENAI_API_KEY` is set, else logs once and skips (still non-blocking).\r\n6. `refactor(pricing): drop Vercel Gateway from pricing + align catalog ids to OR` — `PricingBillingSource` union drops `\"gateway\"`, adds `\"anthropic\"`. Catalog ids in `models/catalog.ts` realigned to `x-ai/` / `mistralai/`.\r\n7. `chore: drop @ai-sdk/gateway dep + finalize env/docs/test cleanup` — `package.json`/`bun.lock`, `.env.example`, env-validator, README, deploy templates, e2e/test helpers all cleaned.\r\n8. `fix(pricing): infer OpenRouter productFamily from output modality only` — bug found during smoke: a multimodal text model (e.g. `gpt-5.4-mini` accepting images) was misclassified as `image` and broke the pricing lookup. Now uses `architecture.output_modalities`.\r\n9. `fix(pricing): backfill OpenRouter embedding pricing from /endpoints route` — OR's `/v1/models` omits embedding models; pricing only exposed via `/api/v1/models/{id}/endpoints`. Backfill at catalog-fetch time.\r\n10. `feat(pricing): cover all OpenRouter-served embedding models, not just OpenAI` — extended to `text-embedding-ada-002` and `qwen/qwen3-embedding-8b` after live inventory check on OR.\r\n11. `refactor(providers): clean pass — extract shared HTTP helper, consolidate types` — DRY out `fetchWithTimeout` into `_http.ts` shared by all 4 provider classes; consolidate the `ProviderHttpError` envelope; add unit tests for direct providers + fallback wiring; strip gateway-era WIP comments and a dead `mergeGatewayGroqPreferenceWithAnthropicCot` helper.\r\n\r\n## Test plan\r\n\r\n- [x] `bun run check-types` clean on touched files.\r\n- [x] `bun run test:unit` — **1437 pass / 0 fail / 106 skip** (1543 tests across 97 files), including new `providers-direct.test.ts`, `providers-fallback.test.ts`, and extended `model-id-translation.test.ts`.\r\n- [x] Local validation: `docker compose up -d` (postgres + redis + redis-rest), `bun run db:migrate` clean (no schema drift caused by this PR).\r\n- [x] Live smoke against local dev server with **only `OPENROUTER_API_KEY`** set:\r\n  - `POST /v1/chat/completions` `openai/gpt-5.4-mini` → ✅ \"pong\"\r\n  - `POST /v1/chat/completions` `x-ai/grok-4` → ✅ \"Pong! 😊\" (translation `xai/`→`x-ai/` exercised)\r\n  - `POST /v1/chat/completions` `anthropic/claude-haiku-4.5` → ✅ \"Hi! 👋\"\r\n  - `POST /v1/chat/completions` streaming → ✅ SSE chunks\r\n  - `POST /v1/embeddings` for all 4 OR-served embedding models → ✅ vectors\r\n  - `POST /v1/responses` (anonymous) → ✅ output text\r\n  - `GET /v1/models` → ✅ 367-model OpenRouter catalog\r\n  - `POST /v1/models/status` → ✅ correctly resolves `x-ai/grok-4`, marks unavailable models\r\n- [x] Final grep for residual gateway references → **zero matches** across `packages/`, `app/`, `db/`, `scripts/`, `deploy/`, `docs/`, env templates, README.\r\n\r\n## Risks accepted\r\n\r\n- OpenRouter is a single point of failure for non-OpenAI/non-Anthropic models (xAI, Google, Mistral, …); per-family fallback only covers `openai/*` and `anthropic/*`.\r\n- OR uses provider-native tokenizers — recorded usage may diverge slightly from gateway-era numbers (~few %).\r\n- Catalog ID change is a breaking change for any client that hardcoded `xai/grok-4` or `mistral/codestral`. Acceptable per \"no legacy\" decision.\r\n- `/v1/responses` no longer supports native Responses-API-only features (custom tools, web_search, image_generation); clients that need those must use Chat Completions.\r\n\r\n## Migration notes\r\n\r\n- Set `OPENROUTER_API_KEY` (required).\r\n- Optional: `OPENAI_API_KEY` (enables OpenAI fallback + content moderation), `ANTHROPIC_API_KEY` (enables Anthropic fallback).\r\n- Remove `AI_GATEWAY_API_KEY` / `VERCEL_AI_GATEWAY_API_KEY` from env — they are no longer read.",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-28T14:26:06Z",
+      "mergedAt": "2026-04-28T21:04:55Z",
+      "additions": 1190,
+      "deletions": 1909
+    },
+    {
+      "id": "PR_kwDOP6BTDM7WJbrR",
+      "title": "fix(auth): unstick cli-login + auto-clear stale Steward tokens on 401",
+      "author": "lalalune",
+      "number": 480,
+      "body": "## Summary\n\nFixes the `/auth/cli-login` page hanging forever on \"Loading… Preparing authentication\" when localStorage holds a Steward (or Privy) token whose JWT decodes as non-expired but whose server-side session is gone (revoked, db reset, key rotation, or sign-out on another device). And makes the recovery automatic so the same class of bug can't trap users again.\n\nReproduced end-to-end against the deployed `https://www.elizacloud.ai`:\n\n- localStorage had `steward_session_token` (still in the future per `exp`) but no valid server cookie.\n- `useSessionAuth()` reported `authenticated=true` from the cached token.\n- The page jumped to `status=\"loading\"`, POSTed `/api/auth/cli-session/<id>/complete`, server returned 401.\n- The catch set `status=\"error\"`, but the prop-sync effect immediately reset it to `\"loading\"` because `initialStatus.status` was still `\"loading\"`.\n- Completion effect re-fired the same failing request. Permanent spinner. No error visible. No way out short of opening DevTools.\n\n## Commits\n\n1. **`63fff7945` fix(cli-login): use Steward-aware session hook, preserve error state** — the unused `packages/ui` shared component (still used elsewhere; brought it up to parity).\n2. **`d7d390f2c` fix(cli-login): gate on ready, preserve error state** — the actually-deployed `app/auth/cli-login/page.tsx`. Adds an `\"initializing\"` status so the page renders the fallback while `!ready`. Excludes `\"error\"` from the prop-sync effect's reset list. Adds a \"Sign In Again\" button on the error UI that routes through `/login` (Steward-aware, preserves `returnTo`).\n3. **`fc97126fe` fix(auth): auto-clear stale Steward tokens on server 401** — the structural fix. Hooks the existing `StewardProvider.AuthTokenSync.syncToken` POST: when the server returns 401, wipe `steward_session_token`, `steward_refresh_token`, every `privy:*` localStorage key, DELETE the cookie, dispatch `steward-token-sync`. Also runs in cli-login's `/complete` 401 catch so \"Sign In Again\" lands on a clean slate. Exports `clearStaleStewardSession` so any other dead-end page can call it.\n\n## Why only those two endpoints (not a global fetch interceptor)\n\n`POST /api/auth/steward-session` and `POST /api/auth/cli-session/<id>/complete` authoritatively validate the Steward token. Their 401 means \"this token is bad, period.\" Other 401s in the app (insufficient perms, missing org, tenant mismatch) shouldn't log the user out and need different handling.\n\n## Test plan\n\n- [x] `bunx tsc --noEmit -p tsconfig.json` — clean.\n- [ ] On a stale-localStorage tab: page no longer hangs. AuthTokenSync auto-clears, page transitions to `waiting_auth`, \"Sign In\" routes to `/login`.\n- [ ] On a fresh sign-in: cli-login completes normally and mints the API key.\n- [ ] On a server-side revoked session: the next page load auto-clears local tokens.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-27T23:38:52Z",
+      "mergedAt": "2026-04-28T02:14:02Z",
+      "additions": 252,
+      "deletions": 81
+    },
+    {
+      "id": "PR_kwDOP6BTDM7WTEEG",
+      "title": "docs: design spec for Claude / Codex sub-agent ↔ Milady runtime bridge",
+      "author": "RemilioNubilio",
+      "number": 481,
+      "body": "## Summary\n\nAdds `docs/claude-subagent-skill-milady-bridge.md` — a design doc capturing the spec for a small read-only HTTP surface on the parent Milady runtime that Claude Code / Codex sub-agents can use to read parent-state (character, memory, current room, active workspaces). Companion to the existing `docs/agent-skill-build-monetized-app.md`, whose footnote explicitly flagged this as a follow-up worth its own design.\n\nThis PR is **design only** — no runtime code, no endpoints, no skill body. The doc is the spec; implementation is sequenced for follow-up PRs.\n\n## The gap this captures\n\n- The Milady orchestrator already injects `CLAUDE.md` + telemetry hooks into every Claude / Codex sub-agent's workspace. Hooks are **one-way**: the sub-agent emits state events, the parent consumes (`POST /api/coding-agents/hooks`).\n- The sub-agent has no way to **read** parent state — character file, memory, current room, active workspaces. Coding tasks that depend on parent context (\"the user mentioned their dad earlier\", \"use the same markup % as the last app\") fly blind unless the orchestrator pre-resolves everything in its prompt.\n- The bridge proposed here is a small read-only HTTP surface on the parent: `GET /api/coding-agents/<agentId>/parent-context`, `GET /memory`, `GET /active-workspaces`. Loopback-only, agentId-authed, no write access from the sub-agent.\n\n## Implementation sequence the doc proposes\n\n1. Wire the bridge endpoints in `eliza/packages/app-core/src/api/coding-agents-routes.ts` alongside the existing `/hooks` POST handler\n2. Extend the orchestrator's CLAUDE.md template (`coding-task-handlers.ts`'s `buildSwarmMemoryInstructions()`) to document the new endpoints\n3. Add the bundled skill at `eliza/packages/skills/skills/claude-subagent-milady-bridge/SKILL.md` following the existing convention (same shape as `eliza-cloud`, `build-monetized-app`)\n4. Live-verify by spawning a coding sub-agent and curling the bridge, capturing the trace in the implementation PR\n\nEach step is shippable on its own. The order matters because the skill body should reference real endpoints, not aspirational ones.\n\n## Why this design (and not something simpler)\n\nThe doc explicitly rejects two simpler designs that fail:\n\n1. **\"Just give the sub-agent the parent's full memory dump in CLAUDE.md.\"** Doesn't scale — CLAUDE.md is consumed every turn and a meaningful memory dump blows the sub-agent's context budget.\n2. **\"Just give the sub-agent the parent's API key and let it call cloud APIs.\"** Conflates two concepts — the parent's *cloud* state (handled by the existing `eliza-cloud` skill) versus the parent's *local runtime* state (memories, characters, rooms — these don't live in cloud). The bridge handles the second; cloud handles the first.\n\n## Why merge a design doc rather than waiting for the implementation\n\n- It commits the surface area to a reviewable spec before any code is written, so future implementers (and reviewers) have a single artifact to debate\n- It makes the dependency from the existing `agent-skill-build-monetized-app.md` footnote concrete — that doc points at this path (`docs/claude-subagent-skill-milady-bridge.md`) and currently 404s\n- It documents what's intentionally out of scope (bidirectional state sync, action delegation, persistent sub-agent identity) so the future implementation doesn't accidentally over-build\n\n## 5-rule check\n\n1. **No meaningless wrappers** — markdown only; the design avoids any wrappers in the proposed surface.\n2. **Reuse existing functions** — uses the existing per-task agentId already minted by the orchestrator; no new auth surface.\n3. **No unused/inline-able type variables** — n/a, doc-only.\n4. **No non-essential parameters** — endpoints take only the agentId path-param; the `memory?q=...` query is the one essential parameter.\n5. **Clean separation** — bridge endpoints are read-only; mutation stays with the orchestrator. Two different audiences (parent agent / sub-agent) get different artifacts (bundled skill / injected CLAUDE.md).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/cloud",
+      "createdAt": "2026-04-28T10:44:08Z",
+      "mergedAt": null,
+      "additions": 189,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 1116,
+    "deletions": 1813,
+    "files": 52,
+    "commitCount": 15
+  },
+  "completedItems": [
+    {
+      "title": "refactor: replace Vercel AI Gateway with OpenRouter",
+      "prNumber": 482,
+      "type": "refactor",
+      "body": "## Summary\r\n\r\nEliminates the Vercel AI Gateway dependency entirely. OpenRouter becomes the principal AI provider for all non-Groq traffic. OpenAI direct and Anthropic direct providers wired as per-family failover targets when their API keys",
+      "files": [
+        ".env.example",
+        "README.md",
+        "app/api/agents/[id]/a2a/route.ts",
+        "app/api/agents/[id]/mcp/route.ts",
+        "app/api/mcp/tools/generation.ts",
+        "app/api/v1/admin/ai-pricing/route.ts",
+        "app/api/v1/chat/completions/route.ts",
+        "app/api/v1/cron/refresh-model-catalog/route.ts",
+        "app/api/v1/embeddings/route.ts",
+        "app/api/v1/generate-image/route.ts",
+        "app/api/v1/messages/route.ts",
+        "app/api/v1/models/[...model]/route.ts",
+        "app/api/v1/models/status/route.ts",
+        "app/api/v1/responses/route.ts",
+        "app/auth/cli-login/page.tsx",
+        "bun.lock",
+        "deploy/milady-cloud.railway.env.example",
+        "package.json",
+        "packages/lib/api/a2a/skills.ts",
+        "packages/lib/cache/keys.ts",
+        "packages/lib/config/env-validator.ts",
+        "packages/lib/eliza/plugin-n8n-bridge/apikey-cred-map.ts",
+        "packages/lib/models/catalog.ts",
+        "packages/lib/providers/StewardProvider.tsx",
+        "packages/lib/providers/_http.ts",
+        "packages/lib/providers/anthropic-direct.ts",
+        "packages/lib/providers/anthropic-thinking.ts",
+        "packages/lib/providers/cloud-provider-options.ts",
+        "packages/lib/providers/failover.ts",
+        "packages/lib/providers/index.ts",
+        "packages/lib/providers/language-model.ts",
+        "packages/lib/providers/model-id-translation.ts",
+        "packages/lib/providers/openai-direct.ts",
+        "packages/lib/providers/openrouter.ts",
+        "packages/lib/providers/types.ts",
+        "packages/lib/providers/vercel-gateway.ts",
+        "packages/lib/services/ai-billing.ts",
+        "packages/lib/services/ai-pricing-definitions.ts",
+        "packages/lib/services/ai-pricing.ts",
+        "packages/lib/services/app-builder-ai-sdk.ts",
+        "packages/lib/services/app-promotion-assets.ts",
+        "packages/lib/services/app-promotion.ts",
+        "packages/lib/services/content-moderation.ts",
+        "packages/lib/services/eliza-app/connection-enforcement.ts",
+        "packages/lib/services/memory.ts",
+        "packages/lib/services/model-catalog.ts",
+        "packages/lib/services/room-title.ts",
+        "packages/lib/services/seo.ts",
+        "packages/lib/services/twitter-automation/app-automation.ts",
+        "packages/lib/utils/responses-stream-reconcile.ts"
+      ]
+    },
+    {
+      "title": "fix(auth): unstick cli-login + auto-clear stale Steward tokens on 401",
+      "prNumber": 480,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the `/auth/cli-login` page hanging forever on \"Loading… Preparing authentication\" when localStorage holds a Steward (or Privy) token whose JWT decodes as non-expired but whose server-side session is gone (revoked, db reset",
+      "files": [
+        "app/auth/cli-login/page.tsx",
+        "packages/db/migrations/0058_add_steward_wallet_provider.sql",
+        "packages/lib/providers/StewardProvider.tsx",
+        "packages/ui/src/components/auth/cli-login-content.tsx"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 215.00061770784046,
+      "prScore": 214.80061770784047,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 180.01466737779978,
+      "prScore": 179.8146673777998,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 88.9442181402252,
+      "prScore": 88.9442181402252,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 87.0875477931522,
+      "prScore": 87.0875477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jqmwa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/95416268?u=0413977243f889f0e371484ed3d4a5f21969d8ca&v=4",
+      "totalScore": 83.23792449022048,
+      "prScore": 83.23792449022048,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 59.5437738965761,
+      "prScore": 59.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 49.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 49.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 44.3817738965761,
+      "prScore": 39.3817738965761,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sailorpepe",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/159828807?u=9298c48eb8b41b0a0b0968e987c029e307771855&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 6
+}
