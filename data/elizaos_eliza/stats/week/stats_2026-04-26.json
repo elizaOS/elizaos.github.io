@@ -5,8 +5,56 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-04-26 to 2026-05-03, elizaos/eliza had 60 new PRs (33 merged), 4 new issues, and 10 active contributors.",
+  "overview": "From 2026-04-26 to 2026-05-03, elizaos/eliza had 99 new PRs (87 merged), 8 new issues, and 13 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABAKqtpQ",
+      "title": "telegram read receipts should fetch by message IDs and avoid nested receipt lookup",
+      "author": "dutchiono",
+      "number": 7009,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nA follow-up is needed after the fix in commit `55f4f27` / PR #7008.\n\nThe critical correctness bug around 1:1 outbound read state is fixed:\n- use `readViaOutbox` (`numericMsgId <= readOutboxMaxId`) for 1:1 outbound read status\n- use `readViaCount` as fallback for groups\n- clarify the `getMessagesReadParticipants` limitation\n\nTwo issues remain.\n\n## Remaining issue 1: requested message IDs are not fetched directly\n`getTelegramReadReceipts` still calls:\n\n```ts\nclient.getMessages(entity, {\n  search: \"\",\n  limit: Math.max(requested.size * 2, MAX_RECENT_LIMIT),\n})\n```\n\nThis is not an IDs-based fetch and can silently miss older requested message IDs.\n\n### Expected fix\n- extend `TelegramLocalClientLike.getMessages` to support an `ids` parameter\n- fetch the exact requested Telegram message IDs instead of relying on `search: \"\"`\n- make `getTelegramReadReceipts` deterministic for older messages\n\n## Remaining issue 2: O(n*m) receipt lookup\nThe final assembly still does a nested scan via:\n- `args.messageIds.map(...)`\n- `receipts.find(...)`\n\nThis should be replaced with a `Map<string, TelegramReadReceiptResult>` so lookup is linear.\n\n## Why this matters\n- issue 1 is still a correctness gap\n- issue 2 is lower-risk, but worth fixing while touching the same path\n\n## Context\n- fixed in PR: #7008\n- fixed commit: `55f4f27`",
+      "createdAt": "2026-04-22T01:21:52Z",
+      "closedAt": "2026-04-29T21:07:32Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA2wj0Q",
+      "title": "@elizaos/agent server has hard imports from app-* packages, contradicts \"standalone backend\" description",
+      "author": "2-A-M",
+      "number": 7204,
+      "repository": "elizaos/eliza",
+      "body": "\n### Summary\n\n`@elizaos/agent` is described in [`packages/agent/package.json`](https://github.com/elizaOS/eliza/blob/main/packages/agent/package.json) as:\n\n> \"Standalone elizaOS-based agent and backend server package.\"\n\nIn practice, [`packages/agent/src/api/server.ts`](https://github.com/elizaOS/eliza/blob/main/packages/agent/src/api/server.ts#L31-L49) imports directly from a number of Milady-app-specific packages, which makes the package non-standalone for any host that isn't Milady:\n\n```ts\n// packages/agent/src/api/server.ts\nimport { DropService, setElizaMakerDropService } from \"@elizaos/app-elizamaker\";\nimport { handleKnowledgeRoutes } from \"@elizaos/app-knowledge/routes\";\nimport {\n  normalizeJsonRpcUrl,\n  probeJsonRpcEndpoint,\n  TxService,\n} from \"@elizaos/app-steward/api/tx-service\";\nimport {\n  ensurePrivyWalletsForCustomUser,\n  isPrivyWalletProvisioningEnabled,\n} from \"@elizaos/app-steward/services/privy-wallets\";\nimport { wireCoordinatorBridgesWhenReady } from \"@elizaos/app-task-coordinator/api/coordinator-wiring\";\nimport {\n  handleTrainingRoutes,\n  handleTrajectoryRoute,\n} from \"@elizaos/app-training/routes\";\n```\n\nThe same pattern shows up in [`@elizaos/app-core`](https://github.com/elizaOS/eliza/tree/main/packages/app-core) — its source re-exports from `@elizaos/app-companion` (e.g. [`character-catalog.ts`](https://github.com/elizaOS/eliza/blob/main/packages/app-core/src/character-catalog.ts), [`state/vrm.ts`](https://github.com/elizaOS/eliza/blob/main/packages/app-core/src/state/vrm.ts), [`components/pages/VectorBrowserView.tsx`](https://github.com/elizaOS/eliza/blob/main/packages/app-core/src/components/pages/VectorBrowserView.tsx)) and imports from `@elizaos/app-steward` in several files (`awareness/contributors/wallet.ts`, `api/client.ts`, `api/client-wallet.ts`, `config/boot-config-store.ts`). `app-core/package.json` describes itself as `\"Shared application core for elizaOS white-label agent apps\"` — same gap.\n\n### Why this matters\n\nFor Atelier — and any future fork that wants to embed elizaOS as a backend — there is no clean spawn target in upstream eliza that doesn't pull in Milady-specific app code, services, routes, and dependencies (xyflow, ethers, telegraf, the full Milady plugin tree). We're tolerating it in v0.1 because cleaning it up isn't on our critical path, but the bundle includes ~50MB of dead Milady code and the dependency graph carries Milady-app concepts (steward wallets, elizamaker drops, lifeops automations) that have no meaning in a non-Milady host.\n\nThe pattern of routes-extracted-into-the-app-itself already exists in this repo — see `server.ts:30`:\n\n```ts\n// Discord local routes extracted to @elizaos/plugin-discord (setup-routes.ts)\n```\n\nSo the architectural shape is established. It just hasn't been generalized to the other apps that still have routes living in the agent server.\n\n### Possible PR shapes — which would you accept?\n\n1. **Move app-* routes into the apps themselves.** `app-elizamaker`, `app-knowledge`, `app-steward`, `app-task-coordinator`, `app-training` would each export their own `setup-routes.ts` (mirroring `plugin-discord`). `agent/src/api/server.ts` would no longer import from any `@elizaos/app-*` package; the apps register their routes via a host-controlled list (or via `runtime.registerRoutes(...)` if such an API is preferred).\n2. **Promote the truly-shared parts into a new `@elizaos/runtime` package.** `@elizaos/agent` becomes a thin orchestrator over `@elizaos/runtime`. Hosts that want a Milady-style stack import `@elizaos/agent`; hosts that want only the runtime import `@elizaos/runtime`. Bigger refactor; cleaner long-term.\n3. **Document the actual coupling and rename `@elizaos/agent`.** If the Milady coupling is intentional and the maintainers prefer to keep it, the package description should reflect that — and a separate \"really standalone\" runtime package should exist for forks. We'd rather have honest naming than a misleading \"standalone\" label.\n\n### What we're doing while this is in flight\n\nWe're spawning `@elizaos/app-core/src/entry.ts start` as-is from Atelier's main process. The Milady coupling rides along in our bundle. We've tracked the cleanup as a follow-up gated on this issue's outcome.\n\n### Reproduction (if useful)\n\n```bash\ngit clone https://github.com/elizaOS/eliza\ncd eliza\ngrep -nE 'from [\"\\'@/]*elizaos/app-(elizamaker|knowledge|steward|task-coordinator|training|companion)' \\\n  packages/agent/src packages/app-core/src\n```\n\nReturns ~15 matches across `packages/agent/src/api/server.ts` and the `app-core` files cited above.\n\n---\n\nHappy to draft a PR for any of (1)/(2)/(3) once we know which shape would land. Thanks for elizaOS — the orchestration layer is exactly what we needed.\n",
+      "createdAt": "2026-04-29T17:17:50Z",
+      "closedAt": "2026-04-29T21:37:19Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA18TjA",
+      "title": "ux: opaque \"No handler found for delegate type: ACTION_PLANNER\" when no LLM provider is configured",
+      "author": "andex23",
+      "number": 7203,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen a runtime boots without any LLM provider plugin (no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ELIZAOS_CLOUD_API_KEY` / Ollama / etc.), the boot logs a clear, actionable message:\n\n```\nInfo [eliza] No AI provider plugin was loaded. Set an API key environment variable\n(e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY) or log in to\nEliza Cloud (ELIZAOS_CLOUD_API_KEY) to enable at least one model provider.\n```\n\nBut as soon as the user sends a chat message, the message service calls `runtime.useModel(ModelType.ACTION_PLANNER, ...)` (`packages/typescript/src/services/message.ts:3753`), which walks the fallback chain `[ACTION_PLANNER, TEXT_MEDIUM, TEXT_SMALL]`, finds nothing registered, and throws:\n\n```\nError: No handler found for delegate type: ACTION_PLANNER\n   at AgentRuntime.useModel (packages/typescript/src/runtime.ts:4250)\n```\n\nIn the dashboard chat this surfaces as:\n\n> I hit an internal parsing error while preparing the reply. Reason: No handler found for delegate type: ACTION_PLANNER. Please try again or ask me to retry the last step.\n\nThat message is misleading — there's no parsing error, retrying won't help, and the real fix (set an API key or sign in to Eliza Cloud) is nowhere in the user-facing string. The runtime already knows this state at boot.\n\n## Repro\n\n1. Fresh checkout, no `*_API_KEY` env vars set, not signed in to Eliza Cloud.\n2. `bun run dev`\n3. Note the `[eliza] No AI provider plugin was loaded.` info log — boot is otherwise clean.\n4. Open the dashboard, send any chat message to the default agent.\n5. The reply contains the cryptic `ACTION_PLANNER` error.\n\n## Suggested fix\n\nIn `AgentRuntime.useModel` (`packages/typescript/src/runtime.ts` around line 4249), when `resolveModelRegistration` returns `undefined` for any text-generation model, detect \"no provider configured at all\" (no handlers registered for any of `TEXT_NANO/TEXT_SMALL/TEXT_MEDIUM/TEXT_LARGE/TEXT_MEGA/RESPONSE_HANDLER/ACTION_PLANNER/TEXT_COMPLETION`) and throw a typed, user-facing error such as:\n\n```ts\nthrow new NoModelProviderConfiguredError(\n  \"This agent has no LLM provider configured. \" +\n  \"Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY in your environment, \" +\n  \"or sign in to Eliza Cloud (ELIZAOS_CLOUD_API_KEY).\"\n);\n```\n\nThe chat surface (e.g. milady's dashboard) can then catch that specific error type and render the actionable hint instead of the \"internal parsing error\" generic. The current opaque message stays only for the genuine case where one provider is registered but the requested model + its fallbacks all happen to be missing — which is the rarer, real \\\"misconfiguration\\\" case.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad`\n- Discovered while exercising the dashboard chat in milady on `develop`",
+      "createdAt": "2026-04-29T14:56:06Z",
+      "closedAt": "2026-04-29T21:11:35Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA1ztIQ",
+      "title": "bug: commit 8551fccafe deleted re-export shims but left dangling imports across packages/agent",
+      "author": "andex23",
+      "number": 7202,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nCommit [`8551fccafe`](https://github.com/elizaos/eliza/commit/8551fccafe) (\"updates\", Apr 15 2026) deleted ~30 single-line re-export shim files under `packages/agent/src/**`, but did **not** update the consumers that still import from them. The result: on a fresh clone, the API server crashes immediately on startup with `Cannot find module './<deleted-shim>.js'` errors.\n\n## Reproduction\n\nOn any consumer of this commit (e.g. milady-ai/milady on `develop`, which pins eliza to a descendant of `8551fccafe`):\n\n1. `bun install`\n2. `bun run dev`\n3. API process exits during boot with one of the errors below.\n\n## Verified missing modules → still imported\n\nI bisected by restoring shims one at a time. The following deleted files have **live importers** that were not updated:\n\n| Deleted shim | Re-exported from | Still imported by |\n|---|---|---|\n| `packages/agent/src/api/task-agent-message-routing.ts` | `@elizaos/app-task-coordinator/api/task-agent-message-routing` | `packages/agent/src/api/server.ts`, `packages/agent/src/api/server-helpers-swarm.ts` |\n| `packages/agent/src/api/website-blocker-routes.ts` | `@elizaos/app-lifeops/routes/website-blocker-routes` | `packages/agent/src/api/server.ts` |\n| `packages/agent/src/runtime/roles/src/utils.ts` | `@elizaos/core` | `packages/agent/src/runtime/roles/src/index.ts`, `packages/agent/src/config/includes.ts` |\n| `packages/agent/src/onboarding-presets.ts` | `@elizaos/shared/onboarding-presets` | `packages/shared/src/i18n/keyword-matching.ts` |\n| `packages/agent/src/providers/lifeops.ts` | `@elizaos/app-lifeops/providers/lifeops` | `packages/agent/src/api/workbench-routes.ts` |\n| `packages/agent/src/actions/life-param-extractor.ts` | `@elizaos/app-lifeops/actions/life-param-extractor` | `packages/agent/src/actions/life-param-extractor-real.test.ts` |\n| `packages/agent/src/actions/life-recent-context.ts` | `@elizaos/app-lifeops/actions/life-recent-context` | `packages/agent/src/actions/context-signal.ts` |\n\nThere may be more — I stopped after the dev server got past boot. The full deletion list from `8551fccafe` contains 33 source files; finding which ones still have callers is straightforward with `git grep`.\n\n## Sample error\n\n```\nerror: Cannot find module './task-agent-message-routing.js'\n       from '/path/to/eliza/packages/agent/src/api/server.ts'\n```\n\nThe `.js` extension comes from ESM-style relative imports against `.ts` sources, but the underlying `.ts` file is gone.\n\n## Suggested fix\n\nTwo reasonable options:\n\n1. **Restore the shim files** (one-line `export * from \"@elizaos/<app-package>/...\"` each). Lowest-impact, preserves the existing import boundary.\n2. **Update the importers** to point at the underlying app package directly (e.g. change `from \"./website-blocker-routes.js\"` to `from \"@elizaos/app-lifeops/routes/website-blocker-routes\"`). Cleaner long-term but touches more files.\n\nI have local diffs for option 1 (verified the dev server boots cleanly with all 7 shims restored). Filing as an issue per request rather than sending a PR — happy to convert if useful.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad` (descendant of `8551fccafe`)\n- Discovered while booting milady on `develop`",
+      "createdAt": "2026-04-29T14:37:23Z",
+      "closedAt": "2026-04-29T21:02:47Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDOMT5cIs8AAAABAho_OQ",
       "title": "[tracking] Integrate shaw/checkpoint-20260426-eliza branch (29 unique commits) into develop",
@@ -15,42 +63,6 @@
       "repository": "elizaos/eliza",
       "body": "## What\n\nThe branch `shaw/checkpoint-20260426-eliza` has 29 commits that are not yet on `develop`, including significant work that should land:\n\n- `a07ff6c598` lifeops(inbox): LLM priority scoring + Missed surface + model setting\n- `53ae1e2890` chore(submodules): bump plugin-discord + plugin-telegram for P3 owner-pairing\n- `0c92b770d3` chore(plugin-elizacloud): bump submodule for cloud SSO helpers\n- `2e6389755a` feat(electrobun): P1 desktop loopback auto-session bridge\n- `476cf2a547` lifeops: finish smart money and security pass\n- `1dc5ad67fc` Move Steward wallet services to app package\n- `debb5e9194` Polish relationships page\n- `2f9cae31b1` Remove Steward agent shims\n- `f12baf1793` Strengthen LifeOps PII redaction\n- `000a9e09eb` lifeops: label subscription playbook capability\n- `f60b3a951c` Fix Gmail reply draft fallback safety\n- `458b4b64e0` Refine Gmail recommendation context policy\n- Plugin resolver fixes (`d183bfcea1`, `47ea85ed2e`, `868f04ebc6`)\n- Cloud SDK / submodule checkpoint chain\n- `2ad44a27ea` fix(lifeops): checkpoint telegram auth encryption update (branch tip)\n\n## Why this isn't merged yet\n\nA naive `git merge origin/shaw/checkpoint-20260426-eliza` into develop produces:\n\n**23 plugin submodule conflicts** — each plugin has divergent SHAs between develop and the branch:\n- `cloud`\n- `plugins/plugin-agent-skills`\n- `plugins/plugin-anthropic`\n- `plugins/plugin-cli`\n- `plugins/plugin-cron`\n- `plugins/plugin-discord`\n- `plugins/plugin-evm`\n- `plugins/plugin-google-genai`\n- `plugins/plugin-groq`\n- `plugins/plugin-imessage`\n- `plugins/plugin-music-library`\n- `plugins/plugin-music-player`\n- `plugins/plugin-ollama`\n- `plugins/plugin-openai`\n- `plugins/plugin-openrouter`\n- `plugins/plugin-pdf`\n- `plugins/plugin-shell`\n- `plugins/plugin-shopify`\n- `plugins/plugin-solana`\n- `plugins/plugin-sql`\n- `plugins/plugin-telegram`\n- `plugins/plugin-wechat`\n- `plugins/plugin-whatsapp`\n\n**9 content conflicts** that need real engineering judgment:\n- `apps/app-lifeops/src/actions/computer-use.ts` — develop renamed `inferSurface → selectSurface`, added helper functions\n- `apps/app-lifeops/src/actions/twilio-call.ts`\n- `packages/agent/src/actions/extract-params.ts`\n- `packages/agent/src/runtime/plugin-resolver.ts`\n- `packages/app-core/src/components/character/CharacterHubView.tsx`\n- `packages/app-core/src/components/pages/AppsView.tsx`\n- `packages/app-core/src/components/pages/BrowserWorkspaceView.test.tsx`\n- `packages/elizaos/templates-manifest.json`\n- `packages/typescript/src/features/advanced-capabilities/personality/actions/set-voice-config.ts`\n\n## How to integrate\n\nFor each plugin submodule conflict: determine which SHA is the descendant (or whether they need their own merge in the plugin repo).\n\nFor each content conflict: review both versions to merge intent — develop's recent work generally took the form of refactors (renames, adds helpers, refines imports) while the branch has its own additions on top of an older base.\n\nThe milady-side counterpart PRs (milady-ai/milady#2045, milady-ai/milady#2044) have been marked merged through the milady-side build/test infra changes that already landed; this branch still holds the eliza-side feature work that needs proper integration.",
       "createdAt": "2026-04-26T06:48:18Z",
-      "closedAt": "2026-04-27T21:03:24Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABAmz4eQ",
-      "title": "discord path works",
-      "author": "binkyfishai",
-      "number": 7140,
-      "repository": "elizaos/eliza",
-      "body": "Created from Discord by Fisbat.",
-      "createdAt": "2026-04-27T12:17:14Z",
-      "closedAt": "2026-04-27T12:19:04Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABAlL62g",
-      "title": "test botdick github auth via bot path",
-      "author": "binkyfishai",
-      "number": 7137,
-      "repository": "elizaos/eliza",
-      "body": "This issue was created through the running botdick Milady message/action pipeline, not gh issue create from a shell.",
-      "createdAt": "2026-04-27T07:41:11Z",
-      "closedAt": "2026-04-27T21:03:25Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABAlEDJg",
-      "title": "test botdick github auth",
-      "author": "binkyfishai",
-      "number": 7136,
-      "repository": "elizaos/eliza",
-      "body": "Test issue created to verify botdick GitHub auth wiring.",
-      "createdAt": "2026-04-27T07:18:12Z",
       "closedAt": "2026-04-27T21:03:24Z",
       "state": "CLOSED",
       "commentCount": 0
@@ -70,6 +82,30 @@
       "deletions": 4667
     },
     {
+      "id": "PR_kwDOMT5cIs7WjdAP",
+      "title": "Shaw/pr 2067 eliza fix",
+      "author": "lalalune",
+      "number": 7175,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T02:39:06Z",
+      "mergedAt": "2026-04-29T02:39:14Z",
+      "additions": 20547,
+      "deletions": 3209
+    },
+    {
+      "id": "PR_kwDOMT5cIs7WsOJC",
+      "title": "feat(vault): @elizaos/vault — cross-platform secrets vault + Settings UI integration",
+      "author": "Dexploarer",
+      "number": 7197,
+      "body": "# Relates to\n\nThis is the upstream-targeting twin of milady-ai/eliza#6. The vault feature originated in the Milady fork; this PR lands the upstream-relevant slice on `elizaOS/eliza:develop`.\n\n# Risks\n\n**Low.** The vault is an additive workspace package; the runtime + Settings UI integration is a write-through mirror over the existing `config.env.X` storage path, so disabling it is a one-line change in `plugins-compat-routes.ts` (`mirrorPluginSensitiveToVault` → no-op). Cross-platform secret-service behaviour is exercised by a new dedicated CI workflow (macOS Keychain / Windows Credential Manager / Linux libsecret) so the headline portability claim is verifiable on every PR. The legacy `config.env.X` write path is unchanged — even if every vault call failed, plugin saves would still persist.\n\n# Background\n\n## What does this PR do?\n\nAdds **`@elizaos/vault`** — a cross-platform secrets/config vault — and wires it into the agent runtime + Settings UI so the existing \"save my OpenAI key\" flow stops storing plaintext in `config.env` and starts encrypting at rest with a key from the OS keychain.\n\n### `@elizaos/vault` (new package, `packages/vault/`)\n\n- **Encryption-at-rest** with AES-256-GCM, secret-id-as-AAD (so a leaked ciphertext can't be replayed against a different key).\n- **Master key in the OS keychain by default** — macOS Keychain, Windows Credential Manager, Linux Secret Service via `@napi-rs/keyring`.\n- **Headless fallback**: `passphraseMasterKey()` / `passphraseMasterKeyFromEnv(\"MILADY_VAULT_PASSPHRASE\")` derives the master key with `scrypt` for Linux servers and CI without a Secret Service agent.\n- `defaultMasterKey()` chains keychain → passphrase → throws `MasterKeyUnavailableError` whose message names every remediation path.\n- **One API for sensitive and non-sensitive config** — `vault.set(key, value, { sensitive: true })` vs `vault.set(key, value)`.\n- **Password-manager references are first-class** — values can live in 1Password / Proton Pass / Bitwarden, the vault stores only the resolver reference.\n- **`SecretsManager`** layer routes per-key writes/reads to the user-selected backend (`in-house`, `1password`, `bitwarden`, `protonpass`), with detection + preferences API at `/api/secrets/manager/{backends,preferences}`.\n- **Audit log** at `audit/vault.jsonl` per write.\n- **Testing harness** (`@elizaos/vault/testing#createTestVault`) that produces a vault wired to an in-memory master key for downstream tests.\n\n### Runtime + Settings UI integration\n\n- **Write-through mirror in `/api/plugins/:id` PUT**: when a sensitive plugin field is saved, the value is mirrored into the vault (encrypted at rest) on top of the existing `config.env.X` write. Mirror failures are surfaced to the UI under `vaultMirrorFailures` rather than silently swallowed.\n- **Vault-first reveal**: `POST /api/plugins/:id/reveal` consults `sharedVault().get(key)` before falling back to `process.env` / `config.env`, so a freshly-saved key is the value the user sees.\n- **Per-process cached `sharedVault()`** so concurrent saves share `VaultImpl.mutate()`'s mutex; a per-request `createVault()` would race and silently lose entries.\n- **Broader credential heuristic** — `pickPrimaryCredentialParam()` walks a priority-ordered regex list (`API_KEY` → `API_TOKEN` → `BOT_TOKEN` → `ACCESS_TOKEN` → `SECRET_KEY` → `PRIVATE_KEY` → `CLIENT_SECRET`) instead of only matching `*_API_KEY$`, with an explicit fallback to the first sensitive parameter. Closes the bug where typing a model field before the API-key field caused `Object.values(config).find()` to pick up the model slug; also fixes connectors whose primary credential is a bot token / private key / client secret.\n- **Settings UI** — `SecretsManagerSection` + `ApiKeyConfig` with inline prefix validation and validation warnings, keyboard shortcut `⌘⌥⌃V` (Mac) / `Ctrl+Alt+Shift+V` (Win/Linux), global modal mount, application menu accelerator.\n- **Cloud disconnect orphan-route patch**: `/api/cloud/disconnect` now nulls every routed service (`llmText`, `tts`, `media`, `embeddings`, `rpc`) instead of just `llmText`, so disconnect doesn't leave silently-401'ing voice/image/embedding features routed at the dead `cloud-proxy → elizacloud`. Plus `linkedAccounts.elizacloud.status=\"unlinked\"` to prevent the in-memory state from overwriting the canonical unlinked state on next `saveElizaConfig`.\n\n### Runtime-ops × vault\n\n- `ProviderSwitchIntent.apiKeyRef` replaces plaintext `apiKey` end-to-end. The provider-switch route writes the vault entry, persists only the reference, and resolves through the vault when the runtime reload-hot needs the key.\n- Legacy ops with plaintext `apiKey` are auto-migrated to `apiKeyRef` on hydrate.\n- Repository pruning suite (retention, cap, idempotency, hydrate; 6 tests).\n- A `simplify` pass that dedupes utility code, removes ghost phases, and consolidates state.\n\n## What kind of change is this?\n\n**Features** — non-breaking. `@elizaos/vault` is new. The runtime/Settings wiring is additive on top of the existing config-write path, controlled by feature presence rather than a flag. The provider-switch `apiKeyRef` replaces `apiKey` but a hydrate-time migration upgrades legacy ops in place.\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation. New package documentation lives inline in `packages/vault/README.md` and the public API surface is documented via TSDoc. The Settings UI changes are user-facing but match the existing settings pattern.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. **`packages/vault/`** — start with `src/vault.ts` (the public API), then `src/master-key.ts` (the keychain/passphrase chain), then `src/manager.ts` (the multi-backend router). Tests in `test/{vault,master-key,manager,store,envelope,references,keyring}.test.ts` exercise every public path; `test/master-key.test.ts` covers the headless-fallback chain explicitly.\n2. **`packages/app-core/src/services/vault-mirror.ts`** + `packages/app-core/src/services/vault-mirror.test.ts` — the write-through mirror is small, isolated, and has a focused test that includes failure-collection and a source-text guard for the vault-first reveal ordering.\n3. **`packages/app-core/src/api/plugins-compat-routes.ts`** — the `PUT /api/plugins/:id` handler and `/reveal` route, where the vault wiring sits next to the existing legacy code path.\n4. **`packages/agent/src/runtime/operations/`** — `vault-bridge.ts`, `vault-integration.test.ts`, and `health.test.ts` show the `apiKeyRef` migration. The 22-case integration suite is the strongest evidence that the runtime path keeps working.\n\n## Detailed testing steps\n\nAutomated tests are acceptable.\n\n- **Vault unit suite (cross-platform)**: `bun run --cwd packages/vault test` — 64 tests covering vault, master-key (incl. passphrase fallback), manager, store, envelope, references, keyring round-trips. The new `vault-ci` workflow runs this matrix on `ubuntu-latest`, `macos-latest`, `windows-latest` so the OS-keychain claim is checked on every PR.\n- **App-core wiring suite**: `bun run --cwd packages/app-core test` — 37 wiring tests (vault-mirror unit + source-text guards, secrets-manager-routes integration via real `http.Server`, usePluginsSkillsState heuristic priority list, useSecretsManagerShortcut Mac/Win/Linux chord matching, server.cloud-disconnect orphan-route guard).\n- **Runtime-ops vault integration**: 22 cases in `packages/agent/src/runtime/operations/vault-integration.test.ts` proving the `apiKeyRef` path works end-to-end.\n- **End-to-end save-flow**: `provider-switch-routes.e2e.test.ts` stands up a real `http.Server` and exercises Settings PUT → mirror → reveal → provider switch against an in-memory vault.\n- **Cross-platform CI**: the new `vault-ci` workflow (`.github/workflows/vault-ci.yaml`) runs the vault suite on macOS / Linux / Windows runners; an `app-core-wiring` job runs the wiring tests on `ubuntu-latest` with proto generation as a prerequisite.\n\n### Manual smoke (UI)\n\n1. Open the desktop app → **Settings → Plugins → OpenAI** (or any AI provider).\n2. Enter an API key, save.\n3. The plugin row should turn green and reload the agent. Open `~/.milady/vault.json` — the value is encrypted; the OS keychain holds the master key under `service: \"milady\"`, `account: \"vault.masterKey\"`.\n4. Open the **Secrets Vault** modal via `⌘⌥⌃V` (or **Edit → Secrets Vault** menu). Switch the routing for `OPENAI_API_KEY` to a different backend, save. Subsequent reveals fetch from the new backend.\n\n## Deploy notes\n\n- **`@elizaos/vault` is a new workspace package** — `bun install` at the repo root picks it up; nothing extra to do.\n- **No database changes.**\n- **No breaking changes** to existing config files. Legacy `config.env.X` writes still happen alongside the vault mirror; vault values shadow `process.env` only in the reveal path. The `apiKeyRef` migration on the runtime-ops side is in-place on hydrate (no operator action required).\n\n---\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T11:25:51Z",
+      "mergedAt": null,
+      "additions": 7138,
+      "deletions": 647
+    },
+    {
       "id": "PR_kwDOMT5cIs7Whalw",
       "title": "feat(agent): runtime operations manager + widget host refresh",
       "author": "Dexploarer",
@@ -77,52 +113,28 @@
       "body": "## Summary\n\nBundles in-flight feature work on `feat/widget-host-cycle-and-greenup` so it isn't sitting as uncommitted state. Includes:\n\n- New `packages/agent/src/runtime/operations/` module — `RuntimeOperationManager` as the single-flight gate for provider switches / restarts / reloads, plus classifier (idempotency-key dedupe), health predicates, hot-reload + cold-restart strategies. Tests included.\n- Provider switch route now reads `Idempotency-Key`, routes through the manager rather than the legacy `providerSwitchInProgress` boolean.\n- Restart, server, and dev-platform paths refactored against the new manager.\n- Earlier widget-host cycle/chunking + steward static-import fixes (already on the branch).\n- Splash asset + launchpad fixes (already on the branch).\n\nWIP — squash / split as makes sense for review. The runtime-operations module is the largest new surface and the most reviewable as a single unit.\n\n## Test plan\n\n- [ ] `bun run test` — exercises classifier + health unit tests\n- [ ] Manual provider switch under load with idempotency key — verify dedupe\n- [ ] Hot reload path — verify health gate prevents premature traffic resume\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR introduces a `RuntimeOperationManager` module as the single-flight gate for provider switches and runtime restarts, replacing the previous `providerSwitchInProgress` boolean with a filesystem-backed operation repository, idempotency-key dedup, tier-classified reload strategies (hot/warm/cold), and health-gated promotion. Three issues need attention before merging:\n\n- Config is persisted to disk before the manager's rejection check — a `409 rejected-busy` response leaves the on-disk config mutated with the new provider while the running runtime is unchanged.\n- The `warm` tier strategy is never registered in `server.ts`, so same-family provider switches (classified as `warm` by the classifier) always fail internally with `\\\"no-strategy-for-tier\\\"`.\n- The raw API key is serialized into the persisted `ProviderSwitchIntent` JSON on disk.\n</details>\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge — config-mutation-before-rejection and the missing warm strategy are current defects on the provider switch hot path.\n\nTwo P1 behavioral bugs (config written before rejection check, warm strategy unregistered causing silent failures) plus one P1 security issue (API key on disk) pull the score below the P1 ceiling of 4. Multiple P1s in core paths warrant a 3.\n\npackages/agent/src/api/provider-switch-routes.ts and packages/agent/src/api/server.ts\n\n<details open><summary><h3>Security Review</h3></summary>\n\n- **Plaintext credential storage** (`packages/agent/src/api/provider-switch-routes.ts`, `packages/agent/src/runtime/operations/repository.ts`): The `ProviderSwitchIntent` includes the raw `apiKey` and is serialized in full to `<stateDir>/runtime-operations/<id>.json`. Although the file is created with mode `0600`, the API key is readable by any process running as the same user and persists for up to 24 hours. API keys should be stripped from the persisted record.\n</details>\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n| Filename | Overview |\n|----------|----------|\n| packages/agent/src/runtime/operations/manager.ts | New DefaultRuntimeOperationManager: single-flight gate with idempotency-key dedup, async execution chain, and health-gated promotion — logic is sound but warm-tier strategy gap causes silent failures for same-family switches |\n| packages/agent/src/runtime/operations/types.ts | Well-typed contracts for operations, phases, repository, health checks, and strategies; clean discriminated union intent model |\n| packages/agent/src/runtime/operations/classifier.ts | Pure tier classifier: returns \"warm\" for same-family switches but no warm strategy is wired in server.ts, making those operations always fail |\n| packages/agent/src/runtime/operations/repository.ts | Filesystem-backed repo with atomic writes and in-memory O(1) cache; abandoned-op reaping on hydrate is solid; file mode 0600 is appropriate but intent JSON (including API keys) still lands on disk in cleartext |\n| packages/agent/src/api/provider-switch-routes.ts | Route correctly routes through the new manager, but saves config to disk before checking the manager outcome (config mutated even on 409) and embeds the raw API key in the persisted intent |\n| packages/agent/src/api/server.ts | Manager wiring looks correct; warm strategy is missing from the strategies map causing all same-family provider switches to fail with \"no-strategy-for-tier\" |\n| packages/agent/src/runtime/operations/cold-strategy.ts | Cold restart delegates correctly to the injected restartRuntime closure, but double-appends \"shutdown-old\" phase producing a duplicate entry in the log |\n| packages/agent/src/runtime/operations/reload-hot.ts | Hot strategy correctly applies env vars and best-effort notifies plugins; defaultApplyProviderEnv double-writes config since the route also writes before submitting the operation |\n| packages/agent/src/runtime/operations/health.ts | HealthChecker with parallel execution, per-check timeouts via Promise.race, and clean required/optional semantics — well implemented |\n| packages/agent/src/runtime/operations/index.ts | Clean barrel export for the operations module |\n\n</details>\n\n</details>\n\n<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\nsequenceDiagram\n    participant C as Client\n    participant R as ProviderSwitchRoute\n    participant M as RuntimeOperationManager\n    participant Repo as FilesystemRepository\n    participant S as ReloadStrategy (hot/cold)\n    participant H as HealthChecker\n\n    C->>R: POST /api/provider/switch\n    R->>R: saveElizaConfig ⚠️ written before rejection check\n    R->>M: start({intent, idempotencyKey})\n    M->>Repo: findByIdempotencyKey(key)\n    alt key exists\n        Repo-->>M: existing op\n        M-->>R: deduped\n        R-->>C: 200\n    end\n    M->>Repo: findActive()\n    alt op in flight\n        Repo-->>M: active op\n        M-->>R: rejected-busy ⚠️ config already written\n        R-->>C: 409\n    end\n    M->>Repo: create(op)\n    M-->>R: accepted\n    R-->>C: 202 + operationId\n    Note over M: async execution chain\n    M->>S: apply(ctx)\n    S-->>M: newRuntime\n    M->>H: runForRuntime(newRuntime)\n    H-->>M: HealthCheckReport\n    alt ok\n        M->>Repo: update succeeded\n    else failed\n        M->>Repo: update failed\n    end\n```\n</details>\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=Fix%20the%20following%204%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A136-196%0A**Config%20written%20to%20disk%20before%20rejection%20is%20checked**%0A%0A%60applyOnboardingConnectionConfig%60%20and%20%60saveElizaConfig%60%20run%20at%20lines%20136%E2%80%93137%20before%20the%20operation%20manager's%20outcome%20is%20evaluated.%20When%20the%20manager%20returns%20%60%22rejected-busy%22%60%2C%20the%20route%20correctly%20returns%20409%2C%20but%20the%20config%20file%20has%20already%20been%20mutated%20on%20disk%20with%20the%20new%20provider%20settings.%20The%20system%20is%20now%20in%20a%20split%20state%3A%20the%20config%20reflects%20provider%20B%20while%20the%20running%20runtime%20still%20uses%20provider%20A%20%28and%20no%20restart%20will%20happen%29.%20On%20the%20next%20cold%20restart%20the%20new%20provider%20config%20will%20be%20loaded%2C%20potentially%20breaking%20the%20running%20agent.%0A%0AThe%20config%20mutation%20should%20only%20be%20persisted%20once%20the%20manager%20has%20accepted%20the%20request%2C%20or%20the%20hot-strategy's%20%60defaultApplyProviderEnv%60%20should%20be%20the%20sole%20writer%20%28it's%20called%20by%20the%20strategy%20itself%20on%20the%20async%20execution%20path%29.%0A%0A%23%23%23%20Issue%202%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fserver.ts%3A1098-1102%0A**%60warm%60%20tier%20has%20no%20registered%20strategy%20%E2%80%94%20same-family%20provider%20switches%20always%20fail**%0A%0A%60strategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%20%7D%60%20omits%20the%20warm%20strategy.%20The%20classifier%20in%20%60classifier.ts%60%20returns%20%60%22warm%22%60%20for%20same-family%20provider%20switches%20%28e.g.%20%60openai%60%20%E2%86%94%20%60openai-subscription%60%29.%20In%20%60manager.ts%60%20lines%20182%E2%80%93188%2C%20a%20missing%20strategy%20calls%20%60failOperation%60%20with%20%60%22no-strategy-for-tier%22%60.%20Any%20user%20switching%20between%20providers%20in%20the%20same%20family%20will%20receive%20a%20silent%20internal%20failure%20with%20no%20clear%20error%20surfaced.%0A%0AEither%20register%20a%20warm%20strategy%20here%20%28falling%20back%20to%20the%20hot%20strategy%20is%20a%20safe%20interim%20choice%29%20or%20change%20the%20classifier%20to%20collapse%20%60warm%60%20to%20%60cold%60%20until%20the%20warm%20strategy%20exists.%0A%0A%60%60%60ts%0Astrategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%2C%20warm%3A%20hotStrategy%20%7D%2C%0A%60%60%60%0A%0A%23%23%23%20Issue%203%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A139-147%0A**API%20key%20written%20to%20disk%20in%20plaintext%20via%20intent%20serialization**%0A%0AThe%20%60ProviderSwitchIntent%60%20built%20here%20includes%20the%20raw%20%60apiKey%60%20value%2C%20and%20the%20%60FilesystemRuntimeOperationRepository%60%20serializes%20the%20full%20%60RuntimeOperation%60%20%28including%20%60intent%60%29%20to%20%60%3CstateDir%3E%2Fruntime-operations%2F%3Cid%3E.json%60%20%28mode%200600%2C%20but%20still%20a%20plain%20JSON%20file%29.%20Every%20provider%20switch%20stores%20the%20user's%20API%20key%20on%20the%20filesystem%20in%20cleartext%20for%20up%20to%20the%2024-hour%20retention%20window.%0A%0AThe%20API%20key%20should%20be%20redacted%20from%20the%20persisted%20intent.%20One%20approach%20is%20to%20store%20only%20a%20boolean%20flag%20%60apiKeyProvided%3A%20true%60%20in%20the%20persisted%20intent%20while%20keeping%20the%20real%20key%20in-memory%20only%20for%20the%20duration%20of%20the%20operation.%0A%0A%23%23%23%20Issue%204%20of%204%0Apackages%2Fagent%2Fsrc%2Fruntime%2Foperations%2Fcold-strategy.ts%3A29-42%0A**%22shutdown-old%22%20phase%20is%20appended%20twice%20instead%20of%20updated%20once**%0A%0A%60ctx.reportPhase%60%20maps%20to%20%60repository.appendPhase%60%2C%20which%20always%20adds%20a%20new%20entry%20to%20the%20phases%20array.%20Calling%20it%20first%20with%20%60status%3A%20%22running%22%60%20and%20then%20immediately%20with%20%60status%3A%20%22succeeded%22%60%20produces%20two%20separate%20%60%22shutdown-old%22%60%20entries%20in%20the%20log%20rather%20than%20one%20entry%20whose%20status%20transitions.%20No%20actual%20shutdown%20work%20occurs%20between%20the%20two%20calls%20%E2%80%94%20%60restartRuntime%60%20is%20invoked%20in%20the%20%60%22start-new%22%60%20phase%20below.%0A%0AThe%20manager's%20health-check%20code%20uses%20%60appendPhase%60%20%28for%20%60%22running%22%60%29%20%2B%20%60updateLastPhase%60%20%28for%20the%20terminal%20state%29.%20The%20cold%20strategy%20should%20follow%20the%20same%20pattern%2C%20or%20both%20phases%20should%20be%20a%20single%20append%20recording%20the%20final%20status%20since%20shutdown%20is%20effectively%20instantaneous%20here.%0A%0A&repo=elizaos%2Feliza&pr=7166&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\"><img alt=\"Fix All in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fwidget-host-cycle-and-greenup%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fwidget-host-cycle-and-greenup%22.%0A%0AFix%20the%20following%204%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A136-196%0A**Config%20written%20to%20disk%20before%20rejection%20is%20checked**%0A%0A%60applyOnboardingConnectionConfig%60%20and%20%60saveElizaConfig%60%20run%20at%20lines%20136%E2%80%93137%20before%20the%20operation%20manager's%20outcome%20is%20evaluated.%20When%20the%20manager%20returns%20%60%22rejected-busy%22%60%2C%20the%20route%20correctly%20returns%20409%2C%20but%20the%20config%20file%20has%20already%20been%20mutated%20on%20disk%20with%20the%20new%20provider%20settings.%20The%20system%20is%20now%20in%20a%20split%20state%3A%20the%20config%20reflects%20provider%20B%20while%20the%20running%20runtime%20still%20uses%20provider%20A%20%28and%20no%20restart%20will%20happen%29.%20On%20the%20next%20cold%20restart%20the%20new%20provider%20config%20will%20be%20loaded%2C%20potentially%20breaking%20the%20running%20agent.%0A%0AThe%20config%20mutation%20should%20only%20be%20persisted%20once%20the%20manager%20has%20accepted%20the%20request%2C%20or%20the%20hot-strategy's%20%60defaultApplyProviderEnv%60%20should%20be%20the%20sole%20writer%20%28it's%20called%20by%20the%20strategy%20itself%20on%20the%20async%20execution%20path%29.%0A%0A%23%23%23%20Issue%202%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fserver.ts%3A1098-1102%0A**%60warm%60%20tier%20has%20no%20registered%20strategy%20%E2%80%94%20same-family%20provider%20switches%20always%20fail**%0A%0A%60strategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%20%7D%60%20omits%20the%20warm%20strategy.%20The%20classifier%20in%20%60classifier.ts%60%20returns%20%60%22warm%22%60%20for%20same-family%20provider%20switches%20%28e.g.%20%60openai%60%20%E2%86%94%20%60openai-subscription%60%29.%20In%20%60manager.ts%60%20lines%20182%E2%80%93188%2C%20a%20missing%20strategy%20calls%20%60failOperation%60%20with%20%60%22no-strategy-for-tier%22%60.%20Any%20user%20switching%20between%20providers%20in%20the%20same%20family%20will%20receive%20a%20silent%20internal%20failure%20with%20no%20clear%20error%20surfaced.%0A%0AEither%20register%20a%20warm%20strategy%20here%20%28falling%20back%20to%20the%20hot%20strategy%20is%20a%20safe%20interim%20choice%29%20or%20change%20the%20classifier%20to%20collapse%20%60warm%60%20to%20%60cold%60%20until%20the%20warm%20strategy%20exists.%0A%0A%60%60%60ts%0Astrategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%2C%20warm%3A%20hotStrategy%20%7D%2C%0A%60%60%60%0A%0A%23%23%23%20Issue%203%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A139-147%0A**API%20key%20written%20to%20disk%20in%20plaintext%20via%20intent%20serialization**%0A%0AThe%20%60ProviderSwitchIntent%60%20built%20here%20includes%20the%20raw%20%60apiKey%60%20value%2C%20and%20the%20%60FilesystemRuntimeOperationRepository%60%20serializes%20the%20full%20%60RuntimeOperation%60%20%28including%20%60intent%60%29%20to%20%60%3CstateDir%3E%2Fruntime-operations%2F%3Cid%3E.json%60%20%28mode%200600%2C%20but%20still%20a%20plain%20JSON%20file%29.%20Every%20provider%20switch%20stores%20the%20user's%20API%20key%20on%20the%20filesystem%20in%20cleartext%20for%20up%20to%20the%2024-hour%20retention%20window.%0A%0AThe%20API%20key%20should%20be%20redacted%20from%20the%20persisted%20intent.%20One%20approach%20is%20to%20store%20only%20a%20boolean%20flag%20%60apiKeyProvided%3A%20true%60%20in%20the%20persisted%20intent%20while%20keeping%20the%20real%20key%20in-memory%20only%20for%20the%20duration%20of%20the%20operation.%0A%0A%23%23%23%20Issue%204%20of%204%0Apackages%2Fagent%2Fsrc%2Fruntime%2Foperations%2Fcold-strategy.ts%3A29-42%0A**%22shutdown-old%22%20phase%20is%20appended%20twice%20instead%20of%20updated%20once**%0A%0A%60ctx.reportPhase%60%20maps%20to%20%60repository.appendPhase%60%2C%20which%20always%20adds%20a%20new%20entry%20to%20the%20phases%20array.%20Calling%20it%20first%20with%20%60status%3A%20%22running%22%60%20and%20then%20immediately%20with%20%60status%3A%20%22succeeded%22%60%20produces%20two%20separate%20%60%22shutdown-old%22%60%20entries%20in%20the%20log%20rather%20than%20one%20entry%20whose%20status%20transitions.%20No%20actual%20shutdown%20work%20occurs%20between%20the%20two%20calls%20%E2%80%94%20%60restartRuntime%60%20is%20invoked%20in%20the%20%60%22start-new%22%60%20phase%20below.%0A%0AThe%20manager's%20health-check%20code%20uses%20%60appendPhase%60%20%28for%20%60%22running%22%60%29%20%2B%20%60updateLastPhase%60%20%28for%20the%20terminal%20state%29.%20The%20cold%20strategy%20should%20follow%20the%20same%20pattern%2C%20or%20both%20phases%20should%20be%20a%20single%20append%20recording%20the%20final%20status%20since%20shutdown%20is%20effectively%20instantaneous%20here.%0A%0A\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\"><img alt=\"Fix All in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=Fix%20the%20following%204%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A136-196%0A**Config%20written%20to%20disk%20before%20rejection%20is%20checked**%0A%0A%60applyOnboardingConnectionConfig%60%20and%20%60saveElizaConfig%60%20run%20at%20lines%20136%E2%80%93137%20before%20the%20operation%20manager's%20outcome%20is%20evaluated.%20When%20the%20manager%20returns%20%60%22rejected-busy%22%60%2C%20the%20route%20correctly%20returns%20409%2C%20but%20the%20config%20file%20has%20already%20been%20mutated%20on%20disk%20with%20the%20new%20provider%20settings.%20The%20system%20is%20now%20in%20a%20split%20state%3A%20the%20config%20reflects%20provider%20B%20while%20the%20running%20runtime%20still%20uses%20provider%20A%20%28and%20no%20restart%20will%20happen%29.%20On%20the%20next%20cold%20restart%20the%20new%20provider%20config%20will%20be%20loaded%2C%20potentially%20breaking%20the%20running%20agent.%0A%0AThe%20config%20mutation%20should%20only%20be%20persisted%20once%20the%20manager%20has%20accepted%20the%20request%2C%20or%20the%20hot-strategy's%20%60defaultApplyProviderEnv%60%20should%20be%20the%20sole%20writer%20%28it's%20called%20by%20the%20strategy%20itself%20on%20the%20async%20execution%20path%29.%0A%0A%23%23%23%20Issue%202%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fserver.ts%3A1098-1102%0A**%60warm%60%20tier%20has%20no%20registered%20strategy%20%E2%80%94%20same-family%20provider%20switches%20always%20fail**%0A%0A%60strategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%20%7D%60%20omits%20the%20warm%20strategy.%20The%20classifier%20in%20%60classifier.ts%60%20returns%20%60%22warm%22%60%20for%20same-family%20provider%20switches%20%28e.g.%20%60openai%60%20%E2%86%94%20%60openai-subscription%60%29.%20In%20%60manager.ts%60%20lines%20182%E2%80%93188%2C%20a%20missing%20strategy%20calls%20%60failOperation%60%20with%20%60%22no-strategy-for-tier%22%60.%20Any%20user%20switching%20between%20providers%20in%20the%20same%20family%20will%20receive%20a%20silent%20internal%20failure%20with%20no%20clear%20error%20surfaced.%0A%0AEither%20register%20a%20warm%20strategy%20here%20%28falling%20back%20to%20the%20hot%20strategy%20is%20a%20safe%20interim%20choice%29%20or%20change%20the%20classifier%20to%20collapse%20%60warm%60%20to%20%60cold%60%20until%20the%20warm%20strategy%20exists.%0A%0A%60%60%60ts%0Astrategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%2C%20warm%3A%20hotStrategy%20%7D%2C%0A%60%60%60%0A%0A%23%23%23%20Issue%203%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A139-147%0A**API%20key%20written%20to%20disk%20in%20plaintext%20via%20intent%20serialization**%0A%0AThe%20%60ProviderSwitchIntent%60%20built%20here%20includes%20the%20raw%20%60apiKey%60%20value%2C%20and%20the%20%60FilesystemRuntimeOperationRepository%60%20serializes%20the%20full%20%60RuntimeOperation%60%20%28including%20%60intent%60%29%20to%20%60%3CstateDir%3E%2Fruntime-operations%2F%3Cid%3E.json%60%20%28mode%200600%2C%20but%20still%20a%20plain%20JSON%20file%29.%20Every%20provider%20switch%20stores%20the%20user's%20API%20key%20on%20the%20filesystem%20in%20cleartext%20for%20up%20to%20the%2024-hour%20retention%20window.%0A%0AThe%20API%20key%20should%20be%20redacted%20from%20the%20persisted%20intent.%20One%20approach%20is%20to%20store%20only%20a%20boolean%20flag%20%60apiKeyProvided%3A%20true%60%20in%20the%20persisted%20intent%20while%20keeping%20the%20real%20key%20in-memory%20only%20for%20the%20duration%20of%20the%20operation.%0A%0A%23%23%23%20Issue%204%20of%204%0Apackages%2Fagent%2Fsrc%2Fruntime%2Foperations%2Fcold-strategy.ts%3A29-42%0A**%22shutdown-old%22%20phase%20is%20appended%20twice%20instead%20of%20updated%20once**%0A%0A%60ctx.reportPhase%60%20maps%20to%20%60repository.appendPhase%60%2C%20which%20always%20adds%20a%20new%20entry%20to%20the%20phases%20array.%20Calling%20it%20first%20with%20%60status%3A%20%22running%22%60%20and%20then%20immediately%20with%20%60status%3A%20%22succeeded%22%60%20produces%20two%20separate%20%60%22shutdown-old%22%60%20entries%20in%20the%20log%20rather%20than%20one%20entry%20whose%20status%20transitions.%20No%20actual%20shutdown%20work%20occurs%20between%20the%20two%20calls%20%E2%80%94%20%60restartRuntime%60%20is%20invoked%20in%20the%20%60%22start-new%22%60%20phase%20below.%0A%0AThe%20manager's%20health-check%20code%20uses%20%60appendPhase%60%20%28for%20%60%22running%22%60%29%20%2B%20%60updateLastPhase%60%20%28for%20the%20terminal%20state%29.%20The%20cold%20strategy%20should%20follow%20the%20same%20pattern%2C%20or%20both%20phases%20should%20be%20a%20single%20append%20recording%20the%20final%20status%20since%20shutdown%20is%20effectively%20instantaneous%20here.%0A%0A&pr=7166&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\"><img alt=\"Fix All in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(agent): runtime operations manager ...\"](https://github.com/elizaos/eliza/commit/3b41268180da76fa04f245d949cf9132bc08005e) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30101058)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
       "repository": "elizaos/eliza",
       "createdAt": "2026-04-28T23:14:38Z",
-      "mergedAt": null,
+      "mergedAt": "2026-04-29T02:39:15Z",
       "additions": 6861,
       "deletions": 619
     },
     {
-      "id": "PR_kwDOMT5cIs7Vug-V",
-      "title": "feat(app-core): apps as native windows + App Details page (test-green)",
-      "author": "Dexploarer",
-      "number": 7115,
-      "body": "## Summary\n\nThis is the org-owned (milady-ai/eliza) version of [Dexploarer/eliza#26 → elizaOS/eliza#7114](https://github.com/elizaOS/eliza/pull/7114) — same changes, pushed from the org fork instead of a personal fork.\n\n- Every app — internal tool, overlay, registry/catalog — launches in its own Electrobun BrowserWindow with slug-based dedupe and persisted bounds.\n- New `AppWindowRenderer` mounts only the app's content (no surrounding shell chrome) at `/apps/<slug>` when `appWindow=1`.\n- New `AppDetailsView` page (config + diagnostics + widget toggles + Launch button) for apps that declare `hasDetailsPage: true`. Zero-config viewers keep direct-launch.\n- Application menu and tray expose every known app via a single Apps menu (replaces per-surface menus).\n- `<scheme>://apps/<slug>` deep links route via `findAppMenuEntryBySlug` + `getDesktopManager().openAppWindow`.\n- Per-slug window bounds persistence in `userData/app-window-bounds.json` (debounced 500ms saves).\n- Branch is rebased on `develop` (commit `4e110bcb5b`) — 4 conflicts in `AppsView.tsx` resolved (state decl, handlers, `openAppRouteWindow` gate, header UI).\n\n## Test fixes pulled in for green CI\n\n- `apps-routes-hero.test.ts`: Content-Type by file extension (svg/png/jpg/webp/avif/gif), not hardcoded PNG. Hero generator now renders the trimmed display label as an SVG `<text>` overlay.\n- `helpers.APPS_VIEW_HIDDEN_APP_NAMES` adds `@elizaos/app-screenshare` so catalog-coverage doesn't flag it as orphan.\n- `useWalletState.test.tsx` clientMock gains `getConfig` + `updateConfig` stubs.\n- `startup-phase-hydrate.test.ts` mocks `./vrm` so the app-companion re-export doesn't load `getBootConfig` at module-init time.\n- `CharacterOverviewSection.test.tsx` asserts section title + click handler instead of caption text (captions are passed through `widget.body` by callers).\n- `lifeops-activity-signals-client.test.ts` imports the side-effect first and pulls `ElizaClient` from the direct sub-path `@elizaos/app-core/api/client-base` to avoid a barrel cycle that left the binding undefined under vitest's ESM bundling.\n- Default vitest config aliases `@elizaos/plugin-sql` + sub-paths so the auth-store test suite imports work via the test runner's invocation path.\n\n## Test plan\n\n- [ ] Click any app → opens in own native window with no Milady shell chrome\n- [ ] Re-clicking same app focuses existing window\n- [ ] Resize/move app window, close, relaunch → restores bounds\n- [ ] Click LifeOps / Fine Tuning / Steward / ElizaMaker → details page (not launch)\n- [ ] Toggle launch mode in details + click Launch → opens in chosen mode\n- [ ] Toggle widget visibility from details → reflected in chat sidebar\n- [ ] `open elizaos://apps/plugins` from terminal opens Plugin Viewer\n- [ ] Web fallback (open in browser) still uses iframe + sidebar tab path\n- [ ] CI green\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR introduces apps-as-native-windows for Electrobun, a new `AppDetailsView` (config + diagnostics + launch), `AppWindowRenderer` (full-bleed renderer at `/apps/<slug>`), per-slug window bounds persistence, and deep-link routing — a significant architectural addition.\n\n- **P1**: `resolveAppFromSlug` in `AppDetailsView` performs a `windowPath === /apps/${slug}` lookup for internal tools. For \\\"Fine Tuning\\\" (`slug:\\\"training\\\"`, `windowPath:\\\"/apps/fine-tuning\\\"`) and \\\"Steward\\\" (`slug:\\\"steward\\\"`, `windowPath:\\\"/apps/inventory\\\"`), no match is found, so the catalog fallback derives `windowPath: \\\"/apps/training\\\"`. The Launch button then opens the window at that wrong path, and `AppWindowRenderer` falls through to `RegistryAppWindowView` instead of rendering `FineTuningView`/`InventoryView`.\n- **P1**: `handleLaunch` navigates to the details page with only `pushAppsUrl(slug, \\\"details\\\")` (no direct `setAppsDetailsSlug` call). In non-hash routing mode (`replaceState` fires no events), `appsDetailsSlug` stays null and `AppDetailsView` never mounts. The `desktopAppDetailsRequested` handler already contains a comment explaining this exact issue and applies the fix — the same pattern needs to be applied in `handleLaunch`.\n</details>\n\n<h3>Confidence Score: 3/5</h3>\n\nTwo confirmed P1 bugs affecting the hasDetailsPage apps (Fine Tuning and Steward) on both the menu/tray and catalog-card click paths.\n\nTwo independent P1 defects: AppDetailsView resolves wrong windowPath for training/steward slugs causing wrong window content; handleLaunch doesn't update appsDetailsSlug state directly causing details page to not mount in non-hash routing mode.\n\nAppDetailsView.tsx (resolveAppFromSlug lookup strategy) and AppsView.tsx (handleLaunch missing setAppsDetailsSlug call).\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/components/pages/AppDetailsView.tsx | New 662-line component for app config/diagnostics/launch. P1: `resolveAppFromSlug` lookup by windowPath fails for \"training\" and \"steward\" apps whose APP_MENU_ENTRIES slug doesn't match their windowPath segment. |\n| packages/app-core/src/components/pages/AppsView.tsx | Refactored to add details-page routing and native window launch. P1: `handleLaunch` details redirect uses only `pushAppsUrl` without calling `setAppsDetailsSlug`, so the details page doesn't mount in non-hash routing mode. |\n| packages/app-core/platforms/electrobun/src/application-menu.ts | New `APP_MENU_ENTRIES` list with slug/windowPath mismatches (training/fine-tuning, steward/inventory) that feed the P1 in AppDetailsView. |\n| packages/app-core/platforms/electrobun/src/index.ts | Adds `handleDeepLink`, per-slug bounds store, tray-clicked listener, and `desktopAppDetailsRequested` sender. |\n| packages/app-core/src/shell/AppWindowRenderer.tsx | New full-bleed renderer for `appWindow=1#/apps/<slug>` routes; correctly dispatches to internal tab views, overlay apps, or registry app iframe. |\n| packages/app-core/platforms/electrobun/src/surface-windows.ts | Adds slug-based dedup, per-slug bounds persistence via injected BoundsStore, and debounced resize/move save listeners. Clean implementation. |\n| packages/app-core/src/components/apps/internal-tool-apps.ts | Adds windowPath and hasDetailsPage fields; slug/windowPath mismatches (training/\"fine-tuning\", steward/\"inventory\") are the root cause of the AppDetailsView P1. |\n| packages/app-core/src/components/apps/per-app-config.ts | New per-app localStorage config with robust parsing/sanitization and cross-window sync via storage events. |\n| packages/app-core/src/components/apps/useRegistryCatalog.ts | New hook coalescing concurrent catalog+installed-apps fetches with a module-level promise; correct cancellation on unmount. |\n| packages/app-core/src/components/apps/launch-history.ts | New 20-slot ring buffer for launch attempt diagnostics stored in localStorage; solid implementation. |\n\n</details>\n\n</details>\n\n<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant BunSide as Electrobun (bun)\n    participant Renderer as Renderer (React)\n    participant AppWin as App Window\n\n    User->>BunSide: Click Fine Tuning in menu/tray\n    BunSide->>BunSide: findAppMenuEntryBySlug(training) hasDetailsPage:true\n    BunSide->>Renderer: desktopAppDetailsRequested slug:training\n    Renderer->>Renderer: setAppsDetailsSlug(training)\n    Renderer->>Renderer: AppDetailsView slug=training\n    Renderer->>Renderer: resolveAppFromSlug — looks for windowPath==/apps/training — NO MATCH\n    Renderer->>Renderer: Falls to catalog, windowPath:/apps/training\n    User->>Renderer: Clicks Launch\n    Renderer->>BunSide: openAppWindow path:/apps/training\n    BunSide->>AppWin: Open window at /apps/training\n    AppWin->>AppWin: resolveInternalToolTabFromSlug(training) NO MATCH\n    AppWin->>AppWin: Falls to RegistryAppWindowView — wrong!\n    Note over AppWin: FineTuningView never rendered\n```\n</details>\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=Fix%20the%20following%202%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%202%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppDetailsView.tsx%3A287-305%0A**%60resolveAppFromSlug%60%20slug%20%E2%89%A0%20windowPath%20segment%20breaks%20%22Fine%20Tuning%22%20and%20%22Steward%22%20details%20pages**%0A%0AThe%20internal-tool%20lookup%20uses%20%60d.windowPath%20%3D%3D%3D%20%5C%60%2Fapps%2F%24%7Bslug%7D%5C%60%60%20but%20two%20of%20the%20four%20%60hasDetailsPage%3A%20true%60%20apps%20have%20slugs%20that%20don't%20match%20their%20%60windowPath%60%20last%20segment%3A%0A-%20%60APP_MENU_ENTRIES%60%20slug%20%60%22training%22%60%20%E2%86%92%20%60INTERNAL_TOOL_APPS%60%20has%20%60windowPath%3A%20%22%2Fapps%2Ffine-tuning%22%60%20%E2%86%92%20lookup%20finds%20nothing%0A-%20%60APP_MENU_ENTRIES%60%20slug%20%60%22steward%22%60%20%E2%86%92%20%60INTERNAL_TOOL_APPS%60%20has%20%60windowPath%3A%20%22%2Fapps%2Finventory%22%60%20%E2%86%92%20lookup%20finds%20nothing%0A%0AThe%20lookup%20falls%20through%20to%20the%20catalog%20path%2C%20which%20derives%20%60windowPath%3A%20%22%2Fapps%2Ftraining%22%60.%20When%20the%20Launch%20button%20calls%20%60openAppWindow%28%7B%20path%3A%20%22%2Fapps%2Ftraining%22%20%7D%29%60%2C%20%60AppWindowRenderer%60%20resolves%20slug%20%60%22training%22%60%20via%20%60resolveInternalToolTabFromSlug%60%2C%20which%20also%20uses%20%60descriptor.windowPath%20%3D%3D%3D%20%22%2Fapps%2Ftraining%22%60%20%E2%80%94%20again%20no%20match%20%E2%80%94%20so%20it%20falls%20through%20to%20%60RegistryAppWindowView%60%20and%20tries%20to%20%60client.launchApp%60%20instead%20of%20rendering%20%60FineTuningView%60%20%2F%20%60InventoryView%60.%0A%0AThe%20fix%20is%20to%20also%20match%20by%20slug%20derived%20from%20the%20package%20name%3A%0A%0A%60%60%60ts%0Aconst%20internal%20%3D%20getInternalToolAppDescriptors%28%29.find%28%0A%20%20%28d%29%20%3D%3E%0A%20%20%20%20d.windowPath%20%3D%3D%3D%20%60%2Fapps%2F%24%7Bslug%7D%60%20%7C%7C%0A%20%20%20%20pluginIdFromName%28d.name%29%20%3D%3D%3D%20slug%2C%0A%29%3B%0A%60%60%60%0A%0A%60%22elizamaker%22%60%20and%20%60%22lifeops%22%60%20are%20unaffected%20because%20their%20slugs%20coincidentally%20match%20their%20%60windowPath%60%20segments.%0A%0A%23%23%23%20Issue%202%20of%202%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppsView.tsx%3A738-753%0A**%60handleLaunch%60%20details-page%20redirect%20doesn't%20update%20%60appsDetailsSlug%60%20state%20in%20non-hash%20routing%20mode**%0A%0AWhen%20a%20catalog-card%20click%20hits%20%60appNeedsDetailsPage%60%2C%20the%20handler%20calls%20%60pushAppsUrl%28slug%2C%20%22details%22%29%60%20and%20returns.%20In%20non-hash%20routing%20mode%20this%20calls%20%60window.history.replaceState%60%2C%20which%20fires%20neither%20%60hashchange%60%20nor%20%60popstate%60.%20The%20%60appsDetailsSlug%60%20state%20never%20updates%2C%20so%20%60AppDetailsView%60%20never%20mounts%20%E2%80%94%20the%20user%20sees%20the%20catalog%20grid%20with%20a%20changed%20URL.%0A%0AThe%20%60desktopAppDetailsRequested%60%20handler%20already%20acknowledges%20this%20exact%20problem%20and%20includes%20the%20direct%20state%20update%3A%0A%0A%60%60%60ts%0A%2F%2F%20desktopAppDetailsRequested%20handler%3A%0AsetAppsDetailsSlug%28slug%29%3B%0ApushAppsUrl%28slug%2C%20%22details%22%29%3B%0A%60%60%60%0A%0AThe%20same%20fix%20needs%20to%20be%20applied%20in%20%60handleLaunch%60%3A%0A%0A%60%60%60ts%0Aif%20%28!isAppWindow%20%26%26%20appNeedsDetailsPage%28app.name%29%29%20%7B%0A%20%20const%20slug%20%3D%20getAppSlug%28app.name%29%3B%0A%20%20pushRecentApp%28app.name%29%3B%0A%20%20setState%28%22appsSubTab%22%2C%20%22browse%22%29%3B%0A%20%20setAppsDetailsSlug%28slug%29%3B%20%20%20%2F%2F%20add%20this%0A%20%20pushAppsUrl%28slug%2C%20%22details%22%29%3B%0A%20%20return%3B%0A%7D%0A%60%60%60%0A%0A&repo=elizaos%2Feliza&pr=7115&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\"><img alt=\"Fix All in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fapps-native-windows%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fapps-native-windows%22.%0A%0AFix%20the%20following%202%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%202%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppDetailsView.tsx%3A287-305%0A**%60resolveAppFromSlug%60%20slug%20%E2%89%A0%20windowPath%20segment%20breaks%20%22Fine%20Tuning%22%20and%20%22Steward%22%20details%20pages**%0A%0AThe%20internal-tool%20lookup%20uses%20%60d.windowPath%20%3D%3D%3D%20%5C%60%2Fapps%2F%24%7Bslug%7D%5C%60%60%20but%20two%20of%20the%20four%20%60hasDetailsPage%3A%20true%60%20apps%20have%20slugs%20that%20don't%20match%20their%20%60windowPath%60%20last%20segment%3A%0A-%20%60APP_MENU_ENTRIES%60%20slug%20%60%22training%22%60%20%E2%86%92%20%60INTERNAL_TOOL_APPS%60%20has%20%60windowPath%3A%20%22%2Fapps%2Ffine-tuning%22%60%20%E2%86%92%20lookup%20finds%20nothing%0A-%20%60APP_MENU_ENTRIES%60%20slug%20%60%22steward%22%60%20%E2%86%92%20%60INTERNAL_TOOL_APPS%60%20has%20%60windowPath%3A%20%22%2Fapps%2Finventory%22%60%20%E2%86%92%20lookup%20finds%20nothing%0A%0AThe%20lookup%20falls%20through%20to%20the%20catalog%20path%2C%20which%20derives%20%60windowPath%3A%20%22%2Fapps%2Ftraining%22%60.%20When%20the%20Launch%20button%20calls%20%60openAppWindow%28%7B%20path%3A%20%22%2Fapps%2Ftraining%22%20%7D%29%60%2C%20%60AppWindowRenderer%60%20resolves%20slug%20%60%22training%22%60%20via%20%60resolveInternalToolTabFromSlug%60%2C%20which%20also%20uses%20%60descriptor.windowPath%20%3D%3D%3D%20%22%2Fapps%2Ftraining%22%60%20%E2%80%94%20again%20no%20match%20%E2%80%94%20so%20it%20falls%20through%20to%20%60RegistryAppWindowView%60%20and%20tries%20to%20%60client.launchApp%60%20instead%20of%20rendering%20%60FineTuningView%60%20%2F%20%60InventoryView%60.%0A%0AThe%20fix%20is%20to%20also%20match%20by%20slug%20derived%20from%20the%20package%20name%3A%0A%0A%60%60%60ts%0Aconst%20internal%20%3D%20getInternalToolAppDescriptors%28%29.find%28%0A%20%20%28d%29%20%3D%3E%0A%20%20%20%20d.windowPath%20%3D%3D%3D%20%60%2Fapps%2F%24%7Bslug%7D%60%20%7C%7C%0A%20%20%20%20pluginIdFromName%28d.name%29%20%3D%3D%3D%20slug%2C%0A%29%3B%0A%60%60%60%0A%0A%60%22elizamaker%22%60%20and%20%60%22lifeops%22%60%20are%20unaffected%20because%20their%20slugs%20coincidentally%20match%20their%20%60windowPath%60%20segments.%0A%0A%23%23%23%20Issue%202%20of%202%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppsView.tsx%3A738-753%0A**%60handleLaunch%60%20details-page%20redirect%20doesn't%20update%20%60appsDetailsSlug%60%20state%20in%20non-hash%20routing%20mode**%0A%0AWhen%20a%20catalog-card%20click%20hits%20%60appNeedsDetailsPage%60%2C%20the%20handler%20calls%20%60pushAppsUrl%28slug%2C%20%22details%22%29%60%20and%20returns.%20In%20non-hash%20routing%20mode%20this%20calls%20%60window.history.replaceState%60%2C%20which%20fires%20neither%20%60hashchange%60%20nor%20%60popstate%60.%20The%20%60appsDetailsSlug%60%20state%20never%20updates%2C%20so%20%60AppDetailsView%60%20never%20mounts%20%E2%80%94%20the%20user%20sees%20the%20catalog%20grid%20with%20a%20changed%20URL.%0A%0AThe%20%60desktopAppDetailsRequested%60%20handler%20already%20acknowledges%20this%20exact%20problem%20and%20includes%20the%20direct%20state%20update%3A%0A%0A%60%60%60ts%0A%2F%2F%20desktopAppDetailsRequested%20handler%3A%0AsetAppsDetailsSlug%28slug%29%3B%0ApushAppsUrl%28slug%2C%20%22details%22%29%3B%0A%60%60%60%0A%0AThe%20same%20fix%20needs%20to%20be%20applied%20in%20%60handleLaunch%60%3A%0A%0A%60%60%60ts%0Aif%20%28!isAppWindow%20%26%26%20appNeedsDetailsPage%28app.name%29%29%20%7B%0A%20%20const%20slug%20%3D%20getAppSlug%28app.name%29%3B%0A%20%20pushRecentApp%28app.name%29%3B%0A%20%20setState%28%22appsSubTab%22%2C%20%22browse%22%29%3B%0A%20%20setAppsDetailsSlug%28slug%29%3B%20%20%20%2F%2F%20add%20this%0A%20%20pushAppsUrl%28slug%2C%20%22details%22%29%3B%0A%20%20return%3B%0A%7D%0A%60%60%60%0A%0A\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\"><img alt=\"Fix All in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=Fix%20the%20following%202%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%202%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppDetailsView.tsx%3A287-305%0A**%60resolveAppFromSlug%60%20slug%20%E2%89%A0%20windowPath%20segment%20breaks%20%22Fine%20Tuning%22%20and%20%22Steward%22%20details%20pages**%0A%0AThe%20internal-tool%20lookup%20uses%20%60d.windowPath%20%3D%3D%3D%20%5C%60%2Fapps%2F%24%7Bslug%7D%5C%60%60%20but%20two%20of%20the%20four%20%60hasDetailsPage%3A%20true%60%20apps%20have%20slugs%20that%20don't%20match%20their%20%60windowPath%60%20last%20segment%3A%0A-%20%60APP_MENU_ENTRIES%60%20slug%20%60%22training%22%60%20%E2%86%92%20%60INTERNAL_TOOL_APPS%60%20has%20%60windowPath%3A%20%22%2Fapps%2Ffine-tuning%22%60%20%E2%86%92%20lookup%20finds%20nothing%0A-%20%60APP_MENU_ENTRIES%60%20slug%20%60%22steward%22%60%20%E2%86%92%20%60INTERNAL_TOOL_APPS%60%20has%20%60windowPath%3A%20%22%2Fapps%2Finventory%22%60%20%E2%86%92%20lookup%20finds%20nothing%0A%0AThe%20lookup%20falls%20through%20to%20the%20catalog%20path%2C%20which%20derives%20%60windowPath%3A%20%22%2Fapps%2Ftraining%22%60.%20When%20the%20Launch%20button%20calls%20%60openAppWindow%28%7B%20path%3A%20%22%2Fapps%2Ftraining%22%20%7D%29%60%2C%20%60AppWindowRenderer%60%20resolves%20slug%20%60%22training%22%60%20via%20%60resolveInternalToolTabFromSlug%60%2C%20which%20also%20uses%20%60descriptor.windowPath%20%3D%3D%3D%20%22%2Fapps%2Ftraining%22%60%20%E2%80%94%20again%20no%20match%20%E2%80%94%20so%20it%20falls%20through%20to%20%60RegistryAppWindowView%60%20and%20tries%20to%20%60client.launchApp%60%20instead%20of%20rendering%20%60FineTuningView%60%20%2F%20%60InventoryView%60.%0A%0AThe%20fix%20is%20to%20also%20match%20by%20slug%20derived%20from%20the%20package%20name%3A%0A%0A%60%60%60ts%0Aconst%20internal%20%3D%20getInternalToolAppDescriptors%28%29.find%28%0A%20%20%28d%29%20%3D%3E%0A%20%20%20%20d.windowPath%20%3D%3D%3D%20%60%2Fapps%2F%24%7Bslug%7D%60%20%7C%7C%0A%20%20%20%20pluginIdFromName%28d.name%29%20%3D%3D%3D%20slug%2C%0A%29%3B%0A%60%60%60%0A%0A%60%22elizamaker%22%60%20and%20%60%22lifeops%22%60%20are%20unaffected%20because%20their%20slugs%20coincidentally%20match%20their%20%60windowPath%60%20segments.%0A%0A%23%23%23%20Issue%202%20of%202%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppsView.tsx%3A738-753%0A**%60handleLaunch%60%20details-page%20redirect%20doesn't%20update%20%60appsDetailsSlug%60%20state%20in%20non-hash%20routing%20mode**%0A%0AWhen%20a%20catalog-card%20click%20hits%20%60appNeedsDetailsPage%60%2C%20the%20handler%20calls%20%60pushAppsUrl%28slug%2C%20%22details%22%29%60%20and%20returns.%20In%20non-hash%20routing%20mode%20this%20calls%20%60window.history.replaceState%60%2C%20which%20fires%20neither%20%60hashchange%60%20nor%20%60popstate%60.%20The%20%60appsDetailsSlug%60%20state%20never%20updates%2C%20so%20%60AppDetailsView%60%20never%20mounts%20%E2%80%94%20the%20user%20sees%20the%20catalog%20grid%20with%20a%20changed%20URL.%0A%0AThe%20%60desktopAppDetailsRequested%60%20handler%20already%20acknowledges%20this%20exact%20problem%20and%20includes%20the%20direct%20state%20update%3A%0A%0A%60%60%60ts%0A%2F%2F%20desktopAppDetailsRequested%20handler%3A%0AsetAppsDetailsSlug%28slug%29%3B%0ApushAppsUrl%28slug%2C%20%22details%22%29%3B%0A%60%60%60%0A%0AThe%20same%20fix%20needs%20to%20be%20applied%20in%20%60handleLaunch%60%3A%0A%0A%60%60%60ts%0Aif%20%28!isAppWindow%20%26%26%20appNeedsDetailsPage%28app.name%29%29%20%7B%0A%20%20const%20slug%20%3D%20getAppSlug%28app.name%29%3B%0A%20%20pushRecentApp%28app.name%29%3B%0A%20%20setState%28%22appsSubTab%22%2C%20%22browse%22%29%3B%0A%20%20setAppsDetailsSlug%28slug%29%3B%20%20%20%2F%2F%20add%20this%0A%20%20pushAppsUrl%28slug%2C%20%22details%22%29%3B%0A%20%20return%3B%0A%7D%0A%60%60%60%0A%0A&pr=7115&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\"><img alt=\"Fix All in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n<sub>Reviews (3): Last reviewed commit: [\"perf(bundle): drop dead lazy() wrappers,...\"](https://github.com/elizaos/eliza/commit/20426a2ad7a447cb082aacf042989493e0aaee30) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=29760088)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "id": "PR_kwDOMT5cIs7WiBUb",
+      "title": "feat(local-agent-on-android): full @elizaos/agent runs on the phone",
+      "author": "lalalune",
+      "number": 7172,
+      "body": "Five-phase landing of the local-agent-on-Android architecture proven by the spike in scripts/spike-android-agent/ and documented in docs/agent-on-mobile.md.\r\n\r\nPhase A — APK asset pipeline (run-mobile-build.mjs + scripts/lib/stage-android-agent.mjs): pinned bun-1.3.13 + Alpine v3.21 musl loader + libstdc++ + libgcc fetched per ABI, cached under ~/.cache/milady-android-agent/, staged into apps/app/android/app/src/ main/assets/agent/{x86_64,arm64-v8a}/ with idempotent re-runs. ~190 MB across both ABIs.\r\n\r\nPhase B — MiladyAgentService.java foreground service: extracts assets to /data/data/<pkg>/files/agent/ at first launch, chmods the bun binary\r\n+ musl loader + launch.sh, ProcessBuilder-spawns bun with the spike's proven invocation pattern, pumps stdout/stderr to logcat + agent.log, runs a watchdog that polls process.isAlive() + http://127.0.0.1:31337/ api/health every 10 s with exponential-backoff restart up to 5 attempts, SIGTERM/SIGKILL on shutdown. FOREGROUND_SERVICE_SPECIAL_USE gated to API 34+ (minSdk=26). Wired into MiladyBootReceiver (BOOT_COMPLETED) and MainActivity.onCreate(). Includes integration step: Service calls SELinux.restoreconRecursive(filesDir + \"/agent\") via reflection after extraction so Phase C's domain transition fires.\r\n\r\nPhase D — agent payload (eliza/packages/agent/scripts/build-mobile- bundle.mjs + mobile-stubs/): bun-build of @elizaos/agent with native deps (node-llama-cpp, sharp, onnxruntime-node, @huggingface/ transformers, puppeteer-core, pty-manager, canvas) replaced by CJS stubs that re-export the names the runtime statically imports. Mobile core-plugin allowlist of @elizaos/plugin-sql + AI providers; plugin- collector restricts the load set so dynamic imports of unbundled packages are impossible. isMobilePlatform() helper in @elizaos/shared gates ~20 child_process.spawn sites (n8n sidecar, telegram polling, embedding warmup, sandbox, signal-pairing, app-route registration, trigger bridges, training crons). MILADY_DISABLE_DIRECT_RUN flattens the runtime/eliza.ts self-invocation so the bundle's bin.ts→cli stays the entry point. Bundle boots on the cuttlefish, completes PGlite migrations, answers /api/health with {\"ready\":true,\"runtime\":\"ok\", \"database\":\"ok\",...}.\r\n\r\nPhase E — UI mode wiring (mobile-runtime-mode.ts + RuntimeGate.tsx + probe-local-agent.ts + platform/init.ts): \"local\" added to MobileRuntimeMode union, async probe-driven local-tile gating with 30 s memo + inflight dedupe + spinner placeholder, mobile-friendly copy (\"Local Agent (Beta)\" / \"ON DEVICE\") gated on isAndroid, finishAsLocal() pins apiBase=http://127.0.0.1:31337 and persists mobile-runtime-mode + active-server side-channel for auto-resume on next launch. canHostLocalAgent() helper. 4 new i18n keys × 7 locales. 20 onboarding tests pass. client-base.setBaseUrl() now mirrors apiBase to window.__ELIZA_API_BASE__ via setElizaApiBase()/ clearElizaApiBase() so the Capacitor agent plugin web fallback resolves the right base on Android (was the Phase E caveat).\r\n\r\nStage-android-agent.mjs prefers eliza/packages/agent/dist-mobile/ agent-bundle.js when present (Phase D's real bundle) and falls back to the spike's stub server.js — so a bare Milady checkout still builds, with `bun run --cwd eliza/packages/agent build:mobile` producing the real payload. PGlite vector.tar.gz and fuzzystrmatch.tar.gz are staged into the assets root and MiladyAgentService extracts them ONE DIR ABOVE the bundle so PGlite's `new URL(\"../X.tar.gz\", import.meta.url)` resolves on- device. dist-mobile/ is gitignored — build artifact only.\r\n\r\n<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR lands the five-phase local-agent-on-Android architecture: APK asset pipeline (bun + musl binaries staged via `stage-android-agent.mjs`), a `MiladyAgentService` foreground service that extracts and supervises the bun process, a mobile-safe agent bundle build (`build-mobile-bundle.mjs`), and a probe-driven \"Local Agent\" tile in `RuntimeGate`.\n\n- **P1 — tile never appears on Android**: `probeLocalAgent` checks `body.ok === true` but the real `/api/health` endpoint always returns `{ ready: boolean, ... }` with no `ok` field. Every probe call returns `false`, the local tile is never shown, and all associated tests pass only because they share the same wrong mock field.\n- **P1 — `restartAttempts` data race**: `MiladyAgentService.restartAttempts` is a plain `int` read and written from the main thread, `WatchdogThread`, and anonymous restart threads without `volatile` or synchronisation, risking unbounded restart loops or premature give-up.\n- **P1 — partial-write leaves corrupt binaries**: `copyAssetIfMissing` uses `length() > 0` as its idempotency guard; a mid-copy crash leaves a truncated `bun` or musl loader that is silently reused on every subsequent launch.\n\n<h3>Confidence Score: 2/5</h3>\n\nNot safe to merge — three P1 issues mean the Local Agent tile is permanently invisible on Android and the service has correctness/reliability bugs.\n\nThree independent P1 findings: a field mismatch that makes the entire feature invisible at runtime, a data race in the restart-counter logic, and a partial-write hazard that can permanently corrupt the extracted bun binary. Any one alone yields a P1 ceiling of 4; three together pull the score to 2.\n\nprobe-local-agent.ts (wrong field check), MiladyAgentService.java (race + partial-write), probe-local-agent.test.ts (mocks must be updated alongside the fix).\n\n<details open><summary><h3>Security Review</h3></summary>\n\n- **Supply-chain risk** (`stage-android-agent.mjs`): the bun binary is fetched from GitHub releases and Alpine packages are fetched by parsing an HTML index page — neither download is verified against a pinned checksum or signature. A tampered artifact would be staged directly into the APK and shipped to devices.\n- No issues found with secrets handling, injection, or auth/authz in the changed TypeScript/Java code.\n</details>\n\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/onboarding/probe-local-agent.ts | New liveness probe for on-device agent — checks `body.ok` but the health endpoint returns `body.ready`; the Local Agent tile will never appear on Android until fixed. |\n| packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java | New 774-line foreground service managing the bun agent process — has a `restartAttempts` data race across threads and a partial-write vulnerability in asset extraction that can leave corrupt binaries. |\n| packages/app-core/test/onboarding/probe-local-agent.test.ts | New probe unit tests — all mocks use `{ ok: true }` which does not match the real health endpoint shape `{ ready: true, ... }`; tests pass only because the implementation and mocks share the same wrong field. |\n| packages/app-core/scripts/lib/stage-android-agent.mjs | New APK asset staging script — downloads bun and Alpine musl binaries without checksum verification; otherwise idempotent and well-structured. |\n| packages/app-core/src/components/shell/RuntimeGate.tsx | Adds async probe-driven local-tile gating, spinner placeholder, and Android-specific finishAsLocal flow that pins apiBase to loopback — looks correct. |\n| packages/agent/scripts/build-mobile-bundle.mjs | New Bun.build pipeline for the Android agent payload — stub-resolver plugin, core-dedupe plugin, and PGlite asset copy look well-reasoned. |\n| packages/agent/src/runtime/plugin-collector.ts | Adds mobile-platform branch that substitutes MOBILE_CORE_PLUGINS and filters the final set to a curated allowlist — logic is clean. |\n| packages/shared/src/runtime-env.ts | Adds isMobilePlatform() and isAndroidMobile() helpers keyed on MILADY_PLATFORM env var — straightforward and correct. |\n| packages/app-core/platforms/android/app/src/main/AndroidManifest.xml | Adds MiladyAgentService declaration with specialUse foreground type and the required FOREGROUND_SERVICE_SPECIAL_USE permission — correct for API 34+. |\n| packages/app-core/src/api/client-base.ts | Mirrors apiBase to window.__ELIZA_API_BASE__ via setElizaApiBase/clearElizaApiBase on every setBaseUrl() call — clean fix for the Capacitor web-plugin fallback. |\n\n</details>\n\n\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (2)</h3></summary>\n\n1. `packages/app-core/src/onboarding/probe-local-agent.ts`, line 938-943 ([link](https://github.com/elizaos/eliza/blob/402f552da412cb94b1b439dad365e01a88741d10/packages/app-core/src/onboarding/probe-local-agent.ts#L938-L943)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Probe checks `body.ok` but health endpoint returns `body.ready`**\n\n   `probeLocalAgent` returns `true` only when `body.ok === true`, but `packages/agent/src/api/health-routes.ts` always serialises `{ ready: boolean, runtime: \"ok\"|\"not_initialized\", ... }` — there is no `ok` field. Every real agent response will cause `(body as { ok?: unknown }).ok === true` to evaluate to `false`, so `shouldShowLocalOption()` never grants the tile on Android.\n\n   The test mocks `{ ok: true }` so it passes, but it doesn't match the actual server response shape. The probe condition should be `(body as { ready?: unknown }).ready === true`.\n\n\n2. `packages/app-core/scripts/lib/stage-android-agent.mjs`, line 540-553 ([link](https://github.com/elizaos/eliza/blob/402f552da412cb94b1b439dad365e01a88741d10/packages/app-core/scripts/lib/stage-android-agent.mjs#L540-L553)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> <a href=\"#\"><img alt=\"security\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/Security.svg?v=1\" align=\"top\"></a> **Downloaded binaries have no checksum verification**\n\n   `ensureBunBinary` fetches the bun zip from GitHub over HTTPS and immediately unzips it without verifying any hash or signature. Similarly, the Alpine APK URLs are resolved by scraping an HTML index with a regex — if the CDN returns a different file (or the download is intercepted), a tampered binary is staged directly into the APK assets.\n\n   Consider pinning the expected SHA-256 of each release artifact and verifying with `crypto.subtle.digest` or `shasum -c` before extracting.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(local-agent-on-android): full @eliz...\"](https://github.com/elizaos/eliza/commit/402f552da412cb94b1b439dad365e01a88741d10) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30106132)</sub>\n\n> Greptile also left **3 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-04-26T13:55:04Z",
-      "mergedAt": "2026-04-26T18:59:43Z",
-      "additions": 3711,
-      "deletions": 1787
-    },
-    {
-      "id": "PR_kwDOMT5cIs7VtqDi",
-      "title": "feat(app-core): apps open in dedicated native windows + App Details page",
-      "author": "Dexploarer",
-      "number": 7114,
-      "body": "## Summary\n\n- Every app — internal tool, overlay, registry/catalog — launches in its own Electrobun BrowserWindow with slug-based dedupe and persisted bounds.\n- New `AppWindowRenderer` mounts only the app's content (no surrounding Milady shell chrome) when the URL has `appWindow=1` + `/apps/<slug>`.\n- New `AppDetailsView` page (config + diagnostics + widget toggles + Launch button) for apps that declare `hasDetailsPage: true`. Zero-config viewers (Plugin Viewer, Skills Viewer, etc.) keep direct-launch behavior.\n- Application menu and tray expose every known app via a single Apps menu (replaces per-surface menus).\n- `<scheme>://apps/<slug>` deep links route via `findAppMenuEntryBySlug` + `getDesktopManager().openAppWindow`.\n- Per-slug window bounds persistence in `userData/app-window-bounds.json` (debounced 500ms saves on resize/move).\n- New `BoundsStore` interface in `surface-windows.ts` lets the manager stay pure and unit-testable; concrete fs-backed implementation lives in the bun entry.\n\n## Architecture\n\n**Renderer**\n- `AppWindowRenderer` (new): three-branch full-bleed component. Resolves slug → (a) lazy-loaded internal-tool tab component; (b) overlay's `Component` with `exitToApps={() => window.close()}`; (c) catalog app's viewer iframe with full postMessage auth handshake mirroring `GameViewOverlay`.\n- `AppDetailsView` (new, ~510 lines): Header (hero/name/source/running-count) → About (description + capabilities chips) → Recent Runs → Launch Diagnostics (last 5 from new `launch-history.ts` ring buffer) → Widgets (own plugin's widgets with enable toggle via existing chat-sidebar visibility store + collapsible live preview using `getWidgetComponent`) → Config (launch mode + always-on-top) → Launch button.\n- `internal-tool-apps`: declares `windowPath` per tool + new `hasDetailsPage?: boolean` field. Marked true for LifeOps, Fine Tuning, Steward, ElizaMaker.\n- New helpers: `getInternalToolAppHasDetailsPage`, `getInternalToolAppWindowPath`, `getInternalToolAppDescriptors`.\n- `AppsView`: `parseAppsRoute` recognises `/apps/<slug>/details`; `appsDetailsSlug` state with hashchange/popstate listeners; `pushAppsUrl(slug, \"details\")` overload; `handleLaunch` checks `appNeedsDetailsPage` first.\n\n**Bun**\n- `desktopOpenAppWindow` accepts `slug`; threaded through `DesktopManager` → `SurfaceWindowManager` → `ManagedWindowRecord`. Slug-based dedupe focuses an existing window instead of spawning a duplicate.\n- `BoundsStore` interface + optional `boundsStore` option on `SurfaceWindowManagerOptions`. `createManagedWindow` restores saved frame on slug match; `resize`/`move` listeners save with 500ms debounce. Frame validation rejects minimized-state geometry.\n- Per-surface submenus (Chat / Plugins / Connectors / Triggers / Cloud / Browser) replaced with a unified Apps menu. Bun-side `APP_MENU_ENTRIES` mirror keeps the renderer module out of the bun bundle and gains `hasDetailsPage`.\n- Tray gains one entry per app (`tray-app-<slug>`), routed through `handleApplicationMenuAction`.\n- `apps:<slug>` / `tray-app-<slug>` dispatchers respect `entry.hasDetailsPage`: if true, restore main window + send `desktopAppDetailsRequested` event; else direct `openAppWindow`.\n- `setupDeepLinks` recognises `<scheme>://apps/<slug>` and opens the matching window. Unrecognised URLs still fall through to `shareTargetReceived`.\n\n## Compat\n\nBranch is currently merged with upstream develop (commit `4e110bcb5b`). The 4 conflicts in `AppsView.tsx` were resolved as follows:\n\n- State decl: kept upstream's new `appWindowLaunchEnabled` + this branch's setter-less `appWindowAlwaysOnTop` (the global \"Keep new windows on top\" toggle was removed at the user's request — per-window pin in the running-windows list remains).\n- Handlers: dropped upstream's revived `handleAppWindowAlwaysOnTopChange` (no UI for it any more); kept new `handleAppWindowLaunchEnabledChange`.\n- `openAppRouteWindow`: kept this branch's windowPath dispatch; added upstream's `!appWindowLaunchEnabled` gate at the top so the new toggle works.\n- Header UI: kept upstream's \"Open apps in windows\" toggle; dropped the re-added \"Keep new windows on top\" one.\n\n## Test plan\n\n- [ ] Click any app on the apps page → opens in its own native window with no Milady shell chrome\n- [ ] Re-clicking same app focuses existing window (no duplicate)\n- [ ] Resize/move an app window, close it, relaunch → restores last bounds\n- [ ] Click LifeOps / Fine Tuning / Steward / ElizaMaker → routes to `/apps/<slug>/details` (config + Launch button) instead of launching\n- [ ] Toggle launch mode in details, click Launch → opens in chosen mode (window or inline)\n- [ ] Toggle a widget visibility from details → reflected in chat sidebar\n- [ ] Apps menu / tray show every app; details-having entries open the details page; others launch directly\n- [ ] `open elizaos://apps/plugins` from terminal opens Plugin Viewer\n- [ ] Web fallback (open in browser) still uses iframe + sidebar tab path\n- [ ] All app-core tests green (`bun test packages/app-core`)\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR introduces dedicated native app windows with slug-based deduplication and bounds persistence, a new `AppDetailsView` for config/diagnostics before launch, a unified Apps menu/tray replacing per-surface submenus, and `<scheme>://apps/<slug>` deep-link routing. The architecture is well-structured — `BoundsStore` is correctly injected for testability, the `desktopAppDetailsRequested` listener now calls `setAppsDetailsSlug` directly (fixing the prior hash-navigation race), and deep links now correctly respect `hasDetailsPage`.\n\n- **P1 — `resolveAppFromSlug` slug mismatch:** Two of the four `hasDetailsPage: true` apps (Steward, slug `\\\"steward\\\"`, windowPath `/apps/inventory`; Fine Tuning, slug `\\\"training\\\"`, windowPath `/apps/fine-tuning`) will fail to resolve on the details page because the lookup compares `d.windowPath === \\\\`/apps/${slug}\\\\`` — fix by matching with `getAppSlug(d.name) === slug` instead.\n</details>\n\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge after fixing the slug-matching bug in AppDetailsView; the Steward and Fine Tuning details pages will otherwise render as perpetual loading spinners.\n\nOne confirmed P1 logic bug: `resolveAppFromSlug` fails for two of the four apps that declare `hasDetailsPage: true`. The rest of the architecture — bounds persistence, dedup, deep links, menu restructuring — is solid. P2s (dedup filter order, debounce cleanup) are non-blocking.\n\n`packages/app-core/src/components/pages/AppDetailsView.tsx` — the `resolveAppFromSlug` function at lines 91-136 needs the slug-matching fix.\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/components/pages/AppDetailsView.tsx | New ~660-line details page for apps with `hasDetailsPage: true`. Contains a P1 slug-matching bug in `resolveAppFromSlug` that causes Steward and Fine Tuning to fail to resolve their app info. |\n| packages/app-core/platforms/electrobun/src/index.ts | Adds bounds store wiring, deep-link handler, and menu/tray app routing. Deep link now correctly respects `hasDetailsPage`. Bounds `isFrame` guard covers both x and y axes. |\n| packages/app-core/platforms/electrobun/src/surface-windows.ts | Adds `BoundsStore` interface, slug-based window deduplication, and resize/move persistence with 500 ms debounce. Debounce timer not cleaned up on window close (P2). |\n| packages/app-core/src/components/apps/useRegistryCatalog.ts | New shared hook with module-level promise coalescing. Dedup filter retains later duplicates (serverApps wins over catalogApps) which may be unintentional. |\n| packages/app-core/src/components/pages/AppsView.tsx | Adds `parseAppsRoute`, `appsDetailsSlug` state, and `desktopAppDetailsRequested` listener that now calls `setAppsDetailsSlug` directly (fixing the hash-navigation race noted in prior review). |\n| packages/app-core/src/shell/AppWindowRenderer.tsx | New three-branch renderer for slug-resolved app windows (internal tool tab / overlay Component / catalog iframe). Catalog fetch is self-contained per the shared `useRegistryCatalog` hook. |\n| apps/app/src/main.tsx | Adds `AppWindowRenderer` mount branch for `appWindow=1` + `/apps/<slug>` URLs. `resolveAppWindowSlug` strips query and hash but not sub-path segments (prior comment). |\n\n</details>\n\n\n</details>\n\n\n<details><summary><h3>Flowchart</h3></summary>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[\"User clicks app\\n(menu / tray / UI)\"] --> B{hasDetailsPage?}\n    B -- Yes --> C[\"restoreWindow()\\n+ send desktopAppDetailsRequested\"]\n    B -- No --> D[\"openAppWindow(slug)\"]\n    C --> E[\"AppsView listener\\nsetAppsDetailsSlug(slug)\\npushAppsUrl(slug, 'details')\"]\n    E --> F[\"AppDetailsView renders\"]\n    F --> G{launchMode}\n    G -- window --> H[\"invokeDesktopBridgeRequest\\ndesktopOpenAppWindow\"]\n    G -- inline --> I[\"setTab / setState\\nactiveOverlayApp\"]\n    D --> J[\"SurfaceWindowManager\\nopenAppWindow\"]\n    H --> J\n    J --> K{slug already open?}\n    K -- Yes --> L[\"window.focus()\"]\n    K -- No --> M[\"createWindow()\\nrestore saved bounds\"]\n    M --> N[\"on resize/move\\ndebounced save → BoundsStore\"]\n    subgraph AppWindowRenderer\n        O[\"resolveAppWindowSlug()\\nfrom URL hash\"] --> P{source type}\n        P -- internal-tool --> Q[\"lazy tab component\"]\n        P -- overlay --> R[\"overlay Component\"]\n        P -- catalog --> S[\"iframe + postMessage auth\"]\n    end\n```\n</details>\n\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (3)</h3></summary>\n\n1. `packages/app-core/platforms/electrobun/src/index.ts`, line 499-512 ([link](https://github.com/elizaos/eliza/blob/5d940f2800e459767b5a6630e6c5ac638729b4e8/packages/app-core/platforms/electrobun/src/index.ts#L499-L512)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Deep link bypasses `hasDetailsPage` UX**\n\n   `handleDeepLink` always calls `openAppWindow` directly, even for apps like `lifeops` or `fine-tuning` that declare `hasDetailsPage: true`. The menu/tray handler checks that flag and routes to the details page instead; deep links skip it entirely. A user who runs `open elizaos://apps/lifeops` gets the LifeOps app window directly with no config review, inconsistent with a menu/tray click for the same app.\n\n   <a href=\"https://app.greptile.com/ide/claude-code?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Findex.ts%0ALine%3A%20499-512%0A%0AComment%3A%0A**Deep%20link%20bypasses%20%60hasDetailsPage%60%20UX**%0A%0A%60handleDeepLink%60%20always%20calls%20%60openAppWindow%60%20directly%2C%20even%20for%20apps%20like%20%60lifeops%60%20or%20%60fine-tuning%60%20that%20declare%20%60hasDetailsPage%3A%20true%60.%20The%20menu%2Ftray%20handler%20checks%20that%20flag%20and%20routes%20to%20the%20details%20page%20instead%3B%20deep%20links%20skip%20it%20entirely.%20A%20user%20who%20runs%20%60open%20elizaos%3A%2F%2Fapps%2Flifeops%60%20gets%20the%20LifeOps%20app%20window%20directly%20with%20no%20config%20review%2C%20inconsistent%20with%20a%20menu%2Ftray%20click%20for%20the%20same%20app.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&repo=elizaos%2Feliza&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=2\"><img alt=\"Fix in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fapps-native-windows%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fapps-native-windows%22.%0A%0AThis%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Findex.ts%0ALine%3A%20499-512%0A%0AComment%3A%0A**Deep%20link%20bypasses%20%60hasDetailsPage%60%20UX**%0A%0A%60handleDeepLink%60%20always%20calls%20%60openAppWindow%60%20directly%2C%20even%20for%20apps%20like%20%60lifeops%60%20or%20%60fine-tuning%60%20that%20declare%20%60hasDetailsPage%3A%20true%60.%20The%20menu%2Ftray%20handler%20checks%20that%20flag%20and%20routes%20to%20the%20details%20page%20instead%3B%20deep%20links%20skip%20it%20entirely.%20A%20user%20who%20runs%20%60open%20elizaos%3A%2F%2Fapps%2Flifeops%60%20gets%20the%20LifeOps%20app%20window%20directly%20with%20no%20config%20review%2C%20inconsistent%20with%20a%20menu%2Ftray%20click%20for%20the%20same%20app.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=2\"><img alt=\"Fix in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Findex.ts%0ALine%3A%20499-512%0A%0AComment%3A%0A**Deep%20link%20bypasses%20%60hasDetailsPage%60%20UX**%0A%0A%60handleDeepLink%60%20always%20calls%20%60openAppWindow%60%20directly%2C%20even%20for%20apps%20like%20%60lifeops%60%20or%20%60fine-tuning%60%20that%20declare%20%60hasDetailsPage%3A%20true%60.%20The%20menu%2Ftray%20handler%20checks%20that%20flag%20and%20routes%20to%20the%20details%20page%20instead%3B%20deep%20links%20skip%20it%20entirely.%20A%20user%20who%20runs%20%60open%20elizaos%3A%2F%2Fapps%2Flifeops%60%20gets%20the%20LifeOps%20app%20window%20directly%20with%20no%20config%20review%2C%20inconsistent%20with%20a%20menu%2Ftray%20click%20for%20the%20same%20app.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=2\"><img alt=\"Fix in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n2. `packages/app-core/platforms/electrobun/src/index.ts`, line 353-363 ([link](https://github.com/elizaos/eliza/blob/5d940f2800e459767b5a6630e6c5ac638729b4e8/packages/app-core/platforms/electrobun/src/index.ts#L353-L363)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> **Bounds store `y` coordinate has no lower-bound guard**\n\n   `isFrame` rejects unreasonable x values (`f.x > -16000`) but places no lower-bound check on `y`. A window dragged off the top of a multi-monitor setup with a large negative y could be saved and then restored off-screen on a single-monitor system. Adding `f.y > -16000` (or a similar sentinel) would mirror the x-guard already present.\n\n   <a href=\"https://app.greptile.com/ide/claude-code?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Findex.ts%0ALine%3A%20353-363%0A%0AComment%3A%0A**Bounds%20store%20%60y%60%20coordinate%20has%20no%20lower-bound%20guard**%0A%0A%60isFrame%60%20rejects%20unreasonable%20x%20values%20%28%60f.x%20%3E%20-16000%60%29%20but%20places%20no%20lower-bound%20check%20on%20%60y%60.%20A%20window%20dragged%20off%20the%20top%20of%20a%20multi-monitor%20setup%20with%20a%20large%20negative%20y%20could%20be%20saved%20and%20then%20restored%20off-screen%20on%20a%20single-monitor%20system.%20Adding%20%60f.y%20%3E%20-16000%60%20%28or%20a%20similar%20sentinel%29%20would%20mirror%20the%20x-guard%20already%20present.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&repo=elizaos%2Feliza&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=2\"><img alt=\"Fix in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fapps-native-windows%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fapps-native-windows%22.%0A%0AThis%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Findex.ts%0ALine%3A%20353-363%0A%0AComment%3A%0A**Bounds%20store%20%60y%60%20coordinate%20has%20no%20lower-bound%20guard**%0A%0A%60isFrame%60%20rejects%20unreasonable%20x%20values%20%28%60f.x%20%3E%20-16000%60%29%20but%20places%20no%20lower-bound%20check%20on%20%60y%60.%20A%20window%20dragged%20off%20the%20top%20of%20a%20multi-monitor%20setup%20with%20a%20large%20negative%20y%20could%20be%20saved%20and%20then%20restored%20off-screen%20on%20a%20single-monitor%20system.%20Adding%20%60f.y%20%3E%20-16000%60%20%28or%20a%20similar%20sentinel%29%20would%20mirror%20the%20x-guard%20already%20present.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=2\"><img alt=\"Fix in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Findex.ts%0ALine%3A%20353-363%0A%0AComment%3A%0A**Bounds%20store%20%60y%60%20coordinate%20has%20no%20lower-bound%20guard**%0A%0A%60isFrame%60%20rejects%20unreasonable%20x%20values%20%28%60f.x%20%3E%20-16000%60%29%20but%20places%20no%20lower-bound%20check%20on%20%60y%60.%20A%20window%20dragged%20off%20the%20top%20of%20a%20multi-monitor%20setup%20with%20a%20large%20negative%20y%20could%20be%20saved%20and%20then%20restored%20off-screen%20on%20a%20single-monitor%20system.%20Adding%20%60f.y%20%3E%20-16000%60%20%28or%20a%20similar%20sentinel%29%20would%20mirror%20the%20x-guard%20already%20present.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=2\"><img alt=\"Fix in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n3. `packages/app-core/src/shell/AppWindowRenderer.tsx`, line 1643-1666 ([link](https://github.com/elizaos/eliza/blob/5d940f2800e459767b5a6630e6c5ac638729b4e8/packages/app-core/src/shell/AppWindowRenderer.tsx#L1643-L1666)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> **Catalog fetch is duplicated between `AppDetailsView` and `RegistryAppWindowView`**\n\n   `RegistryAppWindowView` fetches `client.listApps()` + `client.listCatalogApps()` with the same deduplication logic that already exists in `AppDetailsView`. If both components are active for the same slug simultaneously, the API is hit twice with no shared cache. Extracting the catalog fetch into a shared hook or context would eliminate the duplication and reduce API load.\n\n   <a href=\"https://app.greptile.com/ide/claude-code?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fsrc%2Fshell%2FAppWindowRenderer.tsx%0ALine%3A%201643-1666%0A%0AComment%3A%0A**Catalog%20fetch%20is%20duplicated%20between%20%60AppDetailsView%60%20and%20%60RegistryAppWindowView%60**%0A%0A%60RegistryAppWindowView%60%20fetches%20%60client.listApps%28%29%60%20%2B%20%60client.listCatalogApps%28%29%60%20with%20the%20same%20deduplication%20logic%20that%20already%20exists%20in%20%60AppDetailsView%60.%20If%20both%20components%20are%20active%20for%20the%20same%20slug%20simultaneously%2C%20the%20API%20is%20hit%20twice%20with%20no%20shared%20cache.%20Extracting%20the%20catalog%20fetch%20into%20a%20shared%20hook%20or%20context%20would%20eliminate%20the%20duplication%20and%20reduce%20API%20load.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&repo=elizaos%2Feliza&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=2\"><img alt=\"Fix in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fapps-native-windows%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fapps-native-windows%22.%0A%0AThis%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fsrc%2Fshell%2FAppWindowRenderer.tsx%0ALine%3A%201643-1666%0A%0AComment%3A%0A**Catalog%20fetch%20is%20duplicated%20between%20%60AppDetailsView%60%20and%20%60RegistryAppWindowView%60**%0A%0A%60RegistryAppWindowView%60%20fetches%20%60client.listApps%28%29%60%20%2B%20%60client.listCatalogApps%28%29%60%20with%20the%20same%20deduplication%20logic%20that%20already%20exists%20in%20%60AppDetailsView%60.%20If%20both%20components%20are%20active%20for%20the%20same%20slug%20simultaneously%2C%20the%20API%20is%20hit%20twice%20with%20no%20shared%20cache.%20Extracting%20the%20catalog%20fetch%20into%20a%20shared%20hook%20or%20context%20would%20eliminate%20the%20duplication%20and%20reduce%20API%20load.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=2\"><img alt=\"Fix in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20packages%2Fapp-core%2Fsrc%2Fshell%2FAppWindowRenderer.tsx%0ALine%3A%201643-1666%0A%0AComment%3A%0A**Catalog%20fetch%20is%20duplicated%20between%20%60AppDetailsView%60%20and%20%60RegistryAppWindowView%60**%0A%0A%60RegistryAppWindowView%60%20fetches%20%60client.listApps%28%29%60%20%2B%20%60client.listCatalogApps%28%29%60%20with%20the%20same%20deduplication%20logic%20that%20already%20exists%20in%20%60AppDetailsView%60.%20If%20both%20components%20are%20active%20for%20the%20same%20slug%20simultaneously%2C%20the%20API%20is%20hit%20twice%20with%20no%20shared%20cache.%20Extracting%20the%20catalog%20fetch%20into%20a%20shared%20hook%20or%20context%20would%20eliminate%20the%20duplication%20and%20reduce%20API%20load.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=2\"><img alt=\"Fix in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=2\" height=\"20\"></picture></a>\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=Fix%20the%20following%203%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%203%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppDetailsView.tsx%3A96-109%0A**%60resolveAppFromSlug%60%20fails%20for%20Steward%20and%20Fine%20Tuning**%0A%0AThe%20internal-tool%20lookup%20uses%20%60d.windowPath%20%3D%3D%3D%20%5C%60%2Fapps%2F%24%7Bslug%7D%5C%60%60%20to%20find%20a%20descriptor.%20This%20breaks%20for%20two%20of%20the%20four%20apps%20that%20declare%20%60hasDetailsPage%3A%20true%60%3A%0A%0A%7C%20App%20%7C%20slug%20%28from%20%60APP_MENU_ENTRIES%60%29%20%7C%20windowPath%20%7C%0A%7C---%7C---%7C---%7C%0A%7C%20Steward%20%7C%20%60%22steward%22%60%20%7C%20%60%2Fapps%2Finventory%60%20%7C%0A%7C%20Fine%20Tuning%20%7C%20%60%22training%22%60%20%7C%20%60%2Fapps%2Ffine-tuning%60%20%7C%0A%0AWhen%20the%20menu%2Ftray%20fires%20%60desktopAppDetailsRequested%60%20with%20slug%20%60%22steward%22%60%2C%20%60AppDetailsView%60%20is%20mounted%20with%20%60slug%3D%22steward%22%60.%20The%20lookup%20checks%20%60d.windowPath%20%3D%3D%3D%20%22%2Fapps%2Fsteward%22%60%20but%20finds%20no%20match%20%28steward's%20path%20is%20%60%2Fapps%2Finventory%60%29.%20The%20component%20falls%20through%20to%20the%20catalog%20lookup%2C%20which%20also%20won't%20find%20an%20internal%20tool%20by%20that%20slug%2C%20leaving%20the%20view%20stuck%20on%20the%20%22Loading%20steward%E2%80%A6%22%20spinner.%0A%0AThe%20fix%20is%20to%20match%20by%20slug%20instead%20of%20by%20window-path%20segment%3A%0A%0A%60%60%60tsx%0Aconst%20internal%20%3D%20getInternalToolAppDescriptors%28%29.find%28%0A%20%20%28d%29%20%3D%3E%20getAppSlug%28d.name%29%20%3D%3D%3D%20slug%2C%0A%29%3B%0A%60%60%60%0A%0A%60getAppSlug%60%20is%20already%20imported%20in%20this%20file%20and%20converts%20e.g.%20%60%40elizaos%2Fapp-steward%60%20%E2%86%92%20%60%22steward%22%60%2C%20which%20lines%20up%20with%20the%20slugs%20emitted%20by%20%60APP_MENU_ENTRIES%60.%0A%0A%23%23%23%20Issue%202%20of%203%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fapps%2FuseRegistryCatalog.ts%3A22-37%0A**Dedup%20filter%20favors%20the%20later%20duplicate%2C%20not%20the%20earlier%20one**%0A%0AThe%20catalog%20deduplication%20keeps%20the%20first%20occurrence%20of%20each%20name%20across%20the%20merged%20%60%5B...catalogApps%2C%20...serverApps%5D%60%20array%20by%20checking%20that%20no%20*later*%20entry%20shares%20the%20same%20name%3A%0A%0A%60%60%60ts%0A.filter%28%0A%20%20%28entry%2C%20index%2C%20items%29%20%3D%3E%0A%20%20%20%20!items%0A%20%20%20%20%20%20.slice%28index%20%2B%201%29%0A%20%20%20%20%20%20.some%28%28candidate%29%20%3D%3E%20candidate.name%20%3D%3D%3D%20entry.name%29%2C%0A%29%0A%60%60%60%0A%0AThis%20actually%20keeps%20the%20*last*%20duplicate%20%28the%20entry%20for%20which%20no%20later%20entry%20shares%20the%20name%29%2C%20meaning%20%60serverApps%60%20entries%20silently%20win%20over%20%60catalogApps%60%20entries%20of%20the%20same%20name.%20If%20the%20intent%20is%20for%20registry%20catalog%20data%20to%20take%20precedence%20%28e.g.%20richer%20%60description%60%20%2F%20%60heroImage%60%29%2C%20the%20order%20should%20be%20%60%5B...serverApps%2C%20...catalogApps%5D%60%2C%20or%20the%20filter%20should%20check%20%60items.slice%280%2C%20index%29%60%20instead%20of%20%60items.slice%28index%20%2B%201%29%60.%0A%0A%23%23%23%20Issue%203%20of%203%0Apackages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Fsurface-windows.ts%3A446-473%0A**Debounce%20timer%20not%20cancelled%20on%20window%20close**%0A%0A%60saveTimer%60%20lives%20inside%20the%20%60scheduleSave%60%20closure%20but%20is%20never%20cleared%20when%20the%20window%20emits%20%60%22close%22%60.%20If%20the%20user%20drags%20a%20window%20and%20immediately%20closes%20it%20within%20the%20500%20ms%20debounce%20window%2C%20the%20pending%20%60setTimeout%60%20still%20fires.%20At%20that%20point%20%60window.getFrame%3F.%28%29%60%20may%20throw%20%28destroyed%20native%20window%29%20or%20return%20stale%20geometry%20%E2%80%94%20the%20%60try%2Fcatch%60%20swallows%20the%20error%2C%20so%20nothing%20breaks%2C%20but%20the%20bounds%20file%20is%20updated%20with%20potentially%20wrong%20data%2C%20meaning%20the%20window%20restores%20to%20a%20bad%20position%20on%20next%20launch.%0A%0AHooking%20the%20cleanup%20to%20%60%22close%22%60%20prevents%20this%3A%0A%0A%60%60%60ts%0Awindow.on%28%22close%22%2C%20%28%29%20%3D%3E%20%7B%0A%20%20if%20%28saveTimer%29%20%7B%0A%20%20%20%20clearTimeout%28saveTimer%29%3B%0A%20%20%20%20saveTimer%20%3D%20null%3B%0A%20%20%7D%0A%7D%29%3B%0A%60%60%60%0A%0A&repo=elizaos%2Feliza&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\"><img alt=\"Fix All in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fapps-native-windows%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fapps-native-windows%22.%0A%0AFix%20the%20following%203%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%203%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppDetailsView.tsx%3A96-109%0A**%60resolveAppFromSlug%60%20fails%20for%20Steward%20and%20Fine%20Tuning**%0A%0AThe%20internal-tool%20lookup%20uses%20%60d.windowPath%20%3D%3D%3D%20%5C%60%2Fapps%2F%24%7Bslug%7D%5C%60%60%20to%20find%20a%20descriptor.%20This%20breaks%20for%20two%20of%20the%20four%20apps%20that%20declare%20%60hasDetailsPage%3A%20true%60%3A%0A%0A%7C%20App%20%7C%20slug%20%28from%20%60APP_MENU_ENTRIES%60%29%20%7C%20windowPath%20%7C%0A%7C---%7C---%7C---%7C%0A%7C%20Steward%20%7C%20%60%22steward%22%60%20%7C%20%60%2Fapps%2Finventory%60%20%7C%0A%7C%20Fine%20Tuning%20%7C%20%60%22training%22%60%20%7C%20%60%2Fapps%2Ffine-tuning%60%20%7C%0A%0AWhen%20the%20menu%2Ftray%20fires%20%60desktopAppDetailsRequested%60%20with%20slug%20%60%22steward%22%60%2C%20%60AppDetailsView%60%20is%20mounted%20with%20%60slug%3D%22steward%22%60.%20The%20lookup%20checks%20%60d.windowPath%20%3D%3D%3D%20%22%2Fapps%2Fsteward%22%60%20but%20finds%20no%20match%20%28steward's%20path%20is%20%60%2Fapps%2Finventory%60%29.%20The%20component%20falls%20through%20to%20the%20catalog%20lookup%2C%20which%20also%20won't%20find%20an%20internal%20tool%20by%20that%20slug%2C%20leaving%20the%20view%20stuck%20on%20the%20%22Loading%20steward%E2%80%A6%22%20spinner.%0A%0AThe%20fix%20is%20to%20match%20by%20slug%20instead%20of%20by%20window-path%20segment%3A%0A%0A%60%60%60tsx%0Aconst%20internal%20%3D%20getInternalToolAppDescriptors%28%29.find%28%0A%20%20%28d%29%20%3D%3E%20getAppSlug%28d.name%29%20%3D%3D%3D%20slug%2C%0A%29%3B%0A%60%60%60%0A%0A%60getAppSlug%60%20is%20already%20imported%20in%20this%20file%20and%20converts%20e.g.%20%60%40elizaos%2Fapp-steward%60%20%E2%86%92%20%60%22steward%22%60%2C%20which%20lines%20up%20with%20the%20slugs%20emitted%20by%20%60APP_MENU_ENTRIES%60.%0A%0A%23%23%23%20Issue%202%20of%203%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fapps%2FuseRegistryCatalog.ts%3A22-37%0A**Dedup%20filter%20favors%20the%20later%20duplicate%2C%20not%20the%20earlier%20one**%0A%0AThe%20catalog%20deduplication%20keeps%20the%20first%20occurrence%20of%20each%20name%20across%20the%20merged%20%60%5B...catalogApps%2C%20...serverApps%5D%60%20array%20by%20checking%20that%20no%20*later*%20entry%20shares%20the%20same%20name%3A%0A%0A%60%60%60ts%0A.filter%28%0A%20%20%28entry%2C%20index%2C%20items%29%20%3D%3E%0A%20%20%20%20!items%0A%20%20%20%20%20%20.slice%28index%20%2B%201%29%0A%20%20%20%20%20%20.some%28%28candidate%29%20%3D%3E%20candidate.name%20%3D%3D%3D%20entry.name%29%2C%0A%29%0A%60%60%60%0A%0AThis%20actually%20keeps%20the%20*last*%20duplicate%20%28the%20entry%20for%20which%20no%20later%20entry%20shares%20the%20name%29%2C%20meaning%20%60serverApps%60%20entries%20silently%20win%20over%20%60catalogApps%60%20entries%20of%20the%20same%20name.%20If%20the%20intent%20is%20for%20registry%20catalog%20data%20to%20take%20precedence%20%28e.g.%20richer%20%60description%60%20%2F%20%60heroImage%60%29%2C%20the%20order%20should%20be%20%60%5B...serverApps%2C%20...catalogApps%5D%60%2C%20or%20the%20filter%20should%20check%20%60items.slice%280%2C%20index%29%60%20instead%20of%20%60items.slice%28index%20%2B%201%29%60.%0A%0A%23%23%23%20Issue%203%20of%203%0Apackages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Fsurface-windows.ts%3A446-473%0A**Debounce%20timer%20not%20cancelled%20on%20window%20close**%0A%0A%60saveTimer%60%20lives%20inside%20the%20%60scheduleSave%60%20closure%20but%20is%20never%20cleared%20when%20the%20window%20emits%20%60%22close%22%60.%20If%20the%20user%20drags%20a%20window%20and%20immediately%20closes%20it%20within%20the%20500%20ms%20debounce%20window%2C%20the%20pending%20%60setTimeout%60%20still%20fires.%20At%20that%20point%20%60window.getFrame%3F.%28%29%60%20may%20throw%20%28destroyed%20native%20window%29%20or%20return%20stale%20geometry%20%E2%80%94%20the%20%60try%2Fcatch%60%20swallows%20the%20error%2C%20so%20nothing%20breaks%2C%20but%20the%20bounds%20file%20is%20updated%20with%20potentially%20wrong%20data%2C%20meaning%20the%20window%20restores%20to%20a%20bad%20position%20on%20next%20launch.%0A%0AHooking%20the%20cleanup%20to%20%60%22close%22%60%20prevents%20this%3A%0A%0A%60%60%60ts%0Awindow.on%28%22close%22%2C%20%28%29%20%3D%3E%20%7B%0A%20%20if%20%28saveTimer%29%20%7B%0A%20%20%20%20clearTimeout%28saveTimer%29%3B%0A%20%20%20%20saveTimer%20%3D%20null%3B%0A%20%20%7D%0A%7D%29%3B%0A%60%60%60%0A%0A\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\"><img alt=\"Fix All in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=Fix%20the%20following%203%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%203%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fpages%2FAppDetailsView.tsx%3A96-109%0A**%60resolveAppFromSlug%60%20fails%20for%20Steward%20and%20Fine%20Tuning**%0A%0AThe%20internal-tool%20lookup%20uses%20%60d.windowPath%20%3D%3D%3D%20%5C%60%2Fapps%2F%24%7Bslug%7D%5C%60%60%20to%20find%20a%20descriptor.%20This%20breaks%20for%20two%20of%20the%20four%20apps%20that%20declare%20%60hasDetailsPage%3A%20true%60%3A%0A%0A%7C%20App%20%7C%20slug%20%28from%20%60APP_MENU_ENTRIES%60%29%20%7C%20windowPath%20%7C%0A%7C---%7C---%7C---%7C%0A%7C%20Steward%20%7C%20%60%22steward%22%60%20%7C%20%60%2Fapps%2Finventory%60%20%7C%0A%7C%20Fine%20Tuning%20%7C%20%60%22training%22%60%20%7C%20%60%2Fapps%2Ffine-tuning%60%20%7C%0A%0AWhen%20the%20menu%2Ftray%20fires%20%60desktopAppDetailsRequested%60%20with%20slug%20%60%22steward%22%60%2C%20%60AppDetailsView%60%20is%20mounted%20with%20%60slug%3D%22steward%22%60.%20The%20lookup%20checks%20%60d.windowPath%20%3D%3D%3D%20%22%2Fapps%2Fsteward%22%60%20but%20finds%20no%20match%20%28steward's%20path%20is%20%60%2Fapps%2Finventory%60%29.%20The%20component%20falls%20through%20to%20the%20catalog%20lookup%2C%20which%20also%20won't%20find%20an%20internal%20tool%20by%20that%20slug%2C%20leaving%20the%20view%20stuck%20on%20the%20%22Loading%20steward%E2%80%A6%22%20spinner.%0A%0AThe%20fix%20is%20to%20match%20by%20slug%20instead%20of%20by%20window-path%20segment%3A%0A%0A%60%60%60tsx%0Aconst%20internal%20%3D%20getInternalToolAppDescriptors%28%29.find%28%0A%20%20%28d%29%20%3D%3E%20getAppSlug%28d.name%29%20%3D%3D%3D%20slug%2C%0A%29%3B%0A%60%60%60%0A%0A%60getAppSlug%60%20is%20already%20imported%20in%20this%20file%20and%20converts%20e.g.%20%60%40elizaos%2Fapp-steward%60%20%E2%86%92%20%60%22steward%22%60%2C%20which%20lines%20up%20with%20the%20slugs%20emitted%20by%20%60APP_MENU_ENTRIES%60.%0A%0A%23%23%23%20Issue%202%20of%203%0Apackages%2Fapp-core%2Fsrc%2Fcomponents%2Fapps%2FuseRegistryCatalog.ts%3A22-37%0A**Dedup%20filter%20favors%20the%20later%20duplicate%2C%20not%20the%20earlier%20one**%0A%0AThe%20catalog%20deduplication%20keeps%20the%20first%20occurrence%20of%20each%20name%20across%20the%20merged%20%60%5B...catalogApps%2C%20...serverApps%5D%60%20array%20by%20checking%20that%20no%20*later*%20entry%20shares%20the%20same%20name%3A%0A%0A%60%60%60ts%0A.filter%28%0A%20%20%28entry%2C%20index%2C%20items%29%20%3D%3E%0A%20%20%20%20!items%0A%20%20%20%20%20%20.slice%28index%20%2B%201%29%0A%20%20%20%20%20%20.some%28%28candidate%29%20%3D%3E%20candidate.name%20%3D%3D%3D%20entry.name%29%2C%0A%29%0A%60%60%60%0A%0AThis%20actually%20keeps%20the%20*last*%20duplicate%20%28the%20entry%20for%20which%20no%20later%20entry%20shares%20the%20name%29%2C%20meaning%20%60serverApps%60%20entries%20silently%20win%20over%20%60catalogApps%60%20entries%20of%20the%20same%20name.%20If%20the%20intent%20is%20for%20registry%20catalog%20data%20to%20take%20precedence%20%28e.g.%20richer%20%60description%60%20%2F%20%60heroImage%60%29%2C%20the%20order%20should%20be%20%60%5B...serverApps%2C%20...catalogApps%5D%60%2C%20or%20the%20filter%20should%20check%20%60items.slice%280%2C%20index%29%60%20instead%20of%20%60items.slice%28index%20%2B%201%29%60.%0A%0A%23%23%23%20Issue%203%20of%203%0Apackages%2Fapp-core%2Fplatforms%2Felectrobun%2Fsrc%2Fsurface-windows.ts%3A446-473%0A**Debounce%20timer%20not%20cancelled%20on%20window%20close**%0A%0A%60saveTimer%60%20lives%20inside%20the%20%60scheduleSave%60%20closure%20but%20is%20never%20cleared%20when%20the%20window%20emits%20%60%22close%22%60.%20If%20the%20user%20drags%20a%20window%20and%20immediately%20closes%20it%20within%20the%20500%20ms%20debounce%20window%2C%20the%20pending%20%60setTimeout%60%20still%20fires.%20At%20that%20point%20%60window.getFrame%3F.%28%29%60%20may%20throw%20%28destroyed%20native%20window%29%20or%20return%20stale%20geometry%20%E2%80%94%20the%20%60try%2Fcatch%60%20swallows%20the%20error%2C%20so%20nothing%20breaks%2C%20but%20the%20bounds%20file%20is%20updated%20with%20potentially%20wrong%20data%2C%20meaning%20the%20window%20restores%20to%20a%20bad%20position%20on%20next%20launch.%0A%0AHooking%20the%20cleanup%20to%20%60%22close%22%60%20prevents%20this%3A%0A%0A%60%60%60ts%0Awindow.on%28%22close%22%2C%20%28%29%20%3D%3E%20%7B%0A%20%20if%20%28saveTimer%29%20%7B%0A%20%20%20%20clearTimeout%28saveTimer%29%3B%0A%20%20%20%20saveTimer%20%3D%20null%3B%0A%20%20%7D%0A%7D%29%3B%0A%60%60%60%0A%0A&pr=7114&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\"><img alt=\"Fix All in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n<sub>Reviews (2): Last reviewed commit: [\"Merge branch &#39;develop&#39; into feat/apps-na...\"](https://github.com/elizaos/eliza/commit/a31ba1d293ee30a835d600c5a41fabc9019fe563) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=29754613)</sub>\n\n> Greptile also left **1 inline comment** on this PR.\n\n<!-- /greptile_comment -->",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-04-26T11:26:13Z",
-      "mergedAt": null,
-      "additions": 3650,
-      "deletions": 1711
-    },
-    {
-      "id": "PR_kwDOMT5cIs7WhgqJ",
-      "title": "feat(confidant): phase 0 — credential mediation layer for Eliza agents",
-      "author": "Dexploarer",
-      "number": 7167,
-      "body": "## Summary\n\nIntroduces `@elizaos/confidant` — the single seam at which credentials can be observed inside an Eliza agent. Skills never read `process.env` for credentials; they request from a per-skill `ScopedConfidant` that goes through policy + audit. Confidant stores values literally (AES-256-GCM at rest, secret id bound as AAD) or as references into external password managers.\n\nPhase 0 ships the contract; the runtime does not yet call into Confidant. Phase 1 wires it in.\n\n## What this fixes (concretely)\n\nSeven failure modes observable today in elizaOS-based agents:\n\n1. **Skill exfiltration** — `process.env.OPENROUTER_API_KEY` is process-global. Any plugin or skill in the runtime can read every credential. No boundary, no audit.\n2. **Dual writers** — `api/plugins-compat-routes.ts` writes `config.env[KEY]`; `api/provider-switch-config.ts setEnvValue` writes BOTH `config.env[KEY]` and `config.env.vars[KEY]`. Same value lands twice in two layouts.\n3. **Catalog as authoritative** — `Object.values(config).find(non-empty)` is used to \"find the API key\" in the save path because the persistence layer never had a real schema seam. A user typing the model field before the API-key field overwrites the API key with the model slug.\n4. **Subscription state leaks** — device-bound OAuth tokens collide with API keys in the same `milady.json` JSON blob; different lifecycles, last-write-wins file semantics.\n5. **Disconnect doesn't clean up** — disconnecting Eliza Cloud clears `cloud.apiKey` and `serviceRouting.llmText` but leaves `serviceRouting.tts/media/embeddings/rpc` pointing at a now-unauthenticated cloud-proxy.\n6. **No reveal** — once an API key is saved through `ApiKeyConfig`, the user cannot read it back to verify; bugs in the save path go silent.\n7. **No password-manager integration** — users with 1Password / Proton Pass / Bitwarden / OS-keychain entries already have their keys somewhere safe; today they must copy-paste into a plaintext JSON.\n\nPhase 0 establishes the contract that closes all seven; phases 1-6 are the migration that lands them. The full design including the 7-phase migration plan is in the Milady-side architecture doc; happy to mirror it here if maintainers prefer it landed in `eliza/docs/`.\n\n## What's in this PR\n\n**Public API**\n- `createConfidant`, `ScopedConfidant`\n- `defineSecretSchema(...)` — single source of truth for \\\"this id is a secret\\\"; replaces the catalog-as-authoritative pattern\n- `parseReference` / `buildReference` — URI scheme dispatch (`op://`, `pass://`, `keyring://`, `file://`, `env://`, `cloud://`)\n- AES-256-GCM envelope helpers\n- Identifier validation + glob-pattern matching with most-specific selection\n\n**Backends**\n- `KeyringBackend` — cross-platform via `@napi-rs/keyring` (macOS Keychain, Windows Credential Manager, Linux libsecret). Prebuilt binaries for darwin/win/linux/freebsd.\n- `EnvLegacyBackend` — read-only `env://VAR` migration scaffolding, removed in phase 6.\n- 1Password / Proton Pass / Cloud are deferred to phase 4+.\n\n**Storage**\n- `~/.milady/confidant.json` mode 0600, atomic-rename writes.\n- Master key in OS keychain by default; pluggable via `inMemoryMasterKey` for tests / headless deployments.\n- Secret id bound as AAD so a swapped ciphertext fails closed.\n\n**Policy**\n- Deny-by-default. Implicit grant for the registering plugin. Explicit grants persisted per-skill with glob patterns; most-specific wins; deny absolute. `prompt` mode requires a `PromptHandler` (UI hook) supplied at construction.\n\n**Audit log**\n- `~/.milady/audit/confidant.jsonl`, append-only JSONL. Records ids, never values. Explicit test verifies the secret value never appears in the log.\n\n## Test plan\n\n70 vitest cases:\n\n- Envelope: encrypt/decrypt round-trip, AAD binding, GCM tag tampering, key/nonce length, version handshake.\n- Identifiers + references: validation, glob matching, specificity selection, URI parsing for every scheme.\n- Store: 0600 mode, atomic write, version refusal, malformed JSON rejection, permissions round-trip.\n- Policy: deny-by-default, implicit grant, deny precedence, prompt mode, specificity.\n- End-to-end: literal set/resolve, env-legacy reference resolve, scoped permission denial, lazy resolve, prompt-handler approval caching, audit log shape, ciphertext absence on disk, audit log absence of value, concurrent-set safety.\n- Cross-platform keyring: real round-trip via `@napi-rs/keyring`. Skips cleanly on hosts without a usable Secret Service agent (probe runs at module-import time so vitest's `it.skipIf` evaluates correctly).\n\nAll 70 pass on macOS. Cross-platform CI hooks would surface any darwin-specific bug.\n\n- [ ] `bun run test` in the package\n- [ ] Cross-platform CI matrix (macOS / Windows / Linux)\n\n## Notes for reviewers\n\n- The package depends on `@napi-rs/keyring`. This is the only native dependency.\n- Six open questions documented in the design (audit retention, prompt UI, sync-metadata semantics, etc.) are deliberately deferred to phase 1.\n- This is the first piece of a multi-phase migration. The runtime does not yet read or write through Confidant; existing call sites are untouched.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-04-28T23:22:06Z",
-      "mergedAt": null,
-      "additions": 2577,
-      "deletions": 0
+      "createdAt": "2026-04-29T00:06:09Z",
+      "mergedAt": "2026-04-29T00:27:27Z",
+      "additions": 4144,
+      "deletions": 1491
     }
   ],
   "codeChanges": {
-    "additions": 8050,
-    "deletions": 2065,
-    "files": 95,
-    "commitCount": 607
+    "additions": 27530,
+    "deletions": 10339,
+    "files": 373,
+    "commitCount": 932
   },
   "completedItems": [
     {
@@ -502,57 +514,915 @@
         "packages/app-core/src/api/client-types-chat.ts",
         "packages/app-core/src/components/pages/AutomationsView.tsx"
       ]
+    },
+    {
+      "title": "feat(agent): runtime operations manager + widget host refresh",
+      "prNumber": 7166,
+      "type": "feature",
+      "body": "## Summary\n\nBundles in-flight feature work on `feat/widget-host-cycle-and-greenup` so it isn't sitting as uncommitted state. Includes:\n\n- New `packages/agent/src/runtime/operations/` module — `RuntimeOperationManager` as the single-flight g",
+      "files": [
+        "apps/app-clawville/assets/hero.png",
+        "apps/app-defense-of-the-agents/assets/hero.png",
+        "apps/app-steward/package.json",
+        "apps/app-steward/src/browser-workspace-wallet.ts",
+        "apps/app-steward/src/routes/wallet-browser-compat-routes.ts",
+        "apps/app/tsconfig.json",
+        "packages/agent/src/actions/browser-session.ts",
+        "packages/agent/src/actions/launchpad-launch.test.ts",
+        "packages/agent/src/actions/launchpad-launch.ts",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/cloud-status-routes.ts",
+        "packages/agent/src/api/provider-switch-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/runtime/operations/classifier.test.ts",
+        "packages/agent/src/runtime/operations/classifier.ts",
+        "packages/agent/src/runtime/operations/cold-strategy.ts",
+        "packages/agent/src/runtime/operations/health-checks.ts",
+        "packages/agent/src/runtime/operations/health.test.ts",
+        "packages/agent/src/runtime/operations/health.ts",
+        "packages/agent/src/runtime/operations/index.ts",
+        "packages/agent/src/runtime/operations/manager.ts",
+        "packages/agent/src/runtime/operations/reload-hot.ts",
+        "packages/agent/src/runtime/operations/repository.ts",
+        "packages/agent/src/runtime/operations/types.ts",
+        "packages/agent/src/runtime/restart.ts",
+        "packages/agent/src/services/browser-workspace-desktop.ts",
+        "packages/agent/src/services/browser-workspace-types.ts",
+        "packages/agent/src/services/browser-workspace.ts",
+        "packages/agent/src/services/index.ts",
+        "packages/agent/src/services/launchpads/image-generator.ts",
+        "packages/agent/src/services/launchpads/launchpad-engine.test.ts",
+        "packages/agent/src/services/launchpads/launchpad-engine.ts",
+        "packages/agent/src/services/launchpads/launchpad-types.ts",
+        "packages/agent/src/services/launchpads/metadata-generator.ts",
+        "packages/agent/src/services/launchpads/profiles/flap-sh.ts",
+        "packages/agent/src/services/launchpads/profiles/four-meme.ts",
+        "packages/agent/tsconfig.json",
+        "packages/app-core/platforms/electrobun/src/bridge/browser-tabs-renderer-registry.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-direct-rpc.ts",
+        "packages/app-core/platforms/electrobun/src/native/browser-workspace.ts",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/platforms/electrobun/src/rpc-handlers.ts",
+        "packages/app-core/platforms/electrobun/src/rpc-schema.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/src/ambient-modules.d.ts",
+        "packages/app-core/src/api/catalog-routes.ts",
+        "packages/app-core/src/api/client-base.ts",
+        "packages/app-core/src/api/client-types-core.ts"
+      ]
+    },
+    {
+      "title": "[codex] Clear stale Eliza Cloud auth on relink",
+      "prNumber": 7165,
+      "type": "other",
+      "body": "## Summary\n- Clear stale in-memory Eliza Cloud auth when a new account login is persisted.\n- Reinitialize `CloudManager` with the newly linked API key instead of keeping an old client alive.\n- Preserve the linked account identity in runtime",
+      "files": [
+        "apps/app-lifeops/src/lifeops/relative-time.ts",
+        "apps/app-lifeops/src/lifeops/repository.ts",
+        "apps/app-lifeops/src/lifeops/schedule-insight.ts",
+        "apps/app-lifeops/src/lifeops/schedule-state.ts",
+        "apps/app-lifeops/src/lifeops/schedule-sync-contracts.ts",
+        "packages/agent/src/api/__tests__/provider-switch-config.test.ts",
+        "packages/agent/src/api/cloud-routes.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/auth/credentials.test.ts",
+        "packages/agent/src/auth/credentials.ts",
+        "packages/agent/src/cloud/cloud-manager.ts",
+        "packages/app-core/src/api/cloud-connection.ts",
+        "packages/app-core/src/api/cloud-routes.test.ts",
+        "packages/app-core/src/api/cloud-routes.ts",
+        "packages/app-core/src/components/shell/StartupShell.tsx",
+        "packages/elizaos/templates/fullstack-app/README.md",
+        "packages/elizaos/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs",
+        "packages/shared/src/contracts/lifeops.ts",
+        "packages/templates/fullstack-app/README.md",
+        "packages/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs",
+        "plugins/plugin-elizacloud"
+      ]
+    },
+    {
+      "title": "feat(n8n): propagate originating-conversation routing into workflow generator",
+      "prNumber": 7164,
+      "type": "feature",
+      "body": "## Summary\n\nWhen a workflow is generated from inside a platform conversation (e.g. a Discord DM or a Telegram chat), surface the originating channel or chat to the LLM as a `## Runtime Facts` line. The user can say *\\\"post the result back t",
+      "files": [
+        "packages/app-core/src/api/client-types-chat.ts",
+        "packages/app-core/src/api/n8n-routes.ts",
+        "packages/app-core/src/components/pages/AutomationsView.tsx",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.test.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.ts"
+      ]
+    },
+    {
+      "title": "feat(app-core): n8n runtime-context provider — surface Discord guilds/channels + Gmail to workflow generator",
+      "prNumber": 7163,
+      "type": "feature",
+      "body": "## Summary\n\nRegisters an optional service of type `n8n_runtime_context_provider` that the patched `@elizaos/plugin-n8n-workflow` (see #25) reads to inject live connector facts into the workflow-generation prompt:\n\n- **Discord facts** — enum",
+      "files": [
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.test.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(connectors): purge n8n credential cache on disconnect so disconnect actually disconnects",
+      "prNumber": 7162,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe S25 missing-credentials banner shipped in #7134 silently fails when a user disconnects a connector. The disconnect path clears OAuth tokens from `milady.json` but leaves the n8n credential cache (`credStore` in plugin-n8n-wo",
+      "files": [
+        "packages/agent/src/api/connector-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/src/components/pages/AutomationsView.tsx",
+        "packages/app-core/src/components/pages/SettingsView.tsx",
+        "packages/app-core/src/state/connector-deeplink.ts",
+        "packages/app-core/src/state/index.ts",
+        "packages/app-core/src/styles/styles.css",
+        "packages/app/src/main.tsx",
+        "packages/shared/src/connector-cred-types.ts",
+        "packages/shared/src/index.ts"
+      ]
+    },
+    {
+      "title": "feat(automations): deep-link banner Connect → Settings connector panel",
+      "prNumber": 7161,
+      "type": "feature",
+      "body": "## Summary\n\nThe missing-credentials banner shipped in #7134 dropped the user on the Settings page top — they had to scroll/search for the right connector. This closes the loop: each \"Connect <Service> →\" button now scrolls the matching conn",
+      "files": [
+        "packages/app-core/src/components/pages/AutomationsView.tsx",
+        "packages/app-core/src/components/pages/SettingsView.tsx",
+        "packages/app-core/src/state/connector-deeplink.ts",
+        "packages/app-core/src/state/index.ts",
+        "packages/app-core/src/styles/styles.css",
+        "packages/app/src/main.tsx"
+      ]
+    },
+    {
+      "title": "feat(skills): bundle build-monetized-app skill",
+      "prNumber": 7160,
+      "type": "feature",
+      "body": "## Summary\n\nAdd a new bundled skill — **`build-monetized-app`** — that teaches the agent how to build a monetized app on Eliza Cloud, deploy it as a container, and route the earnings back into hosting via the existing pay-as-you-go-from-ear",
+      "files": [
+        "packages/skills/skills/build-monetized-app/SKILL.md",
+        "packages/skills/skills/build-monetized-app/references/failure-modes.md",
+        "packages/skills/skills/build-monetized-app/references/sdk-flow.md",
+        "packages/skills/skills/build-monetized-app/references/survival-economics.md"
+      ]
+    },
+    {
+      "title": "fix(actions): skip non-string entries in formatActionSimiles/Tags",
+      "prNumber": 7159,
+      "type": "bugfix",
+      "body": "## Summary\n\n`formatActionSimiles` and `formatActionTags` call `.trim()` on every entry of `action.similes` / `action.tags` without filtering out non-string entries. If any registered action ships with a malformed tags/similes array (contain",
+      "files": [
+        "packages/typescript/src/__tests__/actions.test.ts",
+        "packages/typescript/src/actions.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ruby to v3.4.9",
+      "prNumber": 7158,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [ruby](https://www.ruby-lang.org) ([source](https://redirect.github.com/ruby/ruby)) | uses-with | minor | `3.2` → `3.4.9` |\n\n---\n\n> [!WARNING]",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency python to 3.14",
+      "prNumber": 7157,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [python](https://redirect.github.com/actions/python-versions) | uses-with | minor | `3.12` → `3.14` |\n| [python](https://redirect.github.com/a",
+      "files": [
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/test-packaging.yml"
+      ]
+    },
+    {
+      "title": "fix(deps): update react monorepo to v19.2.5",
+      "prNumber": 7156,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [react](https://react.dev/) ([source](h",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency bun to v1.3.13",
+      "prNumber": 7155,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [bun](https://bun.com) ([source](https:",
+      "files": [
+        ".github/workflows/snap-build-test.yml"
+      ]
+    },
+    {
+      "title": "chore: remove @elizaos/plugin-todo and @elizaos/plugin-rolodex",
+      "prNumber": 7154,
+      "type": "other",
+      "body": "## Summary\nRemoves every remaining reference to \\`@elizaos/plugin-todo\\` and \\`@elizaos/plugin-rolodex\\` from the monorepo. Neither \\`plugins/plugin-todo\\` nor \\`plugins/plugin-rolodex\\` exists as a directory in this checkout, but stale ref",
+      "files": [
+        ".github/workflows/release-rust.yaml",
+        "packages/app-core/src/registry/entries/plugins/rolodex.json",
+        "packages/app-core/src/registry/entries/plugins/todo.json",
+        "packages/benchmarks/rolodex/conversations.ts",
+        "packages/benchmarks/rolodex/handlers/eliza.ts",
+        "packages/benchmarks/rolodex/handlers/perfect.ts",
+        "packages/benchmarks/rolodex/handlers/rolodex.ts",
+        "packages/benchmarks/rolodex/python_bench/__init__.py",
+        "packages/benchmarks/rolodex/python_bench/__main__.py",
+        "packages/benchmarks/rolodex/python_bench/conversations.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/__init__.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/eliza.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/perfect.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/rolodex.py",
+        "packages/benchmarks/rolodex/python_bench/reporter.py",
+        "packages/benchmarks/rolodex/python_bench/run.py",
+        "packages/benchmarks/rolodex/python_bench/scorer.py",
+        "packages/benchmarks/rolodex/python_bench/types.py",
+        "packages/benchmarks/rolodex/python_bench/world.py",
+        "packages/benchmarks/rolodex/reporter.ts",
+        "packages/benchmarks/rolodex/run.ts",
+        "packages/benchmarks/rolodex/scorer.ts",
+        "packages/benchmarks/rolodex/types.ts",
+        "packages/benchmarks/rolodex/world.ts",
+        "packages/examples/code/package.json",
+        "packages/examples/code/src/lib/agent.ts"
+      ]
+    },
+    {
+      "title": "Fix cloud provider switch model drift",
+      "prNumber": 7153,
+      "type": "bugfix",
+      "body": "## Summary\n- clear stale direct-provider model state when switching the runtime to Eliza Cloud or a remote provider\n- skip injecting Codex/OpenAI subscription credentials into the main runtime when cloud inference is active\n- add regression",
+      "files": [
+        "apps/app-lifeops/src/lifeops/relative-time.ts",
+        "apps/app-lifeops/src/lifeops/repository.ts",
+        "apps/app-lifeops/src/lifeops/schedule-insight.ts",
+        "apps/app-lifeops/src/lifeops/schedule-state.ts",
+        "apps/app-lifeops/src/lifeops/schedule-sync-contracts.ts",
+        "packages/agent/src/api/__tests__/provider-switch-config.test.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/auth/credentials.test.ts",
+        "packages/agent/src/auth/credentials.ts",
+        "packages/app-core/src/components/shell/StartupShell.tsx",
+        "packages/elizaos/templates/fullstack-app/README.md",
+        "packages/elizaos/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs",
+        "packages/shared/src/contracts/lifeops.ts",
+        "packages/templates/fullstack-app/README.md",
+        "packages/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs"
+      ]
+    },
+    {
+      "title": "fix(message): add CREATE_TASK to EXPLICIT_INTENT_ACTIONS",
+      "prNumber": 7152,
+      "type": "bugfix",
+      "body": "## Summary\n\n`findOwnedActionCorrectionFromMetadata` was overriding the planner's correct `CREATE_TASK` pick with role-gated actions like `OWNER_CALENDAR` based on incidental keyword overlap (e.g. a date in the prompt overlapping the calenda",
+      "files": [
+        "packages/typescript/src/services/message.test.ts",
+        "packages/typescript/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump TypeScript to ^6.0.3",
+      "prNumber": 7151,
+      "type": "other",
+      "body": "## Summary\n- Bumps the \\`typescript\\` devDependency to \\`^6.0.3\\` across all 18 packages that previously pinned a 5.x version.\n- Adds \\`\\\"ignoreDeprecations\\\": \\\"6.0\\\"\\` to the tsconfigs that still use TS 6-deprecated options (\\`moduleResol",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/app-core/package.json",
+        "packages/autonomous/package.json",
+        "packages/autonomous/tsconfig.json",
+        "packages/computeruse/examples/mcp-client-elicitation/package.json",
+        "packages/computeruse/examples/recaptcha-resolver/package.json",
+        "packages/computeruse/packages/kv/package.json",
+        "packages/computeruse/packages/kv/tsconfig.json",
+        "packages/computeruse/packages/workflow/package.json",
+        "packages/computeruse/packages/workflow/tsconfig.json",
+        "packages/daemon/package.json",
+        "packages/elizaos/package.json",
+        "packages/home/package.json",
+        "packages/home/tsconfig.json",
+        "packages/interop/package.json",
+        "packages/sweagent/package.json",
+        "packages/sweagent/typescript/package.json",
+        "packages/sweagent/typescript/src/run/package.json",
+        "packages/sweagent/typescript/src/run/tsconfig.json",
+        "packages/sweagent/typescript/tools/package.json",
+        "packages/sweagent/typescript/tools/tsconfig.json",
+        "packages/training/package.json",
+        "packages/training/tsconfig.json",
+        "packages/typescript/package.json",
+        "packages/typescript/tsconfig.declarations.json",
+        "packages/ui/package.json",
+        "packages/ui/tsconfig.json",
+        "tsconfig.build.template.json",
+        "tsconfig.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump rollup transitive to 4.60.2",
+      "prNumber": 7149,
+      "type": "other",
+      "body": "## Summary\n- Adds \\`rollup: ^4.60.2\\` to root \\`overrides\\` so \\`vite\\` and \\`vitest/vite\\` resolve rollup at 4.60.2 instead of the lockfile-pinned 4.59.0.\n\nRollup isn't a direct dep — \\`vite@5.4.21\\` (\\`^4.20.0\\`) and \\`vitest/vite@7.3.1\\`",
+      "files": [
+        "bun.lock",
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump Node.js to 24.15.0 (LTS Krypton)",
+      "prNumber": 7148,
+      "type": "other",
+      "body": "## Summary\n- \\`engines.node\\` 23.3.0 -> 24.15.0 (root)\n- Workflow \\`node-version\\`: 22 / 23 / 23.3.0 -> 24 / 24.15.0\n  - \\`ci.yaml\\` (3 jobs)\n  - \\`jsdoc-automation.yml\\`\n  - \\`release-computeruse-npm.yaml\\` (3 jobs)\n  - \\`release.yaml\\`\n  ",
+      "files": [
+        ".github/workflows/ci.yaml",
+        ".github/workflows/jsdoc-automation.yml",
+        ".github/workflows/publish-next-prerelease.yaml",
+        ".github/workflows/release-computeruse-npm.yaml",
+        ".github/workflows/release.yaml",
+        ".github/workflows/sync-next-dist-tags.yaml",
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @capacitor/* to current minor versions",
+      "prNumber": 7147,
+      "type": "other",
+      "body": "## Summary\n- @capacitor/core 8.0.2 -> 8.3.1\n- @capacitor/app ^8.0.1 -> ^8.1.0\n- @capacitor/keyboard 8.0.0 -> 8.0.3\n- @capacitor/haptics 8.0.0 -> 8.0.2\n- @capacitor/status-bar ^8.0.1 -> ^8.0.2\n- @capacitor/preferences left at ^8.0.1 (already",
+      "files": [
+        "bun.lock",
+        "packages/app-core/package.json",
+        "packages/home/package.json"
+      ]
+    },
+    {
+      "title": "fix(windows): test portability for path separators and mode bits",
+      "prNumber": 7145,
+      "type": "bugfix",
+      "body": "## Summary\n- **paths.test.ts**: replace hardcoded forward-slash expected values with `path.join()` so tests pass on windows where `path.join` produces backslashes\n- **account-storage.test.ts**: gate the `0o600` POSIX mode-bit assertion behi",
+      "files": [
+        "packages/agent/src/auth/__tests__/account-storage.test.ts",
+        "packages/app-core/src/services/local-inference/paths.test.ts"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency lucide-react to v1",
+      "prNumber": 7209,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [lucide-react](https://lucide.dev) ([so",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update softprops/action-gh-release action to v3",
+      "prNumber": 7208,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [softprops/action-gh-release](https://redirect.github.com/softprops/action-gh-release) | action | major | `v2` → `v3` |\n\n---\n\n> [!WARNING]\n> S",
+      "files": [
+        ".github/workflows/nightly.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update peter-evans/repository-dispatch action to v4",
+      "prNumber": 7207,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [peter-evans/repository-dispatch](https://redirect.github.com/peter-evans/repository-dispatch) | action | major | `v3` → `v4` |\n\n---\n\n> [!WARN",
+      "files": [
+        ".github/workflows/update-homebrew.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.170",
+      "prNumber": 7206,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "Miladyos local agent on android",
+      "prNumber": 7205,
+      "type": "other",
+      "body": "Agent on android\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR wires up a full on-device Eliza agent on Android: a new `MiladyAgentService` foreground service extracts and exec's a Bun runtime + agent bundle from APK assets",
+      "files": [
+        "packages/agent/src/bin.ts",
+        "packages/agent/src/cli/index.ts",
+        "packages/agent/src/runtime/aosp-llama-adapter.test.ts",
+        "packages/agent/src/runtime/aosp-llama-adapter.ts",
+        "packages/agent/src/runtime/aosp-local-inference-bootstrap.test.ts",
+        "packages/agent/src/runtime/aosp-local-inference-bootstrap.ts",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/lib/stage-android-agent.test.ts",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/run-mobile-build.test.ts",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/onboarding/probe-local-agent.ts",
+        "packages/app-core/src/runtime/ensure-local-inference-handler.test.ts",
+        "packages/app-core/src/runtime/ensure-local-inference-handler.ts",
+        "packages/app-core/src/services/local-inference/catalog.ts",
+        "packages/app-core/src/services/local-inference/router-handler.test.ts",
+        "packages/app-core/test/onboarding/probe-local-agent.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update github artifact actions (major)",
+      "prNumber": 7201,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/download-artifact](https://redirect.github.com/actions/download-artifact) | action | major | `v4` → `v8` |\n| [actions/upload-artifact",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/scenario-matrix.yml",
+        ".github/workflows/snap-build-test.yml",
+        ".github/workflows/test-flatpak.yml",
+        ".github/workflows/test-packaging.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update eslint monorepo to v10 (major)",
+      "prNumber": 7200,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@eslint/js](https://eslint.org) ([sour",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency wrangler to v4",
+      "prNumber": 7199,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-con",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency vite to v8",
+      "prNumber": 7198,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-con",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency typescript to v6",
+      "prNumber": 7193,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [typescript](https://www.typescriptlang",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ruby to v4",
+      "prNumber": 7192,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [ruby](https://www.ruby-lang.org) ([source](https://redirect.github.com/ruby/ruby)) | uses-with | major | `3.4.9` → `4.0.3` |\n\n---\n\n> [!WARNIN",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency node to v24",
+      "prNumber": 7191,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Type | Update | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovateb",
+      "files": [
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/integration-dod-gap-issues.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test-packaging.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency macos to v15",
+      "prNumber": 7190,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [macos](https://redirect.github.com/actions/runner-images) | github-runner | major | `14` → `15` |\n\n---\n\n> [!WARNING]\n> Some dependencies coul",
+      "files": [
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @vitejs/plugin-react to v6",
+      "prNumber": 7189,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@vitejs/plugin-react](https://redirect",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update android-actions/setup-android action to v4",
+      "prNumber": 7188,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [android-actions/setup-android](https://redirect.github.com/android-actions/setup-android) | action | major | `v3` → `v4` |\n\n---\n\n> [!WARNING]",
+      "files": [
+        ".github/workflows/elizaos-cuttlefish.yml",
+        ".github/workflows/mobile-build-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-python action to v6",
+      "prNumber": 7186,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-python](https://redirect.github.com/actions/setup-python) | action | major | `v5` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependenci",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/test-packaging.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-java action to v5",
+      "prNumber": 7185,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-java](https://redirect.github.com/actions/setup-java) | action | major | `v4` → `v5` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        ".github/workflows/elizaos-cuttlefish.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.169",
+      "prNumber": 7184,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider-utils to v4.0.24",
+      "prNumber": 7183,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider-utils](https://ai-sdk",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider to v3.0.9",
+      "prNumber": 7182,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider](https://ai-sdk.dev/d",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/openai to v3.0.54",
+      "prNumber": 7181,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/openai](https://ai-sdk.dev/doc",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-node action to v6",
+      "prNumber": 7180,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-node](https://redirect.github.com/actions/setup-node) | action | major | `v4` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/integration-dod-gap-issues.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/quality.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test-packaging.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-java action to v5",
+      "prNumber": 7179,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-java](https://redirect.github.com/actions/setup-java) | action | major | `v4` → `v5` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/mobile-build-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/labeler action to v6",
+      "prNumber": 7178,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/labeler](https://redirect.github.com/actions/labeler) | action | major | `v5` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependencies could n",
+      "files": [
+        ".github/workflows/auto-label.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/github-script action to v9",
+      "prNumber": 7177,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/github-script](https://redirect.github.com/actions/github-script) | action | major | `v7` → `v9` |\n\n---\n\n> [!WARNING]\n> Some dependen",
+      "files": [
+        ".github/workflows/auto-label.yml"
+      ]
+    },
+    {
+      "title": "Miladyos local agent on android",
+      "prNumber": 7176,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/api/provider-switch-config.test.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/provider-switch-routes.ts",
+        "packages/agent/src/api/server-helpers-auth.ts",
+        "packages/agent/src/runtime/first-time-setup.test.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/onboarding-config.ts",
+        "packages/app-core/src/runtime/embedding-warmup-policy.test.ts",
+        "packages/app-core/src/runtime/embedding-warmup-policy.ts",
+        "packages/app-core/src/services/local-inference/catalog.test.ts",
+        "packages/app-core/src/services/local-inference/catalog.ts",
+        "packages/app-core/src/services/local-inference/types.ts",
+        "packages/app-core/test/onboarding-config.test.ts",
+        "packages/shared/src/contracts/service-routing.test.ts",
+        "packages/shared/src/contracts/service-routing.ts"
+      ]
+    },
+    {
+      "title": "Shaw/pr 2067 eliza fix",
+      "prNumber": 7175,
+      "type": "bugfix",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".github/workflows/confidant-ci.yaml",
+        "apps/app-clawville/assets/hero.png",
+        "apps/app-companion/src/components/companion/CompanionAppView.tsx",
+        "apps/app-companion/src/components/companion/CompanionHeader.tsx",
+        "apps/app-companion/src/components/companion/CompanionSettingsPanel.tsx",
+        "apps/app-companion/src/components/companion/CompanionShell.tsx",
+        "apps/app-companion/src/components/companion/CompanionView.tsx",
+        "apps/app-companion/src/components/companion/index.ts",
+        "apps/app-defense-of-the-agents/assets/hero.png",
+        "apps/app-lifeops/src/actions/screen-time.ts",
+        "apps/app-lifeops/src/api/client-lifeops.ts",
+        "apps/app-lifeops/src/components/BrowserBridgeStatusChip.test.tsx",
+        "apps/app-lifeops/src/components/BrowserBridgeStatusChip.tsx",
+        "apps/app-lifeops/src/components/EventEditorDrawer.test.tsx",
+        "apps/app-lifeops/src/components/EventEditorDrawer.tsx",
+        "apps/app-lifeops/src/components/LifeOpsCalendarSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsInboxSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsInboxSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsMoneySection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsMoneySection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsOverviewSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsOverviewSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsRemindersSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsRemindersSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsScreenTimeSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsScreenTimeSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSectionContent.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSettingsSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSleepSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSleepSection.tsx",
+        "apps/app-lifeops/src/components/MissingSourceCard.tsx",
+        "apps/app-lifeops/src/contracts/index.ts",
+        "apps/app-lifeops/src/hooks/useCalendarWeek.test.tsx",
+        "apps/app-lifeops/src/hooks/useCalendarWeek.ts",
+        "apps/app-lifeops/src/hooks/useGoogleLifeOpsConnector.test.ts",
+        "apps/app-lifeops/src/hooks/useGoogleLifeOpsConnector.ts",
+        "apps/app-lifeops/src/hooks/useLifeOpsActivitySignals.ts",
+        "apps/app-lifeops/src/inbox/channel-deep-links.ts",
+        "apps/app-lifeops/src/inbox/message-fetcher.test.ts",
+        "apps/app-lifeops/src/inbox/message-fetcher.ts",
+        "apps/app-lifeops/src/lifeops/browser-readiness.ts",
+        "apps/app-lifeops/src/lifeops/discord-browser-scraper.ts",
+        "apps/app-lifeops/src/lifeops/email-classifier.test.ts",
+        "apps/app-lifeops/src/lifeops/gmail-account-safety-repository.test.ts",
+        "apps/app-lifeops/src/lifeops/google-calendar.test.ts",
+        "apps/app-lifeops/src/lifeops/google-calendar.ts",
+        "apps/app-lifeops/src/lifeops/google-fetch.test.ts",
+        "apps/app-lifeops/src/lifeops/google-fetch.ts",
+        "apps/app-lifeops/src/lifeops/google-gmail.test.ts",
+        "apps/app-lifeops/src/lifeops/google-gmail.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/checkout action to v6",
+      "prNumber": 7174,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/checkout](https://redirect.github.com/actions/checkout) | action | major | `v4` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependencies could",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/integration-dod-gap-issues.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/quality.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/scenario-matrix.yml",
+        ".github/workflows/snap-build-test.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test-flatpak.yml",
+        ".github/workflows/test-packaging.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/cache action to v5",
+      "prNumber": 7173,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/cache](https://redirect.github.com/actions/cache) | action | major | `v4` → `v5` |\n\n---\n\n> [!WARNING]\n> Some dependencies could not b",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "feat(local-agent-on-android): full @elizaos/agent runs on the phone",
+      "prNumber": 7172,
+      "type": "feature",
+      "body": "Five-phase landing of the local-agent-on-Android architecture proven by the spike in scripts/spike-android-agent/ and documented in docs/agent-on-mobile.md.\r\n\r\nPhase A — APK asset pipeline (run-mobile-build.mjs + scripts/lib/stage-android-a",
+      "files": [
+        ".gitignore",
+        "packages/agent/package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/scripts/mobile-stubs/canvas.cjs",
+        "packages/agent/scripts/mobile-stubs/huggingface-transformers.cjs",
+        "packages/agent/scripts/mobile-stubs/node-llama-cpp.cjs",
+        "packages/agent/scripts/mobile-stubs/null-plugin.cjs",
+        "packages/agent/scripts/mobile-stubs/onnxruntime-node.cjs",
+        "packages/agent/scripts/mobile-stubs/pty-manager.cjs",
+        "packages/agent/scripts/mobile-stubs/puppeteer-core.cjs",
+        "packages/agent/scripts/mobile-stubs/sharp.cjs",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/app-core/platforms/android/app/src/main/AndroidManifest.xml",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyBootReceiver.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/src/api/client-base.ts",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/i18n/locales/en.json",
+        "packages/app-core/src/i18n/locales/es.json",
+        "packages/app-core/src/i18n/locales/ko.json",
+        "packages/app-core/src/i18n/locales/pt.json",
+        "packages/app-core/src/i18n/locales/tl.json",
+        "packages/app-core/src/i18n/locales/vi.json",
+        "packages/app-core/src/i18n/locales/zh-CN.json",
+        "packages/app-core/src/onboarding/mobile-runtime-mode.ts",
+        "packages/app-core/src/onboarding/probe-local-agent.ts",
+        "packages/app-core/src/platform/init.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/test/onboarding/mobile-runtime-mode.test.ts",
+        "packages/app-core/test/onboarding/probe-local-agent.test.ts",
+        "packages/app-core/test/onboarding/should-show-local-option.test.ts",
+        "packages/native-plugins/agent/src/web.ts",
+        "packages/shared/src/runtime-env.ts"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency transformers to ~=5.7.0",
+      "prNumber": 7171,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [transformers](https://redirect.github.",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/setup.py",
+        "packages/benchmarks/OSWorld/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency three to ^0.184.0",
+      "prNumber": 7170,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [three](https://threejs.org/) ([source]",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency lucide-react to ^0.577.0",
+      "prNumber": 7169,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [lucide-react](https://lucide.dev) ([so",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update gradle to v9.5.0",
+      "prNumber": 7168,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Update | Change |\n|---|---|---|\n| [gradle](https://gradle.org) ([source](https://redirect.github.com/gradle/gradle)) | minor | `9.4.1` → `9.5.0` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        "packages/app-core/platforms/android/gradle/wrapper/gradle-wrapper.properties"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "2-A-M",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
-      "totalScore": 630.7842422959881,
-      "prScore": 630.5842422959881,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 421.5792937480674,
-      "prScore": 418.6992937480674,
+      "totalScore": 698.0196402653629,
+      "prScore": 694.7016402653629,
       "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 0.8799999999999999,
+      "commentScore": 1.3179999999999998,
       "summary": null
     },
     {
-      "username": "RemilioNubilio",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
-      "totalScore": 255.3379933200244,
-      "prScore": 255.3379933200244,
-      "issueScore": 0,
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 634.7842422959881,
+      "prScore": 630.5842422959881,
+      "issueScore": 4,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
       "username": "Dexploarer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
-      "totalScore": 245.60012198041252,
-      "prScore": 245.20012198041255,
+      "totalScore": 420.21321756671693,
+      "prScore": 419.37521756671697,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.4,
+      "commentScore": 0.838,
       "summary": null
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 202.7,
+      "totalScore": 297.2,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 202.5,
+      "reviewScore": 297,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 270.96704158903515,
+      "prScore": 270.96704158903515,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -566,6 +1436,16 @@
       "summary": null
     },
     {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 120.9565477931522,
+      "prScore": 97.1785477931522,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
       "totalScore": 120.73631903964868,
@@ -576,21 +1456,31 @@
       "summary": null
     },
     {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 62.721773896576096,
-      "prScore": 39.3817738965761,
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 97.89207210748786,
+      "prScore": 97.45407210748786,
       "issueScore": 0,
-      "reviewScore": 23,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 59.5437738965761,
+      "totalScore": 59.9817738965761,
       "prScore": 59.5437738965761,
       "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "andex23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/49397867?u=760e6ec36b34f3511f24928686d87f912c3eb7ba&v=4",
+      "totalScore": 26.63905732961526,
+      "prScore": 16.63905732961526,
+      "issueScore": 10,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -626,6 +1516,26 @@
       "summary": null
     },
     {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sw4pIO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sailorpepe",
       "avatarUrl": "https://avatars.githubusercontent.com/u/159828807?u=9298c48eb8b41b0a0b0968e987c029e307771855&v=4",
       "totalScore": 0.4,
@@ -656,9 +1566,9 @@
       "summary": null
     }
   ],
-  "newPRs": 60,
-  "mergedPRs": 33,
-  "newIssues": 4,
-  "closedIssues": 4,
-  "activeContributors": 10
+  "newPRs": 99,
+  "mergedPRs": 87,
+  "newIssues": 8,
+  "closedIssues": 8,
+  "activeContributors": 13
 }

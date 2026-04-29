@@ -1,0 +1,1116 @@
+{
+  "interval": {
+    "intervalStart": "2026-04-29T00:00:00.000Z",
+    "intervalEnd": "2026-04-30T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-04-29 to 2026-04-30, elizaos/eliza had 37 new PRs (54 merged), 4 new issues, and 10 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABAKqtpQ",
+      "title": "telegram read receipts should fetch by message IDs and avoid nested receipt lookup",
+      "author": "dutchiono",
+      "number": 7009,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nA follow-up is needed after the fix in commit `55f4f27` / PR #7008.\n\nThe critical correctness bug around 1:1 outbound read state is fixed:\n- use `readViaOutbox` (`numericMsgId <= readOutboxMaxId`) for 1:1 outbound read status\n- use `readViaCount` as fallback for groups\n- clarify the `getMessagesReadParticipants` limitation\n\nTwo issues remain.\n\n## Remaining issue 1: requested message IDs are not fetched directly\n`getTelegramReadReceipts` still calls:\n\n```ts\nclient.getMessages(entity, {\n  search: \"\",\n  limit: Math.max(requested.size * 2, MAX_RECENT_LIMIT),\n})\n```\n\nThis is not an IDs-based fetch and can silently miss older requested message IDs.\n\n### Expected fix\n- extend `TelegramLocalClientLike.getMessages` to support an `ids` parameter\n- fetch the exact requested Telegram message IDs instead of relying on `search: \"\"`\n- make `getTelegramReadReceipts` deterministic for older messages\n\n## Remaining issue 2: O(n*m) receipt lookup\nThe final assembly still does a nested scan via:\n- `args.messageIds.map(...)`\n- `receipts.find(...)`\n\nThis should be replaced with a `Map<string, TelegramReadReceiptResult>` so lookup is linear.\n\n## Why this matters\n- issue 1 is still a correctness gap\n- issue 2 is lower-risk, but worth fixing while touching the same path\n\n## Context\n- fixed in PR: #7008\n- fixed commit: `55f4f27`",
+      "createdAt": "2026-04-22T01:21:52Z",
+      "closedAt": "2026-04-29T21:07:32Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA2wj0Q",
+      "title": "@elizaos/agent server has hard imports from app-* packages, contradicts \"standalone backend\" description",
+      "author": "2-A-M",
+      "number": 7204,
+      "repository": "elizaos/eliza",
+      "body": "\n### Summary\n\n`@elizaos/agent` is described in [`packages/agent/package.json`](https://github.com/elizaOS/eliza/blob/main/packages/agent/package.json) as:\n\n> \"Standalone elizaOS-based agent and backend server package.\"\n\nIn practice, [`packages/agent/src/api/server.ts`](https://github.com/elizaOS/eliza/blob/main/packages/agent/src/api/server.ts#L31-L49) imports directly from a number of Milady-app-specific packages, which makes the package non-standalone for any host that isn't Milady:\n\n```ts\n// packages/agent/src/api/server.ts\nimport { DropService, setElizaMakerDropService } from \"@elizaos/app-elizamaker\";\nimport { handleKnowledgeRoutes } from \"@elizaos/app-knowledge/routes\";\nimport {\n  normalizeJsonRpcUrl,\n  probeJsonRpcEndpoint,\n  TxService,\n} from \"@elizaos/app-steward/api/tx-service\";\nimport {\n  ensurePrivyWalletsForCustomUser,\n  isPrivyWalletProvisioningEnabled,\n} from \"@elizaos/app-steward/services/privy-wallets\";\nimport { wireCoordinatorBridgesWhenReady } from \"@elizaos/app-task-coordinator/api/coordinator-wiring\";\nimport {\n  handleTrainingRoutes,\n  handleTrajectoryRoute,\n} from \"@elizaos/app-training/routes\";\n```\n\nThe same pattern shows up in [`@elizaos/app-core`](https://github.com/elizaOS/eliza/tree/main/packages/app-core) — its source re-exports from `@elizaos/app-companion` (e.g. [`character-catalog.ts`](https://github.com/elizaOS/eliza/blob/main/packages/app-core/src/character-catalog.ts), [`state/vrm.ts`](https://github.com/elizaOS/eliza/blob/main/packages/app-core/src/state/vrm.ts), [`components/pages/VectorBrowserView.tsx`](https://github.com/elizaOS/eliza/blob/main/packages/app-core/src/components/pages/VectorBrowserView.tsx)) and imports from `@elizaos/app-steward` in several files (`awareness/contributors/wallet.ts`, `api/client.ts`, `api/client-wallet.ts`, `config/boot-config-store.ts`). `app-core/package.json` describes itself as `\"Shared application core for elizaOS white-label agent apps\"` — same gap.\n\n### Why this matters\n\nFor Atelier — and any future fork that wants to embed elizaOS as a backend — there is no clean spawn target in upstream eliza that doesn't pull in Milady-specific app code, services, routes, and dependencies (xyflow, ethers, telegraf, the full Milady plugin tree). We're tolerating it in v0.1 because cleaning it up isn't on our critical path, but the bundle includes ~50MB of dead Milady code and the dependency graph carries Milady-app concepts (steward wallets, elizamaker drops, lifeops automations) that have no meaning in a non-Milady host.\n\nThe pattern of routes-extracted-into-the-app-itself already exists in this repo — see `server.ts:30`:\n\n```ts\n// Discord local routes extracted to @elizaos/plugin-discord (setup-routes.ts)\n```\n\nSo the architectural shape is established. It just hasn't been generalized to the other apps that still have routes living in the agent server.\n\n### Possible PR shapes — which would you accept?\n\n1. **Move app-* routes into the apps themselves.** `app-elizamaker`, `app-knowledge`, `app-steward`, `app-task-coordinator`, `app-training` would each export their own `setup-routes.ts` (mirroring `plugin-discord`). `agent/src/api/server.ts` would no longer import from any `@elizaos/app-*` package; the apps register their routes via a host-controlled list (or via `runtime.registerRoutes(...)` if such an API is preferred).\n2. **Promote the truly-shared parts into a new `@elizaos/runtime` package.** `@elizaos/agent` becomes a thin orchestrator over `@elizaos/runtime`. Hosts that want a Milady-style stack import `@elizaos/agent`; hosts that want only the runtime import `@elizaos/runtime`. Bigger refactor; cleaner long-term.\n3. **Document the actual coupling and rename `@elizaos/agent`.** If the Milady coupling is intentional and the maintainers prefer to keep it, the package description should reflect that — and a separate \"really standalone\" runtime package should exist for forks. We'd rather have honest naming than a misleading \"standalone\" label.\n\n### What we're doing while this is in flight\n\nWe're spawning `@elizaos/app-core/src/entry.ts start` as-is from Atelier's main process. The Milady coupling rides along in our bundle. We've tracked the cleanup as a follow-up gated on this issue's outcome.\n\n### Reproduction (if useful)\n\n```bash\ngit clone https://github.com/elizaOS/eliza\ncd eliza\ngrep -nE 'from [\"\\'@/]*elizaos/app-(elizamaker|knowledge|steward|task-coordinator|training|companion)' \\\n  packages/agent/src packages/app-core/src\n```\n\nReturns ~15 matches across `packages/agent/src/api/server.ts` and the `app-core` files cited above.\n\n---\n\nHappy to draft a PR for any of (1)/(2)/(3) once we know which shape would land. Thanks for elizaOS — the orchestration layer is exactly what we needed.\n",
+      "createdAt": "2026-04-29T17:17:50Z",
+      "closedAt": "2026-04-29T21:37:19Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA18TjA",
+      "title": "ux: opaque \"No handler found for delegate type: ACTION_PLANNER\" when no LLM provider is configured",
+      "author": "andex23",
+      "number": 7203,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen a runtime boots without any LLM provider plugin (no `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `ELIZAOS_CLOUD_API_KEY` / Ollama / etc.), the boot logs a clear, actionable message:\n\n```\nInfo [eliza] No AI provider plugin was loaded. Set an API key environment variable\n(e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY) or log in to\nEliza Cloud (ELIZAOS_CLOUD_API_KEY) to enable at least one model provider.\n```\n\nBut as soon as the user sends a chat message, the message service calls `runtime.useModel(ModelType.ACTION_PLANNER, ...)` (`packages/typescript/src/services/message.ts:3753`), which walks the fallback chain `[ACTION_PLANNER, TEXT_MEDIUM, TEXT_SMALL]`, finds nothing registered, and throws:\n\n```\nError: No handler found for delegate type: ACTION_PLANNER\n   at AgentRuntime.useModel (packages/typescript/src/runtime.ts:4250)\n```\n\nIn the dashboard chat this surfaces as:\n\n> I hit an internal parsing error while preparing the reply. Reason: No handler found for delegate type: ACTION_PLANNER. Please try again or ask me to retry the last step.\n\nThat message is misleading — there's no parsing error, retrying won't help, and the real fix (set an API key or sign in to Eliza Cloud) is nowhere in the user-facing string. The runtime already knows this state at boot.\n\n## Repro\n\n1. Fresh checkout, no `*_API_KEY` env vars set, not signed in to Eliza Cloud.\n2. `bun run dev`\n3. Note the `[eliza] No AI provider plugin was loaded.` info log — boot is otherwise clean.\n4. Open the dashboard, send any chat message to the default agent.\n5. The reply contains the cryptic `ACTION_PLANNER` error.\n\n## Suggested fix\n\nIn `AgentRuntime.useModel` (`packages/typescript/src/runtime.ts` around line 4249), when `resolveModelRegistration` returns `undefined` for any text-generation model, detect \"no provider configured at all\" (no handlers registered for any of `TEXT_NANO/TEXT_SMALL/TEXT_MEDIUM/TEXT_LARGE/TEXT_MEGA/RESPONSE_HANDLER/ACTION_PLANNER/TEXT_COMPLETION`) and throw a typed, user-facing error such as:\n\n```ts\nthrow new NoModelProviderConfiguredError(\n  \"This agent has no LLM provider configured. \" +\n  \"Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY in your environment, \" +\n  \"or sign in to Eliza Cloud (ELIZAOS_CLOUD_API_KEY).\"\n);\n```\n\nThe chat surface (e.g. milady's dashboard) can then catch that specific error type and render the actionable hint instead of the \"internal parsing error\" generic. The current opaque message stays only for the genuine case where one provider is registered but the requested model + its fallbacks all happen to be missing — which is the rarer, real \\\"misconfiguration\\\" case.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad`\n- Discovered while exercising the dashboard chat in milady on `develop`",
+      "createdAt": "2026-04-29T14:56:06Z",
+      "closedAt": "2026-04-29T21:11:35Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA1ztIQ",
+      "title": "bug: commit 8551fccafe deleted re-export shims but left dangling imports across packages/agent",
+      "author": "andex23",
+      "number": 7202,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nCommit [`8551fccafe`](https://github.com/elizaos/eliza/commit/8551fccafe) (\"updates\", Apr 15 2026) deleted ~30 single-line re-export shim files under `packages/agent/src/**`, but did **not** update the consumers that still import from them. The result: on a fresh clone, the API server crashes immediately on startup with `Cannot find module './<deleted-shim>.js'` errors.\n\n## Reproduction\n\nOn any consumer of this commit (e.g. milady-ai/milady on `develop`, which pins eliza to a descendant of `8551fccafe`):\n\n1. `bun install`\n2. `bun run dev`\n3. API process exits during boot with one of the errors below.\n\n## Verified missing modules → still imported\n\nI bisected by restoring shims one at a time. The following deleted files have **live importers** that were not updated:\n\n| Deleted shim | Re-exported from | Still imported by |\n|---|---|---|\n| `packages/agent/src/api/task-agent-message-routing.ts` | `@elizaos/app-task-coordinator/api/task-agent-message-routing` | `packages/agent/src/api/server.ts`, `packages/agent/src/api/server-helpers-swarm.ts` |\n| `packages/agent/src/api/website-blocker-routes.ts` | `@elizaos/app-lifeops/routes/website-blocker-routes` | `packages/agent/src/api/server.ts` |\n| `packages/agent/src/runtime/roles/src/utils.ts` | `@elizaos/core` | `packages/agent/src/runtime/roles/src/index.ts`, `packages/agent/src/config/includes.ts` |\n| `packages/agent/src/onboarding-presets.ts` | `@elizaos/shared/onboarding-presets` | `packages/shared/src/i18n/keyword-matching.ts` |\n| `packages/agent/src/providers/lifeops.ts` | `@elizaos/app-lifeops/providers/lifeops` | `packages/agent/src/api/workbench-routes.ts` |\n| `packages/agent/src/actions/life-param-extractor.ts` | `@elizaos/app-lifeops/actions/life-param-extractor` | `packages/agent/src/actions/life-param-extractor-real.test.ts` |\n| `packages/agent/src/actions/life-recent-context.ts` | `@elizaos/app-lifeops/actions/life-recent-context` | `packages/agent/src/actions/context-signal.ts` |\n\nThere may be more — I stopped after the dev server got past boot. The full deletion list from `8551fccafe` contains 33 source files; finding which ones still have callers is straightforward with `git grep`.\n\n## Sample error\n\n```\nerror: Cannot find module './task-agent-message-routing.js'\n       from '/path/to/eliza/packages/agent/src/api/server.ts'\n```\n\nThe `.js` extension comes from ESM-style relative imports against `.ts` sources, but the underlying `.ts` file is gone.\n\n## Suggested fix\n\nTwo reasonable options:\n\n1. **Restore the shim files** (one-line `export * from \"@elizaos/<app-package>/...\"` each). Lowest-impact, preserves the existing import boundary.\n2. **Update the importers** to point at the underlying app package directly (e.g. change `from \"./website-blocker-routes.js\"` to `from \"@elizaos/app-lifeops/routes/website-blocker-routes\"`). Cleaner long-term but touches more files.\n\nI have local diffs for option 1 (verified the dev server boots cleanly with all 7 shims restored). Filing as an issue per request rather than sending a PR — happy to convert if useful.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad` (descendant of `8551fccafe`)\n- Discovered while booting milady on `develop`",
+      "createdAt": "2026-04-29T14:37:23Z",
+      "closedAt": "2026-04-29T21:02:47Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA4Rdow",
+      "title": "build: dev-ui.mjs references `./claude-code-stealth.mjs` preload that doesn't exist on fresh clone",
+      "author": "Sw4pIO",
+      "number": 7210,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/app-core/scripts/dev-ui.mjs` declares `./claude-code-stealth.mjs` as a Bun `--preload` entry when the user has an Anthropic subscription, but **no build step generates that file** and **it isn't checked in**. The script's existence check (`existsSync(path.join(cwd, filePath))`) silently filters the missing file out of the preload list, so the stealth fetch interceptor never installs.\n\nThe interceptor is what prepends the Claude Code system prefix and identity headers (`anthropic-beta`, `user-agent: claude-cli/...`, `x-app: cli`) that Anthropic's API requires for OAuth subscription tokens. Without it, every `api.anthropic.com` request from a subscription user gets `401 Invalid authentication credentials` even though the token is valid and registered correctly.\n\nThe TypeScript source is at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`, but the dev preload expects a different file at the **repo root**, named `.mjs`, that auto-runs on import.\n\n## Reproduction\n\nOn a fresh clone of any consumer repo (e.g. milady on `develop`):\n\n1. Sign in to an Anthropic subscription via `POST /api/subscription/anthropic/start` + `/exchange` so `~/.eliza/auth/anthropic-subscription.json` is written.\n2. Manually enable `@elizaos/plugin-anthropic` in `~/.<branding>/<branding>.json` (auto-enable refuses for subscription-only).\n3. Set `ANTHROPIC_AUTH_MODE=oauth` and `CLAUDE_CODE_OAUTH_TOKEN=<token>` in the runtime env.\n4. `bun run dev`\n5. Boot log shows:\n   ```\n   [milady] Stealth imports enabled: \n   ```\n   (notice — empty list because the file doesn't exist; it was silently filtered)\n6. Send any chat message → backend retries 3× with `AI_APICallError: Invalid authentication credentials` and surfaces the parse error to the user.\n\n## Diagnostic trail\n\n- `packages/app-core/scripts/dev-ui.mjs:785` declares the preload:\n  ```js\n  if (stealth.claude) nodeStealthImports.push(\"./claude-code-stealth.mjs\");\n  ```\n- Then filters by existence:\n  ```js\n  const resolvedStealthImports = nodeStealthImports.filter((filePath) =>\n    existsSync(path.join(cwd, filePath)),\n  );\n  ```\n- `find . -name claude-code-stealth.mjs -not -path '*/node_modules/*'` returns nothing on a fresh clone.\n- The TS source exists at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`. Nothing builds it into the expected location.\n\n## Suggested fix\n\nEither of:\n\n1. **Check in / generate the `.mjs`** at the repo root (or wherever `cwd` resolves to in `dev-ui.mjs`), with a self-installing call at the bottom. I verified locally that creating this file unblocks the Anthropic subscription auth path end-to-end (successful chat turns, zero 401s, model calls confirmed via `[stealth] →anthropic` debug logs with `ELIZA_STEALTH_DEBUG=1`).\n\n2. **Fail loud instead of silent**: in `dev-ui.mjs`, when `stealth.claude === true` but the resolved preload file is missing, log a clear warning so users know what's wrong instead of chasing parse errors.\n\nBoth would help; (1) makes the feature work out of the box, (2) prevents the same multi-hour debug hunt for the next person.\n\n## Why this matters\n\nWithout the stealth interceptor, subscription auth is **completely non-functional** on the runtime side, which:\n- Makes the `/api/subscription/anthropic/*` flow look broken (it works correctly, but the runtime that consumes its credentials can't actually use them).\n- Forces users to either get a paid API key or sign up for Eliza Cloud — even though the codebase clearly intends to support direct subscription OAuth via the stealth path.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad`\n- Discovered while booting milady on `develop`",
+      "createdAt": "2026-04-29T22:09:53Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7WjdAP",
+      "title": "Shaw/pr 2067 eliza fix",
+      "author": "lalalune",
+      "number": 7175,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T02:39:06Z",
+      "mergedAt": "2026-04-29T02:39:14Z",
+      "additions": 20547,
+      "deletions": 3209
+    },
+    {
+      "id": "PR_kwDOMT5cIs7WsOJC",
+      "title": "feat(vault): @elizaos/vault — cross-platform secrets vault + Settings UI integration",
+      "author": "Dexploarer",
+      "number": 7197,
+      "body": "# Relates to\n\nThis is the upstream-targeting twin of milady-ai/eliza#6. The vault feature originated in the Milady fork; this PR lands the upstream-relevant slice on `elizaOS/eliza:develop`.\n\n# Risks\n\n**Low.** The vault is an additive workspace package; the runtime + Settings UI integration is a write-through mirror over the existing `config.env.X` storage path, so disabling it is a one-line change in `plugins-compat-routes.ts` (`mirrorPluginSensitiveToVault` → no-op). Cross-platform secret-service behaviour is exercised by a new dedicated CI workflow (macOS Keychain / Windows Credential Manager / Linux libsecret) so the headline portability claim is verifiable on every PR. The legacy `config.env.X` write path is unchanged — even if every vault call failed, plugin saves would still persist.\n\n# Background\n\n## What does this PR do?\n\nAdds **`@elizaos/vault`** — a cross-platform secrets/config vault — and wires it into the agent runtime + Settings UI so the existing \"save my OpenAI key\" flow stops storing plaintext in `config.env` and starts encrypting at rest with a key from the OS keychain.\n\n### `@elizaos/vault` (new package, `packages/vault/`)\n\n- **Encryption-at-rest** with AES-256-GCM, secret-id-as-AAD (so a leaked ciphertext can't be replayed against a different key).\n- **Master key in the OS keychain by default** — macOS Keychain, Windows Credential Manager, Linux Secret Service via `@napi-rs/keyring`.\n- **Headless fallback**: `passphraseMasterKey()` / `passphraseMasterKeyFromEnv(\"MILADY_VAULT_PASSPHRASE\")` derives the master key with `scrypt` for Linux servers and CI without a Secret Service agent.\n- `defaultMasterKey()` chains keychain → passphrase → throws `MasterKeyUnavailableError` whose message names every remediation path.\n- **One API for sensitive and non-sensitive config** — `vault.set(key, value, { sensitive: true })` vs `vault.set(key, value)`.\n- **Password-manager references are first-class** — values can live in 1Password / Proton Pass / Bitwarden, the vault stores only the resolver reference.\n- **`SecretsManager`** layer routes per-key writes/reads to the user-selected backend (`in-house`, `1password`, `bitwarden`, `protonpass`), with detection + preferences API at `/api/secrets/manager/{backends,preferences}`.\n- **Audit log** at `audit/vault.jsonl` per write.\n- **Testing harness** (`@elizaos/vault/testing#createTestVault`) that produces a vault wired to an in-memory master key for downstream tests.\n\n### Runtime + Settings UI integration\n\n- **Write-through mirror in `/api/plugins/:id` PUT**: when a sensitive plugin field is saved, the value is mirrored into the vault (encrypted at rest) on top of the existing `config.env.X` write. Mirror failures are surfaced to the UI under `vaultMirrorFailures` rather than silently swallowed.\n- **Vault-first reveal**: `POST /api/plugins/:id/reveal` consults `sharedVault().get(key)` before falling back to `process.env` / `config.env`, so a freshly-saved key is the value the user sees.\n- **Per-process cached `sharedVault()`** so concurrent saves share `VaultImpl.mutate()`'s mutex; a per-request `createVault()` would race and silently lose entries.\n- **Broader credential heuristic** — `pickPrimaryCredentialParam()` walks a priority-ordered regex list (`API_KEY` → `API_TOKEN` → `BOT_TOKEN` → `ACCESS_TOKEN` → `SECRET_KEY` → `PRIVATE_KEY` → `CLIENT_SECRET`) instead of only matching `*_API_KEY$`, with an explicit fallback to the first sensitive parameter. Closes the bug where typing a model field before the API-key field caused `Object.values(config).find()` to pick up the model slug; also fixes connectors whose primary credential is a bot token / private key / client secret.\n- **Settings UI** — `SecretsManagerSection` + `ApiKeyConfig` with inline prefix validation and validation warnings, keyboard shortcut `⌘⌥⌃V` (Mac) / `Ctrl+Alt+Shift+V` (Win/Linux), global modal mount, application menu accelerator.\n- **Cloud disconnect orphan-route patch**: `/api/cloud/disconnect` now nulls every routed service (`llmText`, `tts`, `media`, `embeddings`, `rpc`) instead of just `llmText`, so disconnect doesn't leave silently-401'ing voice/image/embedding features routed at the dead `cloud-proxy → elizacloud`. Plus `linkedAccounts.elizacloud.status=\"unlinked\"` to prevent the in-memory state from overwriting the canonical unlinked state on next `saveElizaConfig`.\n\n### Runtime-ops × vault\n\n- `ProviderSwitchIntent.apiKeyRef` replaces plaintext `apiKey` end-to-end. The provider-switch route writes the vault entry, persists only the reference, and resolves through the vault when the runtime reload-hot needs the key.\n- Legacy ops with plaintext `apiKey` are auto-migrated to `apiKeyRef` on hydrate.\n- Repository pruning suite (retention, cap, idempotency, hydrate; 6 tests).\n- A `simplify` pass that dedupes utility code, removes ghost phases, and consolidates state.\n\n## What kind of change is this?\n\n**Features** — non-breaking. `@elizaos/vault` is new. The runtime/Settings wiring is additive on top of the existing config-write path, controlled by feature presence rather than a flag. The provider-switch `apiKeyRef` replaces `apiKey` but a hydrate-time migration upgrades legacy ops in place.\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation. New package documentation lives inline in `packages/vault/README.md` and the public API surface is documented via TSDoc. The Settings UI changes are user-facing but match the existing settings pattern.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. **`packages/vault/`** — start with `src/vault.ts` (the public API), then `src/master-key.ts` (the keychain/passphrase chain), then `src/manager.ts` (the multi-backend router). Tests in `test/{vault,master-key,manager,store,envelope,references,keyring}.test.ts` exercise every public path; `test/master-key.test.ts` covers the headless-fallback chain explicitly.\n2. **`packages/app-core/src/services/vault-mirror.ts`** + `packages/app-core/src/services/vault-mirror.test.ts` — the write-through mirror is small, isolated, and has a focused test that includes failure-collection and a source-text guard for the vault-first reveal ordering.\n3. **`packages/app-core/src/api/plugins-compat-routes.ts`** — the `PUT /api/plugins/:id` handler and `/reveal` route, where the vault wiring sits next to the existing legacy code path.\n4. **`packages/agent/src/runtime/operations/`** — `vault-bridge.ts`, `vault-integration.test.ts`, and `health.test.ts` show the `apiKeyRef` migration. The 22-case integration suite is the strongest evidence that the runtime path keeps working.\n\n## Detailed testing steps\n\nAutomated tests are acceptable.\n\n- **Vault unit suite (cross-platform)**: `bun run --cwd packages/vault test` — 64 tests covering vault, master-key (incl. passphrase fallback), manager, store, envelope, references, keyring round-trips. The new `vault-ci` workflow runs this matrix on `ubuntu-latest`, `macos-latest`, `windows-latest` so the OS-keychain claim is checked on every PR.\n- **App-core wiring suite**: `bun run --cwd packages/app-core test` — 37 wiring tests (vault-mirror unit + source-text guards, secrets-manager-routes integration via real `http.Server`, usePluginsSkillsState heuristic priority list, useSecretsManagerShortcut Mac/Win/Linux chord matching, server.cloud-disconnect orphan-route guard).\n- **Runtime-ops vault integration**: 22 cases in `packages/agent/src/runtime/operations/vault-integration.test.ts` proving the `apiKeyRef` path works end-to-end.\n- **End-to-end save-flow**: `provider-switch-routes.e2e.test.ts` stands up a real `http.Server` and exercises Settings PUT → mirror → reveal → provider switch against an in-memory vault.\n- **Cross-platform CI**: the new `vault-ci` workflow (`.github/workflows/vault-ci.yaml`) runs the vault suite on macOS / Linux / Windows runners; an `app-core-wiring` job runs the wiring tests on `ubuntu-latest` with proto generation as a prerequisite.\n\n### Manual smoke (UI)\n\n1. Open the desktop app → **Settings → Plugins → OpenAI** (or any AI provider).\n2. Enter an API key, save.\n3. The plugin row should turn green and reload the agent. Open `~/.milady/vault.json` — the value is encrypted; the OS keychain holds the master key under `service: \"milady\"`, `account: \"vault.masterKey\"`.\n4. Open the **Secrets Vault** modal via `⌘⌥⌃V` (or **Edit → Secrets Vault** menu). Switch the routing for `OPENAI_API_KEY` to a different backend, save. Subsequent reveals fetch from the new backend.\n\n## Deploy notes\n\n- **`@elizaos/vault` is a new workspace package** — `bun install` at the repo root picks it up; nothing extra to do.\n- **No database changes.**\n- **No breaking changes** to existing config files. Legacy `config.env.X` writes still happen alongside the vault mirror; vault values shadow `process.env` only in the reveal path. The `apiKeyRef` migration on the runtime-ops side is in-place on hydrate (no operator action required).\n\n---\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T11:25:51Z",
+      "mergedAt": null,
+      "additions": 7138,
+      "deletions": 647
+    },
+    {
+      "id": "PR_kwDOMT5cIs7Whalw",
+      "title": "feat(agent): runtime operations manager + widget host refresh",
+      "author": "Dexploarer",
+      "number": 7166,
+      "body": "## Summary\n\nBundles in-flight feature work on `feat/widget-host-cycle-and-greenup` so it isn't sitting as uncommitted state. Includes:\n\n- New `packages/agent/src/runtime/operations/` module — `RuntimeOperationManager` as the single-flight gate for provider switches / restarts / reloads, plus classifier (idempotency-key dedupe), health predicates, hot-reload + cold-restart strategies. Tests included.\n- Provider switch route now reads `Idempotency-Key`, routes through the manager rather than the legacy `providerSwitchInProgress` boolean.\n- Restart, server, and dev-platform paths refactored against the new manager.\n- Earlier widget-host cycle/chunking + steward static-import fixes (already on the branch).\n- Splash asset + launchpad fixes (already on the branch).\n\nWIP — squash / split as makes sense for review. The runtime-operations module is the largest new surface and the most reviewable as a single unit.\n\n## Test plan\n\n- [ ] `bun run test` — exercises classifier + health unit tests\n- [ ] Manual provider switch under load with idempotency key — verify dedupe\n- [ ] Hot reload path — verify health gate prevents premature traffic resume\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR introduces a `RuntimeOperationManager` module as the single-flight gate for provider switches and runtime restarts, replacing the previous `providerSwitchInProgress` boolean with a filesystem-backed operation repository, idempotency-key dedup, tier-classified reload strategies (hot/warm/cold), and health-gated promotion. Three issues need attention before merging:\n\n- Config is persisted to disk before the manager's rejection check — a `409 rejected-busy` response leaves the on-disk config mutated with the new provider while the running runtime is unchanged.\n- The `warm` tier strategy is never registered in `server.ts`, so same-family provider switches (classified as `warm` by the classifier) always fail internally with `\\\"no-strategy-for-tier\\\"`.\n- The raw API key is serialized into the persisted `ProviderSwitchIntent` JSON on disk.\n</details>\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge — config-mutation-before-rejection and the missing warm strategy are current defects on the provider switch hot path.\n\nTwo P1 behavioral bugs (config written before rejection check, warm strategy unregistered causing silent failures) plus one P1 security issue (API key on disk) pull the score below the P1 ceiling of 4. Multiple P1s in core paths warrant a 3.\n\npackages/agent/src/api/provider-switch-routes.ts and packages/agent/src/api/server.ts\n\n<details open><summary><h3>Security Review</h3></summary>\n\n- **Plaintext credential storage** (`packages/agent/src/api/provider-switch-routes.ts`, `packages/agent/src/runtime/operations/repository.ts`): The `ProviderSwitchIntent` includes the raw `apiKey` and is serialized in full to `<stateDir>/runtime-operations/<id>.json`. Although the file is created with mode `0600`, the API key is readable by any process running as the same user and persists for up to 24 hours. API keys should be stripped from the persisted record.\n</details>\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n| Filename | Overview |\n|----------|----------|\n| packages/agent/src/runtime/operations/manager.ts | New DefaultRuntimeOperationManager: single-flight gate with idempotency-key dedup, async execution chain, and health-gated promotion — logic is sound but warm-tier strategy gap causes silent failures for same-family switches |\n| packages/agent/src/runtime/operations/types.ts | Well-typed contracts for operations, phases, repository, health checks, and strategies; clean discriminated union intent model |\n| packages/agent/src/runtime/operations/classifier.ts | Pure tier classifier: returns \"warm\" for same-family switches but no warm strategy is wired in server.ts, making those operations always fail |\n| packages/agent/src/runtime/operations/repository.ts | Filesystem-backed repo with atomic writes and in-memory O(1) cache; abandoned-op reaping on hydrate is solid; file mode 0600 is appropriate but intent JSON (including API keys) still lands on disk in cleartext |\n| packages/agent/src/api/provider-switch-routes.ts | Route correctly routes through the new manager, but saves config to disk before checking the manager outcome (config mutated even on 409) and embeds the raw API key in the persisted intent |\n| packages/agent/src/api/server.ts | Manager wiring looks correct; warm strategy is missing from the strategies map causing all same-family provider switches to fail with \"no-strategy-for-tier\" |\n| packages/agent/src/runtime/operations/cold-strategy.ts | Cold restart delegates correctly to the injected restartRuntime closure, but double-appends \"shutdown-old\" phase producing a duplicate entry in the log |\n| packages/agent/src/runtime/operations/reload-hot.ts | Hot strategy correctly applies env vars and best-effort notifies plugins; defaultApplyProviderEnv double-writes config since the route also writes before submitting the operation |\n| packages/agent/src/runtime/operations/health.ts | HealthChecker with parallel execution, per-check timeouts via Promise.race, and clean required/optional semantics — well implemented |\n| packages/agent/src/runtime/operations/index.ts | Clean barrel export for the operations module |\n\n</details>\n\n</details>\n\n<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\nsequenceDiagram\n    participant C as Client\n    participant R as ProviderSwitchRoute\n    participant M as RuntimeOperationManager\n    participant Repo as FilesystemRepository\n    participant S as ReloadStrategy (hot/cold)\n    participant H as HealthChecker\n\n    C->>R: POST /api/provider/switch\n    R->>R: saveElizaConfig ⚠️ written before rejection check\n    R->>M: start({intent, idempotencyKey})\n    M->>Repo: findByIdempotencyKey(key)\n    alt key exists\n        Repo-->>M: existing op\n        M-->>R: deduped\n        R-->>C: 200\n    end\n    M->>Repo: findActive()\n    alt op in flight\n        Repo-->>M: active op\n        M-->>R: rejected-busy ⚠️ config already written\n        R-->>C: 409\n    end\n    M->>Repo: create(op)\n    M-->>R: accepted\n    R-->>C: 202 + operationId\n    Note over M: async execution chain\n    M->>S: apply(ctx)\n    S-->>M: newRuntime\n    M->>H: runForRuntime(newRuntime)\n    H-->>M: HealthCheckReport\n    alt ok\n        M->>Repo: update succeeded\n    else failed\n        M->>Repo: update failed\n    end\n```\n</details>\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=Fix%20the%20following%204%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A136-196%0A**Config%20written%20to%20disk%20before%20rejection%20is%20checked**%0A%0A%60applyOnboardingConnectionConfig%60%20and%20%60saveElizaConfig%60%20run%20at%20lines%20136%E2%80%93137%20before%20the%20operation%20manager's%20outcome%20is%20evaluated.%20When%20the%20manager%20returns%20%60%22rejected-busy%22%60%2C%20the%20route%20correctly%20returns%20409%2C%20but%20the%20config%20file%20has%20already%20been%20mutated%20on%20disk%20with%20the%20new%20provider%20settings.%20The%20system%20is%20now%20in%20a%20split%20state%3A%20the%20config%20reflects%20provider%20B%20while%20the%20running%20runtime%20still%20uses%20provider%20A%20%28and%20no%20restart%20will%20happen%29.%20On%20the%20next%20cold%20restart%20the%20new%20provider%20config%20will%20be%20loaded%2C%20potentially%20breaking%20the%20running%20agent.%0A%0AThe%20config%20mutation%20should%20only%20be%20persisted%20once%20the%20manager%20has%20accepted%20the%20request%2C%20or%20the%20hot-strategy's%20%60defaultApplyProviderEnv%60%20should%20be%20the%20sole%20writer%20%28it's%20called%20by%20the%20strategy%20itself%20on%20the%20async%20execution%20path%29.%0A%0A%23%23%23%20Issue%202%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fserver.ts%3A1098-1102%0A**%60warm%60%20tier%20has%20no%20registered%20strategy%20%E2%80%94%20same-family%20provider%20switches%20always%20fail**%0A%0A%60strategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%20%7D%60%20omits%20the%20warm%20strategy.%20The%20classifier%20in%20%60classifier.ts%60%20returns%20%60%22warm%22%60%20for%20same-family%20provider%20switches%20%28e.g.%20%60openai%60%20%E2%86%94%20%60openai-subscription%60%29.%20In%20%60manager.ts%60%20lines%20182%E2%80%93188%2C%20a%20missing%20strategy%20calls%20%60failOperation%60%20with%20%60%22no-strategy-for-tier%22%60.%20Any%20user%20switching%20between%20providers%20in%20the%20same%20family%20will%20receive%20a%20silent%20internal%20failure%20with%20no%20clear%20error%20surfaced.%0A%0AEither%20register%20a%20warm%20strategy%20here%20%28falling%20back%20to%20the%20hot%20strategy%20is%20a%20safe%20interim%20choice%29%20or%20change%20the%20classifier%20to%20collapse%20%60warm%60%20to%20%60cold%60%20until%20the%20warm%20strategy%20exists.%0A%0A%60%60%60ts%0Astrategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%2C%20warm%3A%20hotStrategy%20%7D%2C%0A%60%60%60%0A%0A%23%23%23%20Issue%203%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A139-147%0A**API%20key%20written%20to%20disk%20in%20plaintext%20via%20intent%20serialization**%0A%0AThe%20%60ProviderSwitchIntent%60%20built%20here%20includes%20the%20raw%20%60apiKey%60%20value%2C%20and%20the%20%60FilesystemRuntimeOperationRepository%60%20serializes%20the%20full%20%60RuntimeOperation%60%20%28including%20%60intent%60%29%20to%20%60%3CstateDir%3E%2Fruntime-operations%2F%3Cid%3E.json%60%20%28mode%200600%2C%20but%20still%20a%20plain%20JSON%20file%29.%20Every%20provider%20switch%20stores%20the%20user's%20API%20key%20on%20the%20filesystem%20in%20cleartext%20for%20up%20to%20the%2024-hour%20retention%20window.%0A%0AThe%20API%20key%20should%20be%20redacted%20from%20the%20persisted%20intent.%20One%20approach%20is%20to%20store%20only%20a%20boolean%20flag%20%60apiKeyProvided%3A%20true%60%20in%20the%20persisted%20intent%20while%20keeping%20the%20real%20key%20in-memory%20only%20for%20the%20duration%20of%20the%20operation.%0A%0A%23%23%23%20Issue%204%20of%204%0Apackages%2Fagent%2Fsrc%2Fruntime%2Foperations%2Fcold-strategy.ts%3A29-42%0A**%22shutdown-old%22%20phase%20is%20appended%20twice%20instead%20of%20updated%20once**%0A%0A%60ctx.reportPhase%60%20maps%20to%20%60repository.appendPhase%60%2C%20which%20always%20adds%20a%20new%20entry%20to%20the%20phases%20array.%20Calling%20it%20first%20with%20%60status%3A%20%22running%22%60%20and%20then%20immediately%20with%20%60status%3A%20%22succeeded%22%60%20produces%20two%20separate%20%60%22shutdown-old%22%60%20entries%20in%20the%20log%20rather%20than%20one%20entry%20whose%20status%20transitions.%20No%20actual%20shutdown%20work%20occurs%20between%20the%20two%20calls%20%E2%80%94%20%60restartRuntime%60%20is%20invoked%20in%20the%20%60%22start-new%22%60%20phase%20below.%0A%0AThe%20manager's%20health-check%20code%20uses%20%60appendPhase%60%20%28for%20%60%22running%22%60%29%20%2B%20%60updateLastPhase%60%20%28for%20the%20terminal%20state%29.%20The%20cold%20strategy%20should%20follow%20the%20same%20pattern%2C%20or%20both%20phases%20should%20be%20a%20single%20append%20recording%20the%20final%20status%20since%20shutdown%20is%20effectively%20instantaneous%20here.%0A%0A&repo=elizaos%2Feliza&pr=7166&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\"><img alt=\"Fix All in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fwidget-host-cycle-and-greenup%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fwidget-host-cycle-and-greenup%22.%0A%0AFix%20the%20following%204%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A136-196%0A**Config%20written%20to%20disk%20before%20rejection%20is%20checked**%0A%0A%60applyOnboardingConnectionConfig%60%20and%20%60saveElizaConfig%60%20run%20at%20lines%20136%E2%80%93137%20before%20the%20operation%20manager's%20outcome%20is%20evaluated.%20When%20the%20manager%20returns%20%60%22rejected-busy%22%60%2C%20the%20route%20correctly%20returns%20409%2C%20but%20the%20config%20file%20has%20already%20been%20mutated%20on%20disk%20with%20the%20new%20provider%20settings.%20The%20system%20is%20now%20in%20a%20split%20state%3A%20the%20config%20reflects%20provider%20B%20while%20the%20running%20runtime%20still%20uses%20provider%20A%20%28and%20no%20restart%20will%20happen%29.%20On%20the%20next%20cold%20restart%20the%20new%20provider%20config%20will%20be%20loaded%2C%20potentially%20breaking%20the%20running%20agent.%0A%0AThe%20config%20mutation%20should%20only%20be%20persisted%20once%20the%20manager%20has%20accepted%20the%20request%2C%20or%20the%20hot-strategy's%20%60defaultApplyProviderEnv%60%20should%20be%20the%20sole%20writer%20%28it's%20called%20by%20the%20strategy%20itself%20on%20the%20async%20execution%20path%29.%0A%0A%23%23%23%20Issue%202%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fserver.ts%3A1098-1102%0A**%60warm%60%20tier%20has%20no%20registered%20strategy%20%E2%80%94%20same-family%20provider%20switches%20always%20fail**%0A%0A%60strategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%20%7D%60%20omits%20the%20warm%20strategy.%20The%20classifier%20in%20%60classifier.ts%60%20returns%20%60%22warm%22%60%20for%20same-family%20provider%20switches%20%28e.g.%20%60openai%60%20%E2%86%94%20%60openai-subscription%60%29.%20In%20%60manager.ts%60%20lines%20182%E2%80%93188%2C%20a%20missing%20strategy%20calls%20%60failOperation%60%20with%20%60%22no-strategy-for-tier%22%60.%20Any%20user%20switching%20between%20providers%20in%20the%20same%20family%20will%20receive%20a%20silent%20internal%20failure%20with%20no%20clear%20error%20surfaced.%0A%0AEither%20register%20a%20warm%20strategy%20here%20%28falling%20back%20to%20the%20hot%20strategy%20is%20a%20safe%20interim%20choice%29%20or%20change%20the%20classifier%20to%20collapse%20%60warm%60%20to%20%60cold%60%20until%20the%20warm%20strategy%20exists.%0A%0A%60%60%60ts%0Astrategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%2C%20warm%3A%20hotStrategy%20%7D%2C%0A%60%60%60%0A%0A%23%23%23%20Issue%203%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A139-147%0A**API%20key%20written%20to%20disk%20in%20plaintext%20via%20intent%20serialization**%0A%0AThe%20%60ProviderSwitchIntent%60%20built%20here%20includes%20the%20raw%20%60apiKey%60%20value%2C%20and%20the%20%60FilesystemRuntimeOperationRepository%60%20serializes%20the%20full%20%60RuntimeOperation%60%20%28including%20%60intent%60%29%20to%20%60%3CstateDir%3E%2Fruntime-operations%2F%3Cid%3E.json%60%20%28mode%200600%2C%20but%20still%20a%20plain%20JSON%20file%29.%20Every%20provider%20switch%20stores%20the%20user's%20API%20key%20on%20the%20filesystem%20in%20cleartext%20for%20up%20to%20the%2024-hour%20retention%20window.%0A%0AThe%20API%20key%20should%20be%20redacted%20from%20the%20persisted%20intent.%20One%20approach%20is%20to%20store%20only%20a%20boolean%20flag%20%60apiKeyProvided%3A%20true%60%20in%20the%20persisted%20intent%20while%20keeping%20the%20real%20key%20in-memory%20only%20for%20the%20duration%20of%20the%20operation.%0A%0A%23%23%23%20Issue%204%20of%204%0Apackages%2Fagent%2Fsrc%2Fruntime%2Foperations%2Fcold-strategy.ts%3A29-42%0A**%22shutdown-old%22%20phase%20is%20appended%20twice%20instead%20of%20updated%20once**%0A%0A%60ctx.reportPhase%60%20maps%20to%20%60repository.appendPhase%60%2C%20which%20always%20adds%20a%20new%20entry%20to%20the%20phases%20array.%20Calling%20it%20first%20with%20%60status%3A%20%22running%22%60%20and%20then%20immediately%20with%20%60status%3A%20%22succeeded%22%60%20produces%20two%20separate%20%60%22shutdown-old%22%60%20entries%20in%20the%20log%20rather%20than%20one%20entry%20whose%20status%20transitions.%20No%20actual%20shutdown%20work%20occurs%20between%20the%20two%20calls%20%E2%80%94%20%60restartRuntime%60%20is%20invoked%20in%20the%20%60%22start-new%22%60%20phase%20below.%0A%0AThe%20manager's%20health-check%20code%20uses%20%60appendPhase%60%20%28for%20%60%22running%22%60%29%20%2B%20%60updateLastPhase%60%20%28for%20the%20terminal%20state%29.%20The%20cold%20strategy%20should%20follow%20the%20same%20pattern%2C%20or%20both%20phases%20should%20be%20a%20single%20append%20recording%20the%20final%20status%20since%20shutdown%20is%20effectively%20instantaneous%20here.%0A%0A\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\"><img alt=\"Fix All in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=Fix%20the%20following%204%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A136-196%0A**Config%20written%20to%20disk%20before%20rejection%20is%20checked**%0A%0A%60applyOnboardingConnectionConfig%60%20and%20%60saveElizaConfig%60%20run%20at%20lines%20136%E2%80%93137%20before%20the%20operation%20manager's%20outcome%20is%20evaluated.%20When%20the%20manager%20returns%20%60%22rejected-busy%22%60%2C%20the%20route%20correctly%20returns%20409%2C%20but%20the%20config%20file%20has%20already%20been%20mutated%20on%20disk%20with%20the%20new%20provider%20settings.%20The%20system%20is%20now%20in%20a%20split%20state%3A%20the%20config%20reflects%20provider%20B%20while%20the%20running%20runtime%20still%20uses%20provider%20A%20%28and%20no%20restart%20will%20happen%29.%20On%20the%20next%20cold%20restart%20the%20new%20provider%20config%20will%20be%20loaded%2C%20potentially%20breaking%20the%20running%20agent.%0A%0AThe%20config%20mutation%20should%20only%20be%20persisted%20once%20the%20manager%20has%20accepted%20the%20request%2C%20or%20the%20hot-strategy's%20%60defaultApplyProviderEnv%60%20should%20be%20the%20sole%20writer%20%28it's%20called%20by%20the%20strategy%20itself%20on%20the%20async%20execution%20path%29.%0A%0A%23%23%23%20Issue%202%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fserver.ts%3A1098-1102%0A**%60warm%60%20tier%20has%20no%20registered%20strategy%20%E2%80%94%20same-family%20provider%20switches%20always%20fail**%0A%0A%60strategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%20%7D%60%20omits%20the%20warm%20strategy.%20The%20classifier%20in%20%60classifier.ts%60%20returns%20%60%22warm%22%60%20for%20same-family%20provider%20switches%20%28e.g.%20%60openai%60%20%E2%86%94%20%60openai-subscription%60%29.%20In%20%60manager.ts%60%20lines%20182%E2%80%93188%2C%20a%20missing%20strategy%20calls%20%60failOperation%60%20with%20%60%22no-strategy-for-tier%22%60.%20Any%20user%20switching%20between%20providers%20in%20the%20same%20family%20will%20receive%20a%20silent%20internal%20failure%20with%20no%20clear%20error%20surfaced.%0A%0AEither%20register%20a%20warm%20strategy%20here%20%28falling%20back%20to%20the%20hot%20strategy%20is%20a%20safe%20interim%20choice%29%20or%20change%20the%20classifier%20to%20collapse%20%60warm%60%20to%20%60cold%60%20until%20the%20warm%20strategy%20exists.%0A%0A%60%60%60ts%0Astrategies%3A%20%7B%20cold%3A%20coldStrategy%2C%20hot%3A%20hotStrategy%2C%20warm%3A%20hotStrategy%20%7D%2C%0A%60%60%60%0A%0A%23%23%23%20Issue%203%20of%204%0Apackages%2Fagent%2Fsrc%2Fapi%2Fprovider-switch-routes.ts%3A139-147%0A**API%20key%20written%20to%20disk%20in%20plaintext%20via%20intent%20serialization**%0A%0AThe%20%60ProviderSwitchIntent%60%20built%20here%20includes%20the%20raw%20%60apiKey%60%20value%2C%20and%20the%20%60FilesystemRuntimeOperationRepository%60%20serializes%20the%20full%20%60RuntimeOperation%60%20%28including%20%60intent%60%29%20to%20%60%3CstateDir%3E%2Fruntime-operations%2F%3Cid%3E.json%60%20%28mode%200600%2C%20but%20still%20a%20plain%20JSON%20file%29.%20Every%20provider%20switch%20stores%20the%20user's%20API%20key%20on%20the%20filesystem%20in%20cleartext%20for%20up%20to%20the%2024-hour%20retention%20window.%0A%0AThe%20API%20key%20should%20be%20redacted%20from%20the%20persisted%20intent.%20One%20approach%20is%20to%20store%20only%20a%20boolean%20flag%20%60apiKeyProvided%3A%20true%60%20in%20the%20persisted%20intent%20while%20keeping%20the%20real%20key%20in-memory%20only%20for%20the%20duration%20of%20the%20operation.%0A%0A%23%23%23%20Issue%204%20of%204%0Apackages%2Fagent%2Fsrc%2Fruntime%2Foperations%2Fcold-strategy.ts%3A29-42%0A**%22shutdown-old%22%20phase%20is%20appended%20twice%20instead%20of%20updated%20once**%0A%0A%60ctx.reportPhase%60%20maps%20to%20%60repository.appendPhase%60%2C%20which%20always%20adds%20a%20new%20entry%20to%20the%20phases%20array.%20Calling%20it%20first%20with%20%60status%3A%20%22running%22%60%20and%20then%20immediately%20with%20%60status%3A%20%22succeeded%22%60%20produces%20two%20separate%20%60%22shutdown-old%22%60%20entries%20in%20the%20log%20rather%20than%20one%20entry%20whose%20status%20transitions.%20No%20actual%20shutdown%20work%20occurs%20between%20the%20two%20calls%20%E2%80%94%20%60restartRuntime%60%20is%20invoked%20in%20the%20%60%22start-new%22%60%20phase%20below.%0A%0AThe%20manager's%20health-check%20code%20uses%20%60appendPhase%60%20%28for%20%60%22running%22%60%29%20%2B%20%60updateLastPhase%60%20%28for%20the%20terminal%20state%29.%20The%20cold%20strategy%20should%20follow%20the%20same%20pattern%2C%20or%20both%20phases%20should%20be%20a%20single%20append%20recording%20the%20final%20status%20since%20shutdown%20is%20effectively%20instantaneous%20here.%0A%0A&pr=7166&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\"><img alt=\"Fix All in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(agent): runtime operations manager ...\"](https://github.com/elizaos/eliza/commit/3b41268180da76fa04f245d949cf9132bc08005e) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30101058)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-28T23:14:38Z",
+      "mergedAt": "2026-04-29T02:39:15Z",
+      "additions": 6861,
+      "deletions": 619
+    },
+    {
+      "id": "PR_kwDOMT5cIs7WiBUb",
+      "title": "feat(local-agent-on-android): full @elizaos/agent runs on the phone",
+      "author": "lalalune",
+      "number": 7172,
+      "body": "Five-phase landing of the local-agent-on-Android architecture proven by the spike in scripts/spike-android-agent/ and documented in docs/agent-on-mobile.md.\r\n\r\nPhase A — APK asset pipeline (run-mobile-build.mjs + scripts/lib/stage-android-agent.mjs): pinned bun-1.3.13 + Alpine v3.21 musl loader + libstdc++ + libgcc fetched per ABI, cached under ~/.cache/milady-android-agent/, staged into apps/app/android/app/src/ main/assets/agent/{x86_64,arm64-v8a}/ with idempotent re-runs. ~190 MB across both ABIs.\r\n\r\nPhase B — MiladyAgentService.java foreground service: extracts assets to /data/data/<pkg>/files/agent/ at first launch, chmods the bun binary\r\n+ musl loader + launch.sh, ProcessBuilder-spawns bun with the spike's proven invocation pattern, pumps stdout/stderr to logcat + agent.log, runs a watchdog that polls process.isAlive() + http://127.0.0.1:31337/ api/health every 10 s with exponential-backoff restart up to 5 attempts, SIGTERM/SIGKILL on shutdown. FOREGROUND_SERVICE_SPECIAL_USE gated to API 34+ (minSdk=26). Wired into MiladyBootReceiver (BOOT_COMPLETED) and MainActivity.onCreate(). Includes integration step: Service calls SELinux.restoreconRecursive(filesDir + \"/agent\") via reflection after extraction so Phase C's domain transition fires.\r\n\r\nPhase D — agent payload (eliza/packages/agent/scripts/build-mobile- bundle.mjs + mobile-stubs/): bun-build of @elizaos/agent with native deps (node-llama-cpp, sharp, onnxruntime-node, @huggingface/ transformers, puppeteer-core, pty-manager, canvas) replaced by CJS stubs that re-export the names the runtime statically imports. Mobile core-plugin allowlist of @elizaos/plugin-sql + AI providers; plugin- collector restricts the load set so dynamic imports of unbundled packages are impossible. isMobilePlatform() helper in @elizaos/shared gates ~20 child_process.spawn sites (n8n sidecar, telegram polling, embedding warmup, sandbox, signal-pairing, app-route registration, trigger bridges, training crons). MILADY_DISABLE_DIRECT_RUN flattens the runtime/eliza.ts self-invocation so the bundle's bin.ts→cli stays the entry point. Bundle boots on the cuttlefish, completes PGlite migrations, answers /api/health with {\"ready\":true,\"runtime\":\"ok\", \"database\":\"ok\",...}.\r\n\r\nPhase E — UI mode wiring (mobile-runtime-mode.ts + RuntimeGate.tsx + probe-local-agent.ts + platform/init.ts): \"local\" added to MobileRuntimeMode union, async probe-driven local-tile gating with 30 s memo + inflight dedupe + spinner placeholder, mobile-friendly copy (\"Local Agent (Beta)\" / \"ON DEVICE\") gated on isAndroid, finishAsLocal() pins apiBase=http://127.0.0.1:31337 and persists mobile-runtime-mode + active-server side-channel for auto-resume on next launch. canHostLocalAgent() helper. 4 new i18n keys × 7 locales. 20 onboarding tests pass. client-base.setBaseUrl() now mirrors apiBase to window.__ELIZA_API_BASE__ via setElizaApiBase()/ clearElizaApiBase() so the Capacitor agent plugin web fallback resolves the right base on Android (was the Phase E caveat).\r\n\r\nStage-android-agent.mjs prefers eliza/packages/agent/dist-mobile/ agent-bundle.js when present (Phase D's real bundle) and falls back to the spike's stub server.js — so a bare Milady checkout still builds, with `bun run --cwd eliza/packages/agent build:mobile` producing the real payload. PGlite vector.tar.gz and fuzzystrmatch.tar.gz are staged into the assets root and MiladyAgentService extracts them ONE DIR ABOVE the bundle so PGlite's `new URL(\"../X.tar.gz\", import.meta.url)` resolves on- device. dist-mobile/ is gitignored — build artifact only.\r\n\r\n<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR lands the five-phase local-agent-on-Android architecture: APK asset pipeline (bun + musl binaries staged via `stage-android-agent.mjs`), a `MiladyAgentService` foreground service that extracts and supervises the bun process, a mobile-safe agent bundle build (`build-mobile-bundle.mjs`), and a probe-driven \"Local Agent\" tile in `RuntimeGate`.\n\n- **P1 — tile never appears on Android**: `probeLocalAgent` checks `body.ok === true` but the real `/api/health` endpoint always returns `{ ready: boolean, ... }` with no `ok` field. Every probe call returns `false`, the local tile is never shown, and all associated tests pass only because they share the same wrong mock field.\n- **P1 — `restartAttempts` data race**: `MiladyAgentService.restartAttempts` is a plain `int` read and written from the main thread, `WatchdogThread`, and anonymous restart threads without `volatile` or synchronisation, risking unbounded restart loops or premature give-up.\n- **P1 — partial-write leaves corrupt binaries**: `copyAssetIfMissing` uses `length() > 0` as its idempotency guard; a mid-copy crash leaves a truncated `bun` or musl loader that is silently reused on every subsequent launch.\n\n<h3>Confidence Score: 2/5</h3>\n\nNot safe to merge — three P1 issues mean the Local Agent tile is permanently invisible on Android and the service has correctness/reliability bugs.\n\nThree independent P1 findings: a field mismatch that makes the entire feature invisible at runtime, a data race in the restart-counter logic, and a partial-write hazard that can permanently corrupt the extracted bun binary. Any one alone yields a P1 ceiling of 4; three together pull the score to 2.\n\nprobe-local-agent.ts (wrong field check), MiladyAgentService.java (race + partial-write), probe-local-agent.test.ts (mocks must be updated alongside the fix).\n\n<details open><summary><h3>Security Review</h3></summary>\n\n- **Supply-chain risk** (`stage-android-agent.mjs`): the bun binary is fetched from GitHub releases and Alpine packages are fetched by parsing an HTML index page — neither download is verified against a pinned checksum or signature. A tampered artifact would be staged directly into the APK and shipped to devices.\n- No issues found with secrets handling, injection, or auth/authz in the changed TypeScript/Java code.\n</details>\n\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/onboarding/probe-local-agent.ts | New liveness probe for on-device agent — checks `body.ok` but the health endpoint returns `body.ready`; the Local Agent tile will never appear on Android until fixed. |\n| packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java | New 774-line foreground service managing the bun agent process — has a `restartAttempts` data race across threads and a partial-write vulnerability in asset extraction that can leave corrupt binaries. |\n| packages/app-core/test/onboarding/probe-local-agent.test.ts | New probe unit tests — all mocks use `{ ok: true }` which does not match the real health endpoint shape `{ ready: true, ... }`; tests pass only because the implementation and mocks share the same wrong field. |\n| packages/app-core/scripts/lib/stage-android-agent.mjs | New APK asset staging script — downloads bun and Alpine musl binaries without checksum verification; otherwise idempotent and well-structured. |\n| packages/app-core/src/components/shell/RuntimeGate.tsx | Adds async probe-driven local-tile gating, spinner placeholder, and Android-specific finishAsLocal flow that pins apiBase to loopback — looks correct. |\n| packages/agent/scripts/build-mobile-bundle.mjs | New Bun.build pipeline for the Android agent payload — stub-resolver plugin, core-dedupe plugin, and PGlite asset copy look well-reasoned. |\n| packages/agent/src/runtime/plugin-collector.ts | Adds mobile-platform branch that substitutes MOBILE_CORE_PLUGINS and filters the final set to a curated allowlist — logic is clean. |\n| packages/shared/src/runtime-env.ts | Adds isMobilePlatform() and isAndroidMobile() helpers keyed on MILADY_PLATFORM env var — straightforward and correct. |\n| packages/app-core/platforms/android/app/src/main/AndroidManifest.xml | Adds MiladyAgentService declaration with specialUse foreground type and the required FOREGROUND_SERVICE_SPECIAL_USE permission — correct for API 34+. |\n| packages/app-core/src/api/client-base.ts | Mirrors apiBase to window.__ELIZA_API_BASE__ via setElizaApiBase/clearElizaApiBase on every setBaseUrl() call — clean fix for the Capacitor web-plugin fallback. |\n\n</details>\n\n\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (2)</h3></summary>\n\n1. `packages/app-core/src/onboarding/probe-local-agent.ts`, line 938-943 ([link](https://github.com/elizaos/eliza/blob/402f552da412cb94b1b439dad365e01a88741d10/packages/app-core/src/onboarding/probe-local-agent.ts#L938-L943)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Probe checks `body.ok` but health endpoint returns `body.ready`**\n\n   `probeLocalAgent` returns `true` only when `body.ok === true`, but `packages/agent/src/api/health-routes.ts` always serialises `{ ready: boolean, runtime: \"ok\"|\"not_initialized\", ... }` — there is no `ok` field. Every real agent response will cause `(body as { ok?: unknown }).ok === true` to evaluate to `false`, so `shouldShowLocalOption()` never grants the tile on Android.\n\n   The test mocks `{ ok: true }` so it passes, but it doesn't match the actual server response shape. The probe condition should be `(body as { ready?: unknown }).ready === true`.\n\n\n2. `packages/app-core/scripts/lib/stage-android-agent.mjs`, line 540-553 ([link](https://github.com/elizaos/eliza/blob/402f552da412cb94b1b439dad365e01a88741d10/packages/app-core/scripts/lib/stage-android-agent.mjs#L540-L553)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=7\" align=\"top\"></a> <a href=\"#\"><img alt=\"security\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/Security.svg?v=1\" align=\"top\"></a> **Downloaded binaries have no checksum verification**\n\n   `ensureBunBinary` fetches the bun zip from GitHub over HTTPS and immediately unzips it without verifying any hash or signature. Similarly, the Alpine APK URLs are resolved by scraping an HTML index with a regex — if the CDN returns a different file (or the download is intercepted), a tampered binary is staged directly into the APK assets.\n\n   Consider pinning the expected SHA-256 of each release artifact and verifying with `crypto.subtle.digest` or `shasum -c` before extracting.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(local-agent-on-android): full @eliz...\"](https://github.com/elizaos/eliza/commit/402f552da412cb94b1b439dad365e01a88741d10) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30106132)</sub>\n\n> Greptile also left **3 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T00:06:09Z",
+      "mergedAt": "2026-04-29T00:27:27Z",
+      "additions": 4144,
+      "deletions": 1491
+    },
+    {
+      "id": "PR_kwDOMT5cIs7Wq9eL",
+      "title": "feat(vault/wiring): mirror sensitive plugin saves to @elizaos/vault (write-side)",
+      "author": "Dexploarer",
+      "number": 7194,
+      "body": "## Stacked on #7187\n\nThis is the next motion after the @elizaos/vault package + Settings UI PR.\n**Should merge after #7187.** Until then, this branch contains all of #7187's\ncommits as a base.\n\n## What this adds\n\nA single, focused write-side wiring: when a user saves a plugin's config\nthrough Settings, sensitive fields are mirrored into \\`@elizaos/vault\\`\nalongside the legacy \\`config.env.X\\` / \\`config.env.vars.X\\` storage.\n\nUntil now the vault was a primitive without consumers in the save/load\nflow — the Settings → Secrets Storage modal could pick a backend, but that\npreference didn't actually route any saves anywhere. This commit closes\nthat gap on the **write side**: vault becomes populated with the user's\nactual keys.\n\n## What this does NOT yet deliver\n\n- **Read-side hydration.** The runtime continues to read from\n  \\`process.env\\` via the legacy hydration path. The vault is a SHADOW\n  store for now.\n- **Auto-creating items in 1Password / Bitwarden via their CLIs.**\n  Sensitive saves go to in-house (encrypted local file with OS-keychain\n  master). If the user's preferences say \\\"1Password\\\" but no\n  \\`externalPath\\` is supplied, the manager already gracefully throws and\n  the legacy save still succeeds.\n\nBoth are scoped for follow-up PRs after this lands.\n\n## Implementation\n\n- New \\`mirrorPluginSensitiveToVault\\` helper at the top of\n  \\`plugins-compat-routes.ts\\`. Iterates the plugin's \\`parameters\\`, finds\n  \\`sensitive: true\\` ones, reads values from the request body's\n  \\`config\\` map, calls \\`vault.set(key, value, { sensitive: true })\\` for\n  each.\n- Called from PUT \\`/api/plugins/:id\\` after the legacy persist + runtime\n  apply succeed. Promise floats with \\`.catch\\` so save response isn't\n  delayed.\n- Vault key shape = env-var name (\\`OPENROUTER_API_KEY\\`). Matches what\n  the legacy code uses; lets future read-side hydration round-trip\n  cleanly without a translation layer.\n\n## Failure mode\n\nBest-effort. Any \\`vault.set\\` failure is logged and swallowed:\n\\`[plugins-compat] vault.set(<key>) failed: <reason>\\`. The save itself\nis NOT rolled back — legacy storage has already succeeded. Users\ncontinue to work; the shadow just isn't populated for that one field.\n\n## Verification\n\n- \\`bun run typecheck\\` from \\`packages/app-core\\` is clean for changes in\n  this PR (plus the prior #7187 changes). Pre-existing errors in\n  \\`packages/typescript/src/types/proto.js\\` re-exports,\n  \\`plugin-anthropic\\`, and \\`plugin-sql\\` are upstream issues independent\n  of this work.\n- Vault unit tests still 45/45 (cd \\`packages/vault && bun run test\\`).\n\n## Test plan\n\n- [ ] Save an OpenRouter API key in Settings → verify \\`~/.milady/vault.json\\`\n      contains an encrypted entry under \\`OPENROUTER_API_KEY\\`\n- [ ] Save with vault unavailable (simulate by killing the keychain\n      master entry) → verify save still succeeds, log line emitted\n- [ ] Saved value can be read back via \\`bun run --filter @elizaos/vault\\`\n      direct vault inspection\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR introduces the `@elizaos/vault` package (AES-256-GCM encrypted local store, OS-keychain master key, password-manager routing) and wires its write side into the `PUT /api/plugins/:id` handler so sensitive plugin fields are mirrored into the vault after each successful legacy save.\n\n- **P1 — per-request `createVault()` race:** `mirrorPluginSensitiveToVault` calls `createVault()` on every invocation, creating a fresh `VaultImpl` with its own mutex and empty cache. Two concurrent plugin saves each read the same on-disk state independently, then write back; the second rename silently drops all keys written by the first instance. Hoisting a module-level vault singleton fixes this.\n- **P2 — blocking keychain calls on the event loop:** `osKeychainMasterKey.load()` invokes `@napi-rs/keyring`'s synchronous `getPassword`/`setPassword` directly on the Node.js main thread, stalling the event loop for the duration of any keychain prompt or unlock delay.\n</details>\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge as-is: the per-request vault instantiation creates a real concurrent-write race that silently drops vault entries.\n\nA P1 race condition exists in the core wiring path (per-request createVault() with independent mutexes). While the vault is a shadow store today and data loss there doesn't affect the primary save, it undermines the vault's usefulness immediately and sets a broken baseline for the upcoming read-side PR. Multiple additional P2s (blocking keychain calls, post-rename chmod window, unbounded audit log) keep the score from reaching 4.\n\npackages/app-core/src/api/plugins-compat-routes.ts (P1 race), packages/vault/src/master-key.ts (blocking keychain), packages/vault/src/store.ts (chmod window)\n\n<details open><summary><h3>Security Review</h3></summary>\n\n- **Preferences stored as plaintext** (`packages/vault/src/manager.ts`): `_manager.preferences` — which can include password-manager item paths — is written to `vault.json` without encryption. The file is mode 0600, but any process running as the same user can read these paths in clear text.\n- **Brief permission window on store writes** (`packages/vault/src/store.ts`): `writeStore` renames the `.tmp` file to its final path before the `chmod 0600` call. Between those two calls the file is readable at the umask-derived mode (typically 0644) by other processes on the system.\n- No secrets or credentials are committed; sensitive field values are never logged.\n</details>\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/api/plugins-compat-routes.ts | Adds mirrorPluginSensitiveToVault helper and wires it into PUT /api/plugins/:id; creates a new VaultImpl per call (P1 race condition for concurrent saves) |\n| packages/vault/src/vault.ts | Core vault implementation with per-instance mutex; stale-cache risk when multiple VaultImpl instances target the same file |\n| packages/vault/src/master-key.ts | OS keychain integration via @napi-rs/keyring; getPassword/setPassword are blocking synchronous native calls on the event loop |\n| packages/vault/src/store.ts | Atomic write-via-rename store; post-rename chmod leaves a brief window where the file exists at wrong permissions |\n| packages/vault/src/manager.ts | SecretsManager routing layer; preferences (including password-manager paths) stored as plaintext in vault.json |\n| packages/vault/src/crypto.ts | AES-256-GCM encryption with AAD bound to key name; correct nonce/tag handling |\n| packages/vault/src/audit.ts | Append-only JSONL audit log; no rotation or size bound — can grow unbounded in long-running processes |\n| .github/workflows/vault-ci.yaml | Cross-platform CI for the vault package across macOS, Linux, and Windows with gnome-keyring setup for Linux Secret Service |\n\n</details>\n\n</details>\n\n<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\nsequenceDiagram\n    participant UI as Settings UI\n    participant Route as PUT /api/plugins/:id\n    participant Legacy as Legacy persist + runtime apply\n    participant Mirror as mirrorPluginSensitiveToVault\n    participant VaultImpl as VaultImpl (createVault())\n    participant Keychain as OS Keychain\n    participant Disk as vault.json (0600)\n\n    UI->>Route: PUT /api/plugins/:id\n    Route->>Legacy: persistCompatPluginMutation + applyCompatRuntimeMutation\n    Legacy-->>Route: success (200)\n    Route->>Route: sendJsonResponse (response sent)\n    Route->>Mirror: void mirrorPluginSensitiveToVault(plugin, body).catch(...)\n    Note over Mirror: fire-and-forget\n    Mirror->>VaultImpl: createVault() — new instance per call\n    Mirror->>VaultImpl: vault.set(key, value, {sensitive: true})\n    VaultImpl->>Keychain: osKeychainMasterKey.load() (blocking sync)\n    Keychain-->>VaultImpl: 32-byte master key\n    VaultImpl->>VaultImpl: AES-256-GCM encrypt(key, plaintext, aad)\n    VaultImpl->>Disk: readStore + mutate + writeStore (atomic rename)\n    Disk-->>VaultImpl: ok\n    VaultImpl-->>Mirror: done\n```\n</details>\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=Fix%20the%20following%206%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%206%0Apackages%2Fapp-core%2Fsrc%2Fapi%2Fplugins-compat-routes.ts%3A264%0A**Per-request%20%60createVault%28%29%60%20creates%20a%20cross-instance%20write%20race**%0A%0A%60mirrorPluginSensitiveToVault%60%20calls%20%60createVault%28%29%60%20on%20every%20invocation%2C%20producing%20a%20fresh%20%60VaultImpl%60%20with%20its%20own%20in-process%20mutex%20and%20%60cachedStore%20%3D%20null%60.%20If%20two%20concurrent%20PUT%20requests%20%28e.g.%2C%20a%20user%20saving%20two%20plugins%20in%20quick%20succession%29%20each%20produce%20a%20vault%20instance%2C%20both%20can%20call%20%60readStore%28%29%60%20before%20either%20writes%20back%20%E2%80%94%20the%20second%20atomic%20rename%20silently%20drops%20all%20keys%20written%20by%20the%20first%20instance.%20The%20mutex%20in%20%60VaultImpl%60%20serializes%20writes%20only%20_within_%20one%20instance%3B%20it%20provides%20no%20cross-instance%20protection.%0A%0AThe%20fix%20is%20to%20hoist%20a%20single%20%60createVault%28%29%60%20call%20to%20module-scope%20%28or%20inject%20it%20as%20a%20dependency%29%20so%20all%20calls%20share%20one%20instance%20and%20its%20mutex%3A%0A%0A%60%60%60typescript%0A%2F%2F%20module-level%20singleton%0Aconst%20_vault%20%3D%20createVault%28%29%3B%0A%0Aasync%20function%20mirrorPluginSensitiveToVault%28%0A%20%20plugin%3A%20%7B%20parameters%3A%20Array%3C%7B%20key%3A%20string%3B%20sensitive%3A%20boolean%20%7D%3E%20%7D%2C%0A%20%20body%3A%20unknown%2C%0A%29%3A%20Promise%3Cvoid%3E%20%7B%0A%20%20%2F%2F%20...%20use%20_vault%20instead%20of%20createVault%28%29%0A%60%60%60%0A%0A%23%23%23%20Issue%202%20of%206%0Apackages%2Fvault%2Fsrc%2Fvault.ts%3A276-280%0A**Stale-cache%20risk%20when%20the%20same%20vault%20file%20is%20opened%20by%20two%20%60VaultImpl%60%20instances**%0A%0A%60loadStore%28%29%60%20checks%20%60cachedStore%60%20and%20returns%20early%20if%20set%2C%20but%20the%20cache%20is%20never%20invalidated%20after%20a%20write%20from%20_another_%20%60VaultImpl%60%20pointing%20at%20the%20same%20%60storePath%60.%20Any%20long-lived%20instance%20%28e.g.%2C%20a%20module-level%20singleton%29%20would%20serve%20stale%20data%20for%20%60get%60%2C%20%60has%60%2C%20and%20%60list%60%20after%20an%20external%20write%20to%20the%20file.%20Adding%20a%20cache-bust%20on%20every%20%60readStore%60%20call%20%28or%20after%20each%20%60mutate%60%29%20would%20prevent%20serving%20stale%20descriptors.%0A%0A%23%23%23%20Issue%203%20of%206%0Apackages%2Fvault%2Fsrc%2Fmaster-key.ts%3A66-94%0A**%60getPassword%28%29%60%20%2F%20%60setPassword%28%29%60%20are%20synchronous%20keychain%20calls%20on%20the%20event%20loop**%0A%0A%60%40napi-rs%2Fkeyring%60's%20%60entry.getPassword%28%29%60%20and%20%60entry.setPassword%28%29%60%20are%20blocking%20native%20calls.%20On%20macOS%20and%20Windows%20these%20can%20block%20for%20tens%20to%20hundreds%20of%20milliseconds%20%28timeout%20dialogs%2C%20keychain%20unlock%20prompts%29.%20Running%20them%20synchronously%20on%20Node's%20main%20thread%20will%20stall%20the%20event%20loop%20for%20that%20duration.%20Wrapping%20each%20in%20%60setImmediate%60%2F%60queueMicrotask%60%20won't%20help%3B%20the%20real%20fix%20is%20to%20offload%20to%20a%20worker%20thread%20or%20use%20an%20async%20API%20if%20%60%40napi-rs%2Fkeyring%60%20exposes%20one.%0A%0A%23%23%23%20Issue%204%20of%206%0Apackages%2Fvault%2Fsrc%2Fstore.ts%3A50-57%0A**%60chmod%60%20after%20rename%20can%20expose%20the%20file%20to%20another%20process%20between%20the%20two%20calls**%0A%0A%60writeStore%60%20does%20%60fs.rename%28tmp%2C%20path%29%60%20followed%20by%20%60fs.chmod%28path%2C%200o600%29%60.%20Between%20those%20two%20calls%20the%20file%20exists%20at%20its%20final%20path%20but%20may%20have%20the%20wrong%20permissions%20%28inherited%20from%20the%20umask%29.%20A%20concurrent%20reader%20could%20observe%20it%20at%20mode%20%600o644%60%20%28or%20whatever%20the%20process%20umask%20yields%29.%20The%20safer%20pattern%20is%20to%20%60chmod%60%20the%20%60.tmp%60%20file%20_before_%20renaming%3A%0A%0A%60%60%60typescript%0Aawait%20fs.writeFile%28tmp%2C%20body%2C%20%7B%20mode%3A%200o600%2C%20flag%3A%20%22w%22%20%7D%29%3B%0Aawait%20fs.chmod%28tmp%2C%200o600%29%3B%20%20%20%2F%2F%20ensure%20mode%20before%20exposure%0Aawait%20fs.rename%28tmp%2C%20path%29%3B%0A%2F%2F%20drop%20the%20post-rename%20chmod%0A%60%60%60%0A%0A%23%23%23%20Issue%205%20of%206%0Apackages%2Fvault%2Fsrc%2Faudit.ts%3A15-28%0A**Audit%20log%20is%20append-only%20but%20has%20no%20file-size%20bound%20or%20rotation**%0A%0AEvery%20vault%20operation%20unconditionally%20appends%20a%20JSON%20line%20to%20%60vault.jsonl%60.%20On%20a%20long-running%20process%20%28or%20one%20that%20saves%20frequently%29%20this%20file%20grows%20without%20bound.%20There%20is%20no%20rotation%2C%20truncation%2C%20or%20max-size%20guard.%20Consider%20capping%20the%20log%20%28e.g.%2C%20keep%20last%20N%20entries%29%20or%20documenting%20the%20growth%20expectation%20explicitly.%0A%0A%23%23%23%20Issue%206%20of%206%0Apackages%2Fvault%2Fsrc%2Fmanager.ts%3A129-132%0A**%60_manager.preferences%60%20stored%20unencrypted%2C%20but%20may%20reference%20sensitive%20routing%20paths**%0A%0A%60setPreferences%60%20serialises%20the%20entire%20%60ManagerPreferences%60%20object%20%E2%80%94%20including%20%60routing%60%20%28per-key%20backend%20overrides%29%20%E2%80%94%20as%20a%20plain%20%60kind%3A%20%22value%22%60%20entry%20via%20%60vault.set%28PREFERENCES_KEY%2C%20...%29%60%20with%20no%20%60sensitive%3A%20true%60.%20A%20%60routing%60%20map%20can%20contain%20password-manager%20item%20paths%20%28e.g.%2C%20%60%22Personal%2FOpenRouter%2Fapi-key%22%60%29%20that%20may%20be%20considered%20internal-disclosure-level%20information.%20Storing%20it%20as%20a%20plaintext%20vault%20entry%20means%20it%20appears%20in%20clear%20text%20in%20%60vault.json%60.%0A%0A&repo=elizaos%2Feliza&pr=7194&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaudeDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\"><img alt=\"Fix All in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22feat%2Fvault-wiring%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22feat%2Fvault-wiring%22.%0A%0AFix%20the%20following%206%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%206%0Apackages%2Fapp-core%2Fsrc%2Fapi%2Fplugins-compat-routes.ts%3A264%0A**Per-request%20%60createVault%28%29%60%20creates%20a%20cross-instance%20write%20race**%0A%0A%60mirrorPluginSensitiveToVault%60%20calls%20%60createVault%28%29%60%20on%20every%20invocation%2C%20producing%20a%20fresh%20%60VaultImpl%60%20with%20its%20own%20in-process%20mutex%20and%20%60cachedStore%20%3D%20null%60.%20If%20two%20concurrent%20PUT%20requests%20%28e.g.%2C%20a%20user%20saving%20two%20plugins%20in%20quick%20succession%29%20each%20produce%20a%20vault%20instance%2C%20both%20can%20call%20%60readStore%28%29%60%20before%20either%20writes%20back%20%E2%80%94%20the%20second%20atomic%20rename%20silently%20drops%20all%20keys%20written%20by%20the%20first%20instance.%20The%20mutex%20in%20%60VaultImpl%60%20serializes%20writes%20only%20_within_%20one%20instance%3B%20it%20provides%20no%20cross-instance%20protection.%0A%0AThe%20fix%20is%20to%20hoist%20a%20single%20%60createVault%28%29%60%20call%20to%20module-scope%20%28or%20inject%20it%20as%20a%20dependency%29%20so%20all%20calls%20share%20one%20instance%20and%20its%20mutex%3A%0A%0A%60%60%60typescript%0A%2F%2F%20module-level%20singleton%0Aconst%20_vault%20%3D%20createVault%28%29%3B%0A%0Aasync%20function%20mirrorPluginSensitiveToVault%28%0A%20%20plugin%3A%20%7B%20parameters%3A%20Array%3C%7B%20key%3A%20string%3B%20sensitive%3A%20boolean%20%7D%3E%20%7D%2C%0A%20%20body%3A%20unknown%2C%0A%29%3A%20Promise%3Cvoid%3E%20%7B%0A%20%20%2F%2F%20...%20use%20_vault%20instead%20of%20createVault%28%29%0A%60%60%60%0A%0A%23%23%23%20Issue%202%20of%206%0Apackages%2Fvault%2Fsrc%2Fvault.ts%3A276-280%0A**Stale-cache%20risk%20when%20the%20same%20vault%20file%20is%20opened%20by%20two%20%60VaultImpl%60%20instances**%0A%0A%60loadStore%28%29%60%20checks%20%60cachedStore%60%20and%20returns%20early%20if%20set%2C%20but%20the%20cache%20is%20never%20invalidated%20after%20a%20write%20from%20_another_%20%60VaultImpl%60%20pointing%20at%20the%20same%20%60storePath%60.%20Any%20long-lived%20instance%20%28e.g.%2C%20a%20module-level%20singleton%29%20would%20serve%20stale%20data%20for%20%60get%60%2C%20%60has%60%2C%20and%20%60list%60%20after%20an%20external%20write%20to%20the%20file.%20Adding%20a%20cache-bust%20on%20every%20%60readStore%60%20call%20%28or%20after%20each%20%60mutate%60%29%20would%20prevent%20serving%20stale%20descriptors.%0A%0A%23%23%23%20Issue%203%20of%206%0Apackages%2Fvault%2Fsrc%2Fmaster-key.ts%3A66-94%0A**%60getPassword%28%29%60%20%2F%20%60setPassword%28%29%60%20are%20synchronous%20keychain%20calls%20on%20the%20event%20loop**%0A%0A%60%40napi-rs%2Fkeyring%60's%20%60entry.getPassword%28%29%60%20and%20%60entry.setPassword%28%29%60%20are%20blocking%20native%20calls.%20On%20macOS%20and%20Windows%20these%20can%20block%20for%20tens%20to%20hundreds%20of%20milliseconds%20%28timeout%20dialogs%2C%20keychain%20unlock%20prompts%29.%20Running%20them%20synchronously%20on%20Node's%20main%20thread%20will%20stall%20the%20event%20loop%20for%20that%20duration.%20Wrapping%20each%20in%20%60setImmediate%60%2F%60queueMicrotask%60%20won't%20help%3B%20the%20real%20fix%20is%20to%20offload%20to%20a%20worker%20thread%20or%20use%20an%20async%20API%20if%20%60%40napi-rs%2Fkeyring%60%20exposes%20one.%0A%0A%23%23%23%20Issue%204%20of%206%0Apackages%2Fvault%2Fsrc%2Fstore.ts%3A50-57%0A**%60chmod%60%20after%20rename%20can%20expose%20the%20file%20to%20another%20process%20between%20the%20two%20calls**%0A%0A%60writeStore%60%20does%20%60fs.rename%28tmp%2C%20path%29%60%20followed%20by%20%60fs.chmod%28path%2C%200o600%29%60.%20Between%20those%20two%20calls%20the%20file%20exists%20at%20its%20final%20path%20but%20may%20have%20the%20wrong%20permissions%20%28inherited%20from%20the%20umask%29.%20A%20concurrent%20reader%20could%20observe%20it%20at%20mode%20%600o644%60%20%28or%20whatever%20the%20process%20umask%20yields%29.%20The%20safer%20pattern%20is%20to%20%60chmod%60%20the%20%60.tmp%60%20file%20_before_%20renaming%3A%0A%0A%60%60%60typescript%0Aawait%20fs.writeFile%28tmp%2C%20body%2C%20%7B%20mode%3A%200o600%2C%20flag%3A%20%22w%22%20%7D%29%3B%0Aawait%20fs.chmod%28tmp%2C%200o600%29%3B%20%20%20%2F%2F%20ensure%20mode%20before%20exposure%0Aawait%20fs.rename%28tmp%2C%20path%29%3B%0A%2F%2F%20drop%20the%20post-rename%20chmod%0A%60%60%60%0A%0A%23%23%23%20Issue%205%20of%206%0Apackages%2Fvault%2Fsrc%2Faudit.ts%3A15-28%0A**Audit%20log%20is%20append-only%20but%20has%20no%20file-size%20bound%20or%20rotation**%0A%0AEvery%20vault%20operation%20unconditionally%20appends%20a%20JSON%20line%20to%20%60vault.jsonl%60.%20On%20a%20long-running%20process%20%28or%20one%20that%20saves%20frequently%29%20this%20file%20grows%20without%20bound.%20There%20is%20no%20rotation%2C%20truncation%2C%20or%20max-size%20guard.%20Consider%20capping%20the%20log%20%28e.g.%2C%20keep%20last%20N%20entries%29%20or%20documenting%20the%20growth%20expectation%20explicitly.%0A%0A%23%23%23%20Issue%206%20of%206%0Apackages%2Fvault%2Fsrc%2Fmanager.ts%3A129-132%0A**%60_manager.preferences%60%20stored%20unencrypted%2C%20but%20may%20reference%20sensitive%20routing%20paths**%0A%0A%60setPreferences%60%20serialises%20the%20entire%20%60ManagerPreferences%60%20object%20%E2%80%94%20including%20%60routing%60%20%28per-key%20backend%20overrides%29%20%E2%80%94%20as%20a%20plain%20%60kind%3A%20%22value%22%60%20entry%20via%20%60vault.set%28PREFERENCES_KEY%2C%20...%29%60%20with%20no%20%60sensitive%3A%20true%60.%20A%20%60routing%60%20map%20can%20contain%20password-manager%20item%20paths%20%28e.g.%2C%20%60%22Personal%2FOpenRouter%2Fapi-key%22%60%29%20that%20may%20be%20considered%20internal-disclosure-level%20information.%20Storing%20it%20as%20a%20plaintext%20vault%20entry%20means%20it%20appears%20in%20clear%20text%20in%20%60vault.json%60.%0A%0A\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodexDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\"><img alt=\"Fix All in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=2\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=Fix%20the%20following%206%20code%20review%20issues.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%206%0Apackages%2Fapp-core%2Fsrc%2Fapi%2Fplugins-compat-routes.ts%3A264%0A**Per-request%20%60createVault%28%29%60%20creates%20a%20cross-instance%20write%20race**%0A%0A%60mirrorPluginSensitiveToVault%60%20calls%20%60createVault%28%29%60%20on%20every%20invocation%2C%20producing%20a%20fresh%20%60VaultImpl%60%20with%20its%20own%20in-process%20mutex%20and%20%60cachedStore%20%3D%20null%60.%20If%20two%20concurrent%20PUT%20requests%20%28e.g.%2C%20a%20user%20saving%20two%20plugins%20in%20quick%20succession%29%20each%20produce%20a%20vault%20instance%2C%20both%20can%20call%20%60readStore%28%29%60%20before%20either%20writes%20back%20%E2%80%94%20the%20second%20atomic%20rename%20silently%20drops%20all%20keys%20written%20by%20the%20first%20instance.%20The%20mutex%20in%20%60VaultImpl%60%20serializes%20writes%20only%20_within_%20one%20instance%3B%20it%20provides%20no%20cross-instance%20protection.%0A%0AThe%20fix%20is%20to%20hoist%20a%20single%20%60createVault%28%29%60%20call%20to%20module-scope%20%28or%20inject%20it%20as%20a%20dependency%29%20so%20all%20calls%20share%20one%20instance%20and%20its%20mutex%3A%0A%0A%60%60%60typescript%0A%2F%2F%20module-level%20singleton%0Aconst%20_vault%20%3D%20createVault%28%29%3B%0A%0Aasync%20function%20mirrorPluginSensitiveToVault%28%0A%20%20plugin%3A%20%7B%20parameters%3A%20Array%3C%7B%20key%3A%20string%3B%20sensitive%3A%20boolean%20%7D%3E%20%7D%2C%0A%20%20body%3A%20unknown%2C%0A%29%3A%20Promise%3Cvoid%3E%20%7B%0A%20%20%2F%2F%20...%20use%20_vault%20instead%20of%20createVault%28%29%0A%60%60%60%0A%0A%23%23%23%20Issue%202%20of%206%0Apackages%2Fvault%2Fsrc%2Fvault.ts%3A276-280%0A**Stale-cache%20risk%20when%20the%20same%20vault%20file%20is%20opened%20by%20two%20%60VaultImpl%60%20instances**%0A%0A%60loadStore%28%29%60%20checks%20%60cachedStore%60%20and%20returns%20early%20if%20set%2C%20but%20the%20cache%20is%20never%20invalidated%20after%20a%20write%20from%20_another_%20%60VaultImpl%60%20pointing%20at%20the%20same%20%60storePath%60.%20Any%20long-lived%20instance%20%28e.g.%2C%20a%20module-level%20singleton%29%20would%20serve%20stale%20data%20for%20%60get%60%2C%20%60has%60%2C%20and%20%60list%60%20after%20an%20external%20write%20to%20the%20file.%20Adding%20a%20cache-bust%20on%20every%20%60readStore%60%20call%20%28or%20after%20each%20%60mutate%60%29%20would%20prevent%20serving%20stale%20descriptors.%0A%0A%23%23%23%20Issue%203%20of%206%0Apackages%2Fvault%2Fsrc%2Fmaster-key.ts%3A66-94%0A**%60getPassword%28%29%60%20%2F%20%60setPassword%28%29%60%20are%20synchronous%20keychain%20calls%20on%20the%20event%20loop**%0A%0A%60%40napi-rs%2Fkeyring%60's%20%60entry.getPassword%28%29%60%20and%20%60entry.setPassword%28%29%60%20are%20blocking%20native%20calls.%20On%20macOS%20and%20Windows%20these%20can%20block%20for%20tens%20to%20hundreds%20of%20milliseconds%20%28timeout%20dialogs%2C%20keychain%20unlock%20prompts%29.%20Running%20them%20synchronously%20on%20Node's%20main%20thread%20will%20stall%20the%20event%20loop%20for%20that%20duration.%20Wrapping%20each%20in%20%60setImmediate%60%2F%60queueMicrotask%60%20won't%20help%3B%20the%20real%20fix%20is%20to%20offload%20to%20a%20worker%20thread%20or%20use%20an%20async%20API%20if%20%60%40napi-rs%2Fkeyring%60%20exposes%20one.%0A%0A%23%23%23%20Issue%204%20of%206%0Apackages%2Fvault%2Fsrc%2Fstore.ts%3A50-57%0A**%60chmod%60%20after%20rename%20can%20expose%20the%20file%20to%20another%20process%20between%20the%20two%20calls**%0A%0A%60writeStore%60%20does%20%60fs.rename%28tmp%2C%20path%29%60%20followed%20by%20%60fs.chmod%28path%2C%200o600%29%60.%20Between%20those%20two%20calls%20the%20file%20exists%20at%20its%20final%20path%20but%20may%20have%20the%20wrong%20permissions%20%28inherited%20from%20the%20umask%29.%20A%20concurrent%20reader%20could%20observe%20it%20at%20mode%20%600o644%60%20%28or%20whatever%20the%20process%20umask%20yields%29.%20The%20safer%20pattern%20is%20to%20%60chmod%60%20the%20%60.tmp%60%20file%20_before_%20renaming%3A%0A%0A%60%60%60typescript%0Aawait%20fs.writeFile%28tmp%2C%20body%2C%20%7B%20mode%3A%200o600%2C%20flag%3A%20%22w%22%20%7D%29%3B%0Aawait%20fs.chmod%28tmp%2C%200o600%29%3B%20%20%20%2F%2F%20ensure%20mode%20before%20exposure%0Aawait%20fs.rename%28tmp%2C%20path%29%3B%0A%2F%2F%20drop%20the%20post-rename%20chmod%0A%60%60%60%0A%0A%23%23%23%20Issue%205%20of%206%0Apackages%2Fvault%2Fsrc%2Faudit.ts%3A15-28%0A**Audit%20log%20is%20append-only%20but%20has%20no%20file-size%20bound%20or%20rotation**%0A%0AEvery%20vault%20operation%20unconditionally%20appends%20a%20JSON%20line%20to%20%60vault.jsonl%60.%20On%20a%20long-running%20process%20%28or%20one%20that%20saves%20frequently%29%20this%20file%20grows%20without%20bound.%20There%20is%20no%20rotation%2C%20truncation%2C%20or%20max-size%20guard.%20Consider%20capping%20the%20log%20%28e.g.%2C%20keep%20last%20N%20entries%29%20or%20documenting%20the%20growth%20expectation%20explicitly.%0A%0A%23%23%23%20Issue%206%20of%206%0Apackages%2Fvault%2Fsrc%2Fmanager.ts%3A129-132%0A**%60_manager.preferences%60%20stored%20unencrypted%2C%20but%20may%20reference%20sensitive%20routing%20paths**%0A%0A%60setPreferences%60%20serialises%20the%20entire%20%60ManagerPreferences%60%20object%20%E2%80%94%20including%20%60routing%60%20%28per-key%20backend%20overrides%29%20%E2%80%94%20as%20a%20plain%20%60kind%3A%20%22value%22%60%20entry%20via%20%60vault.set%28PREFERENCES_KEY%2C%20...%29%60%20with%20no%20%60sensitive%3A%20true%60.%20A%20%60routing%60%20map%20can%20contain%20password-manager%20item%20paths%20%28e.g.%2C%20%60%22Personal%2FOpenRouter%2Fapi-key%22%60%29%20that%20may%20be%20considered%20internal-disclosure-level%20information.%20Storing%20it%20as%20a%20plaintext%20vault%20entry%20means%20it%20appears%20in%20clear%20text%20in%20%60vault.json%60.%0A%0A&pr=7194&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursorDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\"><img alt=\"Fix All in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=2\" height=\"20\"></picture></a>\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(vault/wiring): mirror sensitive plu...\"](https://github.com/elizaos/eliza/commit/b61e4dee3c60c8b95aca28b1feb9bf727ff9b069) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30153982)</sub>\n\n> Greptile also left **6 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T10:31:54Z",
+      "mergedAt": null,
+      "additions": 3204,
+      "deletions": 11
+    }
+  ],
+  "codeChanges": {
+    "additions": 19480,
+    "deletions": 8274,
+    "files": 298,
+    "commitCount": 316
+  },
+  "completedItems": [
+    {
+      "title": "feat(agent): runtime operations manager + widget host refresh",
+      "prNumber": 7166,
+      "type": "feature",
+      "body": "## Summary\n\nBundles in-flight feature work on `feat/widget-host-cycle-and-greenup` so it isn't sitting as uncommitted state. Includes:\n\n- New `packages/agent/src/runtime/operations/` module — `RuntimeOperationManager` as the single-flight g",
+      "files": [
+        "apps/app-clawville/assets/hero.png",
+        "apps/app-defense-of-the-agents/assets/hero.png",
+        "apps/app-steward/package.json",
+        "apps/app-steward/src/browser-workspace-wallet.ts",
+        "apps/app-steward/src/routes/wallet-browser-compat-routes.ts",
+        "apps/app/tsconfig.json",
+        "packages/agent/src/actions/browser-session.ts",
+        "packages/agent/src/actions/launchpad-launch.test.ts",
+        "packages/agent/src/actions/launchpad-launch.ts",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/cloud-status-routes.ts",
+        "packages/agent/src/api/provider-switch-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/runtime/operations/classifier.test.ts",
+        "packages/agent/src/runtime/operations/classifier.ts",
+        "packages/agent/src/runtime/operations/cold-strategy.ts",
+        "packages/agent/src/runtime/operations/health-checks.ts",
+        "packages/agent/src/runtime/operations/health.test.ts",
+        "packages/agent/src/runtime/operations/health.ts",
+        "packages/agent/src/runtime/operations/index.ts",
+        "packages/agent/src/runtime/operations/manager.ts",
+        "packages/agent/src/runtime/operations/reload-hot.ts",
+        "packages/agent/src/runtime/operations/repository.ts",
+        "packages/agent/src/runtime/operations/types.ts",
+        "packages/agent/src/runtime/restart.ts",
+        "packages/agent/src/services/browser-workspace-desktop.ts",
+        "packages/agent/src/services/browser-workspace-types.ts",
+        "packages/agent/src/services/browser-workspace.ts",
+        "packages/agent/src/services/index.ts",
+        "packages/agent/src/services/launchpads/image-generator.ts",
+        "packages/agent/src/services/launchpads/launchpad-engine.test.ts",
+        "packages/agent/src/services/launchpads/launchpad-engine.ts",
+        "packages/agent/src/services/launchpads/launchpad-types.ts",
+        "packages/agent/src/services/launchpads/metadata-generator.ts",
+        "packages/agent/src/services/launchpads/profiles/flap-sh.ts",
+        "packages/agent/src/services/launchpads/profiles/four-meme.ts",
+        "packages/agent/tsconfig.json",
+        "packages/app-core/platforms/electrobun/src/bridge/browser-tabs-renderer-registry.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-direct-rpc.ts",
+        "packages/app-core/platforms/electrobun/src/native/browser-workspace.ts",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/platforms/electrobun/src/rpc-handlers.ts",
+        "packages/app-core/platforms/electrobun/src/rpc-schema.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/src/ambient-modules.d.ts",
+        "packages/app-core/src/api/catalog-routes.ts",
+        "packages/app-core/src/api/client-base.ts",
+        "packages/app-core/src/api/client-types-core.ts"
+      ]
+    },
+    {
+      "title": "[codex] Clear stale Eliza Cloud auth on relink",
+      "prNumber": 7165,
+      "type": "other",
+      "body": "## Summary\n- Clear stale in-memory Eliza Cloud auth when a new account login is persisted.\n- Reinitialize `CloudManager` with the newly linked API key instead of keeping an old client alive.\n- Preserve the linked account identity in runtime",
+      "files": [
+        "apps/app-lifeops/src/lifeops/relative-time.ts",
+        "apps/app-lifeops/src/lifeops/repository.ts",
+        "apps/app-lifeops/src/lifeops/schedule-insight.ts",
+        "apps/app-lifeops/src/lifeops/schedule-state.ts",
+        "apps/app-lifeops/src/lifeops/schedule-sync-contracts.ts",
+        "packages/agent/src/api/__tests__/provider-switch-config.test.ts",
+        "packages/agent/src/api/cloud-routes.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/auth/credentials.test.ts",
+        "packages/agent/src/auth/credentials.ts",
+        "packages/agent/src/cloud/cloud-manager.ts",
+        "packages/app-core/src/api/cloud-connection.ts",
+        "packages/app-core/src/api/cloud-routes.test.ts",
+        "packages/app-core/src/api/cloud-routes.ts",
+        "packages/app-core/src/components/shell/StartupShell.tsx",
+        "packages/elizaos/templates/fullstack-app/README.md",
+        "packages/elizaos/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs",
+        "packages/shared/src/contracts/lifeops.ts",
+        "packages/templates/fullstack-app/README.md",
+        "packages/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs",
+        "plugins/plugin-elizacloud"
+      ]
+    },
+    {
+      "title": "feat(n8n): propagate originating-conversation routing into workflow generator",
+      "prNumber": 7164,
+      "type": "feature",
+      "body": "## Summary\n\nWhen a workflow is generated from inside a platform conversation (e.g. a Discord DM or a Telegram chat), surface the originating channel or chat to the LLM as a `## Runtime Facts` line. The user can say *\\\"post the result back t",
+      "files": [
+        "packages/app-core/src/api/client-types-chat.ts",
+        "packages/app-core/src/api/n8n-routes.ts",
+        "packages/app-core/src/components/pages/AutomationsView.tsx",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.test.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.ts"
+      ]
+    },
+    {
+      "title": "feat(app-core): n8n runtime-context provider — surface Discord guilds/channels + Gmail to workflow generator",
+      "prNumber": 7163,
+      "type": "feature",
+      "body": "## Summary\n\nRegisters an optional service of type `n8n_runtime_context_provider` that the patched `@elizaos/plugin-n8n-workflow` (see #25) reads to inject live connector facts into the workflow-generation prompt:\n\n- **Discord facts** — enum",
+      "files": [
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.test.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(connectors): purge n8n credential cache on disconnect so disconnect actually disconnects",
+      "prNumber": 7162,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe S25 missing-credentials banner shipped in #7134 silently fails when a user disconnects a connector. The disconnect path clears OAuth tokens from `milady.json` but leaves the n8n credential cache (`credStore` in plugin-n8n-wo",
+      "files": [
+        "packages/agent/src/api/connector-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/src/components/pages/AutomationsView.tsx",
+        "packages/app-core/src/components/pages/SettingsView.tsx",
+        "packages/app-core/src/state/connector-deeplink.ts",
+        "packages/app-core/src/state/index.ts",
+        "packages/app-core/src/styles/styles.css",
+        "packages/app/src/main.tsx",
+        "packages/shared/src/connector-cred-types.ts",
+        "packages/shared/src/index.ts"
+      ]
+    },
+    {
+      "title": "feat(automations): deep-link banner Connect → Settings connector panel",
+      "prNumber": 7161,
+      "type": "feature",
+      "body": "## Summary\n\nThe missing-credentials banner shipped in #7134 dropped the user on the Settings page top — they had to scroll/search for the right connector. This closes the loop: each \"Connect <Service> →\" button now scrolls the matching conn",
+      "files": [
+        "packages/app-core/src/components/pages/AutomationsView.tsx",
+        "packages/app-core/src/components/pages/SettingsView.tsx",
+        "packages/app-core/src/state/connector-deeplink.ts",
+        "packages/app-core/src/state/index.ts",
+        "packages/app-core/src/styles/styles.css",
+        "packages/app/src/main.tsx"
+      ]
+    },
+    {
+      "title": "feat(skills): bundle build-monetized-app skill",
+      "prNumber": 7160,
+      "type": "feature",
+      "body": "## Summary\n\nAdd a new bundled skill — **`build-monetized-app`** — that teaches the agent how to build a monetized app on Eliza Cloud, deploy it as a container, and route the earnings back into hosting via the existing pay-as-you-go-from-ear",
+      "files": [
+        "packages/skills/skills/build-monetized-app/SKILL.md",
+        "packages/skills/skills/build-monetized-app/references/failure-modes.md",
+        "packages/skills/skills/build-monetized-app/references/sdk-flow.md",
+        "packages/skills/skills/build-monetized-app/references/survival-economics.md"
+      ]
+    },
+    {
+      "title": "fix(actions): skip non-string entries in formatActionSimiles/Tags",
+      "prNumber": 7159,
+      "type": "bugfix",
+      "body": "## Summary\n\n`formatActionSimiles` and `formatActionTags` call `.trim()` on every entry of `action.similes` / `action.tags` without filtering out non-string entries. If any registered action ships with a malformed tags/similes array (contain",
+      "files": [
+        "packages/typescript/src/__tests__/actions.test.ts",
+        "packages/typescript/src/actions.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ruby to v3.4.9",
+      "prNumber": 7158,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [ruby](https://www.ruby-lang.org) ([source](https://redirect.github.com/ruby/ruby)) | uses-with | minor | `3.2` → `3.4.9` |\n\n---\n\n> [!WARNING]",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency python to 3.14",
+      "prNumber": 7157,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [python](https://redirect.github.com/actions/python-versions) | uses-with | minor | `3.12` → `3.14` |\n| [python](https://redirect.github.com/a",
+      "files": [
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/test-packaging.yml"
+      ]
+    },
+    {
+      "title": "fix(deps): update react monorepo to v19.2.5",
+      "prNumber": 7156,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [react](https://react.dev/) ([source](h",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency bun to v1.3.13",
+      "prNumber": 7155,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [bun](https://bun.com) ([source](https:",
+      "files": [
+        ".github/workflows/snap-build-test.yml"
+      ]
+    },
+    {
+      "title": "chore: remove @elizaos/plugin-todo and @elizaos/plugin-rolodex",
+      "prNumber": 7154,
+      "type": "other",
+      "body": "## Summary\nRemoves every remaining reference to \\`@elizaos/plugin-todo\\` and \\`@elizaos/plugin-rolodex\\` from the monorepo. Neither \\`plugins/plugin-todo\\` nor \\`plugins/plugin-rolodex\\` exists as a directory in this checkout, but stale ref",
+      "files": [
+        ".github/workflows/release-rust.yaml",
+        "packages/app-core/src/registry/entries/plugins/rolodex.json",
+        "packages/app-core/src/registry/entries/plugins/todo.json",
+        "packages/benchmarks/rolodex/conversations.ts",
+        "packages/benchmarks/rolodex/handlers/eliza.ts",
+        "packages/benchmarks/rolodex/handlers/perfect.ts",
+        "packages/benchmarks/rolodex/handlers/rolodex.ts",
+        "packages/benchmarks/rolodex/python_bench/__init__.py",
+        "packages/benchmarks/rolodex/python_bench/__main__.py",
+        "packages/benchmarks/rolodex/python_bench/conversations.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/__init__.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/eliza.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/perfect.py",
+        "packages/benchmarks/rolodex/python_bench/handlers/rolodex.py",
+        "packages/benchmarks/rolodex/python_bench/reporter.py",
+        "packages/benchmarks/rolodex/python_bench/run.py",
+        "packages/benchmarks/rolodex/python_bench/scorer.py",
+        "packages/benchmarks/rolodex/python_bench/types.py",
+        "packages/benchmarks/rolodex/python_bench/world.py",
+        "packages/benchmarks/rolodex/reporter.ts",
+        "packages/benchmarks/rolodex/run.ts",
+        "packages/benchmarks/rolodex/scorer.ts",
+        "packages/benchmarks/rolodex/types.ts",
+        "packages/benchmarks/rolodex/world.ts",
+        "packages/examples/code/package.json",
+        "packages/examples/code/src/lib/agent.ts"
+      ]
+    },
+    {
+      "title": "Fix cloud provider switch model drift",
+      "prNumber": 7153,
+      "type": "bugfix",
+      "body": "## Summary\n- clear stale direct-provider model state when switching the runtime to Eliza Cloud or a remote provider\n- skip injecting Codex/OpenAI subscription credentials into the main runtime when cloud inference is active\n- add regression",
+      "files": [
+        "apps/app-lifeops/src/lifeops/relative-time.ts",
+        "apps/app-lifeops/src/lifeops/repository.ts",
+        "apps/app-lifeops/src/lifeops/schedule-insight.ts",
+        "apps/app-lifeops/src/lifeops/schedule-state.ts",
+        "apps/app-lifeops/src/lifeops/schedule-sync-contracts.ts",
+        "packages/agent/src/api/__tests__/provider-switch-config.test.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/auth/credentials.test.ts",
+        "packages/agent/src/auth/credentials.ts",
+        "packages/app-core/src/components/shell/StartupShell.tsx",
+        "packages/elizaos/templates/fullstack-app/README.md",
+        "packages/elizaos/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs",
+        "packages/shared/src/contracts/lifeops.ts",
+        "packages/templates/fullstack-app/README.md",
+        "packages/templates/fullstack-app/apps/app/scripts/generate-brand-assets.mjs"
+      ]
+    },
+    {
+      "title": "fix(message): add CREATE_TASK to EXPLICIT_INTENT_ACTIONS",
+      "prNumber": 7152,
+      "type": "bugfix",
+      "body": "## Summary\n\n`findOwnedActionCorrectionFromMetadata` was overriding the planner's correct `CREATE_TASK` pick with role-gated actions like `OWNER_CALENDAR` based on incidental keyword overlap (e.g. a date in the prompt overlapping the calenda",
+      "files": [
+        "packages/typescript/src/services/message.test.ts",
+        "packages/typescript/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump TypeScript to ^6.0.3",
+      "prNumber": 7151,
+      "type": "other",
+      "body": "## Summary\n- Bumps the \\`typescript\\` devDependency to \\`^6.0.3\\` across all 18 packages that previously pinned a 5.x version.\n- Adds \\`\\\"ignoreDeprecations\\\": \\\"6.0\\\"\\` to the tsconfigs that still use TS 6-deprecated options (\\`moduleResol",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/app-core/package.json",
+        "packages/autonomous/package.json",
+        "packages/autonomous/tsconfig.json",
+        "packages/computeruse/examples/mcp-client-elicitation/package.json",
+        "packages/computeruse/examples/recaptcha-resolver/package.json",
+        "packages/computeruse/packages/kv/package.json",
+        "packages/computeruse/packages/kv/tsconfig.json",
+        "packages/computeruse/packages/workflow/package.json",
+        "packages/computeruse/packages/workflow/tsconfig.json",
+        "packages/daemon/package.json",
+        "packages/elizaos/package.json",
+        "packages/home/package.json",
+        "packages/home/tsconfig.json",
+        "packages/interop/package.json",
+        "packages/sweagent/package.json",
+        "packages/sweagent/typescript/package.json",
+        "packages/sweagent/typescript/src/run/package.json",
+        "packages/sweagent/typescript/src/run/tsconfig.json",
+        "packages/sweagent/typescript/tools/package.json",
+        "packages/sweagent/typescript/tools/tsconfig.json",
+        "packages/training/package.json",
+        "packages/training/tsconfig.json",
+        "packages/typescript/package.json",
+        "packages/typescript/tsconfig.declarations.json",
+        "packages/ui/package.json",
+        "packages/ui/tsconfig.json",
+        "tsconfig.build.template.json",
+        "tsconfig.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump rollup transitive to 4.60.2",
+      "prNumber": 7149,
+      "type": "other",
+      "body": "## Summary\n- Adds \\`rollup: ^4.60.2\\` to root \\`overrides\\` so \\`vite\\` and \\`vitest/vite\\` resolve rollup at 4.60.2 instead of the lockfile-pinned 4.59.0.\n\nRollup isn't a direct dep — \\`vite@5.4.21\\` (\\`^4.20.0\\`) and \\`vitest/vite@7.3.1\\`",
+      "files": [
+        "bun.lock",
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump Node.js to 24.15.0 (LTS Krypton)",
+      "prNumber": 7148,
+      "type": "other",
+      "body": "## Summary\n- \\`engines.node\\` 23.3.0 -> 24.15.0 (root)\n- Workflow \\`node-version\\`: 22 / 23 / 23.3.0 -> 24 / 24.15.0\n  - \\`ci.yaml\\` (3 jobs)\n  - \\`jsdoc-automation.yml\\`\n  - \\`release-computeruse-npm.yaml\\` (3 jobs)\n  - \\`release.yaml\\`\n  ",
+      "files": [
+        ".github/workflows/ci.yaml",
+        ".github/workflows/jsdoc-automation.yml",
+        ".github/workflows/publish-next-prerelease.yaml",
+        ".github/workflows/release-computeruse-npm.yaml",
+        ".github/workflows/release.yaml",
+        ".github/workflows/sync-next-dist-tags.yaml",
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @capacitor/* to current minor versions",
+      "prNumber": 7147,
+      "type": "other",
+      "body": "## Summary\n- @capacitor/core 8.0.2 -> 8.3.1\n- @capacitor/app ^8.0.1 -> ^8.1.0\n- @capacitor/keyboard 8.0.0 -> 8.0.3\n- @capacitor/haptics 8.0.0 -> 8.0.2\n- @capacitor/status-bar ^8.0.1 -> ^8.0.2\n- @capacitor/preferences left at ^8.0.1 (already",
+      "files": [
+        "bun.lock",
+        "packages/app-core/package.json",
+        "packages/home/package.json"
+      ]
+    },
+    {
+      "title": "fix(windows): test portability for path separators and mode bits",
+      "prNumber": 7145,
+      "type": "bugfix",
+      "body": "## Summary\n- **paths.test.ts**: replace hardcoded forward-slash expected values with `path.join()` so tests pass on windows where `path.join` produces backslashes\n- **account-storage.test.ts**: gate the `0o600` POSIX mode-bit assertion behi",
+      "files": [
+        "packages/agent/src/auth/__tests__/account-storage.test.ts",
+        "packages/app-core/src/services/local-inference/paths.test.ts"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency lucide-react to v1",
+      "prNumber": 7209,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [lucide-react](https://lucide.dev) ([so",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update softprops/action-gh-release action to v3",
+      "prNumber": 7208,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [softprops/action-gh-release](https://redirect.github.com/softprops/action-gh-release) | action | major | `v2` → `v3` |\n\n---\n\n> [!WARNING]\n> S",
+      "files": [
+        ".github/workflows/nightly.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update peter-evans/repository-dispatch action to v4",
+      "prNumber": 7207,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [peter-evans/repository-dispatch](https://redirect.github.com/peter-evans/repository-dispatch) | action | major | `v3` → `v4` |\n\n---\n\n> [!WARN",
+      "files": [
+        ".github/workflows/update-homebrew.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.170",
+      "prNumber": 7206,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "Miladyos local agent on android",
+      "prNumber": 7205,
+      "type": "other",
+      "body": "Agent on android\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR wires up a full on-device Eliza agent on Android: a new `MiladyAgentService` foreground service extracts and exec's a Bun runtime + agent bundle from APK assets",
+      "files": [
+        "packages/agent/src/bin.ts",
+        "packages/agent/src/cli/index.ts",
+        "packages/agent/src/runtime/aosp-llama-adapter.test.ts",
+        "packages/agent/src/runtime/aosp-llama-adapter.ts",
+        "packages/agent/src/runtime/aosp-local-inference-bootstrap.test.ts",
+        "packages/agent/src/runtime/aosp-local-inference-bootstrap.ts",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/lib/stage-android-agent.test.ts",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/run-mobile-build.test.ts",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/onboarding/probe-local-agent.ts",
+        "packages/app-core/src/runtime/ensure-local-inference-handler.test.ts",
+        "packages/app-core/src/runtime/ensure-local-inference-handler.ts",
+        "packages/app-core/src/services/local-inference/catalog.ts",
+        "packages/app-core/src/services/local-inference/router-handler.test.ts",
+        "packages/app-core/test/onboarding/probe-local-agent.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update github artifact actions (major)",
+      "prNumber": 7201,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/download-artifact](https://redirect.github.com/actions/download-artifact) | action | major | `v4` → `v8` |\n| [actions/upload-artifact",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/scenario-matrix.yml",
+        ".github/workflows/snap-build-test.yml",
+        ".github/workflows/test-flatpak.yml",
+        ".github/workflows/test-packaging.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update eslint monorepo to v10 (major)",
+      "prNumber": 7200,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@eslint/js](https://eslint.org) ([sour",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency wrangler to v4",
+      "prNumber": 7199,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-con",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency vite to v8",
+      "prNumber": 7198,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-con",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency typescript to v6",
+      "prNumber": 7193,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [typescript](https://www.typescriptlang",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ruby to v4",
+      "prNumber": 7192,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [ruby](https://www.ruby-lang.org) ([source](https://redirect.github.com/ruby/ruby)) | uses-with | major | `3.4.9` → `4.0.3` |\n\n---\n\n> [!WARNIN",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency node to v24",
+      "prNumber": 7191,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Type | Update | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovateb",
+      "files": [
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/integration-dod-gap-issues.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test-packaging.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency macos to v15",
+      "prNumber": 7190,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [macos](https://redirect.github.com/actions/runner-images) | github-runner | major | `14` → `15` |\n\n---\n\n> [!WARNING]\n> Some dependencies coul",
+      "files": [
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @vitejs/plugin-react to v6",
+      "prNumber": 7189,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@vitejs/plugin-react](https://redirect",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update android-actions/setup-android action to v4",
+      "prNumber": 7188,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [android-actions/setup-android](https://redirect.github.com/android-actions/setup-android) | action | major | `v3` → `v4` |\n\n---\n\n> [!WARNING]",
+      "files": [
+        ".github/workflows/elizaos-cuttlefish.yml",
+        ".github/workflows/mobile-build-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-python action to v6",
+      "prNumber": 7186,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-python](https://redirect.github.com/actions/setup-python) | action | major | `v5` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependenci",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/test-packaging.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-java action to v5",
+      "prNumber": 7185,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-java](https://redirect.github.com/actions/setup-java) | action | major | `v4` → `v5` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        ".github/workflows/elizaos-cuttlefish.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.169",
+      "prNumber": 7184,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider-utils to v4.0.24",
+      "prNumber": 7183,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider-utils](https://ai-sdk",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider to v3.0.9",
+      "prNumber": 7182,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider](https://ai-sdk.dev/d",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/openai to v3.0.54",
+      "prNumber": 7181,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/openai](https://ai-sdk.dev/doc",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-node action to v6",
+      "prNumber": 7180,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-node](https://redirect.github.com/actions/setup-node) | action | major | `v4` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/integration-dod-gap-issues.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/quality.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test-packaging.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/setup-java action to v5",
+      "prNumber": 7179,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/setup-java](https://redirect.github.com/actions/setup-java) | action | major | `v4` → `v5` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/mobile-build-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/labeler action to v6",
+      "prNumber": 7178,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/labeler](https://redirect.github.com/actions/labeler) | action | major | `v5` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependencies could n",
+      "files": [
+        ".github/workflows/auto-label.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/github-script action to v9",
+      "prNumber": 7177,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/github-script](https://redirect.github.com/actions/github-script) | action | major | `v7` → `v9` |\n\n---\n\n> [!WARNING]\n> Some dependen",
+      "files": [
+        ".github/workflows/auto-label.yml"
+      ]
+    },
+    {
+      "title": "Miladyos local agent on android",
+      "prNumber": 7176,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/api/provider-switch-config.test.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/provider-switch-routes.ts",
+        "packages/agent/src/api/server-helpers-auth.ts",
+        "packages/agent/src/runtime/first-time-setup.test.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/onboarding-config.ts",
+        "packages/app-core/src/runtime/embedding-warmup-policy.test.ts",
+        "packages/app-core/src/runtime/embedding-warmup-policy.ts",
+        "packages/app-core/src/services/local-inference/catalog.test.ts",
+        "packages/app-core/src/services/local-inference/catalog.ts",
+        "packages/app-core/src/services/local-inference/types.ts",
+        "packages/app-core/test/onboarding-config.test.ts",
+        "packages/shared/src/contracts/service-routing.test.ts",
+        "packages/shared/src/contracts/service-routing.ts"
+      ]
+    },
+    {
+      "title": "Shaw/pr 2067 eliza fix",
+      "prNumber": 7175,
+      "type": "bugfix",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".github/workflows/confidant-ci.yaml",
+        "apps/app-clawville/assets/hero.png",
+        "apps/app-companion/src/components/companion/CompanionAppView.tsx",
+        "apps/app-companion/src/components/companion/CompanionHeader.tsx",
+        "apps/app-companion/src/components/companion/CompanionSettingsPanel.tsx",
+        "apps/app-companion/src/components/companion/CompanionShell.tsx",
+        "apps/app-companion/src/components/companion/CompanionView.tsx",
+        "apps/app-companion/src/components/companion/index.ts",
+        "apps/app-defense-of-the-agents/assets/hero.png",
+        "apps/app-lifeops/src/actions/screen-time.ts",
+        "apps/app-lifeops/src/api/client-lifeops.ts",
+        "apps/app-lifeops/src/components/BrowserBridgeStatusChip.test.tsx",
+        "apps/app-lifeops/src/components/BrowserBridgeStatusChip.tsx",
+        "apps/app-lifeops/src/components/EventEditorDrawer.test.tsx",
+        "apps/app-lifeops/src/components/EventEditorDrawer.tsx",
+        "apps/app-lifeops/src/components/LifeOpsCalendarSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsInboxSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsInboxSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsMoneySection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsMoneySection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsOverviewSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsOverviewSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsRemindersSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsRemindersSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsScreenTimeSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsScreenTimeSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSectionContent.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSettingsSection.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSleepSection.test.tsx",
+        "apps/app-lifeops/src/components/LifeOpsSleepSection.tsx",
+        "apps/app-lifeops/src/components/MissingSourceCard.tsx",
+        "apps/app-lifeops/src/contracts/index.ts",
+        "apps/app-lifeops/src/hooks/useCalendarWeek.test.tsx",
+        "apps/app-lifeops/src/hooks/useCalendarWeek.ts",
+        "apps/app-lifeops/src/hooks/useGoogleLifeOpsConnector.test.ts",
+        "apps/app-lifeops/src/hooks/useGoogleLifeOpsConnector.ts",
+        "apps/app-lifeops/src/hooks/useLifeOpsActivitySignals.ts",
+        "apps/app-lifeops/src/inbox/channel-deep-links.ts",
+        "apps/app-lifeops/src/inbox/message-fetcher.test.ts",
+        "apps/app-lifeops/src/inbox/message-fetcher.ts",
+        "apps/app-lifeops/src/lifeops/browser-readiness.ts",
+        "apps/app-lifeops/src/lifeops/discord-browser-scraper.ts",
+        "apps/app-lifeops/src/lifeops/email-classifier.test.ts",
+        "apps/app-lifeops/src/lifeops/gmail-account-safety-repository.test.ts",
+        "apps/app-lifeops/src/lifeops/google-calendar.test.ts",
+        "apps/app-lifeops/src/lifeops/google-calendar.ts",
+        "apps/app-lifeops/src/lifeops/google-fetch.test.ts",
+        "apps/app-lifeops/src/lifeops/google-fetch.ts",
+        "apps/app-lifeops/src/lifeops/google-gmail.test.ts",
+        "apps/app-lifeops/src/lifeops/google-gmail.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/checkout action to v6",
+      "prNumber": 7174,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/checkout](https://redirect.github.com/actions/checkout) | action | major | `v4` → `v6` |\n\n---\n\n> [!WARNING]\n> Some dependencies could",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/integration-dod-gap-issues.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/publish-packages.yml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/quality.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/scenario-matrix.yml",
+        ".github/workflows/snap-build-test.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test-flatpak.yml",
+        ".github/workflows/test-packaging.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/cache action to v5",
+      "prNumber": 7173,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/cache](https://redirect.github.com/actions/cache) | action | major | `v4` → `v5` |\n\n---\n\n> [!WARNING]\n> Some dependencies could not b",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "feat(local-agent-on-android): full @elizaos/agent runs on the phone",
+      "prNumber": 7172,
+      "type": "feature",
+      "body": "Five-phase landing of the local-agent-on-Android architecture proven by the spike in scripts/spike-android-agent/ and documented in docs/agent-on-mobile.md.\r\n\r\nPhase A — APK asset pipeline (run-mobile-build.mjs + scripts/lib/stage-android-a",
+      "files": [
+        ".gitignore",
+        "packages/agent/package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/scripts/mobile-stubs/canvas.cjs",
+        "packages/agent/scripts/mobile-stubs/huggingface-transformers.cjs",
+        "packages/agent/scripts/mobile-stubs/node-llama-cpp.cjs",
+        "packages/agent/scripts/mobile-stubs/null-plugin.cjs",
+        "packages/agent/scripts/mobile-stubs/onnxruntime-node.cjs",
+        "packages/agent/scripts/mobile-stubs/pty-manager.cjs",
+        "packages/agent/scripts/mobile-stubs/puppeteer-core.cjs",
+        "packages/agent/scripts/mobile-stubs/sharp.cjs",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/app-core/platforms/android/app/src/main/AndroidManifest.xml",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyAgentService.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MiladyBootReceiver.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/src/api/client-base.ts",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/i18n/locales/en.json",
+        "packages/app-core/src/i18n/locales/es.json",
+        "packages/app-core/src/i18n/locales/ko.json",
+        "packages/app-core/src/i18n/locales/pt.json",
+        "packages/app-core/src/i18n/locales/tl.json",
+        "packages/app-core/src/i18n/locales/vi.json",
+        "packages/app-core/src/i18n/locales/zh-CN.json",
+        "packages/app-core/src/onboarding/mobile-runtime-mode.ts",
+        "packages/app-core/src/onboarding/probe-local-agent.ts",
+        "packages/app-core/src/platform/init.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/test/onboarding/mobile-runtime-mode.test.ts",
+        "packages/app-core/test/onboarding/probe-local-agent.test.ts",
+        "packages/app-core/test/onboarding/should-show-local-option.test.ts",
+        "packages/native-plugins/agent/src/web.ts",
+        "packages/shared/src/runtime-env.ts"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency transformers to ~=5.7.0",
+      "prNumber": 7171,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [transformers](https://redirect.github.",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/setup.py",
+        "packages/benchmarks/OSWorld/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency three to ^0.184.0",
+      "prNumber": 7170,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [three](https://threejs.org/) ([source]",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency lucide-react to ^0.577.0",
+      "prNumber": 7169,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [lucide-react](https://lucide.dev) ([so",
+      "files": [
+        "packages/homepage/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update gradle to v9.5.0",
+      "prNumber": 7168,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Update | Change |\n|---|---|---|\n| [gradle](https://gradle.org) ([source](https://redirect.github.com/gradle/gradle)) | minor | `9.4.1` → `9.5.0` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        "packages/app-core/platforms/android/gradle/wrapper/gradle-wrapper.properties"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 276.4403465172955,
+      "prScore": 276.0023465172955,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 174.61309558630438,
+      "prScore": 174.1750955863044,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 97.89207210748786,
+      "prScore": 97.45407210748786,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 94.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 94.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 58.2347738965761,
+      "prScore": 57.7967738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "andex23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/49397867?u=760e6ec36b34f3511f24928686d87f912c3eb7ba&v=4",
+      "totalScore": 26.63905732961526,
+      "prScore": 16.63905732961526,
+      "issueScore": 10,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 15.629048269010742,
+      "prScore": 15.629048269010742,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sw4pIO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 37,
+  "mergedPRs": 54,
+  "newIssues": 4,
+  "closedIssues": 4,
+  "activeContributors": 10
+}
