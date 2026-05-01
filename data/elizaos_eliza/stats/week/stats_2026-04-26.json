@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-04-26 to 2026-05-03, elizaos/eliza had 106 new PRs (87 merged), 10 new issues, and 16 active contributors.",
+  "overview": "From 2026-04-26 to 2026-05-03, elizaos/eliza had 115 new PRs (104 merged), 11 new issues, and 16 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABAKqtpQ",
@@ -16,6 +16,18 @@
       "body": "## Summary\nA follow-up is needed after the fix in commit `55f4f27` / PR #7008.\n\nThe critical correctness bug around 1:1 outbound read state is fixed:\n- use `readViaOutbox` (`numericMsgId <= readOutboxMaxId`) for 1:1 outbound read status\n- use `readViaCount` as fallback for groups\n- clarify the `getMessagesReadParticipants` limitation\n\nTwo issues remain.\n\n## Remaining issue 1: requested message IDs are not fetched directly\n`getTelegramReadReceipts` still calls:\n\n```ts\nclient.getMessages(entity, {\n  search: \"\",\n  limit: Math.max(requested.size * 2, MAX_RECENT_LIMIT),\n})\n```\n\nThis is not an IDs-based fetch and can silently miss older requested message IDs.\n\n### Expected fix\n- extend `TelegramLocalClientLike.getMessages` to support an `ids` parameter\n- fetch the exact requested Telegram message IDs instead of relying on `search: \"\"`\n- make `getTelegramReadReceipts` deterministic for older messages\n\n## Remaining issue 2: O(n*m) receipt lookup\nThe final assembly still does a nested scan via:\n- `args.messageIds.map(...)`\n- `receipts.find(...)`\n\nThis should be replaced with a `Map<string, TelegramReadReceiptResult>` so lookup is linear.\n\n## Why this matters\n- issue 1 is still a correctness gap\n- issue 2 is lower-risk, but worth fixing while touching the same path\n\n## Context\n- fixed in PR: #7008\n- fixed commit: `55f4f27`",
       "createdAt": "2026-04-22T01:21:52Z",
       "closedAt": "2026-04-29T21:07:32Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABA4Rdow",
+      "title": "build: dev-ui.mjs references `./claude-code-stealth.mjs` preload that doesn't exist on fresh clone",
+      "author": "Sw4pIO",
+      "number": 7210,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/app-core/scripts/dev-ui.mjs` declares `./claude-code-stealth.mjs` as a Bun `--preload` entry when the user has an Anthropic subscription, but **no build step generates that file** and **it isn't checked in**. The script's existence check (`existsSync(path.join(cwd, filePath))`) silently filters the missing file out of the preload list, so the stealth fetch interceptor never installs.\n\nThe interceptor is what prepends the Claude Code system prefix and identity headers (`anthropic-beta`, `user-agent: claude-cli/...`, `x-app: cli`) that Anthropic's API requires for OAuth subscription tokens. Without it, every `api.anthropic.com` request from a subscription user gets `401 Invalid authentication credentials` even though the token is valid and registered correctly.\n\nThe TypeScript source is at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`, but the dev preload expects a different file at the **repo root**, named `.mjs`, that auto-runs on import.\n\n## Reproduction\n\nOn a fresh clone of any consumer repo (e.g. milady on `develop`):\n\n1. Sign in to an Anthropic subscription via `POST /api/subscription/anthropic/start` + `/exchange` so `~/.eliza/auth/anthropic-subscription.json` is written.\n2. Manually enable `@elizaos/plugin-anthropic` in `~/.<branding>/<branding>.json` (auto-enable refuses for subscription-only).\n3. Set `ANTHROPIC_AUTH_MODE=oauth` and `CLAUDE_CODE_OAUTH_TOKEN=<token>` in the runtime env.\n4. `bun run dev`\n5. Boot log shows:\n   ```\n   [milady] Stealth imports enabled: \n   ```\n   (notice — empty list because the file doesn't exist; it was silently filtered)\n6. Send any chat message → backend retries 3× with `AI_APICallError: Invalid authentication credentials` and surfaces the parse error to the user.\n\n## Diagnostic trail\n\n- `packages/app-core/scripts/dev-ui.mjs:785` declares the preload:\n  ```js\n  if (stealth.claude) nodeStealthImports.push(\"./claude-code-stealth.mjs\");\n  ```\n- Then filters by existence:\n  ```js\n  const resolvedStealthImports = nodeStealthImports.filter((filePath) =>\n    existsSync(path.join(cwd, filePath)),\n  );\n  ```\n- `find . -name claude-code-stealth.mjs -not -path '*/node_modules/*'` returns nothing on a fresh clone.\n- The TS source exists at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`. Nothing builds it into the expected location.\n\n## Suggested fix\n\nEither of:\n\n1. **Check in / generate the `.mjs`** at the repo root (or wherever `cwd` resolves to in `dev-ui.mjs`), with a self-installing call at the bottom. I verified locally that creating this file unblocks the Anthropic subscription auth path end-to-end (successful chat turns, zero 401s, model calls confirmed via `[stealth] →anthropic` debug logs with `ELIZA_STEALTH_DEBUG=1`).\n\n2. **Fail loud instead of silent**: in `dev-ui.mjs`, when `stealth.claude === true` but the resolved preload file is missing, log a clear warning so users know what's wrong instead of chasing parse errors.\n\nBoth would help; (1) makes the feature work out of the box, (2) prevents the same multi-hour debug hunt for the next person.\n\n## Why this matters\n\nWithout the stealth interceptor, subscription auth is **completely non-functional** on the runtime side, which:\n- Makes the `/api/subscription/anthropic/*` flow look broken (it works correctly, but the runtime that consumes its credentials can't actually use them).\n- Forces users to either get a paid API key or sign up for Eliza Cloud — even though the codebase clearly intends to support direct subscription OAuth via the stealth path.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad`\n- Discovered while booting milady on `develop`",
+      "createdAt": "2026-04-29T22:09:53Z",
+      "closedAt": "2026-05-01T20:04:54Z",
       "state": "CLOSED",
       "commentCount": 1
     },
@@ -54,18 +66,6 @@
       "closedAt": "2026-04-29T21:02:47Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABAho_OQ",
-      "title": "[tracking] Integrate shaw/checkpoint-20260426-eliza branch (29 unique commits) into develop",
-      "author": "lalalune",
-      "number": 7108,
-      "repository": "elizaos/eliza",
-      "body": "## What\n\nThe branch `shaw/checkpoint-20260426-eliza` has 29 commits that are not yet on `develop`, including significant work that should land:\n\n- `a07ff6c598` lifeops(inbox): LLM priority scoring + Missed surface + model setting\n- `53ae1e2890` chore(submodules): bump plugin-discord + plugin-telegram for P3 owner-pairing\n- `0c92b770d3` chore(plugin-elizacloud): bump submodule for cloud SSO helpers\n- `2e6389755a` feat(electrobun): P1 desktop loopback auto-session bridge\n- `476cf2a547` lifeops: finish smart money and security pass\n- `1dc5ad67fc` Move Steward wallet services to app package\n- `debb5e9194` Polish relationships page\n- `2f9cae31b1` Remove Steward agent shims\n- `f12baf1793` Strengthen LifeOps PII redaction\n- `000a9e09eb` lifeops: label subscription playbook capability\n- `f60b3a951c` Fix Gmail reply draft fallback safety\n- `458b4b64e0` Refine Gmail recommendation context policy\n- Plugin resolver fixes (`d183bfcea1`, `47ea85ed2e`, `868f04ebc6`)\n- Cloud SDK / submodule checkpoint chain\n- `2ad44a27ea` fix(lifeops): checkpoint telegram auth encryption update (branch tip)\n\n## Why this isn't merged yet\n\nA naive `git merge origin/shaw/checkpoint-20260426-eliza` into develop produces:\n\n**23 plugin submodule conflicts** — each plugin has divergent SHAs between develop and the branch:\n- `cloud`\n- `plugins/plugin-agent-skills`\n- `plugins/plugin-anthropic`\n- `plugins/plugin-cli`\n- `plugins/plugin-cron`\n- `plugins/plugin-discord`\n- `plugins/plugin-evm`\n- `plugins/plugin-google-genai`\n- `plugins/plugin-groq`\n- `plugins/plugin-imessage`\n- `plugins/plugin-music-library`\n- `plugins/plugin-music-player`\n- `plugins/plugin-ollama`\n- `plugins/plugin-openai`\n- `plugins/plugin-openrouter`\n- `plugins/plugin-pdf`\n- `plugins/plugin-shell`\n- `plugins/plugin-shopify`\n- `plugins/plugin-solana`\n- `plugins/plugin-sql`\n- `plugins/plugin-telegram`\n- `plugins/plugin-wechat`\n- `plugins/plugin-whatsapp`\n\n**9 content conflicts** that need real engineering judgment:\n- `apps/app-lifeops/src/actions/computer-use.ts` — develop renamed `inferSurface → selectSurface`, added helper functions\n- `apps/app-lifeops/src/actions/twilio-call.ts`\n- `packages/agent/src/actions/extract-params.ts`\n- `packages/agent/src/runtime/plugin-resolver.ts`\n- `packages/app-core/src/components/character/CharacterHubView.tsx`\n- `packages/app-core/src/components/pages/AppsView.tsx`\n- `packages/app-core/src/components/pages/BrowserWorkspaceView.test.tsx`\n- `packages/elizaos/templates-manifest.json`\n- `packages/typescript/src/features/advanced-capabilities/personality/actions/set-voice-config.ts`\n\n## How to integrate\n\nFor each plugin submodule conflict: determine which SHA is the descendant (or whether they need their own merge in the plugin repo).\n\nFor each content conflict: review both versions to merge intent — develop's recent work generally took the form of refactors (renames, adds helpers, refines imports) while the branch has its own additions on top of an older base.\n\nThe milady-side counterpart PRs (milady-ai/milady#2045, milady-ai/milady#2044) have been marked merged through the milady-side build/test infra changes that already landed; this branch still holds the eliza-side feature work that needs proper integration.",
-      "createdAt": "2026-04-26T06:48:18Z",
-      "closedAt": "2026-04-27T21:03:24Z",
-      "state": "CLOSED",
-      "commentCount": 0
     }
   ],
   "topPRs": [
@@ -82,6 +82,18 @@
       "deletions": 4667
     },
     {
+      "id": "PR_kwDOMT5cIs7WsOJC",
+      "title": "feat(vault): @elizaos/vault — cross-platform secrets vault + Settings UI integration",
+      "author": "Dexploarer",
+      "number": 7197,
+      "body": "# Relates to\n\nThis is the upstream-targeting twin of milady-ai/eliza#6. The vault feature originated in the Milady fork; this PR lands the upstream-relevant slice on `elizaOS/eliza:develop`.\n\n# Risks\n\n**Low.** The vault is an additive workspace package; the runtime + Settings UI integration is a write-through mirror over the existing `config.env.X` storage path, so disabling it is a one-line change in `plugins-compat-routes.ts` (`mirrorPluginSensitiveToVault` → no-op). Cross-platform secret-service behaviour is exercised by a new dedicated CI workflow (macOS Keychain / Windows Credential Manager / Linux libsecret) so the headline portability claim is verifiable on every PR. The legacy `config.env.X` write path is unchanged — even if every vault call failed, plugin saves would still persist.\n\n# Background\n\n## What does this PR do?\n\nAdds **`@elizaos/vault`** — a cross-platform secrets/config vault — and wires it into the agent runtime + Settings UI so the existing \"save my OpenAI key\" flow stops storing plaintext in `config.env` and starts encrypting at rest with a key from the OS keychain.\n\n### `@elizaos/vault` (new package, `packages/vault/`)\n\n- **Encryption-at-rest** with AES-256-GCM, secret-id-as-AAD (so a leaked ciphertext can't be replayed against a different key).\n- **Master key in the OS keychain by default** — macOS Keychain, Windows Credential Manager, Linux Secret Service via `@napi-rs/keyring`.\n- **Headless fallback**: `passphraseMasterKey()` / `passphraseMasterKeyFromEnv(\"MILADY_VAULT_PASSPHRASE\")` derives the master key with `scrypt` for Linux servers and CI without a Secret Service agent.\n- `defaultMasterKey()` chains keychain → passphrase → throws `MasterKeyUnavailableError` whose message names every remediation path.\n- **One API for sensitive and non-sensitive config** — `vault.set(key, value, { sensitive: true })` vs `vault.set(key, value)`.\n- **Password-manager references are first-class** — values can live in 1Password / Proton Pass / Bitwarden, the vault stores only the resolver reference.\n- **`SecretsManager`** layer routes per-key writes/reads to the user-selected backend (`in-house`, `1password`, `bitwarden`, `protonpass`), with detection + preferences API at `/api/secrets/manager/{backends,preferences}`.\n- **Audit log** at `audit/vault.jsonl` per write.\n- **Testing harness** (`@elizaos/vault/testing#createTestVault`) that produces a vault wired to an in-memory master key for downstream tests.\n\n### Runtime + Settings UI integration\n\n- **Write-through mirror in `/api/plugins/:id` PUT**: when a sensitive plugin field is saved, the value is mirrored into the vault (encrypted at rest) on top of the existing `config.env.X` write. Mirror failures are surfaced to the UI under `vaultMirrorFailures` rather than silently swallowed.\n- **Vault-first reveal**: `POST /api/plugins/:id/reveal` consults `sharedVault().get(key)` before falling back to `process.env` / `config.env`, so a freshly-saved key is the value the user sees.\n- **Per-process cached `sharedVault()`** so concurrent saves share `VaultImpl.mutate()`'s mutex; a per-request `createVault()` would race and silently lose entries.\n- **Broader credential heuristic** — `pickPrimaryCredentialParam()` walks a priority-ordered regex list (`API_KEY` → `API_TOKEN` → `BOT_TOKEN` → `ACCESS_TOKEN` → `SECRET_KEY` → `PRIVATE_KEY` → `CLIENT_SECRET`) instead of only matching `*_API_KEY$`, with an explicit fallback to the first sensitive parameter. Closes the bug where typing a model field before the API-key field caused `Object.values(config).find()` to pick up the model slug; also fixes connectors whose primary credential is a bot token / private key / client secret.\n- **Settings UI** — `SecretsManagerSection` + `ApiKeyConfig` with inline prefix validation and validation warnings, keyboard shortcut `⌘⌥⌃V` (Mac) / `Ctrl+Alt+Shift+V` (Win/Linux), global modal mount, application menu accelerator.\n- **Cloud disconnect orphan-route patch**: `/api/cloud/disconnect` now nulls every routed service (`llmText`, `tts`, `media`, `embeddings`, `rpc`) instead of just `llmText`, so disconnect doesn't leave silently-401'ing voice/image/embedding features routed at the dead `cloud-proxy → elizacloud`. Plus `linkedAccounts.elizacloud.status=\"unlinked\"` to prevent the in-memory state from overwriting the canonical unlinked state on next `saveElizaConfig`.\n\n### Runtime-ops × vault\n\n- `ProviderSwitchIntent.apiKeyRef` replaces plaintext `apiKey` end-to-end. The provider-switch route writes the vault entry, persists only the reference, and resolves through the vault when the runtime reload-hot needs the key.\n- Legacy ops with plaintext `apiKey` are auto-migrated to `apiKeyRef` on hydrate.\n- Repository pruning suite (retention, cap, idempotency, hydrate; 6 tests).\n- A `simplify` pass that dedupes utility code, removes ghost phases, and consolidates state.\n\n## What kind of change is this?\n\n**Features** — non-breaking. `@elizaos/vault` is new. The runtime/Settings wiring is additive on top of the existing config-write path, controlled by feature presence rather than a flag. The provider-switch `apiKeyRef` replaces `apiKey` but a hydrate-time migration upgrades legacy ops in place.\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation. New package documentation lives inline in `packages/vault/README.md` and the public API surface is documented via TSDoc. The Settings UI changes are user-facing but match the existing settings pattern.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. **`packages/vault/`** — start with `src/vault.ts` (the public API), then `src/master-key.ts` (the keychain/passphrase chain), then `src/manager.ts` (the multi-backend router). Tests in `test/{vault,master-key,manager,store,envelope,references,keyring}.test.ts` exercise every public path; `test/master-key.test.ts` covers the headless-fallback chain explicitly.\n2. **`packages/app-core/src/services/vault-mirror.ts`** + `packages/app-core/src/services/vault-mirror.test.ts` — the write-through mirror is small, isolated, and has a focused test that includes failure-collection and a source-text guard for the vault-first reveal ordering.\n3. **`packages/app-core/src/api/plugins-compat-routes.ts`** — the `PUT /api/plugins/:id` handler and `/reveal` route, where the vault wiring sits next to the existing legacy code path.\n4. **`packages/agent/src/runtime/operations/`** — `vault-bridge.ts`, `vault-integration.test.ts`, and `health.test.ts` show the `apiKeyRef` migration. The 22-case integration suite is the strongest evidence that the runtime path keeps working.\n\n## Detailed testing steps\n\nAutomated tests are acceptable.\n\n- **Vault unit suite (cross-platform)**: `bun run --cwd packages/vault test` — 64 tests covering vault, master-key (incl. passphrase fallback), manager, store, envelope, references, keyring round-trips. The new `vault-ci` workflow runs this matrix on `ubuntu-latest`, `macos-latest`, `windows-latest` so the OS-keychain claim is checked on every PR.\n- **App-core wiring suite**: `bun run --cwd packages/app-core test` — 37 wiring tests (vault-mirror unit + source-text guards, secrets-manager-routes integration via real `http.Server`, usePluginsSkillsState heuristic priority list, useSecretsManagerShortcut Mac/Win/Linux chord matching, server.cloud-disconnect orphan-route guard).\n- **Runtime-ops vault integration**: 22 cases in `packages/agent/src/runtime/operations/vault-integration.test.ts` proving the `apiKeyRef` path works end-to-end.\n- **End-to-end save-flow**: `provider-switch-routes.e2e.test.ts` stands up a real `http.Server` and exercises Settings PUT → mirror → reveal → provider switch against an in-memory vault.\n- **Cross-platform CI**: the new `vault-ci` workflow (`.github/workflows/vault-ci.yaml`) runs the vault suite on macOS / Linux / Windows runners; an `app-core-wiring` job runs the wiring tests on `ubuntu-latest` with proto generation as a prerequisite.\n\n### Manual smoke (UI)\n\n1. Open the desktop app → **Settings → Plugins → OpenAI** (or any AI provider).\n2. Enter an API key, save.\n3. The plugin row should turn green and reload the agent. Open `~/.milady/vault.json` — the value is encrypted; the OS keychain holds the master key under `service: \"milady\"`, `account: \"vault.masterKey\"`.\n4. Open the **Secrets Vault** modal via `⌘⌥⌃V` (or **Edit → Secrets Vault** menu). Switch the routing for `OPENAI_API_KEY` to a different backend, save. Subsequent reveals fetch from the new backend.\n\n## Deploy notes\n\n- **`@elizaos/vault` is a new workspace package** — `bun install` at the repo root picks it up; nothing extra to do.\n- **No database changes.**\n- **No breaking changes** to existing config files. Legacy `config.env.X` writes still happen alongside the vault mirror; vault values shadow `process.env` only in the reveal path. The `apiKeyRef` migration on the runtime-ops side is in-place on hydrate (no operator action required).\n\n---\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-04-29T11:25:51Z",
+      "mergedAt": "2026-05-01T03:12:42Z",
+      "additions": 22472,
+      "deletions": 677
+    },
+    {
       "id": "PR_kwDOMT5cIs7WjdAP",
       "title": "Shaw/pr 2067 eliza fix",
       "author": "lalalune",
@@ -92,18 +104,6 @@
       "mergedAt": "2026-04-29T02:39:14Z",
       "additions": 20547,
       "deletions": 3209
-    },
-    {
-      "id": "PR_kwDOMT5cIs7WsOJC",
-      "title": "feat(vault): @elizaos/vault — cross-platform secrets vault + Settings UI integration",
-      "author": "Dexploarer",
-      "number": 7197,
-      "body": "# Relates to\n\nThis is the upstream-targeting twin of milady-ai/eliza#6. The vault feature originated in the Milady fork; this PR lands the upstream-relevant slice on `elizaOS/eliza:develop`.\n\n# Risks\n\n**Low.** The vault is an additive workspace package; the runtime + Settings UI integration is a write-through mirror over the existing `config.env.X` storage path, so disabling it is a one-line change in `plugins-compat-routes.ts` (`mirrorPluginSensitiveToVault` → no-op). Cross-platform secret-service behaviour is exercised by a new dedicated CI workflow (macOS Keychain / Windows Credential Manager / Linux libsecret) so the headline portability claim is verifiable on every PR. The legacy `config.env.X` write path is unchanged — even if every vault call failed, plugin saves would still persist.\n\n# Background\n\n## What does this PR do?\n\nAdds **`@elizaos/vault`** — a cross-platform secrets/config vault — and wires it into the agent runtime + Settings UI so the existing \"save my OpenAI key\" flow stops storing plaintext in `config.env` and starts encrypting at rest with a key from the OS keychain.\n\n### `@elizaos/vault` (new package, `packages/vault/`)\n\n- **Encryption-at-rest** with AES-256-GCM, secret-id-as-AAD (so a leaked ciphertext can't be replayed against a different key).\n- **Master key in the OS keychain by default** — macOS Keychain, Windows Credential Manager, Linux Secret Service via `@napi-rs/keyring`.\n- **Headless fallback**: `passphraseMasterKey()` / `passphraseMasterKeyFromEnv(\"MILADY_VAULT_PASSPHRASE\")` derives the master key with `scrypt` for Linux servers and CI without a Secret Service agent.\n- `defaultMasterKey()` chains keychain → passphrase → throws `MasterKeyUnavailableError` whose message names every remediation path.\n- **One API for sensitive and non-sensitive config** — `vault.set(key, value, { sensitive: true })` vs `vault.set(key, value)`.\n- **Password-manager references are first-class** — values can live in 1Password / Proton Pass / Bitwarden, the vault stores only the resolver reference.\n- **`SecretsManager`** layer routes per-key writes/reads to the user-selected backend (`in-house`, `1password`, `bitwarden`, `protonpass`), with detection + preferences API at `/api/secrets/manager/{backends,preferences}`.\n- **Audit log** at `audit/vault.jsonl` per write.\n- **Testing harness** (`@elizaos/vault/testing#createTestVault`) that produces a vault wired to an in-memory master key for downstream tests.\n\n### Runtime + Settings UI integration\n\n- **Write-through mirror in `/api/plugins/:id` PUT**: when a sensitive plugin field is saved, the value is mirrored into the vault (encrypted at rest) on top of the existing `config.env.X` write. Mirror failures are surfaced to the UI under `vaultMirrorFailures` rather than silently swallowed.\n- **Vault-first reveal**: `POST /api/plugins/:id/reveal` consults `sharedVault().get(key)` before falling back to `process.env` / `config.env`, so a freshly-saved key is the value the user sees.\n- **Per-process cached `sharedVault()`** so concurrent saves share `VaultImpl.mutate()`'s mutex; a per-request `createVault()` would race and silently lose entries.\n- **Broader credential heuristic** — `pickPrimaryCredentialParam()` walks a priority-ordered regex list (`API_KEY` → `API_TOKEN` → `BOT_TOKEN` → `ACCESS_TOKEN` → `SECRET_KEY` → `PRIVATE_KEY` → `CLIENT_SECRET`) instead of only matching `*_API_KEY$`, with an explicit fallback to the first sensitive parameter. Closes the bug where typing a model field before the API-key field caused `Object.values(config).find()` to pick up the model slug; also fixes connectors whose primary credential is a bot token / private key / client secret.\n- **Settings UI** — `SecretsManagerSection` + `ApiKeyConfig` with inline prefix validation and validation warnings, keyboard shortcut `⌘⌥⌃V` (Mac) / `Ctrl+Alt+Shift+V` (Win/Linux), global modal mount, application menu accelerator.\n- **Cloud disconnect orphan-route patch**: `/api/cloud/disconnect` now nulls every routed service (`llmText`, `tts`, `media`, `embeddings`, `rpc`) instead of just `llmText`, so disconnect doesn't leave silently-401'ing voice/image/embedding features routed at the dead `cloud-proxy → elizacloud`. Plus `linkedAccounts.elizacloud.status=\"unlinked\"` to prevent the in-memory state from overwriting the canonical unlinked state on next `saveElizaConfig`.\n\n### Runtime-ops × vault\n\n- `ProviderSwitchIntent.apiKeyRef` replaces plaintext `apiKey` end-to-end. The provider-switch route writes the vault entry, persists only the reference, and resolves through the vault when the runtime reload-hot needs the key.\n- Legacy ops with plaintext `apiKey` are auto-migrated to `apiKeyRef` on hydrate.\n- Repository pruning suite (retention, cap, idempotency, hydrate; 6 tests).\n- A `simplify` pass that dedupes utility code, removes ghost phases, and consolidates state.\n\n## What kind of change is this?\n\n**Features** — non-breaking. `@elizaos/vault` is new. The runtime/Settings wiring is additive on top of the existing config-write path, controlled by feature presence rather than a flag. The provider-switch `apiKeyRef` replaces `apiKey` but a hydrate-time migration upgrades legacy ops in place.\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation. New package documentation lives inline in `packages/vault/README.md` and the public API surface is documented via TSDoc. The Settings UI changes are user-facing but match the existing settings pattern.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. **`packages/vault/`** — start with `src/vault.ts` (the public API), then `src/master-key.ts` (the keychain/passphrase chain), then `src/manager.ts` (the multi-backend router). Tests in `test/{vault,master-key,manager,store,envelope,references,keyring}.test.ts` exercise every public path; `test/master-key.test.ts` covers the headless-fallback chain explicitly.\n2. **`packages/app-core/src/services/vault-mirror.ts`** + `packages/app-core/src/services/vault-mirror.test.ts` — the write-through mirror is small, isolated, and has a focused test that includes failure-collection and a source-text guard for the vault-first reveal ordering.\n3. **`packages/app-core/src/api/plugins-compat-routes.ts`** — the `PUT /api/plugins/:id` handler and `/reveal` route, where the vault wiring sits next to the existing legacy code path.\n4. **`packages/agent/src/runtime/operations/`** — `vault-bridge.ts`, `vault-integration.test.ts`, and `health.test.ts` show the `apiKeyRef` migration. The 22-case integration suite is the strongest evidence that the runtime path keeps working.\n\n## Detailed testing steps\n\nAutomated tests are acceptable.\n\n- **Vault unit suite (cross-platform)**: `bun run --cwd packages/vault test` — 64 tests covering vault, master-key (incl. passphrase fallback), manager, store, envelope, references, keyring round-trips. The new `vault-ci` workflow runs this matrix on `ubuntu-latest`, `macos-latest`, `windows-latest` so the OS-keychain claim is checked on every PR.\n- **App-core wiring suite**: `bun run --cwd packages/app-core test` — 37 wiring tests (vault-mirror unit + source-text guards, secrets-manager-routes integration via real `http.Server`, usePluginsSkillsState heuristic priority list, useSecretsManagerShortcut Mac/Win/Linux chord matching, server.cloud-disconnect orphan-route guard).\n- **Runtime-ops vault integration**: 22 cases in `packages/agent/src/runtime/operations/vault-integration.test.ts` proving the `apiKeyRef` path works end-to-end.\n- **End-to-end save-flow**: `provider-switch-routes.e2e.test.ts` stands up a real `http.Server` and exercises Settings PUT → mirror → reveal → provider switch against an in-memory vault.\n- **Cross-platform CI**: the new `vault-ci` workflow (`.github/workflows/vault-ci.yaml`) runs the vault suite on macOS / Linux / Windows runners; an `app-core-wiring` job runs the wiring tests on `ubuntu-latest` with proto generation as a prerequisite.\n\n### Manual smoke (UI)\n\n1. Open the desktop app → **Settings → Plugins → OpenAI** (or any AI provider).\n2. Enter an API key, save.\n3. The plugin row should turn green and reload the agent. Open `~/.milady/vault.json` — the value is encrypted; the OS keychain holds the master key under `service: \"milady\"`, `account: \"vault.masterKey\"`.\n4. Open the **Secrets Vault** modal via `⌘⌥⌃V` (or **Edit → Secrets Vault** menu). Switch the routing for `OPENAI_API_KEY` to a different backend, save. Subsequent reveals fetch from the new backend.\n\n## Deploy notes\n\n- **`@elizaos/vault` is a new workspace package** — `bun install` at the repo root picks it up; nothing extra to do.\n- **No database changes.**\n- **No breaking changes** to existing config files. Legacy `config.env.X` writes still happen alongside the vault mirror; vault values shadow `process.env` only in the reveal path. The `apiKeyRef` migration on the runtime-ops side is in-place on hydrate (no operator action required).\n\n---\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-04-29T11:25:51Z",
-      "mergedAt": null,
-      "additions": 19166,
-      "deletions": 627
     },
     {
       "id": "PR_kwDOMT5cIs7Whalw",
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 27530,
-    "deletions": 10339,
-    "files": 373,
-    "commitCount": 988
+    "additions": 28528,
+    "deletions": 10658,
+    "files": 459,
+    "commitCount": 1139
   },
   "completedItems": [
     {
@@ -984,6 +984,64 @@
       ]
     },
     {
+      "title": "feat(vault): @elizaos/vault — cross-platform secrets vault + Settings UI integration",
+      "prNumber": 7197,
+      "type": "feature",
+      "body": "# Relates to\n\nThis is the upstream-targeting twin of milady-ai/eliza#6. The vault feature originated in the Milady fork; this PR lands the upstream-relevant slice on `elizaOS/eliza:develop`.\n\n# Risks\n\n**Low.** The vault is an additive works",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/vault-ci.yaml",
+        ".github/workflows/windows-dev-smoke.yml",
+        "apps/app/.env.example",
+        "apps/app/.gitignore",
+        "apps/app/README.md",
+        "apps/app/app.config.ts",
+        "apps/app/capacitor.config.ts",
+        "apps/app/electrobun/.gitignore",
+        "apps/app/index.html",
+        "apps/app/package.json",
+        "apps/app/playwright.electrobun.packaged.config.ts",
+        "apps/app/playwright.ui-packaged.config.ts",
+        "apps/app/playwright.ui-smoke.config.ts",
+        "apps/app/playwright.web-views.config.ts",
+        "apps/app/public/android-chrome-192x192.png",
+        "apps/app/public/android-chrome-512x512.png",
+        "apps/app/public/apple-touch-icon.png",
+        "apps/app/public/favicon-16x16.png",
+        "apps/app/public/favicon-32x32.png",
+        "apps/app/public/favicon.ico",
+        "apps/app/public/logos/anthropic-icon-white.png",
+        "apps/app/public/logos/anthropic-icon.png",
+        "apps/app/public/logos/claude-icon.png",
+        "apps/app/public/logos/deepseek-icon.png",
+        "apps/app/public/logos/elizaos-icon.png",
+        "apps/app/public/logos/gemini-icon.png",
+        "apps/app/public/logos/grok-icon-white.png",
+        "apps/app/public/logos/grok-icon.png",
+        "apps/app/public/logos/groq-icon-white.png",
+        "apps/app/public/logos/groq-icon.png",
+        "apps/app/public/logos/mistral-icon.png",
+        "apps/app/public/logos/ollama-icon-white.png",
+        "apps/app/public/logos/ollama-icon.png",
+        "apps/app/public/logos/openai-icon-white.png",
+        "apps/app/public/logos/openai-icon.png",
+        "apps/app/public/logos/openrouter-icon-white.png",
+        "apps/app/public/logos/openrouter-icon.png",
+        "apps/app/public/logos/together-ai-icon.png",
+        "apps/app/public/logos/zai-icon-white.png",
+        "apps/app/public/logos/zai-icon.png",
+        "apps/app/public/og-image.png",
+        "apps/app/public/splash-bg.jpg",
+        "apps/app/scripts/build.mjs",
+        "apps/app/scripts/capacitor-plugin-names.mjs"
+      ]
+    },
+    {
       "title": "chore(deps): update dependency typescript to v6",
       "prNumber": 7193,
       "type": "other",
@@ -1372,17 +1430,210 @@
       "files": [
         "packages/app-core/platforms/android/gradle/wrapper/gradle-wrapper.properties"
       ]
+    },
+    {
+      "title": "chore(deps): update supabase/postgres docker tag to v17.6.1.113",
+      "prNumber": 7219,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Update | Change |\n|---|---|---|\n| supabase/postgres | patch | `17.6.1.112` → `17.6.1.113` |\n\n---\n\n> [!WARNING]\n> Some dependencies could not be looked up. Check the [Dependency Dashboard]",
+      "files": [
+        "packages/app-core/deploy/docker-compose.supabase-db.yml"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency @anthropic-ai/sdk to ^0.92.0",
+      "prNumber": 7218,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@anthropic-ai/sdk](https://redirect.gi",
+      "files": [
+        "packages/typescript/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.172",
+      "prNumber": 7217,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider-utils to v4.0.25",
+      "prNumber": 7216,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider-utils](https://ai-sdk",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider to v3.0.10",
+      "prNumber": 7215,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider](https://ai-sdk.dev/d",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/openai to v3.0.55",
+      "prNumber": 7214,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/openai](https://ai-sdk.dev/doc",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "feat(self-hosted): CORS + bearer auth + cross-platform build fixes",
+      "prNumber": 7212,
+      "type": "feature",
+      "body": "# Relates to\n\nSelf-hosting cross-platform connectivity. The runtime now serves browser dashboards over HTTPS at a custom domain, App Store-style mobile builds (Capacitor), and Electrobun desktop builds — all routed through a remote agent vi",
+      "files": [
+        "package.json",
+        "packages/agent/src/api/experience-routes.test.ts",
+        "packages/agent/src/api/experience-routes.ts",
+        "packages/agent/src/runtime/plugin-lifecycle.ts",
+        "packages/app-core/platforms/android/variables.gradle",
+        "packages/app-core/platforms/electrobun/assets/brand-config.json",
+        "packages/app-core/platforms/electrobun/electrobun.config.ts",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app-core/src/App.tsx",
+        "packages/app-core/src/api/auth-client.ts",
+        "packages/app-core/src/api/auth-pairing-compat-routes.ts",
+        "packages/app-core/src/api/auth-session-routes.ts",
+        "packages/app-core/src/api/client-agent.ts",
+        "packages/app-core/src/api/client-base.test.ts",
+        "packages/app-core/src/api/client-base.ts",
+        "packages/app-core/src/api/csrf-client.test.ts",
+        "packages/app-core/src/api/csrf-client.ts",
+        "packages/app-core/src/api/server-cors.test.ts",
+        "packages/app-core/src/api/server-cors.ts",
+        "packages/app-core/src/api/server.ts",
+        "packages/app-core/src/components/pages/ChatView.tsx",
+        "packages/app-core/src/components/shell/RuntimeGate.tsx",
+        "packages/app-core/src/registry/index.ts",
+        "packages/app-core/src/state/persistence.ts",
+        "packages/app-core/src/state/startup-phase-poll.ts",
+        "packages/app-core/src/state/startup-phase-restore.ts",
+        "packages/app-core/src/state/startup-phase-runtime.ts",
+        "plugins/plugin-agent-skills",
+        "plugins/plugin-anthropic",
+        "plugins/plugin-cli",
+        "plugins/plugin-commands",
+        "plugins/plugin-cron",
+        "plugins/plugin-discord",
+        "plugins/plugin-edge-tts",
+        "plugins/plugin-elizacloud",
+        "plugins/plugin-evm",
+        "plugins/plugin-google-genai",
+        "plugins/plugin-groq",
+        "plugins/plugin-local-ai",
+        "plugins/plugin-local-embedding",
+        "plugins/plugin-ollama",
+        "plugins/plugin-openai",
+        "plugins/plugin-openrouter",
+        "plugins/plugin-pdf",
+        "plugins/plugin-shell",
+        "plugins/plugin-solana",
+        "plugins/plugin-sql",
+        "plugins/plugin-whatsapp",
+        "plugins/plugin-agent-orchestrator"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.174",
+      "prNumber": 7229,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @biomejs/biome to v2.4.14",
+      "prNumber": 7228,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@biomejs/biome](https://biomejs.dev) (",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/openai to v3.0.58",
+      "prNumber": 7227,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/openai](https://ai-sdk.dev/doc",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "test(app-core): remove api module mocks",
+      "prNumber": 7226,
+      "type": "tests",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/app-core/src/api/client-base.test.ts",
+        "packages/app-core/src/api/csrf-client.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency ai to v6.0.173",
+      "prNumber": 7225,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [ai](https://ai-sdk.dev/docs) ([source]",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/provider-utils to v4.0.26",
+      "prNumber": 7224,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/provider-utils](https://ai-sdk",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @ai-sdk/openai to v3.0.57",
+      "prNumber": 7223,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@ai-sdk/openai](https://ai-sdk.dev/doc",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @electric-sql/pglite to ^0.4.0",
+      "prNumber": 7221,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@electric-sql/pglite](https://pglite.d",
+      "files": [
+        "apps/app-lifeops/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update actions/upload-artifact action to v7",
+      "prNumber": 7220,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [actions/upload-artifact](https://redirect.github.com/actions/upload-artifact) | action | major | `v4` → `v7` |\n\n---\n\n> [!WARNING]\n> Some depe",
+      "files": [
+        ".github/workflows/mobile-build-smoke.yml"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 698.0196402653629,
-      "prScore": 694.7016402653629,
+      "totalScore": 732.9446077440335,
+      "prScore": 729.2866077440335,
       "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 1.3179999999999998,
+      "commentScore": 1.658,
       "summary": null
     },
     {
@@ -1488,11 +1739,11 @@
     {
       "username": "chopmob-cloud",
       "avatarUrl": "https://avatars.githubusercontent.com/u/250041792?u=295fb2375e2007927789532dae29a2c2bd3c5f80&v=4",
-      "totalScore": 14.693147180559945,
+      "totalScore": 14.893147180559945,
       "prScore": 14.693147180559945,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1501,6 +1752,16 @@
       "totalScore": 12,
       "prScore": 0,
       "issueScore": 12,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sw4pIO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
+      "totalScore": 6,
+      "prScore": 0,
+      "issueScore": 6,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -1546,16 +1807,6 @@
       "summary": null
     },
     {
-      "username": "Sw4pIO",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
-      "totalScore": 2,
-      "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "sailorpepe",
       "avatarUrl": "https://avatars.githubusercontent.com/u/159828807?u=9298c48eb8b41b0a0b0968e987c029e307771855&v=4",
       "totalScore": 0.4,
@@ -1586,9 +1837,9 @@
       "summary": null
     }
   ],
-  "newPRs": 106,
-  "mergedPRs": 87,
-  "newIssues": 10,
-  "closedIssues": 8,
+  "newPRs": 115,
+  "mergedPRs": 104,
+  "newIssues": 11,
+  "closedIssues": 12,
   "activeContributors": 16
 }
