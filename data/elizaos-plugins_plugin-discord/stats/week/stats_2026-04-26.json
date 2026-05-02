@@ -5,25 +5,63 @@
     "intervalType": "week"
   },
   "repository": "elizaos-plugins/plugin-discord",
-  "overview": "From 2026-04-26 to 2026-05-03, elizaos-plugins/plugin-discord had 0 new PRs (0 merged), 0 new issues, and 5 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-04-26 to 2026-05-03, elizaos-plugins/plugin-discord had 1 new PRs (0 merged), 1 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOOtXZkc8AAAABBHtB1Q",
+      "title": "voice.ts reads DISCORD_AUTO_REPLY via runtime.getSetting directly, bypassing discordSettings.autoReply",
+      "author": "RemilioNubilio",
+      "number": 49,
+      "repository": "elizaos-plugins/plugin-discord",
+      "body": "### context\n\n`voice.ts` and the text path in `messages.ts` both gate on `DISCORD_AUTO_REPLY`, but they read the setting through different paths:\n\n- text path uses `this.discordSettings.autoReply`, which goes through `getDiscordSettings` → `resolveSetting` and so picks up character-level `settings.discord.autoReply` overrides.\n- voice path reads `runtime.getSetting(\"DISCORD_AUTO_REPLY\")` directly (`typescript/voice.ts:1258`).\n\n```ts\n// voice.ts:1258\nconst voiceAutoReplyRaw = this.runtime.getSetting(\"DISCORD_AUTO_REPLY\");\n```\n\n### why this matters\n\nIn an upstream-only setup the two are mostly equivalent (both end up reading from settings/env). But:\n\n1. Embedders (e.g. milady) wrap `runtime.getSetting` with an env-var allowlist so only specified keys fall through to `process.env`. `DISCORD_AUTO_REPLY` is not on milady's allowlist, so the voice path silently never picks up the env var even when text auto-reply works.\n2. Anyone setting `character.settings.discord.autoReply = true` enables text auto-reply but leaves voice auto-reply off (or vice versa, depending on which path they touched).\n\n### question\n\nIs this asymmetry intentional — i.e. voice and text auto-reply should be configurable independently? Or should voice also read `discordSettings.autoReply` so a single source of truth governs both?\n\nHappy to send a follow-up PR once you confirm direction.\n\n### related\n\nPR ___ fixes a sibling issue where `DISCORD_AUTO_REPLY=true` env var was effectively ignored on the text path because the `resolveSetting` fallback was hardcoded to `false`.\n",
+      "createdAt": "2026-05-02T21:56:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOtXZkc7Sfel5",
+      "title": "fix(discord): safer defaults, DM allowlist gating, and generation timeout fallback",
+      "author": "dutchiono",
+      "number": 48,
+      "body": "## Summary\\n- default to safer Discord behavior flags\\n- parse optional boolean env settings robustly\\n- allow DM processing for explicit allowlist users even when DM-ignore default is enabled\\n- add generation timeout/failure fallback reply to avoid stuck typing state\\n\\n## Why\\nImproves Discord reliability and prevents silent hangs during provider timeouts/failures.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR introduces three improvements: changes default behavior flags (`shouldIgnoreBotMessages`, `shouldIgnoreDirectMessages`, `shouldRespondOnlyToMentions`) from `false` to `true` for safer defaults; allows explicit allowlisted users to bypass the DM-ignore gate while still subject to `dmPolicy`; and wraps message generation in a `Promise.race` timeout to prevent stuck typing state and send a user-facing fallback reply.\n\n- **Unhandled promise rejection after timeout**: `generationPromise` runs as a detached in-flight promise once the timeout race wins. If the underlying handler subsequently rejects (network error, provider crash), Node.js 15+ will treat this as an uncaught exception and can terminate the process. The fix is to attach `.catch(() => {})` to `generationPromise` before or after the race so the late rejection is silently swallowed.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge after addressing the detached-promise unhandled-rejection risk, which can crash the bot process under a provider failure that follows a timeout.\n\nOne P1 finding: the `generationPromise` is left without a rejection handler after `Promise.race` resolves on timeout, creating a potential process-terminating unhandled rejection in Node 15+. The fix is a one-liner. All other changes (safer defaults, DM allowlist bypass, `parseOptionalBooleanSetting`) are clean and correct.\n\ntypescript/messages.ts — specifically the `Promise.race` block around line 1035 and the error-reaction guard in the catch block.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| typescript/messages.ts | Adds DM allowlist bypass for `shouldIgnoreDirectMessages` and wraps generation in a `Promise.race` timeout; the detached `generationPromise` can produce an unhandled rejection if the handler fails after the timeout fires. |\n| typescript/accounts.ts | Adds `parseOptionalBooleanSetting` to return `undefined` when env var is unset, allowing proper fallback to `DISCORD_DEFAULTS`; clean and correct change. |\n| typescript/environment.ts | Changes three boolean defaults from `false` to `true` — intentional breaking change to safer defaults; no logic errors introduced. |\n| README.md | Documentation updated to reflect new default values and DM allowlist behavior; accurate and consistent with code changes. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[Incoming Discord Message] --> B{Is DM channel?}\n    B -- No --> G{shouldRespondOnlyToMentions?}\n    B -- Yes --> C{shouldIgnoreDirectMessages?}\n    C -- No --> E[checkDmAccess]\n    C -- Yes --> D{In allowFrom\\nor isInAllowlist?}\n    D -- No --> SKIP[return — ignore]\n    D -- Yes --> E\n    E -- not allowed --> F{Has reply message?}\n    F -- Yes --> SEND_PAIR[Send pairing reply]\n    F -- No --> SKIP\n    SEND_PAIR --> SKIP\n    E -- allowed --> G\n    G -- strict + not mentioned --> SKIP\n    G -- pass --> H[Build newMessage]\n    H --> I[Promise.race: generationPromise vs timeoutPromise]\n    I -- success --> J{responseEmitted?}\n    J -- No --> K[finalizePendingDraft / setDone]\n    J -- Yes --> END[done]\n    K --> END\n    I -- timeout/error --> L[stopTyping / setError / abortDraft]\n    L --> M{responseEmitted?}\n    M -- No --> N[sendFailureReply]\n    M -- Yes --> END\n    N --> END\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(discord): safer defaults, dm allowli...\"](https://github.com/elizaos-plugins/plugin-discord/commit/b4c999b9522fc0228383dffa8979e3f08a5b7906) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=28436749)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-discord",
+      "createdAt": "2026-04-15T02:04:40Z",
+      "mergedAt": null,
+      "additions": 186,
+      "deletions": 63
+    },
+    {
+      "id": "PR_kwDOOtXZkc7XsiZe",
+      "title": "fix(env): respect DISCORD_AUTO_REPLY env var via DISCORD_DEFAULTS",
+      "author": "RemilioNubilio",
+      "number": 50,
+      "body": "### what\n\nMake `DISCORD_AUTO_REPLY` env var actually respected by `getDiscordSettings`. Default behavior unchanged: still `false` when the env var is unset.\n\n### why\n\nCommit 93e9afc (`fix: default DISCORD_AUTO_REPLY to off`) documented:\n\n> Inbound text and voice messages are still ingested, but the agent no longer auto-generates a reply. […] Opt back in by setting `DISCORD_AUTO_REPLY=true`.\n\nIn practice the env var was effectively ignored because the `resolveSetting` fallback for `autoReply` was a hardcoded `false`, while every other `DISCORD_SHOULD_*` boolean in the same function reads its default from `DISCORD_DEFAULTS` (which uses `getEnvBoolean` to pick up env vars).\n\n### change\n\n```diff\n export const DISCORD_DEFAULTS = {\n \t…\n \tSYNC_PROFILE: getEnvBoolean(\"DISCORD_SYNC_PROFILE\", true),\n+\tAUTO_REPLY: getEnvBoolean(\"DISCORD_AUTO_REPLY\", false),\n } as const;\n```\n\n```diff\n \t\tautoReply: resolveSetting(\n \t\t\t\"DISCORD_AUTO_REPLY\",\n \t\t\tcharacterSettings.autoReply,\n-\t\t\tfalse,\n+\t\t\tDISCORD_DEFAULTS.AUTO_REPLY,\n \t\t\tparseBooleanFromText,\n \t\t),\n```\n\nOne file, +2/-1.\n\n### no behavior change for non-opters\n\nWhen neither the env var nor a character-level override is set, `getEnvBoolean(\"DISCORD_AUTO_REPLY\", false)` returns `false` — identical to the prior hardcoded literal.\n\n### scope\n\nDeliberately narrow:\n\n- text path only. `voice.ts` has the same conceptual gate but reads the setting through a different path; whether voice and text auto-reply should share a single source of truth is a design call I left to the maintainer. See #49.\n- `discordEnvSchema` (zod) does not list `DISCORD_AUTO_REPLY`, but `validateDiscordConfig` has no callers — adding to the schema would be cosmetic, so I left it.\n\n### verified\n\nBuilt and ran on a self-hosted milady-flavored bot whose gateway connected and `ClientReady` fired but never replied. Before this change the only signal was the debug-level `Auto-reply disabled; message ingested without response` log; setting `DISCORD_AUTO_REPLY=true` had no effect. After this change the bot replies as expected.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * Discord auto-reply behavior can now be configured through environment settings, enabling users to control automatic message responses.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes `DISCORD_AUTO_REPLY` being silently ignored by adding it to `DISCORD_DEFAULTS` (read at module-load time via `getEnvBoolean`) and replacing the hardcoded `false` fallback in `getDiscordSettings` with `DISCORD_DEFAULTS.AUTO_REPLY`. The fix is consistent with the existing pattern used by every other boolean setting in the file, and the default behavior (`false` when unset) is preserved.\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — narrow, correct, and consistent with existing patterns.\n\nThe change is a one-liner that aligns `autoReply`'s default-value source with every other boolean setting in the file. Default behavior is identical when the env var is unset; no new code paths are introduced.\n\nNo files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| typescript/environment.ts | Adds `AUTO_REPLY: getEnvBoolean(\"DISCORD_AUTO_REPLY\", false)` to `DISCORD_DEFAULTS` and updates the `autoReply` fallback in `getDiscordSettings` to use it, aligning the env-var lookup pattern with every other boolean setting in the file. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[\"getDiscordSettings(runtime)\"] --> B[\"runtime.getSetting('DISCORD_AUTO_REPLY')\"]\n    B -->|\"non-null value\"| C[\"parseBooleanFromText(value)\"]\n    B -->|\"null / undefined\"| D[\"characterSettings.autoReply\"]\n    D -->|\"set\"| E[\"use character value\"]\n    D -->|\"unset\"| F[\"DISCORD_DEFAULTS.AUTO_REPLY\"]\n    F --> G[\"getEnvBoolean('DISCORD_AUTO_REPLY', false)\"]\n    G -->|\"env var set\"| H[\"process.env.DISCORD_AUTO_REPLY → boolean\"]\n    G -->|\"env var unset\"| I[\"false (unchanged default)\"]\n    C --> Z[\"autoReply resolved\"]\n    E --> Z\n    H --> Z\n    I --> Z\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(env): respect DISCORD\\_AUTO\\_REPLY env...\"](https://github.com/elizaos-plugins/plugin-discord/commit/8334d279e5f35eb7490df725e2c0ad9bb7c5ed37) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30574297)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-discord",
+      "createdAt": "2026-05-02T21:57:05Z",
+      "mergedAt": null,
+      "additions": 2,
+      "deletions": 1
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 21
+    "commitCount": 28
   },
   "completedItems": [],
   "topContributors": [
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 732.9446077440335,
-      "prScore": 729.2866077440335,
+      "totalScore": 767.0313816406095,
+      "prScore": 762.9353816406096,
       "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 1.658,
+      "commentScore": 2.0959999999999996,
       "summary": null
     },
     {
@@ -47,33 +85,33 @@
       "summary": null
     },
     {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 387.2486824729237,
+      "prScore": 384.84868247292366,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 315.2,
+      "totalScore": 342.4,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 315,
-      "commentScore": 0.2,
+      "reviewScore": 342,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "RemilioNubilio",
       "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
-      "totalScore": 270.96704158903515,
-      "prScore": 270.96704158903515,
-      "issueScore": 0,
+      "totalScore": 287.6601887695951,
+      "prScore": 285.6601887695951,
+      "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "NubsCarson",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 168.69182638433247,
-      "prScore": 168.29182638433247,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -127,6 +165,36 @@
       "summary": null
     },
     {
+      "username": "vyctorbrzezowski",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/51521767?u=9cd153e7883fb4e8486fe44817b3ae46a6a3df22&v=4",
+      "totalScore": 21.0695263639469,
+      "prScore": 21.0695263639469,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sw4pIO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 20,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "chopmob-cloud",
       "avatarUrl": "https://avatars.githubusercontent.com/u/250041792?u=295fb2375e2007927789532dae29a2c2bd3c5f80&v=4",
       "totalScore": 14.893147180559945,
@@ -147,16 +215,6 @@
       "summary": null
     },
     {
-      "username": "Sw4pIO",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
-      "totalScore": 6,
-      "prScore": 0,
-      "issueScore": 6,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "dutchiono",
       "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
       "totalScore": 5.763180262308081,
@@ -167,18 +225,8 @@
       "summary": null
     },
     {
-      "username": "github-code-quality",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
-      "totalScore": 4.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "srotzin",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/140019476?u=68fc1a0ee6d4b68049dfca93735cd9c7ef0d1082&v=4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/140019476?u=4afff7c0f6603a8301374438c61471cb77500f0e&v=4",
       "totalScore": 2,
       "prScore": 0,
       "issueScore": 2,
@@ -227,9 +275,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
-  "newIssues": 0,
+  "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 5
+  "activeContributors": 7
 }

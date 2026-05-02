@@ -5,9 +5,22 @@
     "intervalType": "month"
   },
   "repository": "elizaos-plugins/plugin-anthropic",
-  "overview": "From 2026-05-01 to 2026-06-01, elizaos-plugins/plugin-anthropic had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-05-01 to 2026-06-01, elizaos-plugins/plugin-anthropic had 0 new PRs (0 merged), 0 new issues, and 3 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOjIiUc7WvZKB",
+      "title": "fix: TypeScript build errors blocking postinstall (Bun globals + parseUsage type mismatch)",
+      "author": "andex23",
+      "number": 21,
+      "body": "## Summary\n\n`tsc --project tsconfig.build.json` currently fails on a fresh clone with 4 errors, which cascades into `bun install` failing in any consumer repo that builds all workspace packages on postinstall (e.g. milady).\n\n```\ninit.ts(39,24): error TS2868: Cannot find name 'Bun'.\nutils/claude-cli.ts(83,16): error TS2868: Cannot find name 'Bun'.\nutils/claude-cli.ts(142,16): error TS2868: Cannot find name 'Bun'.\nutils/claude-cli.ts(208,28): error TS2345: Argument of type\n  '{ inputTokens: number; outputTokens: number; totalTokens: number; }'\n  is not assignable to parameter of type\n  '{ promptTokens: number; completionTokens: number; totalTokens: number; }'.\n```\n\n## Fix\n\n- **`Cannot find name 'Bun'`** — `tsconfig.json` declares `types: [\"node\", \"bun\"]`, but `@types/bun` is a globals-augmentation package (not a module) and TS doesn't always resolve it through workspace hoisting depending on the consumer's resolver settings. Added a local `declare const Bun: any;` in the two files that touch `Bun.spawn` / `Bun.spawnSync`. This keeps the existing bun fast-path working without forcing every consumer to wire `@types/bun` themselves.\n\n- **`parseUsage` → `resolveUsage` type mismatch** (`claude-cli.ts:208`) — `parseUsage()` returns `{ inputTokens, outputTokens, totalTokens }` but `resolveUsage` is typed as `{ promptTokens, completionTokens, totalTokens }`. The same object was already being mapped correctly for `emitModelUsageEvent` two lines above; this PR reuses that mapping for `resolveUsage` too.\n\n## Test plan\n\n- [x] `tsc --project tsconfig.build.json` exits 0 on a fresh clone\n- [x] `bun install` postinstall completes downstream (verified in milady consumer repo)\n- [ ] Existing tests still pass (no behavior change — type-only fix + dropped a duplicate field-mapping)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes four TypeScript build errors that blocked `tsc --project tsconfig.build.json` on fresh clones. It adds `declare const Bun: any;` ambient declarations to the two files that call `Bun.spawn`/`Bun.spawnSync`, and fixes a field-name mismatch where `resolveUsage` was being called with `{ inputTokens, outputTokens }` instead of the expected `{ promptTokens, completionTokens }` shape — a real runtime bug that would have caused consumers of the `usagePromise` to receive fields with the wrong names.\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — all changes are type-only fixes or a correct field-name alignment with no behavior regressions.\n\nBoth fixes are narrowly scoped: the `declare const Bun` declarations compile to nothing at runtime, and the `resolveUsage` field-name fix corrects a genuine bug (wrong property names on the resolved promise) without altering any control flow. No P0 or P1 issues identified.\n\nNo files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| typescript/init.ts | Adds `declare const Bun: any;` ambient declaration between import statements to resolve TS2868 compile error; no logic changes. |\n| typescript/utils/claude-cli.ts | Adds `declare const Bun: any;` to fix TS2868, and extracts `tokenUsage` to correctly pass `{ promptTokens, completionTokens, totalTokens }` to both `emitModelUsageEvent` and `resolveUsage`, fixing the TS2345 type mismatch and a real field-name bug in the resolved usage promise. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Caller\n    participant streamViaCli\n    participant Bun\n    participant parseUsage\n    participant emitModelUsageEvent\n    participant resolveUsage\n\n    Caller->>streamViaCli: call(runtime, prompt, modelName, ...)\n    streamViaCli->>Bun: Bun.spawn(args, {stdout,stderr})\n    Bun-->>streamViaCli: proc\n\n    loop stream-json lines\n        streamViaCli->>streamViaCli: yield text_delta chunks\n    end\n\n    Note over streamViaCli,resolveUsage: On result event (BEFORE fix: wrong shape)\n    streamViaCli->>parseUsage: parseUsage(event.modelUsage)\n    parseUsage-->>streamViaCli: { inputTokens, outputTokens, totalTokens }\n\n    Note over streamViaCli,resolveUsage: AFTER fix: map to tokenUsage first\n    streamViaCli->>streamViaCli: tokenUsage = { promptTokens, completionTokens, totalTokens }\n    streamViaCli->>emitModelUsageEvent: emitModelUsageEvent(runtime, modelType, prompt, tokenUsage)\n    streamViaCli->>resolveUsage: resolveUsage(tokenUsage)\n    resolveUsage-->>Caller: Promise resolves with correct field names\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix: build errors in plugin-anthropic bl...\"](https://github.com/elizaos-plugins/plugin-anthropic/commit/a9ec7d1cb0d31d63d7889b0310417c143bc92966) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30176864)</sub>\n\n<!-- /greptile_comment -->\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **Bug Fixes**\n  * Improved token usage tracking and reporting accuracy in streaming mode.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-anthropic",
+      "createdAt": "2026-04-29T13:53:30Z",
+      "mergedAt": null,
+      "additions": 10,
+      "deletions": 3
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
@@ -17,22 +30,72 @@
   "completedItems": [],
   "topContributors": [
     {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 218.5568560885912,
+      "prScore": 216.5568560885912,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 34.924967478670574,
-      "prScore": 34.58496747867057,
+      "totalScore": 69.01174137524669,
+      "prScore": 68.23374137524667,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 27.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "vyctorbrzezowski",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/51521767?u=9cd153e7883fb4e8486fe44817b3ae46a6a3df22&v=4",
+      "totalScore": 21.0695263639469,
+      "prScore": 21.0695263639469,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "Sw4pIO",
       "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
-      "totalScore": 4,
+      "totalScore": 18,
       "prScore": 0,
-      "issueScore": 4,
+      "issueScore": 18,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 16.693147180559947,
+      "prScore": 14.693147180559945,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
       "commentScore": 0,
       "summary": null
     },
@@ -51,5 +114,5 @@
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 3
 }

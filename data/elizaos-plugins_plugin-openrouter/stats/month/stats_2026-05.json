@@ -5,34 +5,107 @@
     "intervalType": "month"
   },
   "repository": "elizaos-plugins/plugin-openrouter",
-  "overview": "From 2026-05-01 to 2026-06-01, elizaos-plugins/plugin-openrouter had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-05-01 to 2026-06-01, elizaos-plugins/plugin-openrouter had 1 new PRs (1 merged), 0 new issues, and 4 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOiniuM7XlYVF",
+      "title": "fix: drop broken CJS build (cannot load async ESM @elizaos/core)",
+      "author": "NubsCarson",
+      "number": 26,
+      "body": "## What this fixes\n\nThe CJS bundle this plugin ships at `dist/cjs/index.node.cjs` does `require(\"@elizaos/core\")` at the top level. `@elizaos/core` is now an ESM-only package that uses top-level await internally; CJS cannot synchronously require an async module, so any consumer resolving this plugin's `require` export hits:\n\n```\nTypeError: require() async module \"@elizaos/core\" is unsupported.\nuse \"await import()\" instead.\n```\n\n## Fix\n\nDrop CJS support to match the established pattern in `@elizaos/plugin-anthropic` (which already shipped this fix):\n\n- `package.json`: `main` → ESM build, remove `require` condition from `exports`\n- `build.ts`: remove the `Bun.build({ format: \"cjs\" })` step (where present)\n- `dist/cjs/` deleted\n\nESM Node + ESM Browser builds are unchanged. Consumers using `import` / `await import()` are unaffected. Consumers using `require()` will now get a clean \"no \\\"require\\\" condition\" resolver error pointing them at dynamic import — much better than the misleading \"async module unsupported\" crash.\n\n## Context\n\nPR #5 (\"dual build cjs / esm\") was closed without merging — that decision is consistent with this fix. `@elizaos/core` going ESM-only makes shipping a CJS bundle structurally impossible for any plugin that imports anything from core.\n\n## Tested\n\nThis plugin loaded by a self-hosted milady runtime on bun 1.3.13 across full agent boot; with the fix, the runtime no longer hits the require()-async-module TypeError when this plugin is in the active set.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR removes the `require` export condition from `package.json` to prevent consumers from resolving to `dist/cjs/index.node.cjs`, which crashes with `TypeError: require() async module \"@elizaos/core\"` because `@elizaos/core` is now ESM-only. The exports-map fix is correct and sufficient to stop the crash for all consumers using the standard resolver.\n\n- **Incomplete fix**: `build.ts` still contains the full CJS build step (`Bun.build({ format: \"cjs\" })`), the `dist/cjs/` directory setup, and the `.d.ts` write — the PR description explicitly states this step was removed. The broken `dist/cjs/index.node.cjs` artifact will continue to be built on every `bun run build` and shipped in the npm package (captured by `\"files\": [\"dist\"]`), which is at odds with the stated goal of dropping the CJS build entirely.\n\n<h3>Confidence Score: 3/5</h3>\n\nThe exports-map fix stops the crash, but the CJS build step in build.ts was not removed as stated, leaving a broken artifact being built and published on every release.\n\nOne P1 finding: build.ts still generates the broken CJS bundle and ships it in the package, contradicting the PR's stated intent. The crash itself is fixed by the exports change, but the incomplete cleanup means the problem artifact persists in every published package.\n\ntypescript/build.ts — CJS build step, directory creation, and .d.ts write for dist/cjs/ all need to be removed to fully complete this fix.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| typescript/package.json | Removes the `require` export condition pointing to the broken CJS bundle — correctly fixes the `require() async module` TypeError for consumers using the exports map. |\n| typescript/build.ts | CJS build step (Bun.build format:cjs, dist/cjs/ dir creation, dist/cjs/index.d.ts write) is still present despite PR description claiming it was removed — broken CJS artifact is still built and published. |\n\n</details>\n\n\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[Consumer runs require/import] --> B{Resolve package exports}\n    B -->|import / await import| C[\"exports.node.import → dist/node/index.node.js (ESM ✅)\"]\n    B -->|require| D[\"require condition removed from exports ✅\"]\n    D --> E[\"Resolver error: no 'require' condition (clean error)\"]\n\n    subgraph build [\"bun run build (unchanged)\"]\n        F[\"dist/node/ ESM bundle ✅\"]\n        G[\"dist/browser/ ESM bundle ✅\"]\n        H[\"dist/cjs/index.node.cjs ❌ still built\"]\n    end\n\n    C --> F\n    H -->|still published in dist/ via 'files'| I[\"Broken CJS artifact in npm package\\n(not accessible via exports, but present on disk)\"]\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `typescript/build.ts`, line 14-81 ([link](https://github.com/elizaos-plugins/plugin-openrouter/blob/fec74b8654448209a91557328293be0df79e9a02/typescript/build.ts#L14-L81)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **CJS build step not removed as described**\n\n   The PR description explicitly states that `build.ts` has `Bun.build({ format: \"cjs\" })` removed, but that step is still fully present (lines 46–59). As a result, every `bun run build` still creates `dist/cjs/index.node.cjs` — the exact broken artifact the fix is trying to eliminate — and because `\"files\": [\"dist\"]` captures the whole `dist/` tree, that broken bundle is still shipped in every published package. The `dist/cjs/` directory setup and its `.d.ts` declaration file are also still generated (lines 14, 65, 81). While the removed `require` export condition prevents automatic resolution to the CJS file, any consumer referencing `dist/cjs/` directly (or any tool that inspects all files in the package) will still encounter the broken bundle.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"fix: drop top-level require condition (c...\"](https://github.com/elizaos-plugins/plugin-openrouter/commit/fec74b8654448209a91557328293be0df79e9a02) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30539423)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-openrouter",
+      "createdAt": "2026-05-02T03:13:05Z",
+      "mergedAt": "2026-05-02T10:24:58Z",
+      "additions": 0,
+      "deletions": 1
+    }
+  ],
   "codeChanges": {
     "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "deletions": 1,
+    "files": 1,
+    "commitCount": 6
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "fix: drop broken CJS build (cannot load async ESM @elizaos/core)",
+      "prNumber": 26,
+      "type": "bugfix",
+      "body": "## What this fixes\n\nThe CJS bundle this plugin ships at `dist/cjs/index.node.cjs` does `require(\"@elizaos/core\")` at the top level. `@elizaos/core` is now an ESM-only package that uses top-level await internally; CJS cannot synchronously re",
+      "files": [
+        "typescript/package.json"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 218.5568560885912,
+      "prScore": 216.5568560885912,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 34.924967478670574,
-      "prScore": 34.58496747867057,
+      "totalScore": 69.01174137524669,
+      "prScore": 68.23374137524667,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 27.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "vyctorbrzezowski",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/51521767?u=9cd153e7883fb4e8486fe44817b3ae46a6a3df22&v=4",
+      "totalScore": 21.0695263639469,
+      "prScore": 21.0695263639469,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "Sw4pIO",
       "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
-      "totalScore": 4,
+      "totalScore": 18,
       "prScore": 0,
-      "issueScore": 4,
+      "issueScore": 18,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 16.693147180559947,
+      "prScore": 14.693147180559945,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
       "commentScore": 0,
       "summary": null
     },
@@ -47,9 +120,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 1,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 4
 }

@@ -1,0 +1,130 @@
+{
+  "interval": {
+    "intervalStart": "2026-05-02T00:00:00.000Z",
+    "intervalEnd": "2026-05-03T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-ollama",
+  "overview": "From 2026-05-02 to 2026-05-03, elizaos-plugins/plugin-ollama had 1 new PRs (1 merged), 0 new issues, and 5 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOOjIlKM7TGnA3",
+      "title": "fix(lint): replace relative biome path with bunx invocation",
+      "author": "dutchiono",
+      "number": 23,
+      "body": "## Problem\n\nOn Windows, `bun run lint:check` fails with:\n\n```\nerror: could not open bin metadata file\nBun failed to remap this bin to its proper location within node_modules.\n```\n\nThe `typescript/package.json` scripts use `../../../node_modules/.bin/biome` — a relative path crossing directory boundaries. Bun on Windows cannot resolve the `.bunx` metadata file for a binary referenced this way, causing exit code 255 and blocking the full `lint:check` turbo run.\n\n## Fix\n\nReplace the relative path with `bunx @biomejs/biome`, which matches the pattern used by `plugin-agent-skills`, `plugin-anthropic`, and `plugin-bluebubbles`. `bunx` resolves the package name directly without path traversal, working correctly on both Windows and Linux.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **Chores**\n  * Updated lint script execution method in the TypeScript package configuration. No functional changes to linting behavior.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a Windows-specific failure in `bun run lint:check` by replacing the relative binary path `../../../node_modules/.bin/biome` with `bunx @biomejs/biome check .` in `typescript/package.json`, consistent with how other plugins in the workspace already invoke biome. The `format` and `format:check` scripts in the same file still use the old relative path, so they would encounter the same issue on Windows if invoked directly.\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — the targeted fix is correct and the remaining inconsistency in `format`/`format:check` is a minor follow-up, not a blocker.\n\nThe one-line change correctly resolves the stated Windows bug for `lint:check`. The only remaining finding is a P2 style suggestion to apply the same fix to `format` and `format:check` scripts, which are not part of the failing CI path and do not block merge.\n\nNo files require special attention.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| typescript/package.json | Fixes `lint:check` Windows failure by replacing relative biome path with `bunx @biomejs/biome check .`; `format` and `format:check` still use the old relative path pattern. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[\"bun run lint:check\\n(root or turbo)\"] --> B[\"cd typescript && bun run lint:check\"]\n    B --> C{\"Before PR\\n../../../node_modules/.bin/biome\"}\n    B --> D{\"After PR\\nbunx @biomejs/biome check .\"}\n    C -->|Windows| E[\"❌ exit 255\\ncould not open bin metadata file\"]\n    C -->|Linux| F[\"✅ OK\"]\n    D -->|Windows| G[\"✅ OK\"]\n    D -->|Linux| H[\"✅ OK\"]\n    I[\"bun run format / format:check\"] --> J{\"Still uses\\n../../../node_modules/.bin/biome\"}\n    J -->|Windows| K[\"❌ Still fails on Windows\"]\n    J -->|Linux| L[\"✅ OK\"]\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(lint): replace relative biome path w...\"](https://github.com/elizaos-plugins/plugin-ollama/commit/f29b7abad846b60947213c8056ec155652541c95) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=28690470)</sub>\n\n> Greptile also left **1 inline comment** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-ollama",
+      "createdAt": "2026-04-16T20:48:18Z",
+      "mergedAt": null,
+      "additions": 2,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDOOjIlKM7XlYS6",
+      "title": "fix: drop broken CJS build (cannot load async ESM @elizaos/core)",
+      "author": "NubsCarson",
+      "number": 24,
+      "body": "## What this fixes\n\nThe CJS bundle this plugin ships at `dist/cjs/index.node.cjs` does `require(\"@elizaos/core\")` at the top level. `@elizaos/core` is now an ESM-only package that uses top-level await internally; CJS cannot synchronously require an async module, so any consumer resolving this plugin's `require` export hits:\n\n```\nTypeError: require() async module \"@elizaos/core\" is unsupported.\nuse \"await import()\" instead.\n```\n\n## Fix\n\nDrop CJS support to match the established pattern in `@elizaos/plugin-anthropic` (which already shipped this fix):\n\n- `package.json`: `main` → ESM build, remove `require` condition from `exports`\n- `build.ts`: remove the `Bun.build({ format: \"cjs\" })` step (where present)\n- `dist/cjs/` deleted\n\nESM Node + ESM Browser builds are unchanged. Consumers using `import` / `await import()` are unaffected. Consumers using `require()` will now get a clean \"no \\\"require\\\" condition\" resolver error pointing them at dynamic import — much better than the misleading \"async module unsupported\" crash.\n\n## Context\n\nPR #5 (\"dual build cjs / esm\") was closed without merging — that decision is consistent with this fix. `@elizaos/core` going ESM-only makes shipping a CJS bundle structurally impossible for any plugin that imports anything from core.\n\n## Tested\n\nThis plugin loaded by a self-hosted milady runtime on bun 1.3.13 across full agent boot; with the fix, the runtime no longer hits the require()-async-module TypeError when this plugin is in the active set.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes a real runtime crash by removing the `require` export condition from `package.json`, preventing CJS consumers from hitting the `TypeError: require() async module` error caused by `@elizaos/core` being ESM-only. However, `build.ts` was not updated: it still creates `dist/cjs/`, compiles a CJS bundle, and writes type declarations there — meaning the broken artifact continues to be generated on every build and shipped inside the published package via `\"files\": [\"dist\"]`.\n\n<h3>Confidence Score: 3/5</h3>\n\nSafe to merge for the crash fix, but the PR is incomplete — the CJS build artifact is still generated and published.\n\nThe `package.json` change correctly solves the stated runtime problem. However, the PR description explicitly promises a `build.ts` change that was not made; the CJS bundle continues to be built and included in published releases, leaving dead/misleading artifacts in the package. This is a present defect on the build/publish path, warranting a P1 and a score below the P1 ceiling of 4.\n\ntypescript/build.ts — the CJS build step and related directory scaffolding were not removed as described.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| typescript/package.json | Removes the `require` export condition so CJS consumers get a clean resolver error instead of a crash; the `main` field already pointed at ESM. Correct but incomplete — `build.ts` still builds and publishes the dead CJS artifact. |\n\n</details>\n\n\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[bun run build.ts] --> B[Build Node ESM\\ndist/node/index.node.js]\n    A --> C[Build Browser ESM\\ndist/browser/index.browser.js]\n    A --> D[Build CJS bundle\\ndist/cjs/index.node.cjs\\n⚠️ Still runs post-PR]\n    B --> E[Published via dist/]\n    C --> E\n    D --> E\n    E --> F{Consumer resolves plugin}\n    F -- 'import / await import()' --> G[✅ Resolves ESM via exports.node]\n    F -- 'require()' --> H[❌ No require condition → clean resolver error]\n    D -.->|Unreachable but still built & published| H\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `typescript/build.ts`, line 14 ([link](https://github.com/elizaos-plugins/plugin-ollama/blob/9fde702c4362e297608b7bb02f1cd201ef0f290c/typescript/build.ts#L14)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **CJS build step not removed despite PR description**\n\n   `build.ts` still creates `dist/cjs/`, compiles the CJS bundle (lines 46–59), and writes `dist/cjs/index.d.ts` (line 89). Because `\"files\": [\"dist\"]` publishes everything under `dist/`, the broken `dist/cjs/index.node.cjs` artifact is still generated on every build and included in the published package — it's just now unreachable via `exports`. The PR description explicitly states this step would be removed (\"remove the `Bun.build({ format: \\\"cjs\\\" })` step (where present)\"), but `build.ts` was never modified in this PR.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"fix: drop top-level require condition (c...\"](https://github.com/elizaos-plugins/plugin-ollama/commit/9fde702c4362e297608b7bb02f1cd201ef0f290c) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30539422)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos-plugins/plugin-ollama",
+      "createdAt": "2026-05-02T03:12:59Z",
+      "mergedAt": "2026-05-02T10:24:53Z",
+      "additions": 0,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 1,
+    "files": 1,
+    "commitCount": 6
+  },
+  "completedItems": [
+    {
+      "title": "fix: drop broken CJS build (cannot load async ESM @elizaos/core)",
+      "prNumber": 24,
+      "type": "bugfix",
+      "body": "## What this fixes\n\nThe CJS bundle this plugin ships at `dist/cjs/index.node.cjs` does `require(\"@elizaos/core\")` at the top level. `@elizaos/core` is now an ESM-only package that uses top-level await internally; CJS cannot synchronously re",
+      "files": [
+        "typescript/package.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 218.5568560885912,
+      "prScore": 216.5568560885912,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 34.086773896576105,
+      "prScore": 33.6487738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 27.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "vyctorbrzezowski",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/51521767?u=9cd153e7883fb4e8486fe44817b3ae46a6a3df22&v=4",
+      "totalScore": 21.0695263639469,
+      "prScore": 21.0695263639469,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 16.693147180559947,
+      "prScore": 14.693147180559945,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sw4pIO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 14,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 5
+}
