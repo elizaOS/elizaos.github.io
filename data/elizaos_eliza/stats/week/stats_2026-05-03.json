@@ -1,0 +1,653 @@
+{
+  "interval": {
+    "intervalStart": "2026-05-03T00:00:00.000Z",
+    "intervalEnd": "2026-05-10T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-05-03 to 2026-05-10, elizaos/eliza had 96 new PRs (37 merged), 0 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABBHeRuA",
+      "title": "telegram: milady wrapper + @elizaos/plugin-telegram both poll the same bot — race causes silent message loss",
+      "author": "Sw4pIO",
+      "number": 7245,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nTwo independent Telegraf consumers run against the same bot token concurrently:\n\n1. **`@elizaos/plugin-telegram`** — auto-enabled when `connectors.telegram.enabled === true`. Spawns its own Telegraf instance and starts long-polling.\n2. **milady's standalone wrapper** at `packages/app-core/src/runtime/eliza.ts:534` (function `ensureTelegramBotPolling`) — spawns a *second* Telegraf instance with the same token, calls `bot.startPolling()`.\n\nTelegram's `getUpdates` long-poll API delivers each update to **exactly one consumer**. Whichever long-poll wins the race for a given message gets it; the other sees nothing. Updates routed to the upstream plugin go through elizaOS message handling — which on milady is not wired to a Telegram-channel-aware agent — and silently drop. Updates routed to milady's wrapper go through `useModel` directly and reply correctly.\n\nEnd result: **every other Telegram message (roughly) gets dropped silently**. From the user's perspective, the bot replies sometimes, ignores others.\n\n## Why both exist\n\nThe wrapper was added with this comment (`packages/app-core/src/runtime/eliza.ts:531-533`):\n\n> *\"Ensure Telegram bot is polling. The upstream plugin's `bot.launch()` is not awaited and silently fails on bun/Windows. We create a standalone Telegraf instance with proper lifecycle management.\"*\n\nSo milady spawns its own Telegraf to work around #7241 (Bun + Telegraf 4.16.3 `launch()` readonly-property bug). But it never disables the upstream plugin to avoid the duplicate poller.\n\n## Symptoms\n\n- Inconsistent: bot replies to ~50% of messages, ignores the rest.\n- Logs show `[milady] Telegram bot polling started` AND `[PLUGIN:TELEGRAM] Starting Telegram bot` on boot.\n- `curl https://api.telegram.org/bot<token>/getUpdates` returns empty (something *did* consume them) but no `[milady] Telegram message from @user: ...` log entry for the dropped messages.\n\n## Reproduction\n\n1. Fresh milady, telegram connector enabled with a valid bot token.\n2. `bun run dev` — both pollers start.\n3. From a Telegram client, DM the bot 5 messages back to back.\n4. ~2-3 will get a reply, ~2-3 will be silently dropped depending on which poller wins each `getUpdates` race.\n\n## Workaround (verified locally)\n\nDisable the upstream plugin so milady's wrapper is the only consumer:\n\n```json\n// ~/.milady/milady.json\n{\n  \"plugins\": {\n    \"entries\": {\n      \"@elizaos/plugin-telegram\": { \"enabled\": false },\n      \"telegram\": { \"enabled\": false }\n    }\n  },\n  \"connectors\": {\n    \"telegram\": { \"enabled\": false /* still want the bot active */ }\n  }\n}\n```\n\nAfter restart: only one Telegraf polls, every inbound message routes through milady's wrapper, every message gets a reply. Verified with 4 back-to-back messages — 4 logged inbound, 4 logged replies.\n\n## Suggested fix\n\nTwo paths:\n\n1. **Mutually exclusive at config time.** When milady spawns its own wrapper (`ensureTelegramBotPolling`), it should also force-disable the upstream `@elizaos/plugin-telegram` and the `connectors.telegram` auto-enable. One owner per bot token, no exceptions.\n\n2. **Remove the wrapper, fix the upstream plugin.** Address the `launch()` Bun bug at the source (#7241). Then the wrapper becomes unnecessary and `@elizaos/plugin-telegram` is the single source of truth.\n\nOption 2 is the cleaner architectural fix. Option 1 is the right tactical fix until the upstream Bun issue is resolved. Either way, the current \"both run, hope for the best\" state is not OK because **silent message loss looks like working software** to the user.\n\n## Why this matters\n\nCombined with #7240 (token bridge bug) and #7241 (Telegraf launch bug), the Telegram setup path is currently unable to deliver \"I sent 5 messages and got 5 replies\" reliably out of the box. Even with the user's token correctly bridged into the env and the launch bug worked around, the dual-poller race means inconsistent delivery — a user-facing failure mode that's nearly impossible to diagnose without log access.\n\n## Environment\n\n- bun 1.3.13\n- telegraf 4.16.3\n- @elizaos/plugin-telegram (current alice submodule pin)\n- milady on `alice` (PR #105 sync)",
+      "createdAt": "2026-05-02T20:12:34Z",
+      "closedAt": "2026-05-03T07:12:53Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABBHd_Yw",
+      "title": "duplicate MiladyClient class — augmenter prototypes attach to never-instantiated class, all client.X methods undefined at runtime",
+      "author": "Sw4pIO",
+      "number": 7244,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/app-core/src/api/` has **two** `export class MiladyClient` declarations:\n\n- `client-base.ts:36` — the one all 7 augmenter files import (`client-agent`, `client-skills`, `client-chat`, `client-cloud`, `client-vincent`, `client-wallet`, `client-browser-workspace`)\n- `client.ts:2277` — the one the live `client` instance is built from (`export const client = new MiladyClient()` at `client.ts:6504`)\n\nEach augmenter does `MiladyClient.prototype.X = ...` to attach domain methods (e.g. `listAppRuns`, `listCodingAgentTaskThreads`, `sendMessage`, ~155 methods total). Because they import from `client-base.ts` and the instance is built from `client.ts`'s class, **none of those 155 methods land on the live instance**.\n\n## Symptoms\n\n- UI throws `client.listCodingAgentTaskThreads is not a function`, `client.listAppRuns is not a function`, etc. on every page that uses these methods.\n- Errors bubble through React error boundary → chat surface freezes → text input becomes unresponsive (it's `disabled` because the surrounding state crashed).\n- 343 methods present on prototype (the inline `client.ts` ones) — but the augmenter set is missing entirely.\n\n## Reproduction\n\n1. Fresh milady (alice, post-PR#105 sync), `bun run dev`.\n2. Open dashboard → Chat or Apps tab.\n3. Browser console:\n   ```js\n   const m = await import('/@fs/Users/.../packages/app-core/src/api/index.ts');\n   ({\n     listAppRuns: typeof m.client.listAppRuns,             // 'undefined' ❌\n     listCodingAgentTaskThreads: typeof m.client.listCodingAgentTaskThreads, // 'undefined' ❌\n     methodCount: Object.getOwnPropertyNames(Object.getPrototypeOf(m.client)).length, // 343\n   })\n   ```\n4. UI bubbles `is not a function` errors.\n\n## Root cause / context\n\n`client-base.ts` was originally introduced (per its own header comment):\n\n> *\"Separated from client.ts so domain augmentation files can import the class without circular dependency issues.\"*\n\nAt some point during the alice merge, `client.ts` had its own `export class MiladyClient` added inline (likely a refactor that consolidated methods back into one file) — but `client-base.ts` was left in place. The 7 augmenters still target `client-base.ts`. Two separate classes, two separate prototypes. The augmenters silently augment the wrong one.\n\nThere's no compile-time error because both files export a class with the same name and same shape. TypeScript happily lets `MiladyClient.prototype.X = ...` succeed on either.\n\n## Fix (verified locally)\n\nReplace `client-base.ts` body with a one-line re-export shim:\n\n```ts\nexport { MiladyClient } from \"./client\";\n```\n\nVerified locally: method count goes 343 → 500 (157 augmenter methods now land on the live instance). All `is not a function` errors disappear. Chat hydrates cleanly.\n\n## Side-effect imports also needed\n\n`packages/app-core/src/api/index.ts` was also missing side-effect imports for the augmenter files. Even with the re-export shim, the augmenters need to be **loaded** for their `MiladyClient.prototype.X = ...` statements to execute:\n\n```ts\nexport * from \"./client\";\n\n// Side-effect imports: each augments MiladyClient.prototype with methods.\nimport \"./client-agent\";\nimport \"./client-browser-workspace\";\nimport \"./client-chat\";\nimport \"./client-cloud\";\nimport \"./client-skills\";\nimport \"./client-vincent\";\nimport \"./client-wallet\";\n```\n\nThese were dropped in the alice merge as well — possibly because they appear redundant after `export * from \"./client\"`, but they're not (imports of side-effect-only modules need explicit `import \"...\"` statements).\n\n## Environment\n\n- bun 1.3.13\n- milady on `alice` (PR #105 sync)\n- React 19 + Vite dev server",
+      "createdAt": "2026-05-02T20:10:27Z",
+      "closedAt": "2026-05-03T07:12:56Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABBHdQ7Q",
+      "title": "auth: hasCodexCliSubscriptionAuth misses modern `tokens.access_token` shape — falsely reports 'install required'",
+      "author": "Sw4pIO",
+      "number": 7243,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/agent/src/auth/credentials.ts:210-225` — `hasCodexCliSubscriptionAuth()` only matches the **legacy** `~/.codex/auth.json` layout:\n\n```ts\nconst data = JSON.parse(fs.readFileSync(authPath, \"utf-8\")) as {\n  auth_mode?: string;\n  OPENAI_API_KEY?: string;\n};\nreturn Boolean(\n  data.OPENAI_API_KEY?.trim() &&\n    data.auth_mode?.trim() &&\n    data.auth_mode.trim().toLowerCase() !== \"api-key\",\n);\n```\n\nModern `codex-cli` (≥ 0.93.0) writes a different shape — no top-level `OPENAI_API_KEY`, no `auth_mode`, just a `tokens` object:\n\n```json\n{\n  \"tokens\": {\n    \"id_token\": \"eyJhbGciOiJSUzI1NiIs...\",\n    \"access_token\": \"eyJhbGciOiJSUzI1NiIs...\",\n    \"refresh_token\": \"...\",\n    \"account_id\": \"...\"\n  },\n  \"last_refresh\": \"...\"\n}\n```\n\nDetection returns `false` → milady reports the user's Codex subscription as \"install required\" on the Settings → Connectors panel and the auto-enable map for `@elizaos/plugin-openai` is skipped. The `subscriptionProvider` resolution silently falls through, so chat routes to whatever else is configured (or fails).\n\n## Symptoms\n\n- User has a valid `codex login` session (verifiable: `codex --version` works, `~/.codex/auth.json` exists with `tokens` block, manual API calls with `tokens.access_token` succeed).\n- Milady dashboard shows **Codex: install required** even though the CLI is installed and authenticated.\n- Boot log lacks `Auto-enabled plugin: @elizaos/plugin-openai (subscription: openai-codex)`.\n- Chat falls back to \"Sorry, I'm having a provider issue\" because routing thinks no provider is available.\n\n## Reproduction\n\n1. `brew install codex-cli` (or already installed — version ≥ 0.93.0)\n2. `codex login` — authenticates and writes `~/.codex/auth.json` in the new format\n3. `cat ~/.codex/auth.json | python3 -c \"import json,sys; d=json.load(sys.stdin); print({'OPENAI_API_KEY': d.get('OPENAI_API_KEY'), 'auth_mode': d.get('auth_mode'), 'has_tokens': bool(d.get('tokens'))})\"` →\n   ```\n   {'OPENAI_API_KEY': None, 'auth_mode': None, 'has_tokens': True}\n   ```\n4. Boot milady → log shows no Codex auto-enable.\n5. Settings → Connectors → Codex shows \"install required\".\n\n## Workaround (verified locally)\n\nManually translate `~/.codex/auth.json` into the milady-side `~/.eliza/auth/openai-codex.json` shape:\n\n```python\nrecord = {\n    'id': 'default',\n    'providerId': 'openai-codex',\n    'label': 'Codex CLI',\n    'source': 'codex-cli',\n    'credentials': {\n        'access': tokens['access_token'],\n        'refresh': tokens['refresh_token'],\n        'expires': now_ms + 3600 * 1000,\n    },\n    'createdAt': now_ms,\n    'updatedAt': now_ms,\n}\n```\n\nAfter writing this file + restart, milady detects the subscription and `@elizaos/plugin-openai` auto-enables.\n\n## Suggested fix\n\nUpdate `hasCodexCliSubscriptionAuth()` to recognize **both** shapes:\n\n```ts\nfunction hasCodexCliSubscriptionAuth(): boolean {\n  const authPath = path.join(os.homedir(), \".codex\", \"auth.json\");\n  try {\n    const data = JSON.parse(fs.readFileSync(authPath, \"utf-8\")) as {\n      auth_mode?: string;\n      OPENAI_API_KEY?: string;\n      tokens?: {\n        access_token?: string;\n        refresh_token?: string;\n      };\n    };\n\n    // Modern codex-cli (>= 0.93.0): tokens block present.\n    if (data.tokens?.access_token?.trim()) return true;\n\n    // Legacy: OPENAI_API_KEY + non-\"api-key\" auth_mode.\n    return Boolean(\n      data.OPENAI_API_KEY?.trim() &&\n        data.auth_mode?.trim() &&\n        data.auth_mode.trim().toLowerCase() !== \"api-key\",\n    );\n  } catch {\n    return false;\n  }\n}\n```\n\nThen update the credential-import path (`importCodexCliCredentials` or wherever it lives) to translate `tokens.access_token`/`tokens.refresh_token` → `OAuthCredentials.{access,refresh,expires}` when the legacy fields are absent.\n\n## Why it matters\n\nEvery user on a fresh install with a current `codex-cli` will hit this. The codex CLI changed its auth file format and milady's detection didn't get updated. From the user's perspective: \"I logged in with codex, milady says I didn't\" → confusion.\n\n## Environment\n- bun 1.3.13\n- codex-cli 0.93.0 (the one written by the modern CLI)\n- macOS arm64\n- milady on `alice` (PR #105 sync)",
+      "createdAt": "2026-05-02T20:06:05Z",
+      "closedAt": "2026-05-03T07:12:59Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABBHPxsw",
+      "title": "@elizaos/plugin-telegram (Telegraf 4.16.3) bot.launch() throws 'Attempted to assign to readonly property' under Bun",
+      "author": "Sw4pIO",
+      "number": 7241,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`@elizaos/plugin-telegram`'s startup wrapper calls `bot.launch({...})` on a `Telegraf` instance (Telegraf 4.16.3). Under Bun 1.3.13 this rejects with:\n\n```\n[milady] Telegram bot launch error: Attempted to assign to readonly property.\n```\n\nThe bot never starts polling. From the user side, the bot looks alive on Telegram (Telegram's `getUpdates` queues messages waiting for it) but the runtime never receives them. No replies. UI may report \"Connected\" because the token is valid; the actual long-poll never started.\n\n## Root cause\n\n`telegraf@4.16.3/lib/telegraf.js:189` (compiled output of nullish-coalescing-assignment):\n\n```js\nasync launch(config = {}, onLaunch) {\n    var _a, _b;\n    ...\n    debug('Connecting to Telegram');\n    (_a = this.botInfo) !== null && _a !== void 0 ? _a : (this.botInfo = await this.telegram.getMe());\n    ...\n}\n```\n\nThe expression assigns to `this.botInfo`. Under Bun's CJS interop the Telegraf prototype/instance ends up with a non-writable descriptor on certain inherited fields, and the assignment trips a strict-mode `TypeError: Attempted to assign to readonly property`. Same code paths work under Node.\n\n## Reproduction\n\n1. Fresh milady (alice or develop), Telegram connector enabled with a valid BotFather token (in `env.TELEGRAM_BOT_TOKEN` per #7240).\n2. `bun run dev`\n3. Boot log:\n   ```\n   [PLUGIN:TELEGRAM] Starting Telegram bot\n   [milady] Telegram bot polling started\n   [Warn] [milady] Telegram bot launch error: Attempted to assign to readonly property.\n   ```\n4. DM the bot from Telegram — no inbound message appears in logs.\n5. `curl https://api.telegram.org/bot<token>/getUpdates` shows the messages queued, confirming the bot itself is reachable but its long-poll never started.\n\n## Workaround (verified locally)\n\nIn `eliza/packages/app-core/src/runtime/eliza.ts` (or wherever the wrapper is), bypass `bot.launch()` and start polling directly:\n\n```ts\n(async () => {\n  try {\n    await bot.telegram.deleteWebhook({ drop_pending_updates: true });\n  } catch (err) {\n    logger.warn(`[milady] Telegram deleteWebhook failed: ${...}`);\n  }\n  try {\n    // @ts-expect-error - startPolling is intentionally public for this fallback\n    bot.startPolling([\"message\", \"message_reaction\"]);\n  } catch (err) {\n    logger.warn(`[milady] Telegram startPolling failed: ${...}`);\n  }\n})();\n```\n\nThis skips the `(this.botInfo ??= ...)` assignment that triggers the Bun strict-mode reject. Same behavior as `launch()` (long-poll mode, no webhook), without the error. Verified inbound messages reach the runtime and replies go back.\n\n## Suggested upstream fix\n\nTwo options for the plugin layer:\n\n1. **Wrap `bot.launch()` to use the explicit polling path on Bun:**\n   ```ts\n   const isBun = typeof process !== \"undefined\" && Boolean((process as any).versions?.bun);\n   if (isBun) {\n     await bot.telegram.deleteWebhook({ drop_pending_updates: true });\n     bot.startPolling([\"message\", \"message_reaction\"]);\n   } else {\n     await bot.launch({ dropPendingUpdates: true, allowedUpdates: [\"message\", \"message_reaction\"] });\n   }\n   ```\n\n2. **Pin/upgrade Telegraf** — the issue may be fixed in a newer release with a different compiled output. Worth testing against the latest 4.x and 5.x previews.\n\nOption 1 is the safer immediate fix; option 2 is the right long-term move.\n\n## Why this matters\n\nThis silently breaks every Bun-hosted milady install with a Telegram connector. The auto-enable log says the plugin is loaded, the dashboard says \"connected\", but no messages ever flow. Users have no way to diagnose this without log access, and the failure mode (warning, not error; \"polling started\" log fires before the launch reject because launch() is fire-and-forget) hides the bug effectively.\n\n## Environment\n\n- bun 1.3.13\n- telegraf 4.16.3\n- macOS arm64\n- milady on `alice` (PR #105)",
+      "createdAt": "2026-05-02T18:17:06Z",
+      "closedAt": "2026-05-03T07:13:02Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABBGwSaQ",
+      "title": "telegram bot token not bridged from dashboard config to runtime — UI says 'connected' while plugin says 'Bot token not provided'",
+      "author": "Sw4pIO",
+      "number": 7240,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe dashboard's Telegram setup writes the bot token to `connectors.telegram.botToken` in milady.json, but `@elizaos/plugin-telegram` reads it via `runtime.getSetting(\\\"TELEGRAM_BOT_TOKEN\\\")`. **No code bridges between them.** The `/api/telegram-setup/status` endpoint reports `connected: true, hasToken: true` based on the connector config, while the plugin silently starts in degraded mode with `[PLUGIN:TELEGRAM] Bot token not provided, Telegram functionality unavailable`.\n\nThis is a classic UI/runtime contract drift: setup-status looks at one source of truth (`connectors.telegram.botToken`), the plugin looks at another (`runtime.getSetting(\\\"TELEGRAM_BOT_TOKEN\\\")`), and nothing tells the user that pasting the token in the UI didn't actually wire up the bot.\n\n## Symptoms\n\nAfter completing the Settings → Connectors → Telegram setup form with a valid BotFather token:\n\n- UI: \"Telegram — Connected\" (green checkmark)\n- `GET /api/telegram-setup/status`: `{ available: true, hasToken: true, connected: true }`\n- Backend log on boot:\n  ```\n  [Warn] [PLUGIN:TELEGRAM] Bot token not provided, Telegram functionality unavailable\n  [Warn] [PLUGIN:TELEGRAM] Service started without bot functionality\n  ```\n- DMing the bot on Telegram: bot is unresponsive (it's not polling because no token reached the plugin)\n\n## Reproduction\n\n1. Fresh milady (alice or develop), start dev.\n2. Settings → Connectors → Telegram → paste BotFather token, save.\n3. Inspect `~/.milady/milady.json` — token lives at `connectors.telegram.botToken`.\n4. Inspect `~/.milady/milady.json` `env` block — `TELEGRAM_BOT_TOKEN` is **not** there.\n5. Boot logs show `Bot token not provided`.\n6. Manually copy the token into `env.TELEGRAM_BOT_TOKEN`, restart → plugin starts polling and bot responds.\n\n## Root cause\n\nTwo parallel config keys, no synchronization:\n\n| Where | Read by |\n|---|---|\n| `connectors.telegram.botToken` | Dashboard, `/api/telegram-setup/status` |\n| `env.TELEGRAM_BOT_TOKEN` (or process env) | `@elizaos/plugin-telegram` via `runtime.getSetting()` |\n\nThe setup-routes handler at `packages/agent/src/api/telegram-setup-routes.ts:144` checks `state.runtime?.getSetting(\\\"TELEGRAM_BOT_TOKEN\\\")` for `hasToken`. But the dashboard save handler writes to `connectors.telegram.botToken` only — it doesn't propagate into `env.TELEGRAM_BOT_TOKEN` and doesn't call `runtime.setSetting()`. So `hasToken` happens to read true via some other code path (likely a config-snapshot fallback) while the live runtime has no setting.\n\n## Fix\n\nBridge the two in the save path. Either:\n\n1. **In the dashboard save handler:** when persisting `connectors.telegram.botToken`, also write to `env.TELEGRAM_BOT_TOKEN` (so it's loaded into runtime settings on next boot) AND call `runtime.setSetting(\\\"TELEGRAM_BOT_TOKEN\\\", token)` (so the live plugin picks it up without restart).\n\n2. **In the plugin's init:** read from both `runtime.getSetting(\\\"TELEGRAM_BOT_TOKEN\\\")` AND `runtime.character?.connectors?.telegram?.botToken` (or whatever the canonical config path is). Less clean — encodes UI config layout in plugin code.\n\nOption 1 is right. Same fix should be applied to the other connector→env bridges that have the same problem (likely `discord`, `whatsapp`, `wechat`, etc. — worth grepping).\n\n## Workaround\n\nUntil fixed, users can manually edit `~/.milady/milady.json` and add their token under the `env` block:\n\n```json\n{\n  \"env\": {\n    \"TELEGRAM_BOT_TOKEN\": \"<token from BotFather>\"\n  }\n}\n```\n\nI verified locally: after this edit + restart, plugin logs `Starting Telegram bot` / `Telegram bot polling started` and the bot responds.\n\n## Why this is dangerous\n\nThe UI affirmatively shows \"Connected\" while nothing works. Users with no log access have no way to know setup silently failed. Other connectors likely have the same bug pattern — worth a sweep.\n\n## Environment\n\n- bun 1.3.13\n- milady on `alice` (PR #105 sync)\n- @elizaos/plugin-telegram from eliza submodule",
+      "createdAt": "2026-05-02T14:24:53Z",
+      "closedAt": "2026-05-03T07:13:10Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7XooKA",
+      "title": "chore: add cloud and plugins, remove rust and python",
+      "author": "lalalune",
+      "number": 7235,
+      "body": "This PR simplifies and consolidates",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-02T11:46:07Z",
+      "mergedAt": "2026-05-03T00:50:22Z",
+      "additions": 1307096,
+      "deletions": 248884
+    },
+    {
+      "id": "PR_kwDOMT5cIs7X0nhA",
+      "title": "refactor(cloud): Clean Architecture migration (WIP)",
+      "author": "standujar",
+      "number": 7336,
+      "body": "## ⚠️ WIP / Draft\n\nLong-running refactor branch. Phase A + B Hono-scope clean + Phase C.1\nlanded. Phase C.2–C.10 + D + E to follow on the same branch.\n**Do not merge yet.**\n\n## Context\n\nFixes the root cause behind the May 2 `CACHE_ENABLED=false` hotfix:\n`CacheClient` was a module-level singleton whose lazy-opened Redis socket\ngot bound to the first request's I/O context on Cloudflare Workers,\nkilling the worker on subsequent requests with `Cannot perform I/O on\nbehalf of a different request`.\n\nRather than just fix the cache singleton (étape 2 plan, ALS facade with\ndocumented dette), the user chose **Clean Architecture** (étape 3) — no\nintermediate dette, layered domain/application/infrastructure, repository\npattern, cache as decorator. See ADR:\n[docs/architecture/clean-architecture-migration.md](cloud/docs/architecture/clean-architecture-migration.md).\n\n## Commits (in order)\n\n| Commit | Phase | What |\n|---|---|---|\n| `766249bf9d` | A | Layered skeleton: domain/, application/, infrastructure/{db,cache}/, composition root, AppEnv.Variables.deps typing, middleware mounted in bootstrap-app.ts |\n| `26c127dd04` | B.1 | ApiKey aggregate foundation: entity, repo interface, Postgres adapter (replica→primary fallback), Cached decorator (positive + 60s negative cache + invalidation), 8 use cases, wired into buildContainer |\n| `82846e0ca1` | B.2 (1/12) | First route (`apps/api/v1/api-keys/route.ts`) migrated — pattern reference |\n| `37ba7c5f59` | B.2 (full) | Remaining 11 routes migrated to `c.var.deps.<useCase>.execute(...)`, dynamic `await import(\"@/lib/services/api-keys\")` removed |\n| `f3b012a154` | B.2.b | `workers-hono-auth.ts` migrated; dead `app-auth.ts` deleted (zero importers) |\n| `53ae403bb0` | B.2.c | `user-context.ts` dead-code drop (`buildContext` had zero callers) |\n| `a772f7e5f6` | docs | ADR documenting layering target, phase plan, architectural concession |\n| `d47c84888d` | C.1 | Organization aggregate: domain entity + repo interface, Postgres adapter, Cached decorator, 8 use cases, 9 route call sites migrated across 8 files |\n\n## Architectural concession (validated 2026-05-03)\n\nThe clean DI / `c.var.deps` pattern applies to the **Hono request scope**.\nFor elizaOS plugin runtime services (`N8nCredentialBridge`),\nrequest-based auth helpers (`auth.ts`), and multi-context service\nsingletons (`apps/cli-auth-sessions/google-search/eliza-app-user-service/\nmanaged-eliza-config`), the legacy `apiKeysService` /\n`organizationsService` stay alive — they live in non-Hono runtime\ncontexts where the DI doesn't naturally apply. Tracked as deferred\nPhase F.\n\nCache state is coherent across both paths (same keys, same TTLs).\n\n## Phase plan\n\n- ✅ A — skeleton\n- ✅ B — ApiKey pilot end-to-end (Hono-scope)\n- ✅ C.1 — Organization aggregate (Hono-scope)\n- 🟡 C.2 — User aggregate\n- 🟡 C.3 — App aggregate\n- 🟡 C.4 — Character aggregate\n- 🟡 C.5 — OAuth split (Provider / OAuthState / OAuthToken)\n- 🟡 C.6 — Affiliate\n- 🟡 C.7 — UserMcp + UserMetrics\n- 🟡 C.8 — Credit + AppCredits\n- 🟡 C.9 — Agent\n- 🟡 C.10 — Misc (analytics, whatsapp, dashboard, proxy, email, redis-queue, race-tracking, eliza-managed-launch, entity-settings, connection-enforcement)\n- 🟡 D — CacheClient per-request via constructor; reactivate `CACHE_ENABLED=true`; roll back PR #7324 SIWE bypass\n- 🟡 E — promote `domain/application/infrastructure/` to top-level packages\n- ⏸ F — deferred: elizaOS plugin DI + multi-context service singletons + auth.ts cascade\n\n## Test plan (when WIP → ready)\n\n- [x] `bun run typecheck` clean for all touched files (filtered grep empty)\n- [ ] `bun run test:e2e:bundle` green\n- [ ] Staging deploy from `apps/api`: `wrangler deploy --env staging`\n- [ ] Hammer steward-session × 50 → zero `Cannot perform I/O` in CF tail\n- [ ] SIWE round-trip × 10 → 200 + valid `eliza_*` API key\n- [ ] Per-route latency benchmark (after Phase D cache reactivation)\n\n## Risk\n\n- Long-lived branch — risk of merge conflicts as develop moves. Plan: rebase\n  between phases.\n- Phase D is the highest-risk: re-enabling cache after the May 2 hotfix.\n  Mitigated by a regression test that hammers steward-session.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-03T20:31:33Z",
+      "mergedAt": null,
+      "additions": 1840,
+      "deletions": 608
+    },
+    {
+      "id": "PR_kwDOMT5cIs7Xx-JA",
+      "title": "feat(n8n): clarification roundtrip route",
+      "author": "2-A-M",
+      "number": 7316,
+      "body": "## Summary\n\nCloses the half-built clarification loop on the host side. Previously the n8n-workflow plugin populated \\`_meta.requiresClarification\\` and the LLM was told to emit it, but the host route ignored it and the UI never rendered it. With this PR:\n\n- \\`POST /api/n8n/workflows/generate\\` inspects the draft for clarifications before deploying. If non-empty, it short-circuits with \\`{ status: \\\"needs_clarification\\\", draft, clarifications: ClarificationRequest[], catalog: TargetGroup[] }\\` where \\`catalog\\` snapshots only the platforms referenced in clarifications via the \\`ConnectorTargetCatalog\\` service.\n- New \\`POST /api/n8n/workflows/resolve-clarification\\` accepts \\`{ draft, resolutions: { paramPath, value }[] }\\`, applies the resolutions to the unmodified draft via an inline \\`setByDotPath\\` helper (~10 lines, supports \\`nodes[\\\"Discord Send\\\"].parameters.channelId\\` syntax including bracketed string keys), runs \\`validateAndRepair\\`, then deploys.\n- Adds \\`N8nClarificationRequest\\`, \\`N8nClarificationTargetGroup\\`, \\`N8nWorkflowNeedsClarificationResponse\\` to \\`client-types-chat\\`. Widens \\`N8nWorkflowGenerateResponse\\` union accordingly.\n\n## Slice 2 backend\n\nThis is the second of two backend PRs for slice 2 of the NL→workflow resolver. The catalog service it depends on is in #7315. The UI side (clarification ChoiceWidget rendering inline in the chat) is a separate follow-up.\n\n## Test plan\n\n- [x] \\`packages/app-core/src/api/n8n-clarification.test.ts\\` — 16 tests: \\`parseParamPath\\`, \\`setByDotPath\\`, \\`applyResolutions\\`, \\`pruneResolvedClarifications\\`, \\`buildCatalogSnapshot\\`, \\`coerceClarifications\\`\n- [x] \\`packages/app-core/src/api/n8n-routes.test.ts\\` — generate roundtrip returns \\`needs_clarification\\`; resolve happy path; bad paramPath → 400\n- [x] \\`bun run typecheck\\` clean\n\n## Stacking\n\n**Depends on #7315** (\\`milady/connector-target-catalog\\`). Until that merges, the diff here will appear to include both PRs' commits; reviewers should look at this branch's unique commit (\\`feat(n8n): clarification roundtrip route + types\\`) for the actual change.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR closes the clarification loop for the n8n workflow generation flow: `/generate` now short-circuits with a `needs_clarification` envelope when the LLM emits unresolved parameters, and the new `/resolve-clarification` endpoint patches the draft and either re-prompts or deploys. Two P1 issues flagged in prior review threads remain unresolved and affect production paths: the bracket-string `paramPath` format emitted by the LLM (`nodes[\"Discord Send\"]`) throws when `nodes` is an existing array, breaking every real roundtrip; and legacy `free_text` clarifications with an empty `paramPath` can never be pruned, trapping clients in a perpetual `needs_clarification` loop.\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge — two unresolved P1 defects from prior review threads will cause 400 errors and infinite loops on real-world inputs.\n\nMultiple P1 findings identified in prior threads: the bracket-string paramPath format causes a runtime throw against any real n8n draft (nodes is always an array), and legacy free_text clarifications with empty paramPath create an unbreakable needs_clarification loop. Neither is addressed in this revision. Score pulled below the P1 ceiling of 4 due to multiple concurrent P1s on the critical generate→resolve path.\n\npackages/app-core/src/api/n8n-clarification.ts (setByDotPath array/string-key conflict, pruneResolvedClarifications free_text loop) and packages/app-core/src/api/n8n-routes.test.ts (missing end-to-end roundtrip test with the same draft+paramPath).\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/api/n8n-clarification.ts | New clarification helper module: coerceClarifications, parseParamPath, setByDotPath, applyResolutions, pruneResolvedClarifications, buildCatalogSnapshot. Has two pre-flagged P1 issues: bracket-string paramPath throws when nodes is an existing array, and legacy free_text items with empty paramPath can never be pruned, causing an infinite needs_clarification loop. |\n| packages/app-core/src/api/n8n-routes.ts | Adds handleResolveClarification route and deployAndRespond helper; refactors handleGenerateWorkflow to short-circuit before deploy when draft contains clarifications. N8nWorkflowServiceLike declares deployWorkflow/getWorkflow as optional but deployAndRespond uses ! non-null assertions on both; pre-flagged P1 for accepting arbitrary client-supplied draft JSON. |\n| packages/app-core/src/api/n8n-clarification.test.ts | 346 lines of unit tests covering all exported helpers. Tests pass, but no end-to-end roundtrip test exercises the exact same draft+paramPath from a /generate response fed into /resolve-clarification, leaving the format mismatch bug undetected. |\n| packages/app-core/src/api/n8n-routes.test.ts | New integration tests for the clarification roundtrip. The generate fixture uses bracket-string paramPath nodes[\"Discord Send\"] while the resolve fixture uses numeric-index nodes[0]; no test exercises the actual generate→resolve handoff with the same draft object. |\n| packages/app-core/src/api/client-types-chat.ts | Adds N8nClarificationRequest, N8nClarificationTargetGroup, N8nWorkflowNeedsClarificationResponse, N8nClarificationResolution, N8nWorkflowResolveClarificationRequest types, and widens the N8nWorkflowGenerateResponse union. Also adds isNeedsClarificationResponse type guard. Types are well-formed and consistent. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant UI\n    participant Route as n8n-routes\n    participant Clarif as n8n-clarification\n    participant Svc as N8nWorkflowService\n    participant Catalog as ConnectorTargetCatalog\n\n    UI->>Route: POST /api/n8n/workflows/generate {prompt}\n    Route->>Svc: generateWorkflowDraft(prompt)\n    Svc-->>Route: draft (may include _meta.requiresClarification)\n    Route->>Clarif: coerceClarifications(draft._meta.requiresClarification)\n    alt clarifications present\n        Route->>Catalog: buildCatalogSnapshot(catalog, clarifications)\n        Catalog-->>Route: catalog[]\n        Route-->>UI: 200 {status:needs_clarification, draft, clarifications, catalog}\n        loop until all resolved\n            UI->>Route: POST /api/n8n/workflows/resolve-clarification {draft, resolutions}\n            Route->>Clarif: applyResolutions(draft, resolutions)\n            Route->>Clarif: pruneResolvedClarifications(draft, resolvedPaths)\n            alt more clarifications remain\n                Route->>Catalog: buildCatalogSnapshot(catalog, remaining)\n                Route-->>UI: 200 {status:needs_clarification, draft, clarifications, catalog}\n            else all resolved\n                Route->>Svc: deployWorkflow(draft, userId)\n                Svc-->>Route: deployed\n                Route->>Svc: getWorkflow(deployed.id)\n                Svc-->>Route: full workflow\n                Route-->>UI: 200 full workflow\n            end\n        end\n    else no clarifications\n        Route->>Svc: deployWorkflow(draft, userId)\n        Svc-->>Route: deployed\n        Route->>Svc: getWorkflow(deployed.id)\n        Svc-->>Route: full workflow\n        Route-->>UI: 200 full workflow\n    end\n```\n\n<sub>Reviews (2): Last reviewed commit: [\"feat(n8n): clarification roundtrip route...\"](https://github.com/elizaos/eliza/commit/ec786025466415e47e73e0b4bc561e739a07c882) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30604466)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-03T13:59:59Z",
+      "mergedAt": "2026-05-03T14:53:41Z",
+      "additions": 1271,
+      "deletions": 36
+    },
+    {
+      "id": "PR_kwDOMT5cIs7Xx97f",
+      "title": "feat(app-core): connector-target-catalog service (Discord)",
+      "author": "2-A-M",
+      "number": 7315,
+      "body": "## Summary\n\nNew \\`ConnectorTargetCatalog\\` service that surfaces real Discord guilds + channels (lifted from the existing slice-1 \\`n8n-runtime-context-provider\\` REST enumeration). Used by the n8n clarification roundtrip (#7XXX next in stack) so the host can render quick-pick UIs scoped to the user's actually-connected platforms.\n\n## What this PR adds\n\n- \\`packages/app-core/src/services/connector-target-catalog.ts\\` — \\`ConnectorTargetCatalog\\` interface + \\`MiladyConnectorTargetCatalog\\` implementation. Per-platform dispatch, 5-min in-memory cache keyed by \\`(platform, groupId)\\`, silent degradation on REST 4xx/5xx.\n- \\`packages/app-core/src/services/discord-target-source.ts\\` — extracted Discord REST helper (lifted from \\`n8n-runtime-context-provider.ts\\` so the catalog and the runtime-context provider both go through one source).\n- \\`packages/app-core/src/services/n8n-runtime-context-provider.ts\\` — refactor to consume the shared helper. No public-behavior change.\n- Tests for both new services.\n\n## Slice 2 backend\n\nThis is the first of two backend PRs that close the n8n clarification loop on the host side (slice 2 of the NL→workflow resolver). The companion PR (\\`milady/n8n-resolve-clarification\\`) wires the catalog into the \\`/api/n8n/workflows/generate\\` and \\`/api/n8n/workflows/resolve-clarification\\` route handlers.\n\n## Test plan\n\n- [x] \\`bun test packages/app-core/src/services/connector-target-catalog.test.ts\\` — 16 tests (multi-guild, single-guild, no-token, REST 4xx silent degrade, cache hit/miss, multi-platform)\n- [x] \\`bun test packages/app-core/src/services/discord-target-source.test.ts\\` — covers the extracted REST helper directly\n- [x] \\`bun run typecheck\\` clean in \\`packages/app-core\\`\n\n## Stacking\n\nThis PR is independent. The clarification route PR stacks on top of this one.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR introduces a `ConnectorTargetCatalog` service that enumerates real Discord guilds and channels for the n8n clarification quick-pick UI, extracting the shared Discord REST logic from the existing n8n runtime-context provider into a new `discord-target-source` helper so both consumers share a single 5-minute in-memory cache. All findings are P2.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge; all findings are P2 style/design concerns with no blocking defects.\n\nOnly P2 findings: the undeclared enabled flag, transient 5xx responses being cached for the full TTL, sequential channel fetching, and a minor cache-sharing fragility on import failure. No P0/P1 issues were identified. Tests are thorough and the refactor of the n8n-runtime-context-provider has no behavior change.\n\npackages/app-core/src/services/discord-target-source.ts (cache-on-error behavior and sequential fetching) and packages/app-core/src/services/connector-target-catalog.ts (enabled flag)\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/services/discord-target-source.ts | New shared Discord REST helper with 5-min per-token cache; sequential guild channel fetching and inconsistent cache-write-on-error behavior are the main concerns. |\n| packages/app-core/src/services/connector-target-catalog.ts | New ConnectorTargetCatalog service; `discord.enabled` flag is declared in the config interface but never consulted, so disabled connectors are still enumerated. |\n| packages/app-core/src/runtime/eliza.ts | Wires catalog and cache-sharing into runtime boot; cache sharing silently degrades to independent caches if the dynamic import throws before `_discordEnumerationCache` is assigned. |\n| packages/app-core/src/services/n8n-runtime-context-provider.ts | Refactored to delegate Discord REST + caching to the shared `discord-target-source` helper; no behavior change, clean extraction. |\n| packages/app-core/src/services/connector-target-catalog.test.ts | Good coverage of multi-guild, single-guild, no-token, 401/429 degrade, cache hit, and multi-platform cases. |\n| packages/app-core/src/services/discord-target-source.test.ts | Thorough test coverage for the shared helper: cache TTL hit/miss, partial guild failures, network throws, and fact-formatting edge cases. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Host as eliza.ts (repairRuntimeAfterBoot)\n    participant NRC as N8nRuntimeContextProvider\n    participant CTC as ConnectorTargetCatalog\n    participant DSS as discord-target-source\n    participant Cache as DiscordSourceCache (shared)\n    participant Discord as Discord REST API\n\n    Host->>NRC: ensureN8nRuntimeContextProvider(runtime)\n    NRC->>Cache: createDiscordSourceCache() → _discordEnumerationCache\n    NRC->>NRC: startMiladyN8nRuntimeContextProvider({ discordCache })\n\n    Host->>CTC: ensureConnectorTargetCatalog(runtime)\n    CTC->>CTC: createMiladyConnectorTargetCatalog({ discordCache: _discordEnumerationCache })\n\n    note over NRC,CTC: Both services now share the same cache instance\n\n    Host->>NRC: fetchDiscordFacts(token)\n    NRC->>DSS: fetchDiscordEnumeration(token, { cache })\n    DSS->>Cache: cache.get(token) — miss\n    DSS->>Discord: GET /users/@me/guilds\n    DSS->>Discord: GET /guilds/{id}/channels (sequential, per guild)\n    DSS->>Cache: cache.set(token, { result, expiresAt })\n    DSS-->>NRC: DiscordEnumerationResult[]\n    NRC-->>Host: fact strings (for LLM prompt)\n\n    Host->>CTC: listGroups({ platform: discord })\n    CTC->>DSS: fetchDiscordEnumeration(token, { cache })\n    DSS->>Cache: cache.get(token) — HIT (within 5 min TTL)\n    DSS-->>CTC: DiscordEnumerationResult[] (no REST call)\n    CTC-->>Host: TargetGroup[] (quick-pick data)\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(app-core): connector-target-catalog...\"](https://github.com/elizaos/eliza/commit/249ff0c2c40afd9966a05647e295a6f5e1a56d0c) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30604446)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-03T13:59:26Z",
+      "mergedAt": "2026-05-03T14:41:14Z",
+      "additions": 787,
+      "deletions": 95
+    },
+    {
+      "id": "PR_kwDOMT5cIs7X1JHn",
+      "title": "feat(automations): clarification quick-pick UI",
+      "author": "2-A-M",
+      "number": 7341,
+      "body": "## Summary\n\nRenders the `needs_clarification` response from `POST /api/n8n/workflows/generate` (added in #7316) as an inline panel in `AutomationsView`, just below the missing-credentials banner. The user picks from a row of buttons drawn from the `connector-target-catalog` snapshot (#7315), the host calls `POST /api/n8n/workflows/resolve-clarification` with `{paramPath, value}`, and either deploys (clearing the panel and refreshing the workflow list) or chains a follow-up picker (server then channel) by surfacing the next pending clarification.\n\nThis was the planned slice-2 P5 UI surface that #7316 / #7317 made the backend for. Shipping it now closes the loop: the route + UX restoration are already on develop, but the user-facing clarification picker was missing.\n\n## Implementation\n\n`ClarificationPanel` renders `ChoiceWidget` directly. `ChoiceWidget`'s existing `onChoose` callback contract was already a clean direct callback — the chat round-trip via `sendActionMessage` is layered on in `MessageContent.tsx`, not in the widget itself, so the widget did not need an `onChooseDirect` prop. The clarification flow simply instantiates `ChoiceWidget` with its own callback.\n\n`optionsForClarification` narrows the catalog snapshot per clarification kind:\n- `target_server` lists one button per group.\n- `target_channel` narrows to `scope.guildId` when set, then lists each text channel; if no scope is set and multiple guilds returned, the label is prefixed with the guild name to disambiguate same-named channels.\n- `recipient` lists each recipient target.\n- `value` / `free_text` / unmatched-platform fall through to a free-text `Input` bubble (`ClarificationFreeTextInput`) so the user can still answer when no catalog backs the question.\n\nCancel dismisses the panel locally without touching the server. A busy spinner suppresses re-clicks while resolve is in flight; an error string surfaces failed resolves (bad paramPath, validation rejection) without dropping the panel.\n\n`client-n8n.ts` gains `resolveN8nClarification(request)` calling `POST /api/n8n/workflows/resolve-clarification` with the same 120s timeout as `generateN8nWorkflow` (validateAndRepair + deploy can be slow).\n\n## Stacking\n\n**Depends on #7340** (`milady/fix-trigger-delete-name`) — that PR's P1 fix is the first commit in this branch. When #7340 merges, this PR's diff collapses to just the P5 commit.\n\n## Test plan\n\n- [x] `bun run typecheck` clean in `packages/app-core`\n- [ ] Manual: type a Discord-targeting prompt like \"send a Discord message to my announcements channel when a new GitHub issue is opened\" → expect `target_server` clarification card → click an option → expect chained `target_channel` clarification → click a channel → expect deploy success and panel clears\n- [ ] Manual: same flow with `kind: free_text` clarification → expect `ClarificationFreeTextInput` → typing + Apply submits the value\n- [ ] Manual: Cancel dismisses the panel without server call\n\nBackend coverage from #7316 (route + helper tests) covers the `resolve-clarification` endpoint.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR adds the clarification quick-pick UI (`ClarificationPanel`, `ClarificationFreeTextInput`, `optionsForClarification`) to `AutomationsView`, replacing the previous static page-notice with an inline picker that chains server → channel → recipient selections driven by the catalog snapshot. `client-n8n.ts` gains `resolveN8nClarification` with the same 120 s timeout as `generateN8nWorkflow`.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge with minor follow-ups — no runtime blocking bugs; two P2 edge cases around key collisions and dead UI code.\n\nAll three previously-flagged P1s (React key, busy-state leak, stale free-text) are addressed in this version of the code. Remaining findings are P2: `choiceId` can collide for consecutive paramPath-less clarifications, and `currentIndex` is never incremented so the Step X of Y display is unreachable. Neither blocks the happy path.\n\npackages/app-core/src/components/pages/AutomationsView.tsx — `choiceId` generation and `currentIndex` advancement logic.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/src/api/client-n8n.ts | Adds `resolveN8nClarification` method via declaration merging, mirroring `generateN8nWorkflow` with the same 120 s timeout; straightforward and consistent with existing patterns. |\n| packages/app-core/src/components/pages/AutomationsView.tsx | Adds `ClarificationPanel`, `ClarificationFreeTextInput`, and `optionsForClarification`; wires `resolveClarificationChoice` into `AutomationsLayout`. Two P2s: `choiceId` can collide for consecutive free-text clarifications with absent `paramPath`, and `currentIndex` is never advanced so the \"Step X of Y\" UI is unreachable. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant U as User\n    participant AV as AutomationsView\n    participant API as /api/n8n/workflows\n\n    U->>AV: Submit automation prompt\n    AV->>API: POST /generate\n    API-->>AV: needs_clarification {clarifications, catalog, draft}\n    AV->>AV: setClarification({response, currentIndex:0})\n    AV->>U: Render ClarificationPanel (ChoiceWidget or FreeTextInput)\n\n    U->>AV: Pick option / submit text\n    AV->>API: POST /resolve-clarification {draft, resolutions}\n\n    alt Another clarification needed\n        API-->>AV: needs_clarification (chained)\n        AV->>AV: setClarification({response, currentIndex:0})\n        AV->>U: Render next ClarificationPanel\n    else Missing credentials\n        API-->>AV: missing_credentials\n        AV->>AV: setMissingCredentials(...)\n        AV->>U: Show credentials banner\n    else Deploy success\n        API-->>AV: deployed workflow {id}\n        AV->>AV: setClarification(null), refreshAutomations()\n        AV->>U: Select deployed workflow\n    end\n```\n\n<sub>Reviews (3): Last reviewed commit: [\"fix(automations): surface post-deploy re...\"](https://github.com/elizaos/eliza/commit/ad3416cec19be4072196a1e05c5e32844f4a30a2) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30623960)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-03T21:48:23Z",
+      "mergedAt": null,
+      "additions": 307,
+      "deletions": 6
+    }
+  ],
+  "codeChanges": {
+    "additions": 4367,
+    "deletions": 2479,
+    "files": 105,
+    "commitCount": 296
+  },
+  "completedItems": [
+    {
+      "title": "chore: add cloud and plugins, remove rust and python",
+      "prNumber": 7235,
+      "type": "other",
+      "body": "This PR simplifies and consolidates",
+      "files": [
+        ".biomeignore",
+        ".github/dependabot.yml",
+        ".github/workflows/README.md",
+        ".github/workflows/ci.yaml",
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-gateway-discord.yml",
+        ".github/workflows/cloud-gateway-webhook.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/confidant-ci.yaml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/multi-lang-tests.yaml",
+        ".github/workflows/publish-next-prerelease.yaml",
+        ".github/workflows/publish-plugin-elizacloud.yml",
+        ".github/workflows/release-python.yaml",
+        ".github/workflows/release-rust.yaml",
+        ".github/workflows/release.yaml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/weekly-maintenance.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        ".gitignore",
+        ".gitmodules",
+        "apps/app-browser/src/action.ts",
+        "apps/app-companion/public_src/dev/vrm-gzip-smoke.html",
+        "apps/app-companion/test/companion-emotes.live.e2e.test.ts",
+        "apps/app-contacts/src/register.ts",
+        "apps/app-contacts/vitest.config.ts",
+        "apps/app-defense-of-the-agents/src/routes.ts",
+        "apps/app-form/src/validation.ts",
+        "apps/app-form/test/form-plugin.live.e2e.test.ts",
+        "apps/app-knowledge/test/knowledge-api.live.e2e.test.ts",
+        "apps/app-lifeops/src/activity-profile/analyzer.ts",
+        "apps/app-lifeops/src/lifeops/cross-channel-search.ts",
+        "apps/app-lifeops/src/lifeops/google-fetch.ts",
+        "apps/app-lifeops/src/lifeops/google-oauth.ts",
+        "apps/app-lifeops/src/lifeops/health-bridge.ts",
+        "apps/app-lifeops/src/lifeops/screen-context.ts",
+        "apps/app-lifeops/src/lifeops/service-mixin-discord.test.ts",
+        "apps/app-lifeops/src/lifeops/service-mixin-screentime.ts",
+        "apps/app-lifeops/src/lifeops/service-mixin-telegram.test.ts",
+        "apps/app-lifeops/src/lifeops/travel-adapters/duffel.ts",
+        "apps/app-lifeops/test/apple-reminders.live.test.ts",
+        "apps/app-lifeops/test/approval-queue.integration.test.ts",
+        "apps/app-lifeops/test/cross-channel-search.integration.test.ts",
+        "apps/app-lifeops/test/helpers/lifeops-live-harness.ts",
+        "apps/app-lifeops/test/life-smoke.integration.test.ts",
+        "apps/app-lifeops/test/lifeops-llm-extraction.live.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): align steward-sync test mocks with current service types",
+      "prNumber": 7333,
+      "type": "bugfix",
+      "body": "## Summary\n\nResolves the ~25 TypeScript errors in [packages/tests/unit/steward-sync.test.ts](cloud/packages/tests/unit/steward-sync.test.ts) that have been blocking the **Cloud Tests / lint-and-types** job on `develop`.\n\nThe mocks in this f",
+      "files": [
+        "cloud/packages/tests/unit/steward-sync.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): unblock format check and 2 cloud typecheck errors",
+      "prNumber": 7332,
+      "type": "bugfix",
+      "body": "## Summary\n\nUnblocks the **Quality (Extended)** and **NPM Release** workflows on `develop` (failing 5+ runs in a row), plus removes 2 of the ~25 typecheck errors in **Cloud Tests**.\n\n### Root causes fixed\n- **`plugin-telegram`** (12 files) ",
+      "files": [
+        "cloud/packages/tests/unit/providers-vast.test.ts",
+        "cloud/packages/ui/src/components/apps/platform-automation-card.tsx"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency python to 3.14",
+      "prNumber": 7331,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [python](https://redirect.github.com/actions/python-versions) | uses-with | minor | `3.11` → `3.14` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        "plugins/plugin-bluesky/.github/workflows/ci.yml",
+        "plugins/plugin-elizacloud/.github/workflows/publish.yml",
+        "plugins/plugin-google-genai/.github/workflows/npm-deploy.yml",
+        "plugins/plugin-google-genai/.github/workflows/test.yml",
+        "plugins/plugin-groq/.github/workflows/pypi-deploy.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency pino-std-serializers to v7.1.0",
+      "prNumber": 7330,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [pino-std-serializers](https://redirect",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency pino to v10.3.1",
+      "prNumber": 7329,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [pino](https://getpino.io) ([source](ht",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency lodash-es to v4.18.1",
+      "prNumber": 7328,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [lodash-es](https://lodash.com/custom-b",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "fix(cloud/auth): pass c.env to getAppHost/getAppUrl on Worker (SIWE domain)",
+      "prNumber": 7327,
+      "type": "bugfix",
+      "body": "## Summary\nFollow-up to #7324 (now merged). Fixes the SIWE response domain reading `localhost:3000` instead of the actual app host on staging/production.\n\n`getAppHost()` / `getAppUrl()` in `packages/lib/utils/app-url.ts` read from `process.",
+      "files": [
+        "cloud/apps/api/auth/siwe/nonce/route.ts",
+        "cloud/apps/api/auth/siwe/verify/route.ts",
+        "cloud/packages/lib/utils/app-url.ts",
+        "cloud/packages/lib/utils/siwe-helpers.ts",
+        "cloud/packages/tests/unit/siwe-helpers-smoke.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency fast-xml-parser to v5.7.2",
+      "prNumber": 7326,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [fast-xml-parser](https://redirect.gith",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency express-rate-limit to v8.4.1",
+      "prNumber": 7325,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [express-rate-limit](https://redirect.g",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "fix(cloud/auth): unblock SIWE by bypassing the disabled cache singleton",
+      "prNumber": 7324,
+      "type": "bugfix",
+      "body": "## Summary\n- The SIWE endpoints `/api/auth/siwe/{nonce,verify}` 503 in prod because `CACHE_ENABLED=\"false\"` is set as a hotfix (commit 3c00f8e62a) and both routes gate on `cache.isAvailable()`.\n- The hotfix exists because `CacheClient` is a",
+      "files": [
+        "cloud/apps/api/auth/siwe/nonce/route.ts",
+        "cloud/apps/api/auth/siwe/verify/route.ts",
+        "cloud/packages/lib/utils/siwe-helpers.ts",
+        "cloud/packages/tests/unit/siwe-helpers-smoke.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency axios to v1.16.0",
+      "prNumber": 7323,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [axios](https://axios-http.com) ([sourc",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "fix(deps): update react monorepo to v19.2.5",
+      "prNumber": 7322,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [react](https://react.dev/) ([source](h",
+      "files": [
+        "cloud/apps/frontend/package.json",
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump uuid from 11.1.1 to 14.0.0 in /plugins/plugin-social-alpha in the npm_and_yarn group across 1 directory",
+      "prNumber": 7321,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /plugins/plugin-social-alpha directory: [uuid](https://github.com/uuidjs/uuid).\n\nUpdates `uuid` from 11.1.1 to 14.0.0\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"",
+      "files": [
+        "plugins/plugin-social-alpha/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency dompurify to v3.4.2",
+      "prNumber": 7319,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [dompurify](https://redirect.github.com",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @walletconnect/utils to v2.23.9",
+      "prNumber": 7318,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@walletconnect/utils](https://redirect",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "feat(automations): hero centerpiece overview + UX restoration",
+      "prNumber": 7317,
+      "type": "feature",
+      "body": "## Summary\n\nRestores the NL-first hero centerpiece as the primary Automations Overview surface, plus several inline UX fixes that compound the workflow-creation path. Implements Section 3 of \\`packages/app-core/docs/automations-ux-redesign.",
+      "files": [
+        "packages/app-core/src/components/pages/AutomationsView.tsx"
+      ]
+    },
+    {
+      "title": "feat(n8n): clarification roundtrip route",
+      "prNumber": 7316,
+      "type": "feature",
+      "body": "## Summary\n\nCloses the half-built clarification loop on the host side. Previously the n8n-workflow plugin populated \\`_meta.requiresClarification\\` and the LLM was told to emit it, but the host route ignored it and the UI never rendered it.",
+      "files": [
+        "packages/app-core/src/api/client-types-chat.ts",
+        "packages/app-core/src/api/n8n-clarification.test.ts",
+        "packages/app-core/src/api/n8n-clarification.ts",
+        "packages/app-core/src/api/n8n-routes.test.ts",
+        "packages/app-core/src/api/n8n-routes.ts"
+      ]
+    },
+    {
+      "title": "feat(app-core): connector-target-catalog service (Discord)",
+      "prNumber": 7315,
+      "type": "feature",
+      "body": "## Summary\n\nNew \\`ConnectorTargetCatalog\\` service that surfaces real Discord guilds + channels (lifted from the existing slice-1 \\`n8n-runtime-context-provider\\` REST enumeration). Used by the n8n clarification roundtrip (#7XXX next in sta",
+      "files": [
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/services/connector-target-catalog.test.ts",
+        "packages/app-core/src/services/connector-target-catalog.ts",
+        "packages/app-core/src/services/discord-target-source.test.ts",
+        "packages/app-core/src/services/discord-target-source.ts",
+        "packages/app-core/src/services/n8n-runtime-context-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(registry): rename plugin polymarket id to avoid app/plugin collision",
+      "prNumber": 7314,
+      "type": "bugfix",
+      "body": "## Summary\n\n`packages/app-core/src/registry/entries/` has BOTH an app entry and a plugin entry with `id: \\\"polymarket\\\"`. The registry loader enforces globally-unique ids across all entries (`packages/app-core/src/registry/loader.ts:46-65`)",
+      "files": [
+        "packages/app-core/src/registry/entries/plugins/polymarket.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @walletconnect/universal-provider to v2.23.9",
+      "prNumber": 7312,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@walletconnect/universal-provider](htt",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @walletconnect/types to v2.23.9",
+      "prNumber": 7311,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@walletconnect/types](https://redirect",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @walletconnect/sign-client to v2.23.9",
+      "prNumber": 7308,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@walletconnect/sign-client](https://re",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @walletconnect/core to v2.23.9 - autoclosed",
+      "prNumber": 7307,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@walletconnect/core](https://redirect.",
+      "files": [
+        "cloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @types/node to v22.19.17",
+      "prNumber": 7306,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@types/node](https://redirect.github.c",
+      "files": [
+        "cloud/packages/billing/package.json",
+        "cloud/services/gateway-discord/package.json",
+        "cloud/services/gateway-webhook/package.json",
+        "plugins/plugin-video/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @biomejs/biome to v1.9.4",
+      "prNumber": 7305,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@biomejs/biome](https://biomejs.dev) (",
+      "files": [
+        "plugins/plugin-birdeye/package.json",
+        "plugins/plugin-suno/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @anthropic-ai/sdk to ^0.92.0",
+      "prNumber": 7304,
+      "type": "other",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-con",
+      "files": [
+        "plugins/plugin-agent-skills/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update appleboy/ssh-action action to v1.2.5",
+      "prNumber": 7303,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [appleboy/ssh-action](https://redirect.github.com/appleboy/ssh-action) | action | minor | `v1.0.3` → `v1.2.5` |\n\n---\n\n> [!WARNING]\n> Some depe",
+      "files": [
+        ".github/workflows/cloud-deploy-backend.yml",
+        "cloud/.github/workflows/deploy-backend.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud): re-apply auth fixes lost in cloud → eliza migration",
+      "prNumber": 7288,
+      "type": "bugfix",
+      "body": "## Re-applies two hotfixes that were lost in the elizaOS/cloud → elizaOS/eliza squash import (May 3 01:18 UTC)\n\nThe migration imported elizaOS/cloud as a single squash commit. The snapshot used predates two critical fixes that landed yester",
+      "files": [
+        "cloud/apps/api/wrangler.toml",
+        "cloud/packages/lib/auth/steward-client.ts",
+        "cloud/packages/lib/cache/client.ts"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency @solana/spl-token to v0.4.14",
+      "prNumber": 7287,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@solana/spl-token](https://redirect.gi",
+      "files": [
+        "plugins/plugin-birdeye/package.json",
+        "plugins/plugin-lpinfo/package.json"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency @hono/node-server to v1.19.14 - autoclosed",
+      "prNumber": 7286,
+      "type": "bugfix",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@hono/node-server](https://redirect.gi",
+      "files": [
+        "cloud/package.json",
+        "cloud/services/gateway-discord/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the npm_and_yarn group across 6 directories with 11 updates",
+      "prNumber": 7282,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 7 updates in the /cloud/services/operator directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [minimatch](https://github.com/isaacs/minimatch) | `3.1.3` | `3.1.5` |\n| [minimatch](https://github.com/is",
+      "files": [
+        "cloud/services/operator/package-lock.json",
+        "plugins/plugin-action-bench/package.json",
+        "plugins/plugin-action-bench/src/frontend/package.json",
+        "plugins/plugin-google-meet-cute/package.json",
+        "plugins/plugin-matrix/package.json",
+        "plugins/plugin-ollama/package.json"
+      ]
+    },
+    {
+      "title": "fix(deps): update dependency axios to v1.15.0 [security] - autoclosed",
+      "prNumber": 7280,
+      "type": "bugfix",
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-con",
+      "files": [
+        "cloud/package.json",
+        "plugins/plugin-whatsapp/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the npm_and_yarn group across 14 directories with 15 updates",
+      "prNumber": 7279,
+      "type": "other",
+      "body": "[//]: # (dependabot-start)\n⚠️  **Dependabot is rebasing this PR** ⚠️ \n\nRebasing might not happen immediately, so don't worry if this takes some time.\n\nNote: if you make any changes to this PR yourself, they will take precedence over the reb",
+      "files": [
+        "cloud/apps/api/package.json",
+        "cloud/apps/frontend/package.json",
+        "cloud/examples/clone-ur-crush/package.json",
+        "cloud/package.json",
+        "cloud/packages/ui/package.json",
+        "cloud/services/_smoke-mcp/package.json",
+        "cloud/services/gateway-discord/package.json",
+        "cloud/services/gateway-webhook/package.json",
+        "cloud/services/operator/package-lock.json",
+        "plugins/plugin-action-bench/package.json",
+        "plugins/plugin-action-bench/src/frontend/package.json",
+        "plugins/plugin-google-meet-cute/package.json",
+        "plugins/plugin-matrix/package.json",
+        "plugins/plugin-ollama/package.json",
+        "plugins/plugin-whatsapp/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update oven/bun docker tag to v1.3.13",
+      "prNumber": 7277,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [oven/bun](https://redirect.github.com/oven-sh/bun) | stage | patch | `1.3.10-slim` → `1.3.13-slim` |\n\n---\n\n> [!WARNING]\n> Some dependencies c",
+      "files": [
+        "cloud/services/agent-server/Dockerfile",
+        "cloud/services/gateway-discord/Dockerfile",
+        "cloud/services/gateway-webhook/Dockerfile"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency form-data to v4.0.5 - autoclosed",
+      "prNumber": 7275,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [form-data](https://redirect.github.com",
+      "files": [
+        "plugins/plugin-birdeye/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): update dependency @walletconnect/logger to v3.0.2 - autoclosed",
+      "prNumber": 7273,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [@walletconnect/logger](https://redirec",
+      "files": [
+        "cloud/package.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 276.2743941018279,
+      "prScore": 276.2743941018279,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 233.14733051630031,
+      "prScore": 232.94733051630033,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ezumba",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/10479651?v=4",
+      "totalScore": 202.55430756779697,
+      "prScore": 188.61630756779698,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 166.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 166.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 147.95237061421795,
+      "prScore": 147.51437061421797,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "jasonxkensei",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/260305565?u=b17387a9077530191e297ff256d49d9a14c47194&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 96,
+  "mergedPRs": 37,
+  "newIssues": 0,
+  "closedIssues": 8,
+  "activeContributors": 8
+}
