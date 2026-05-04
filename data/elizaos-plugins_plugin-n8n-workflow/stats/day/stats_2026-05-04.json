@@ -1,0 +1,206 @@
+{
+  "interval": {
+    "intervalStart": "2026-05-04T00:00:00.000Z",
+    "intervalEnd": "2026-05-05T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos-plugins/plugin-n8n-workflow",
+  "overview": "From 2026-05-04 to 2026-05-05, elizaos-plugins/plugin-n8n-workflow had 0 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDORDL9tM7VvR91",
+      "title": "feat(validation): validateAndRepair pre-deploy pass + retry loop + anti-hallucination layered defense",
+      "author": "2-A-M",
+      "number": 23,
+      "body": "## Summary\n\nAdds a deterministic pre-deploy validation+repair pass that closes 10 distinct LLM-hallucination classes before the workflow ever hits n8n. Five-commit chain (kept as separate commits on this branch for review traceability — happy to squash on merge if preferred).\n\nThis is the largest of the four anti-hallucination PRs and the one with the highest production impact. With this pass enabled, our hit rate on **one-shot, no-manual-fixes workflow generation** went from \\\"often needs manual edits\\\" to \\\"works on first try for the canonical Gmail→Discord, RSS→Slack, scheduled-summary patterns\\\" — verified across hundreds of dogfood runs.\n\n### Hallucination classes closed\n\n1. **typeVersion outside catalog** — clamped to the highest valid `typeVersion ≤ requested`.\n2. **typeVersion outside actual n8n runtime** — intersect catalog ∩ live `/types/nodes.json`.\n3. **`/types/nodes.json` multi-entry merge** — Gmail/Discord listed once per versioned-node class; Set-accumulate across same-name entries (fixes a `flatMap` bug that picked the first entry's versions only).\n4. **Missing `parameters.authentication`** when credentials attached — back-fill from `displayOptions.show.authentication`.\n5. **Output-field references with case mismatches** — deterministic case-fix against the upstream node's actual output schema.\n6. **Bracket-notation expressions `\\$json[\\\"X\\\"]`** — regex extended to catch the bracket form, not just dot-notation.\n7. **Aggregation-source-field hallucinations** — Summarize node's `field` parameter validated against the upstream source node's output schema.\n8. **Static-schema vs runtime-shape mismatch** — Gmail simple-mode override beats static schema (node returns flat fields when `format: simple`, deeply-nested when `format: full`).\n9. **Node-name collisions** — auto-rename with `(N)` suffix.\n10. **Connection edges to non-existent nodes** — drop + log.\n\n### What's new\n\n- **`src/utils/validateAndRepair.ts`** (561 lines) — the orchestrator. Walks every node, runs each validator, applies repairs in-place. Returns `{ workflow, repairs: [], errors: [] }`. Pure function — no n8n calls.\n\n- **`src/utils/inferSyntheticOutputSchema.ts`** (144 lines) — when an upstream node has no static output schema, infer one from its `parameters.fieldsToOutput` or similar. Used by the case-fix and aggregation-source validators.\n\n- **`src/utils/api.ts`** (48 lines added) — `/types/nodes.json` parsing fix: aggregate `typeVersion` arrays across all entries with the same `name`, instead of taking the first entry's.\n\n- **`src/utils/catalog.ts`** (47 lines added) — `clampTypeVersion(node, runtimeVersions)` helper.\n\n- **`src/utils/outputSchema.ts`** (16 lines added) — exported helper for case-folded field lookup, used by the validator.\n\n- **`src/utils/generation.ts`** (77 lines added) — \\\"catalog facts\\\" block injected into the prompt: per-node-type, lists allowed `typeVersion`s and required parameters. Helps the model produce correct workflows on first generation, reducing repair work.\n\n- **`src/services/n8n-workflow-service.ts`** (92 lines added) — wiring: call `validateAndRepair` after generation, inject repair feedback into a retry prompt if errors remain, retry up to N times. Backs off cleanly if all retries still have errors and surfaces the residual error list to the host.\n\n- **`src/prompts/workflowGeneration.ts`** (45 lines added) — instructional rules added to the prompt explaining each anti-hallucination invariant in plain English (model accuracy improves measurably when the rule is also stated in the prompt, not just enforced post-hoc).\n\n- **`__tests__/unit/validateAndRepair.test.ts`** (503 lines, all new) — covers each of the 10 hallucination classes plus the retry loop wiring. Pure unit tests — no live n8n required.\n\n### Why a deterministic pass\n\nThe repair-via-LLM-retry path alone has three failure modes:\n- It's slow (extra round-trips, often two or three).\n- The model sometimes \\\"fixes\\\" the wrong thing (changes a node type when the issue was just a typeVersion).\n- It can introduce new hallucinations while fixing the old ones (cycle).\n\nA deterministic pass with the catalog + runtime as ground truth is faster, cheaper, and has a bounded blast radius. Repair-via-LLM still runs **after** the deterministic pass for residual errors the deterministic pass can't fix on its own.\n\n## Stacking\n\n**Depends on #20, #21, #22.** This branch was cherry-picked on top of #22's branch, so until those merge the diff includes their commits.\n\nThe 5 commits in this PR are kept separate for review traceability:\n1. `validateAndRepair` pre-deploy pass + retry loop + catalog facts in prompt\n2. `typeVersion` clamp uses live n8n runtime ∩ catalog\n3. Merge `typeVersion` arrays across same-name entries in `/types/nodes.json`\n4. Bracket-notation `\\$json[\\\"X\\\"]` + Summarize.field upstream case-fix\n5. Gmail simple-mode override beats static schema\n\n## Test plan\n\n- [x] Verified live in Milady against `n8n@1.119+` — canonical mission prompts (Gmail→Discord, RSS→Slack, scheduled summaries) generate, validate, deploy, and run on first try without manual fixes.\n- [x] 503-line unit test suite covers each hallucination class + the retry loop.\n- [ ] Reviewer: existing tests should remain green; the validator runs after generation and is no-op if no issues are found.",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-04-26T15:55:01Z",
+      "mergedAt": null,
+      "additions": 1944,
+      "deletions": 25
+    },
+    {
+      "id": "PR_kwDORDL9tM7Xx-m6",
+      "title": "feat(prompt): name->id directives + structured clarification rules",
+      "author": "2-A-M",
+      "number": 28,
+      "body": "## Summary\n\nHardens \\`workflowGeneration\\` prompt with two directive sets that close the LLM-side gap between Slice-1's runtime-context catalog and Slice-2's structured clarification round-trip:\n\n1. **Name → id resolution.** When the user names a server / channel / chat / contact by display name (\\\"Cozy Devs\\\", \\\"#general\\\", \\\"@alex\\\"), the prompt now mandates looking up the matching id in the \\`## Runtime Facts\\` section the runtime-context provider already injects (slice 1, #20). \\\"Never emit a placeholder id when a fact line covers the request.\\\"\n\n2. **Structured ClarificationRequest emission.** When the user references a target the LLM cannot resolve from runtime facts, the prompt directs the model to emit a \\`ClarificationRequest\\` object in \\`requiresClarification\\` with \\`kind\\`, \\`platform\\`, \\`paramPath\\` (JSON path to the unresolved node parameter), and a short user-facing \\`question\\` — instead of either guessing or returning prose. The host (Milady eliza repo PR #7316) reads this and renders a quick-pick UI, applies the user's pick at the param path, and re-deploys without another LLM call.\n\nConcrete payload examples are inline so the model can pattern-match (ambiguous-channel vs missing-server cases).\n\n## Stacking\n\n**Depends on #26 + #27** (\\`milady/runtime-context-trigger-input\\` for runtime facts injection, \\`milady/clarification-request-shape\\` for the structured type).\n\n## Test plan\n\n- [x] \\`__tests__/prompts/workflowGeneration.test.ts\\` — fixture cases extended:\n  - matched name → id used\n  - unknown name → structured \\`ClarificationRequest\\` emitted\n  - ambiguous-channel → \\`kind: 'target_channel'\\` with \\`scope.guildId\\` set\n- [x] Existing prompt-fixture cases unchanged",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-05-03T14:01:05Z",
+      "mergedAt": null,
+      "additions": 592,
+      "deletions": 26
+    },
+    {
+      "id": "PR_kwDORDL9tM7Xx-ei",
+      "title": "feat(types): structured ClarificationRequest on WorkflowMeta",
+      "author": "2-A-M",
+      "number": 27,
+      "body": "## Summary\n\nWidens \\`WorkflowMeta.requiresClarification\\` from \\`string[]\\` to \\`string[] | ClarificationRequest[]\\` so the LLM can emit structured clarifications with enough metadata for the host to render a quick-pick UI (kind, platform, scope, paramPath, question). Strings still parse via a coercer that wraps them as \\`{ kind: 'free_text', question, paramPath: '' }\\`, preserving back-compat.\n\n## Why\n\nWhen the LLM doesn't have enough info to fully resolve a workflow node parameter (e.g. user said \\\"post to Cozy Devs\\\" with no channel), it currently emits a string description. The host has no way to render a structured picker because it doesn't know what kind of value to ask for or where in the draft to apply the resolution. \\`ClarificationRequest\\` carries that metadata.\n\n## What this PR adds\n\n- \\`src/types/index.ts\\` — new \\`ClarificationRequest\\` interface, widened \\`WorkflowMeta.requiresClarification\\` union.\n- \\`src/utils/clarification.ts\\` (new) — \\`coerceClarificationRequests(items)\\` normalizer.\n- \\`src/services/n8n-workflow-service.ts\\` — calls coercer at the existing \\`injectCatalogClarifications\\` exit; preserves shape end-to-end.\n- \\`__tests__/utils/clarification.test.ts\\` — both shapes parse; structurally-identical for already-structured input.\n\n## Stacking\n\n**Depends on #26** (\\`milady/runtime-context-trigger-input\\`). The companion PR (\\`milady/clarification-prompt-rules\\`) stacks on top of this one with the prompt directives that tell the LLM when and how to emit \\`ClarificationRequest\\`.\n\n## Test plan\n\n- [x] \\`bun test __tests__/utils/clarification.test.ts\\` — 21 tests\n- [x] Existing \\`createWorkflow.test.ts\\` clarification fixture still passes",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-05-03T14:00:47Z",
+      "mergedAt": null,
+      "additions": 450,
+      "deletions": 26
+    },
+    {
+      "id": "PR_kwDORDL9tM7VvRdj",
+      "title": "feat(prompt,types,service): preferredProviders bias hint for keyword extraction",
+      "author": "2-A-M",
+      "number": 22,
+      "body": "## Summary\n\nAdds an optional `preferredProviders` array to the `keywordExtraction` request, biasing the model toward provider-specific keywords when the host knows which integrations are actually available.\n\n### Why\n\nToday the keyword-extraction LLM call sees the user's prompt with no awareness of which providers are connected. So when a user asks for *\"send a daily email summary\"*, the extracted keywords might include generic terms like `email`, `send`, `daily` — but if the host has Gmail connected and the model didn't bias toward that, the downstream node-search step misses the Gmail-specific candidates.\n\nWith `preferredProviders: [\"Gmail\", \"Discord\"]`, the prompt now hints \"the user has Gmail and Discord connected — prefer keywords specific to those when ambiguous.\" Empirically this raises the rate of Gmail-specific node hits (`gmailTrigger`, `gmail.send`) on prompts that don't explicitly say \"Gmail.\"\n\n### What's new\n\n- **`KeywordExtractionRequest.preferredProviders?: string[]`** type field (`src/types/index.ts`).\n- **Service-side wiring** (`src/services/n8n-workflow-service.ts`) — accepts the array via existing service-call options, forwards it into the prompt assembler.\n- **Prompt assembly update** (`src/utils/generation.ts`) — appends a `Preferred providers: <list>` line to the keyword-extraction system prompt when the array is non-empty.\n- **Unit test** (`__tests__/unit/generation.test.ts`) — covers the new prompt-text branch.\n\nOptional + backwards-compatible: callers that don't pass it get today's behavior unchanged.\n\n## Stacking\n\n**Depends on #20** (RuntimeContextProvider) and **#21** (injectMissingCredentialBlocks). This branch was cherry-picked on top of #21's branch, so until both merge the diff includes their commits.\n\n## Test plan\n\n- [x] Verified live in Milady — Gmail/Discord-connected agents pick up provider-specific keywords more reliably.\n- [x] New unit test covers the prompt-text branch.\n- [ ] Reviewer: existing keyword-extraction tests should remain green; new field is optional.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n## Release Notes\n\n* **New Features**\n  * Added runtime context provider support for enhanced, personalized workflow generation.\n  * Implemented automatic credential block injection to ensure workflows contain complete credential definitions.\n\n* **Improvements**\n  * Strengthened workflow generation with stricter credential validation and field reference rules.\n  * Enhanced handling of Discord IDs and runtime facts in generated workflows.\n\n* **Tests**\n  * Extended test coverage for keyword extraction with conditional prompt behavior validation.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-04-26T15:53:45Z",
+      "mergedAt": null,
+      "additions": 412,
+      "deletions": 24
+    },
+    {
+      "id": "PR_kwDORDL9tM7VvRJQ",
+      "title": "feat(workflow): deterministic injectMissingCredentialBlocks safety net",
+      "author": "2-A-M",
+      "number": 21,
+      "body": "## Summary\n\nAdds `injectMissingCredentialBlocks` — a deterministic post-generation pass that walks every node in the generated workflow, checks whether it requires credentials, and injects the correct credential block from the host's resolved credential map.\n\nThis catches the common LLM failure where the model omits the `credentials` block on a node entirely (often because the prompt instructs it to leave credentials empty for the host to inject — see #20 — and the model then forgets that the host *will* inject them and produces a workflow that's structurally credential-less).\n\n### What's new\n\n- **`injectMissingCredentialBlocks(workflow, resolvedCredentials)`** in `src/utils/workflow.ts` — pure function. For each node, looks at its `type` + `typeVersion`, consults the credential resolver's output to find the credentialId, and writes a `credentials: { <credentialType>: { id, name } }` block if one is missing.\n\n- **Service-side wiring** in `src/services/n8n-workflow-service.ts` — calls the new helper after generation and before deployment. No-op if all nodes already have credential blocks (which is the happy-path case).\n\n### Why deterministic\n\nThe repair path could ask the LLM to add credentials, but:\n- It's slow (extra round-trip).\n- The model frequently picks the wrong credential type or hallucinates IDs.\n- The host already knows the right answer (it's the same credential the user picked when configuring the connector).\n\nA deterministic pass with the host's credential map as ground truth is faster, cheaper, and more correct.\n\n## Stacking\n\n**Depends on #20** (RuntimeContextProvider + prompt hardening). The credential-rule prompt change in PR #20 is what creates the failure mode this PR catches; they should land together.\n\nThis branch was cherry-picked on top of #20's branch, so until #20 merges this PR's diff includes #20's commit. When #20 merges, this PR auto-rebases and shows only its own diff.\n\n## Test plan\n\n- [x] Verified live in Milady against `n8n@1.119+` — workflows that previously deployed credential-less now deploy with the right credential blocks attached.\n- [ ] Reviewer: existing tests should remain green; this is purely additive.",
+      "repository": "elizaos-plugins/plugin-n8n-workflow",
+      "createdAt": "2026-04-26T15:53:01Z",
+      "mergedAt": null,
+      "additions": 340,
+      "deletions": 20
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 1
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 331.83194645981956,
+      "prScore": 331.3939464598196,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 217.4816532184886,
+      "prScore": 217.2816532184886,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 85.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 85.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 80.24608004091016,
+      "prScore": 80.24608004091016,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 59.5437738965761,
+      "prScore": 59.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 54.763328839830905,
+      "prScore": 48.763328839830905,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 31.94591014905531,
+      "prScore": 31.94591014905531,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "dutchiono",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
+      "totalScore": 31.198947636399186,
+      "prScore": 31.198947636399186,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sw4pIO",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250003491?u=b9bad2342b9ccdb72ee4d4502d5534b6256e9d5c&v=4",
+      "totalScore": 6,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Agnuxo1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/166046035?u=4654f0706d2f6e9cf6894bd6717003d19f74645c&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "andex23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/49397867?u=760e6ec36b34f3511f24928686d87f912c3eb7ba&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bartonguestier1725-collab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/249058300?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
