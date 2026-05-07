@@ -12,3 +12,4 @@ const nextConfig = {
 };
 
 export default nextConfig;
+interface ImportMetaENV
