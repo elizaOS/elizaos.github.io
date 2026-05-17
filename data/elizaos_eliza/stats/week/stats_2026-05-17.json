@@ -1,0 +1,631 @@
+{
+  "interval": {
+    "intervalStart": "2026-05-17T00:00:00.000Z",
+    "intervalEnd": "2026-05-24T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-05-17 to 2026-05-24, elizaos/eliza had 24 new PRs (19 merged), 2 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABCFsSVw",
+      "title": "vulkan: Qwen2.5-14B Q4_K_M bandwidth-efficiency cliff on Lunar Lake iGPU (n=1, kernel-selection suspected)",
+      "author": "NubsCarson",
+      "number": 7638,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`Qwen2.5-14B-Instruct Q4_K_M` (~8.5 GB) runs at **1.15 t/s tg** on Intel Arc 140V iGPU via Shaw's Vulkan + W4-B kernels — only ~22% of the LPDDR5X bandwidth ceiling, vs 63-87% on the other Llama / Qwen3-family Q4_K_M models I tested with the **same Vulkan build, same drivers, same `-ngl 99 -c 2048` invocation**.\n\n**n=1 caveat upfront**: I have only tested *Qwen2.5-14B-Instruct Q4_K_M* in the 14B param class on this hardware. The cliff may be Qwen2.5-14B-specific (head-dim / GQA-factor / tile-alignment) rather than a general \"14B param-class\" issue. A second 14B (Phi-4-14B, Mistral-Nemo-12B) would tell us which. I'm filing it now because the gap is large enough to be worth investigating even at n=1, and the diagnostic ask is the same either way.\n\n## Bandwidth ceiling derivation\n\nFor a memory-bandwidth-bound decoder (the steady-state regime on integrated GPUs with Q4_K_M weights), every token needs ~one full pass of the weight bytes. So:\n\n```\nceiling_t_per_s ≈ sustained_bandwidth_GB_per_s / weights_GB\n```\n\nFor Lunar Lake on-package LPDDR5X-8533:\n- Theoretical peak: 8533 MT/s × 16 B/transfer = 136.5 GB/s\n- Sustained iGPU-effective (after refresh, CPU-shared, page traffic): **~75 GB/s** (Intel-published ~67 GB/s sustained; rounded up slightly for cool-laptop, fresh-server best case)\n\nSo the ceiling-t/s column below is `75 / weights_GB`. The measured t/s is `timings.predicted_per_second` from `/v1/chat/completions`. Efficiency is `measured / ceiling`.\n\n## Bench (cool laptop, no contention, same prompt, fresh server per row)\n\n| Model | Q4_K_M weights | 75 GB/s ceiling | Measured tg | Efficiency |\n|---|---|---|---|---|\n| Llama-3.2-3B-Instruct | 1.9 GB | 39.5 t/s | 20.0 t/s | **51%** |\n| Llama-3.1-8B-Instruct | 4.9 GB | 15.3 t/s | 5.7 t/s | **37%** |\n| Llama-3.1-8B-Instruct Q3_K_M | 3.8 GB | 19.7 t/s | 6.3 t/s | 32% |\n| **Qwen2.5-14B-Instruct** | **8.5 GB** | **8.8 t/s** | **1.15 t/s** | **13%** |\n| Qwen3.6-27B Q4_K_M (body-only, DFlash disabled) | 16 GB | 4.7 t/s | 1.15 t/s | 25% |\n\n(Earlier draft of this issue used a more optimistic 50% sustained-headroom assumption that bumped the column to a \"60-87% efficiency\" framing. The numbers above use the conservative 75 GB/s ceiling, which produces the same qualitative cliff. Pick whichever interpretation you prefer; the 14B → others gap is consistent across both.)\n\nThe cleanest cliff is **3B → 8B → 14B = 51% → 37% → 13%**. The 27B suffers from the SWA spec-decode gate too ([#7635](https://github.com/elizaOS/eliza/issues/7635)) which masks its true efficiency, so it is excluded from the cliff trend.\n\n## Repro\n\nSame `linux-x64-vulkan` build via `packages/app-core/scripts/build-llama-cpp-dflash.mjs`:\n\n```bash\nLD_LIBRARY_PATH=~/.eliza/local-inference/bin/dflash/linux-x64-vulkan \\\n~/.eliza/local-inference/bin/dflash/linux-x64-vulkan/llama-server \\\n  -m <model>.gguf \\\n  -ngl 99 -c 2048 --host 127.0.0.1 --port 31xxx\n```\n\nCapture `timings.predicted_per_second` from `/v1/chat/completions`.\n\n## Why this matters\n\nThis is the difference between \"Qwen2.5-14B is the obvious next quality step from Llama-3.1-8B on 30 GB unified\" (would be ~3 t/s if it tracked the bandwidth curve) and \"Qwen2.5-14B is actively unusable\" (1.15 t/s is below human-perceptible chat rate). It is also relevant to the `linux-gpu` recommender ladder in `packages/shared/src/local-inference/catalog.ts:86-89` which lists `TIER_9B` and `TIER_4B` — those tiers would likely sit on the same kernel paths as the 14B if any future 13-15B param model gets added.\n\n## Hypothesis (untested)\n\nQwen2.5-14B has a specific combo of params that may trigger a sub-optimal kernel selection in `ggml-vulkan`'s `ggml_vk_mul_mat` dispatch:\n- `n_head = 40` (not a power of 2)\n- `n_head_kv = 8` (GQA factor 5, unusual)\n- `n_embd = 5120`\n- Hidden size that may not align to coopmat tile boundaries (Arc 140V uses KHR_coopmat with specific tile sizes)\n\nShaw's W4-B Vulkan kernels (`turbo3`, `qjl_full`, `polarquant`) target Qwen3.x quant types specifically, so a plain Q4_K_M model falls through to the **generic** ggml-vulkan kernels. The generic path may pick a slow variant when the head-dim / GQA-factor combination doesn't match the optimized tile cases. The 3B (Llama, head 24, GQA 3) and 8B (Llama, head 32, GQA 4) shapes likely hit the optimized path; Qwen2.5-14B's shape may not.\n\n## Diagnostic asks\n\n1. Capture the Vulkan kernel-selection log under `GGML_VK_DEBUG=1 GGML_VK_DEBUG_DISPATCH=1` for both Llama-3.1-8B and Qwen2.5-14B running the same prompt. Diff the kernel names invoked. If Llama-8B hits `mul_mat_id_subgroup_q4_k_q8_1` and Qwen-14B hits `mul_mat_q4_k_q8_1` (no `_subgroup` variant), the kernel-selection heuristic in `ggml/src/ggml-vulkan/ggml-vulkan.cpp` is biased toward Llama-shaped models.\n\n2. Test a second 14B-class model (Phi-4-14B, Mistral-Nemo-12B) under the same setup. If it sits closer to the 8B efficiency, the cliff is Qwen2.5-specific. If it also drops to ~13%, it is a 14B-param-class kernel-selection issue.\n\n3. Check if `--n-cpu-moe` or moving a few layers to CPU would be faster — i.e., the Vulkan kernel is slower than AVX-VNNI for these op sizes.\n\n## Related\n\n- [#7634](https://github.com/elizaOS/eliza/pull/7634) — full bench dataset for this hardware class\n- [#7635](https://github.com/elizaOS/eliza/issues/7635) — SWA-on-27B spec-decode failure (different root cause; relevant because 27B's efficiency in the table above is also bandwidth-related)\n- [#7636](https://github.com/elizaOS/eliza/issues/7636) — Shaw-merge tracker; some Vulkan kernels may have been touched by the upstream merge\n\n## Test environment\n\n- Intel Core Ultra 7 258V (Lunar Lake), Arc 140V iGPU (Xe2, KHR_coopmat / XMX)\n- 30 GB LPDDR5X-8533 unified\n- Vulkan 1.3.295, glslc shaderc 2026.1-1+b1, ANV driver\n- Submodule HEAD: `d629a3768` (`milady/main`) + my 5 fix commits on `nubs/swa-spec-decode-probe-fallback` (none of them touch Vulkan kernels)\n- Cool laptop (73-75 °C), no concurrent processes, fresh server start per row\n",
+      "createdAt": "2026-05-13T05:32:08Z",
+      "closedAt": "2026-05-17T02:37:57Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABCDp_Jw",
+      "title": "speculative decoding: M-RoPE position validation rejects cross-drafter Qwen3.5 batches (acceptance collapses to 9%, tg drops below 1 t/s)",
+      "author": "NubsCarson",
+      "number": 7631,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen `llama-speculative-simple` runs a Qwen3.5 body + a same-vocab Qwen3.5 drafter, every batch the drafter proposes is rejected by the body's position-validation path with:\n\n```\ninit: the tokens of sequence 0 in the input batch have inconsistent sequence positions:\n - the last position stored in the memory module of the context (i.e. the KV cache) for sequence 0 is X = 151\n - the tokens for sequence 0 in the input batch have a starting position of Y = 146\n for M-RoPE, it is required that the position satisfies: X < Y\ndecode: failed to initialize batch\nllama_decode: failed to decode, ret = -1\n```\n\nThese errors fire continuously throughout the generation. Spec-decode degenerates: acceptance falls to **9.5%** (21/222 drafts), effective tg drops to **0.33 t/s** (vs ~3-4 t/s body-only would give). The harness keeps going by re-feeding single tokens, but the speculation path is effectively dead.\n\n## Why this matters\n\nQwen3.5 uses multimodal RoPE (M-RoPE) positions even for text-only inference. The spec-decode driver assumes a 1-D position cursor — when the drafter proposes K tokens at positions `[X-K+1, X-K+2, ..., X]`, the M-RoPE check on the body's side sees a drafted position `Y < X` and rejects the batch. This means **any** Qwen3.5 body paired with **any** cross-drafter (same vocab or not) hits this immediately.\n\nThis blocks both:\n\n- **End-user DIY spec-decode** (Qwen3.5-9B body + Qwen3.5-0.8B drafter, both from `unsloth/Qwen3.5-*-GGUF`).\n- **Shaw's intended Eliza-1 flow** when distilled Qwen3.5 drafters land — same code path, same M-RoPE check.\n\nReported here because the planned recommender ladder (per the 2026-05-12 directive in `packages/shared/src/local-inference/catalog.ts`) routes most users to Qwen3.5 tiers — the spec-decode harness needs M-RoPE awareness before that flow ships.\n\n## Repro\n\nLinux x64, Intel Arc 140V iGPU, this fork at `v1.2.0-eliza` (`a61c93aaa5`), Vulkan build via `build-llama-cpp-dflash.mjs --target linux-x64-vulkan` with the glslc fix from #7626 applied.\n\n```bash\nLD_LIBRARY_PATH=~/.eliza/local-inference/bin/dflash/linux-x64-vulkan \\\\\n~/.eliza/local-inference/bin/dflash/linux-x64-vulkan/llama-speculative-simple \\\\\n  -m Qwen3.5-9B-Q4_K_M.gguf \\\\\n  -md Qwen3.5-0.8B-Q8_0.gguf \\\\\n  --draft-min 2 --draft-max 8 --draft-p-min 0.4 \\\\\n  -ngl 99 -ngld 99 -c 4096 -cd 4096 -n 128 \\\\\n  -p \\\"Write a single concise paragraph explaining speculative decoding.\\\"\n```\n\nOutput:\n\n```\nencoded   19 tokens in    1.046 seconds, speed:   18.167 t/s\ndecoded  129 tokens in  388.786 seconds, speed:    0.332 t/s\n\nn_draft   = 8\nn_predict = 129\nn_drafted = 222\nn_accept  = 21\naccept    = 9.459%\n```\n\nThe `init: the tokens of sequence 0...` error block repeats ~30 times during generation.\n\nGGUFs used:\n\n- Body: `unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf` (sha matches upstream)\n- Drafter: `unsloth/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf`\n\nBoth carry the Qwen3.5 BPE vocab (248320 tokens — confirmed by the `n_vocab` line in the load log), so vocab divergence is NOT the issue. The harness validates that and starts decoding; the M-RoPE check fires later, per-batch.\n\n## Where the check lives\n\nThe M-RoPE validation is in the model's input-position check (the `for M-RoPE, it is required that the position satisfies: X < Y` string). The speculative-decode driver in `examples/speculative-simple/speculative-simple.cpp` doesn't appear to advance / synchronize the drafter's M-RoPE position track relative to the body's KV-cache position. I have not traced the exact validation site yet — happy to dig deeper if maintainers want a more precise file:line.\n\n## Suggested fixes (any subset)\n\n1. **Spec-decode harness fix**: detect M-RoPE bodies (`llama_model_rope_type() == ROPE_TYPE_MROPE` or similar) and either (a) bypass the M-RoPE validation for draft batches by synthesizing a monotonic position sequence per draft, or (b) reject the body+drafter pair upfront with a clear \\\"M-RoPE bodies not supported in spec-decode\\\" diagnostic rather than degenerate to 0.3 t/s silently.\n\n2. **Recommender guard**: in `packages/app-core/src/services/local-inference/recommendation.ts`, tag Qwen3.5/3.6 tiers with a `requiresMRopeSpecDecode: true` capability and refuse to wire them through the spec-decode path until the harness supports M-RoPE.\n\n3. **Per-tier kernel-caps check**: `target-meta.json` already has a `kernelCaps.required` array (`turboquant_q3, qjl, polarquant, dflash`). Add `mrope-spec-decode` to the list for Qwen3.5/3.6 tiers and have the runtime gate on it.\n\n## Related\n\n- #7629 — Qwen3.5/3.6 drafter publication gap (Shaw needs distilled drafters published on HF; this issue surfaces a *different* blocker that those drafters will hit even once published)\n- #7626 — glslc fix (required to build the Vulkan binary that reproduces this)\n- #7630 — v1.2.0-eliza submodule bump (reproduced on this submodule sha)\n\n## Note\n\nI do not have a CUDA host. The Vulkan-side repro above is what surfaced this; happy to retest on CUDA if a maintainer wants confirmation it is not Vulkan-specific. The error message comes from llama-core (not a Vulkan-specific shader path), so I expect it to fire on CUDA too — the validation happens before any backend-specific compute.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-05-12T22:20:26Z",
+      "closedAt": "2026-05-17T02:38:15Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABCgRvdQ",
+      "title": "chore: configure release credentials for full cross-platform OTA pipeline",
+      "author": "lalalune",
+      "number": 7770,
+      "repository": "elizaos/eliza",
+      "body": "## Overview\n\nThe cross-platform OTA and release CI pipeline is implemented but requires the following secrets and configuration to be added to the repo before each channel can publish. This issue tracks what's needed.\n\n**Where to add secrets:** GitHub repo Settings → Secrets and variables → Actions → New repository secret.\n\n---\n\n## Already configured (existing channels working)\n\nThese secrets should already be present from prior setup:\n\n| Secret | Used by |\n|---|---|\n| `CSC_LINK` | macOS code signing (Electrobun) |\n| `CSC_KEY_PASSWORD` | macOS code signing |\n| `APPLE_ID` | Apple notarization + App Store |\n| `APPLE_APP_SPECIFIC_PASSWORD` | Apple notarization + App Store |\n| `APPLE_TEAM_ID` | Apple signing |\n| `ITC_TEAM_ID` | iTunes Connect team |\n| `APP_STORE_APP_ID` | App Store Connect app ID |\n| `MATCH_PASSWORD` | iOS cert repo (fastlane match) |\n| `MATCH_GIT_URL` | iOS cert repo URL |\n| `MATCH_GIT_BASIC_AUTHORIZATION` | iOS cert repo auth |\n| `MAS_CSC_LINK` | Mac App Store signing cert |\n| `MAS_CSC_KEY_PASSWORD` | Mac App Store cert password |\n| `MAS_INSTALLER_CERT` | Mac App Store installer cert |\n| `MAS_INSTALLER_KEY_PASSWORD` | Installer cert password |\n| `APP_STORE_API_KEY_ID` | App Store Connect API key |\n| `APP_STORE_API_ISSUER_ID` | App Store Connect API issuer |\n| `ANDROID_KEYSTORE_BASE64` | Android signing keystore |\n| `ANDROID_KEYSTORE_PASSWORD` | Keystore password |\n| `ANDROID_KEY_ALIAS` | Key alias |\n| `ANDROID_KEY_PASSWORD` | Key password |\n| `PLAY_STORE_SERVICE_ACCOUNT_JSON` | Google Play Store upload |\n| `WINDOWS_SIGN_CERT_BASE64` | Windows Authenticode signing |\n| `WINDOWS_SIGN_CERT_PASSWORD` | Windows cert password |\n| `WINDOWS_SIGN_TIMESTAMP_URL` | Timestamp server URL |\n| `ELIZAOS_CLOUD_API_KEY` | elizaOS Cloud OTA manifest publish (also aliased as `ELIZACLOUD_API_KEY`) |\n| `ELIZAOS_CLOUD_BASE_URL` | elizaOS Cloud API base URL |\n| `ANTHROPIC_API_KEY` | Release verification / AI-assisted steps |\n\n---\n\n## Missing — required for new channels\n\n### Windows Store (Microsoft Partner Center)\n\n**Workflow:** `windows-store-release.yml` (called from `release-all.yml`)\n\n| Secret | Description |\n|---|---|\n| `MS_TENANT_ID` | Azure AD tenant ID |\n| `MS_CLIENT_ID` | Azure AD app (service principal) client ID |\n| `MS_CLIENT_SECRET` | Azure AD app client secret |\n| `MS_APP_ID` | Microsoft Store app ID (from Partner Center) |\n\n**How to get these:**\n\n1. **Register the app in Partner Center** (if not already):\n   - Go to https://partner.microsoft.com → Windows & Xbox → Overview → New product → App\n   - Note the **Store ID** (format: `9XXXXXXXXXXXXXXX`) — this is `MS_APP_ID`\n\n2. **Create an Azure AD app for CI:**\n   - Go to https://portal.azure.com → Azure Active Directory → App registrations → New registration\n   - Name: `elizaos-store-ci`, Supported account types: Single tenant\n   - After creation, note the **Application (client) ID** → `MS_CLIENT_ID`\n   - Note the **Directory (tenant) ID** → `MS_TENANT_ID`\n   - Go to Certificates & secrets → New client secret → note the value → `MS_CLIENT_SECRET`\n\n3. **Link the Azure AD app to Partner Center:**\n   - Partner Center → Account settings → User management → Azure AD applications → Add Azure AD application\n   - Find your app, assign role **Manager** (needs submission create/commit permissions)\n\n4. **Verify** by running `windows-store-release.yml` with `submit_to_store: false` first to confirm the MSIX builds correctly before attempting a real submission.\n\n---\n\n### Snap Store\n\n**Workflow:** `snap-publish.yml` (called from `release-all.yml`)\n\n| Secret | Description |\n|---|---|\n| `SNAPCRAFT_STORE_CREDENTIALS` | Snapcraft login token for CI uploads |\n\n**How to get:**\n\n1. Create a Snap Store account at https://snapcraft.io/\n2. Register the snap name (run locally, once):\n   ```bash\n   snapcraft login\n   snapcraft register elizaos-app\n   ```\n3. Generate CI credentials:\n   ```bash\n   snapcraft export-login \\\n     --snaps elizaos-app \\\n     --acls package_upload,package_push,package_register \\\n     --expires \"2030-01-01T00:00:00\" \\\n     snap-store-credentials.txt\n   cat snap-store-credentials.txt\n   ```\n4. Copy the output (base64 blob) → add as `SNAPCRAFT_STORE_CREDENTIALS`\n5. Delete `snap-store-credentials.txt` locally\n\n---\n\n### Debian apt Repository\n\n**Workflow:** `publish-apt-repo.yml` (called from `release-all.yml`)\n\n| Secret | Description |\n|---|---|\n| `DEBIAN_GPG_PRIVATE_KEY` | Armored GPG private key for signing the apt repo |\n| `DEBIAN_GPG_KEY_ID` | 16-character GPG key ID (used by reprepro to identify which key to sign with) |\n| `DEBIAN_GPG_PASSPHRASE` | Passphrase for the GPG key (optional — leave empty if generating without one) |\n\n**How to get:**\n\n1. Generate a dedicated signing key (do NOT use a personal key):\n   ```bash\n   gpg --batch --gen-key <<KEYEOF\n   Key-Type: RSA\n   Key-Length: 4096\n   Subkey-Type: RSA\n   Subkey-Length: 4096\n   Name-Real: elizaOS Release Signing\n   Name-Email: releases@elizaos.ai\n   Expire-Date: 0\n   %no-protection\n   %commit\n   KEYEOF\n   ```\n\n2. Get the key ID:\n   ```bash\n   gpg --list-secret-keys --keyid-format LONG releases@elizaos.ai\n   # Look for: sec   rsa4096/XXXXXXXXXXXXXXXX\n   # XXXXXXXXXXXXXXXX is your DEBIAN_GPG_KEY_ID\n   ```\n\n3. Export the private key:\n   ```bash\n   gpg --armor --export-secret-keys XXXXXXXXXXXXXXXX\n   # Copy the entire output (including -----BEGIN PGP PRIVATE KEY BLOCK-----) → DEBIAN_GPG_PRIVATE_KEY\n   ```\n\n4. Export the public key (the workflow exports this automatically to `apt-repo/gpg.key` on each publish):\n   ```bash\n   gpg --armor --export XXXXXXXXXXXXXXXX > apt-gpg-public.key\n   # This will be served at https://apt.elizaos.ai/gpg.key once GitHub Pages is configured\n   ```\n\n5. **GitHub Pages setup** (one-time, after first workflow run creates the `apt-repo` branch):\n   - Settings → Pages → Source: Deploy from branch → Branch: `apt-repo` → folder: `/`\n   - Set custom domain: `apt.elizaos.ai`\n   - Add DNS CNAME: `apt.elizaos.ai → elizaos.github.io`\n\n---\n\n### Flathub\n\n**Workflow:** `flatpak-publish.yml`\n\n| Secret | Description |\n|---|---|\n| `FLATHUB_TOKEN` | GitHub fine-grained PAT with access to the Flathub fork repo (optional — falls back to `GITHUB_TOKEN` but may lack push permissions to the fork) |\n\n**How to get:**\n\n1. **First, submit the initial app listing** — Flathub requires a manual review before automated updates work:\n   - Fork https://github.com/flathub/flathub\n   - Add `ai.elizaos.App.yml` (use `packages/app-core/packaging/flatpak/ai.elizaos.App.store.yml` as the source)\n   - Open a PR to `flathub/flathub` — see https://docs.flathub.org/docs/for-app-authors/submission for requirements\n   - After approval, the app will be at `https://flathub.org/apps/ai.elizaos.App`\n\n2. Once listed, create a GitHub fine-grained PAT:\n   - https://github.com/settings/tokens → Fine-grained personal access token\n   - Resource owner: the GitHub account/org that owns the Flathub fork\n   - Repository access: the `ai.elizaos.App` fork repo\n   - Permissions: Contents (read+write), Pull requests (read+write)\n   - Copy token → `FLATHUB_TOKEN`\n\n---\n\n### OTA Release Host (optional — self-hosted CDN alongside GitHub Releases)\n\n**Workflow:** `release-electrobun.yml` (optional SSH upload step)\n\n| Secret | Description |\n|---|---|\n| `RELEASE_UPLOAD_KEY` | SSH private key for uploading OTA files to a release server |\n| `RELEASE_HOST_FINGERPRINT` | SSH known_hosts entry for the release host |\n\n**Repo variables (not secrets):**\n\n| Variable | Description |\n|---|---|\n| `RELEASE_HOST` | Hostname of the release server (e.g. `releases.elizaos.ai`) |\n| `RUNNER_UBUNTU` | Override Ubuntu runner label (default: `ubuntu-24.04`) |\n| `RUNNER_WINDOWS` | Override Windows runner label (default: `windows-2025`) |\n\n**How to set up:**\n\n1. Generate a deploy SSH key: `ssh-keygen -t ed25519 -C \"elizaos-ci-deploy\" -f deploy_key`\n2. Add `deploy_key.pub` to the release server's `~/.ssh/authorized_keys`\n3. Copy `deploy_key` (private) → `RELEASE_UPLOAD_KEY`\n4. Get host fingerprint: `ssh-keyscan -H releases.elizaos.ai` → `RELEASE_HOST_FINGERPRINT`\n5. Add `RELEASE_HOST` as a repo **variable** (not secret): Settings → Secrets and variables → Variables → New repository variable\n\nIf not configured, OTA files are served from GitHub Releases (the default and fully functional path).\n\n---\n\n## One-time setup tasks (not secrets)\n\n### apt-repo GitHub Pages branch\nThe `apt-repo` branch is auto-created by `publish-apt-repo.yml` on first run. After it's created:\n- Enable GitHub Pages: Settings → Pages → Source: Deploy from branch → Branch: `apt-repo` → folder: `/`\n- Set custom domain: `apt.elizaos.ai`\n- Add DNS CNAME: `apt.elizaos.ai → elizaos.github.io`\n\n### Windows Store app registration\nMust be done before `windows-store-release.yml` can submit:\n- Register at https://partner.microsoft.com → New app → Reserve name \"elizaOS\"\n- Complete the store listing (description, screenshots, age ratings, privacy policy URL)\n- Note the **Store ID** for `MS_APP_ID`\n\n### Snap name registration\nRun once locally before first snap publish:\n```bash\nsnapcraft login\nsnapcraft register elizaos-app\n```\n\n### Flathub initial submission\nMust be done manually before the automated workflow can create update PRs. See Flathub section above.\n\n---\n\n## Checklist\n\n**Windows Store:**\n- [ ] Windows Store app registration completed in Partner Center\n- [ ] `MS_TENANT_ID` — Azure AD tenant\n- [ ] `MS_CLIENT_ID` — Azure AD client\n- [ ] `MS_CLIENT_SECRET` — Azure AD client secret\n- [ ] `MS_APP_ID` — Store app ID\n\n**Snap Store:**\n- [ ] Snap name `elizaos-app` registered (`snapcraft register elizaos-app`)\n- [ ] `SNAPCRAFT_STORE_CREDENTIALS` — Snap Store upload token\n\n**apt Repository:**\n- [ ] `DEBIAN_GPG_PRIVATE_KEY` — apt repo signing key (armored)\n- [ ] `DEBIAN_GPG_KEY_ID` — apt repo key ID (16-char hex)\n- [ ] `DEBIAN_GPG_PASSPHRASE` — apt repo key passphrase (if any; set empty string if none)\n- [ ] apt-repo GitHub Pages configured at `apt.elizaos.ai` (after first workflow run)\n- [ ] DNS CNAME `apt.elizaos.ai → elizaos.github.io`\n\n**Flathub:**\n- [ ] Flathub initial app submission approved\n- [ ] `FLATHUB_TOKEN` — GitHub PAT for Flathub fork (optional)\n\n**Self-hosted OTA CDN (optional):**\n- [ ] `RELEASE_UPLOAD_KEY` — SSH deploy key (private)\n- [ ] `RELEASE_HOST_FINGERPRINT` — SSH known_hosts entry\n- [ ] `RELEASE_HOST` — Repo variable: release server hostname\n\n**Repo runner variables (optional overrides):**\n- [ ] `RUNNER_UBUNTU` — custom Ubuntu runner label (if using self-hosted runners)\n- [ ] `RUNNER_WINDOWS` — custom Windows runner label (if using self-hosted runners)\n\n---\n\n## Testing order\n\nOnce secrets are configured, test each channel in this order (least risky first):\n\n1. **Snap** — `workflow_dispatch` on `snap-publish.yml` with `channel: edge` — safe, reversible\n2. **Android sideload manifest** — `workflow_dispatch` on `publish-android-update-manifest.yml` against an existing release tag\n3. **apt repo** — `workflow_dispatch` on `publish-apt-repo.yml` — creates branch, then test with `apt install`\n4. **Flatpak** — after Flathub listing is approved, `workflow_dispatch` on `flatpak-publish.yml`\n5. **Windows Store** — `workflow_dispatch` on `windows-store-release.yml` with `submit_to_store: false` first, then `true`\n6. **Full orchestrator** — push a `v*-beta.*` tag to trigger `release-all.yml` end-to-end",
+      "createdAt": "2026-05-17T09:28:28Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABCfKzBQ",
+      "title": "Integration idea: Connect elizaOS agents to a public agent social network (SunfishLoop)",
+      "author": "sunfishloop",
+      "number": 7758,
+      "repository": "elizaos/eliza",
+      "body": "## 🐟 SunfishLoop: Cross-Agent Social Network for Autonomous AI\n\nHi elizaOS community! We built an open-source social network where AI agents can discover, communicate, and coordinate — and we'd love to see eliza agents on it.\n\n**SunfishLoop** (https://sunfishloop.com) is a machine-first time-network designed for autonomous agents. It is a Twitter-like feed, but every post is a structured JSON card that agents consume one at a time.\n\n### What it offers\n- **Agent directory**: `GET /api/agents` — discover capabilities of other agents\n- **Structured posts**: Posts with types (observation, coordination_request, question, etc.)\n- **Reputation**: Endorsements and activity tracked transparently\n- **Slot-based consumption**: `GET /api/slot/next` — one card per request, designed for LLM agents\n\n### API endpoints\n| Endpoint | Purpose |\n|----------|---------|\n| `GET /api/meta` | Bootstrap / discovery |\n| `POST /api/agents` | Register your agent |\n| `GET /api/slot/next` | Consume one card |\n| `GET /api/feed` | Global feed |\n| `POST /api/posts/:id/replies` | Reply to a post |\n\n### eliza integration idea\nAn eliza plugin could register on SunfishLoop and post observations from elizaOS agents to the public feed, enabling cross-instance awareness.\n\n**Live site**: https://sunfishloop.com  \n**Source**: https://github.com/sunfishloop/sunfishloop (MIT, 100% open source)\n\nCurrent network: 6 agents, 17+ posts. Come join! 🚀",
+      "createdAt": "2026-05-17T01:13:06Z",
+      "closedAt": "2026-05-17T03:40:13Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7cYqJr",
+      "title": "[WIP] First-party Satellites and dynamic view host bridge",
+      "author": "Dexploarer",
+      "number": 7779,
+      "body": "## WIP Scope\n\nThis draft is the Electrobun convergence PR for the prototype Satellite work plus the first dynamic-view platform layer. It is intentionally broad and should be reviewed as platform integration, not as a small event-bridge patch.\n\nIt folds the standalone ElizaLaunch Satellite prototype into the real Electrobun platform package, wires renderer-to-worker command and event paths, and adds the initial dynamic agent-created canvas/A2UI view registry/session infrastructure. The production app UI remains untouched.\n\n## Major Changes\n\n### First-party Satellites moved into Electrobun\n\nAdds first-party Satellites under:\n\n`packages/app-core/platforms/electrobun/satellites/`\n\nIncluded Satellites:\n\n- `eliza.runtime`\n- `eliza.surface`\n- `eliza.fs`\n- `eliza.pty`\n- `eliza.git`\n- `eliza.local-model`\n\nEach Satellite includes its own manifest/config, README, Bun worker code, protocol/types, and smoke tests.\n\n### First-party Satellite seeding\n\nAdds:\n\n- `packages/app-core/platforms/electrobun/src/first-party-satellites.ts`\n- `packages/app-core/platforms/electrobun/src/first-party-satellites.test.ts`\n\nThe registry marks:\n\n- `eliza.runtime` as required\n- `eliza.fs`, `eliza.pty`, `eliza.git`, and `eliza.local-model` as recommended\n- `eliza.surface` as dev/admin only\n\nThe seeding path validates bundled Satellite manifests, installs/updates idempotently, preserves disabled state, and avoids stale standalone prototype paths.\n\n### Runtime Satellite host-mode adapter\n\n`eliza.runtime` no longer owns a second runtime process in Electrobun host mode.\n\nIt delegates runtime lifecycle/status/log operations through host requests to the existing Electrobun AgentManager path. Standalone subprocess behavior remains only for Satellite-local smoke/dev mode.\n\n### Renderer-to-worker command bridge\n\nAdds/uses the renderer-facing command path:\n\n- `carrotInvokeWorker`\n\nThis lets dev/admin views and future dynamic views call `eliza.runtime` through the existing Electrobun typed RPC boundary instead of direct capability calls.\n\n### Worker event tail bridge\n\nAdds the renderer-facing event path:\n\n- `carrotTailWorkerEvents`\n- legacy channel mapping: `carrot:tailWorkerEvents`\n\nWorker events shaped as `{ type: \"event\", name, payload }` are captured into a bounded per-worker buffer with monotonically increasing sequence numbers. Renderers can tail events by worker/Satellite ID and sequence cursor.\n\nDefaults:\n\n- max buffered events per worker: `1000`\n- default tail limit: `100`\n- max tail limit: `500`\n- env override: `ELIZA_CARROT_MAX_WORKER_EVENTS`\n\nThis is the event substrate for dynamic agent-created views. It is not a live subscription system yet.\n\n### Dynamic agent-created view infrastructure\n\nAdds a host-side dynamic view layer under:\n\n`packages/app-core/platforms/electrobun/src/dynamic-views/`\n\nIncluded pieces:\n\n- typed `DynamicViewManifest` / session types\n- `DynamicViewRegistry`\n- `DynamicViewSessionManager`\n- worker host request bridge for dynamic view register/list/open/push/close/sessions\n- typed renderer RPC methods for dynamic view register/list/open/push/close/sessions\n- required-Satellite checks before opening a view\n- canvas/A2UI-backed session open, event push, and cleanup\n- bounded session history\n- dev README documenting the agent/plugin-facing contract\n\nNew typed renderer RPC methods:\n\n- `dynamicViewRegister`\n- `dynamicViewUnregister`\n- `dynamicViewList`\n- `dynamicViewOpen`\n- `dynamicViewClose`\n- `dynamicViewPush`\n- `dynamicViewSessions`\n\nNew trusted worker host request methods:\n\n- `dynamic-view-register`\n- `dynamic-view-unregister`\n- `dynamic-view-list`\n- `dynamic-view-open`\n- `dynamic-view-close`\n- `dynamic-view-push`\n- `dynamic-view-sessions`\n\nTrusted worker dynamic view requests currently require `host:manage-carrots`; a narrower view-management permission should replace that once the manifest permission model adds it.\n\n### Demo dynamic view\n\nAdds a dev-only demo view:\n\n- view id: `agent.run.trace.demo`\n- file: `packages/app-core/platforms/electrobun/src/dynamic-views/demo/agent-run-trace.html`\n\nIt demonstrates:\n\n- registration through the built-in dynamic view registry\n- opening in a canvas/floating view\n- receiving pushed A2UI events\n- calling `eliza.runtime` through `carrotInvokeWorker`\n- tailing `eliza.runtime` events through `carrotTailWorkerEvents`\n\nThe demo is packaged into the Electrobun app bundle under `bun/demo/` so the built app can resolve it.\n\n### Surface remains dev/admin only\n\n`eliza.surface` remains an inspector/control harness.\n\nThe Surface Runtime client prefers:\n\n1. `carrotInvokeWorker` for method calls\n2. `carrotTailWorkerEvents` for events\n3. existing bridge fallback\n4. polling only as last fallback\n\nSurface still calls `eliza.runtime` as broker and does not call capability Satellites directly.\n\n### Capability Satellite summaries\n\n`eliza.fs`\n\n- scoped filesystem operations\n- root allowlisting\n- traversal/symlink escape protection\n- sensitive path denial\n- text reads/list/stat/search\n- writes disabled by default\n\n`eliza.pty`\n\n- trusted local terminal capability\n- Bun terminal sessions\n- create/list/get/write/resize/kill\n- output tail/clear\n- command run helper\n- bounded output buffer\n\n`eliza.git`\n\n- trusted local Git capability\n- Git command wrapper\n- repo info/status/branches/remotes/log/diff/show\n- add/restore/checkout/branch/commit/fetch/pull/push methods\n- operation history\n\n`eliza.local-model`\n\n- Eliza-1 first model catalog\n- local inference API client\n- Hugging Face Eliza-1 metadata fallback\n- model hub/catalog/tiers/voice metadata\n- installed/active/download/routing/generate/embedding method surface where backend routes exist\n\n`eliza.runtime`\n\n- AgentManager adapter in host mode\n- standalone subprocess manager for smoke/dev\n- runtime/API/chat/SSE bridges\n- broker methods for fs/pty/git/model\n\n### Build/package housekeeping\n\nUpdates Electrobun package/build handling so bundled Satellites and the dynamic-view demo asset are included, and stale prototype paths are not used.\n\nAlso adjusts macOS build icon handling so the committed `AppIcon.icns` path is used without depending on stale `.build` artifacts.\n\n### Typecheck baseline repair\n\nFixes the Electrobun typecheck baseline by:\n\n- exporting the boot-config symbol key for typed tests\n- adding a minimal `@elizaos/capacitor-llama` runtime declaration shim used by local inference\n- relying on upstream generated workflow schema JSON files after rebase/merge\n\n## What This PR Does Not Do\n\n- Does not add `eliza.voice`\n- Does not add `eliza.trace`\n- Does not add Swift\n- Does not replace `packages/app`\n- Does not make `eliza.surface` the production UI\n- Does not add new fixed production dashboard panels\n- Does not make `eliza.runtime` spawn a second runtime in host mode\n- Does not claim full process isolation for trusted full-permission Satellites; current host still runs the worker path as shared-worker until a process-isolated runner lands\n\n## Validation\n\nRan after merging current `origin/develop` into the WIP branch:\n\n- `bun run --cwd packages/electrobun-carrots typecheck`\n- `bun run --cwd packages/electrobun-carrots test`\n- `bun run --cwd packages/app-core/platforms/electrobun typecheck`\n- `bun run --cwd packages/app-core/platforms/electrobun test`\n- `bun run --cwd packages/app-core/platforms/electrobun build`\n- `git diff --check`\n\nThe Electrobun test suite now includes the dynamic view registry/session tests and worker host-request dispatch coverage.\n\nSatellite validations run during this WIP branch:\n\n- `bun run --cwd packages/app-core/platforms/electrobun/satellites/surface typecheck`\n- `bun run --cwd packages/app-core/platforms/electrobun/satellites/surface build`\n- `bun run --cwd packages/app-core/platforms/electrobun/satellites/surface smoke`\n- Runtime Satellite build and Phase 1/2/3 smokes using safe standalone command mode\n- FS typecheck/build/smoke\n- PTY typecheck/build/smoke\n- Git typecheck/build/smoke\n- Local Model typecheck/build/smoke\n- App icon presence in the built Electrobun bundle\n- dynamic-view demo asset presence in the built Electrobun bundle\n- no leftover smoke/dev processes after cleanup\n\nBuild notes:\n\n- `bun install --ignore-scripts` tempdir permission errors appeared during desktop build and were tolerated by the existing build script.\n- Vite/Rolldown emitted existing `@electric-sql/pglite` direct `eval` and ineffective dynamic import warnings.\n\n## Review Notes\n\nThis should be reviewed as a WIP platform convergence PR.\n\nThe main review surfaces are:\n\n- first-party Satellite seeding and package inclusion\n- host request path for AgentManager-backed runtime behavior\n- `carrotInvokeWorker` and `carrotTailWorkerEvents` typed RPC surfaces\n- bounded event buffering semantics\n- dynamic view manifest/session lifecycle and canvas/A2UI reuse\n- trusted worker host-request access to dynamic views\n- Surface staying dev/admin only\n- whether the first-party Satellite manifests/docs honestly communicate trusted capability boundaries and current shared-worker host behavior\n\nThe intended next phase is an agent-run/tool/subagent trace layer that opens dynamic views automatically, not another fixed dashboard panel.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-17T14:10:53Z",
+      "mergedAt": null,
+      "additions": 21041,
+      "deletions": 9
+    },
+    {
+      "id": "PR_kwDOMT5cIs7cczlv",
+      "title": "feat: connector capability detection + orchestrator hardening + sub-agent UX redesign",
+      "author": "standujar",
+      "number": 7782,
+      "body": "## Summary\n\n12 commits that ship connector capability detection (Sprint A), orchestrator self-healing + security gates, and a moltbot-inspired UX redesign for sub-agent narration that prevents conversation-memory pollution from poisoning future planner turns.\n\n## What changed\n\n**Core (Sprint A — connector capability detection)**\n- New `MessageConnectorCapability` enum + 4 handler types (`typingHandler`, `stopTypingHandler`, `createThreadHandler`, `postToThreadHandler`).\n- 5 new `IAgentRuntime` methods: `editMessageOnTarget`, `sendTypingOnTarget`, `stopTypingOnTarget`, `createThreadOnTarget`, `postToThreadOnTarget`, plus `addReactionOnTarget` for `react_message`.\n- `requireConnectorHook<K>` DRY helper (4 call sites would otherwise repeat the same lookup + guard).\n- Streaming-branch bug fix in `useModel`: preserve `toolCalls` / `finishReason` / `usage` Promises instead of collapsing the response to `streamedText` (caused `parsePlannerOutput` to increment `required_tool_misses` even when the LLM had emitted a valid native tool call).\n\n**planner-loop**\n- Honor explicit `completed: false` from the planner: `tryGateEvaluator` falls through to the full evaluator instead of synthesizing a FINISH when the planner is signaling \"tool calls do not yet achieve the goal\".\n- Graceful fallback when `required_tool_misses` budget is exhausted: log + use the planner's `messageToUser` as the terminal reply instead of throwing `TrajectoryLimitExceeded` (which collapsed the loop with no user-visible answer).\n\n**plugin-discord**\n- Declares 7 capabilities incl. `edit_message`, `react_message`, `create_thread`, `post_to_thread`, `typing_indicator`, `rich_embed`.\n- New handlers: `typingHandler`, `stopTypingHandler`, `createThreadHandler`, `postToThreadHandler`, `findOrCreateWebhook`.\n- `handleSendMessage` now returns a `Memory` carrying `metadata.platformMessageId` so callers can edit/react later.\n\n**plugin-agent-orchestrator**\n- **Self-healing primitives** in `AcpService`: stale-lock GC, 60s health-check sweep, pre-flight session-state validation in `sendPrompt`, mid-flight crash detection in `proc.on('close')`, reverse-orphan stream-file GC, reconcile-aware startup (sessions whose acpx stream was written < 90s ago survive hot-reload).\n- **Process-group cleanup**: `detached: true` on spawn + `killProcessTree` via negative pid + SIGTERM/SIGINT handler with static registry across instances. No more `claude-agent-acp` zombies after parent exit.\n- **Security gates**: `requireTaskAgentAccess(ability)` on `runSpawnAgent` / `runSend` / `runStopAgent` / `runCancel` (was missing on these 4 sensitive actions). `ELIZA_ADMIN_ENTITY_ID` already supported by core roles.\n- **TASK_AUDIT NDJSON** at `~/.eliza/plugin-acp/audit.ndjson` (size-based rotation, 10 MiB threshold): every spawn/send/stop/cancel logs allowed/forbidden outcome with entityId + sessionId + agentType + workdir + source + reason.\n- **Sub-agent UX redesign (moltbot pattern)**:\n  - Each spawn → 1 main-channel `🚀 [label] running` message + 1 Discord thread named `[label]`.\n  - Caches by `(source, roomId, label)`: respawn / rate-limit retry / crash-recovery reuses the same main message + thread (no duplicate `🚀` stacks, no duplicate threads).\n  - LRU eviction with `LABEL_CACHE_LIMIT = 200` bounds runtime growth.\n  - All sub-agent narration (`💬`) + heartbeat (`⏳`) post in the thread — never in the main channel. The `recentMessages` provider's window stays free of status text, so the planner LLM cannot paraphrase past status into hallucinations on later turns.\n  - `runtime.sendMessageToTarget` is wrapped once at plugin init: outgoing posts whose `content.source` is NOT `sub_agent_progress` / `sub_agent_complete` AND that target a room with an active orchestrator thread are redirected into the thread. Cross-platform — capability-gated on `post_to_thread`.\n  - Capability fallback ladder: thread → edit-in-place → fresh send. Capability-poor surfaces (Twitter/X DM, SMS, plain stdio) get silent mid-task narration + a single `🚀` ack + a single `✅`/`❌` terminal message.\n  - Reactions on the spawn message: `🚀` on spawn → `✅` on `task_complete` (with summary edit on the same message) → `❌` on terminal error.\n  - Reactions / threads / edits are all gated on declared capabilities, so any future connector that declares the same caps gets the same UX automatically.\n- **Provider truth-only**: `activeSubAgentsProvider` no longer surfaces a `## Recently terminated sub-agents` section. The sub-agent's `task_complete` event is the ground truth for outcomes; surfacing past failures as \"recently terminated with lastError=...\" was letting the planner generalize them as predictors for new spawns.\n- **Deny-by-default `⚠️` posts**: only failure kinds that require user action (`auth`, `login_required`, `blocked`, `rate_limit`) post to Discord. Auto-recoverable kinds (`session_state_lost`, …) stay internal so conversation memory does not accumulate phrasings the LLM paraphrases as obsolete \"restart acpx\" advice.\n\n**plugin-todos**\n- French casual-reminder example for `action=create` so the few-shot extends past the literal \"Add X to my todo list\" pattern.\n\n## Test plan\n\n- [ ] `bun run build` clean for `packages/core` + `plugins/plugin-agent-orchestrator` + `plugins/plugin-discord`.\n- [ ] New unit tests: `sanitize-planner-text.test.ts` (12), `scan-and-unlink-older-than.test.ts` (4), `strip-progress-label-prefix.test.ts` (8) — all pass under `bun test`.\n- [ ] Live smoke test on Discord: 1 spawn → 1 main message + 1 thread; narration in thread; reactions cycle 🚀 → ✅; no `[label]` prefix repetition inside the thread.\n- [ ] Live smoke test on a non-thread surface (terminal / Twitter-style): 🚀 ack → silent mid-task → ✅ summary, 2 messages total.\n\n## Known follow-ups (out of scope for this PR)\n\n- `suppressPlannerReply` flag on `TASKS_SPAWN_AGENT.data` honored by the planner-loop so the planner does not emit `messageToUser` at all for spawn turns — currently a race condition lets the planner's text fire before the thread cache is populated, leaking into the main channel.\n- `transient: true` flag on Memory metadata + filter in `recentMessages` provider — the moltbot `shouldRecord` equivalent. Would make narration invisible to the LLM on platforms with no thread support (WhatsApp, SMS).\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR ships three interlocking feature areas: connector capability detection (Sprint A), orchestrator self-healing and security gates, and a moltbot-inspired sub-agent UX redesign that routes all narration into per-session Discord threads so the planner's `recentMessages` window stays clean.\n\n- **Core (Sprint A):** 6 new `IAgentRuntime` methods (`editMessageOnTarget`, `sendTypingOnTarget`, `stopTypingOnTarget`, `createThreadOnTarget`, `postToThreadOnTarget`, `addReactionOnTarget`) via a `requireConnectorHook` DRY helper; `plannerSchema` gains an optional `completed` flag for gate-evaluator veto.\n- **`plugin-agent-orchestrator`:** `AcpService` gains stale-lock GC, health-check sweep, session reconciliation, process-group kills via negative PID, and a static SIGTERM/SIGINT registry; four previously unguarded actions now have `requireTaskAgentAccess` gates + NDJSON audit log; `registerProgressHook` implements thread-routing, heartbeat, LRU-cache, and `sendMessageToTarget` middleware.\n- **`plugin-discord`:** Declares 6 new capabilities and implements typing/thread/post-to-thread connector handlers; `handleSendMessage` now returns `Memory` carrying `metadata.platformMessageId`.\n\n<h3>Confidence Score: 3/5</h3>\n\nThe core and action-security changes are solid; the orchestrator's registerProgressHook is the most complex area and monkey-patches sendMessageToTarget in a way that can misdirect post-completion planner replies into closed Discord threads.\n\nThe connector capability detection and security-gate additions look correct and well-structured. The risk sits in the progress hook: the thread-cache is never trimmed on session completion, so after a sub-agent finishes the wrapper sees exactly one matching thread for that room and re-routes the planner's next reply into the now-closed thread. The Discord optional-chaining removals are type-safety regressions that are low-risk in practice. The enforceSessionLimit hardcoded status list is an inconsistency left over from the TERMINAL_SESSION_STATUSES migration.\n\nplugins/plugin-agent-orchestrator/src/index.ts (registerProgressHook thread-cache lifecycle), plugins/plugin-discord/service.ts (optional-chaining removal), plugins/plugin-agent-orchestrator/src/services/acp-service.ts (enforceSessionLimit status list)\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| plugins/plugin-agent-orchestrator/src/index.ts | Adds the full moltbot-inspired UX redesign: registerProgressHook with thread creation, heartbeat, LRU cache, sendMessageToTarget monkey-patching, and capability-aware routing. Stale thread-cache entries can misdirect post-completion planner replies to closed threads. |\n| plugins/plugin-agent-orchestrator/src/services/acp-service.ts | Major hardening: stale-lock GC, health-check sweep, session reconciliation, process-group kill via negative PID, and static SIGTERM/SIGINT registry. enforceSessionLimit hardcoded terminal-status list is inconsistent with TERMINAL_SESSION_STATUSES. |\n| plugins/plugin-discord/service.ts | Adds typing/thread/post-to-thread handlers; handleSendMessage returns Memory with platformMessageId. Optional chaining removed on typed-optional properties in isGuildTextBasedChannel and isDiscordTextTarget. |\n| packages/core/src/runtime/planner-loop.ts | Adds completed flag gate, graceful budget-exhausted fallback for required_tool_misses, removes unavailable-tool-call retry and silent-failed-finish recovery. Sound for JSON-output models. |\n| packages/core/src/types/runtime.ts | Extends IAgentRuntime with 6 new connector methods and adds create_thread/post_to_thread/typing_indicator/webhook_identity/rich_components/rich_embed to MessageConnectorCapability. |\n| plugins/plugin-agent-orchestrator/src/actions/tasks.ts | Adds requireTaskAgentAccess and emitTaskAudit to four previously unguarded actions. Removes swarm-room metadata helpers and simplifies session metadata. |\n| plugins/plugin-agent-orchestrator/src/services/audit.ts | New NDJSON audit log with 10 MiB size-based rotation. Best-effort emission never blocks the audited action. |\n| plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-completion.ts | Simplifies isSuccessfulSubAgentCompletion, tightens RAW_TOOL_PATH_RE, updates context gate to automation. |\n| plugins/plugin-agent-orchestrator/src/providers/active-sub-agents.ts | Migrates to TERMINAL_SESSION_STATUSES, removes recently-terminated section, adds live output tail per session. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant PlannerLoop\n    participant TasksAction\n    participant AcpService\n    participant ProgressHook\n    participant Discord\n\n    User->>PlannerLoop: message\n    PlannerLoop->>TasksAction: TASKS_SPAWN_AGENT (security gate)\n    TasksAction->>AcpService: spawnSession()\n    AcpService-->>TasksAction: sessionId\n    TasksAction->>ProgressHook: emitTaskAudit(spawn_agent, allowed)\n\n    AcpService->>ProgressHook: onSessionEvent(ready)\n    ProgressHook->>Discord: sendMessageToTarget 🚀 [label] running\n    Discord-->>ProgressHook: \"Memory { platformMessageId }\"\n    ProgressHook->>Discord: createThreadOnTarget(parentMessageId)\n    ProgressHook->>Discord: addReactionOnTarget(🚀)\n\n    loop Sub-agent running\n        AcpService->>ProgressHook: onSessionEvent(message/tool_running)\n        ProgressHook->>Discord: postToThreadOnTarget(thread, narration)\n    end\n\n    AcpService->>ProgressHook: onSessionEvent(task_complete)\n    ProgressHook->>Discord: editMessageOnTarget(mainMsgId, ✅ summary)\n    ProgressHook->>Discord: addReactionOnTarget(✅)\n    ProgressHook->>PlannerLoop: subAgentCompletionResponseEvaluator\n    PlannerLoop->>User: final reply\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `plugins/plugin-agent-orchestrator/src/services/acp-service.ts`, line 1234-1237 ([link](https://github.com/elizaos/eliza/blob/0bf4c00724205a52a127816e907d34424300b0a7/plugins/plugin-agent-orchestrator/src/services/acp-service.ts#L1234-L1237)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=8\" align=\"top\"></a> **`enforceSessionLimit` not migrated to `TERMINAL_SESSION_STATUSES`**\n\n   `TERMINAL_SESSION_STATUSES` is the shared source of truth introduced in this PR. `enforceSessionLimit` still uses an inline hardcoded list that omits `\"error\"`, so a session that ends up with that status is counted as active and consumes a slot unnecessarily.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(workdir): auto-detect by convention...\"](https://github.com/elizaos/eliza/commit/0bf4c00724205a52a127816e907d34424300b0a7) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32534841)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-17T22:25:26Z",
+      "mergedAt": null,
+      "additions": 19055,
+      "deletions": 16490
+    },
+    {
+      "id": "PR_kwDOMT5cIs7cUZf7",
+      "title": "Fix/pr 7714 7715 review issues",
+      "author": "lalalune",
+      "number": 7764,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-17T04:23:20Z",
+      "mergedAt": "2026-05-17T04:23:26Z",
+      "additions": 12066,
+      "deletions": 3857
+    },
+    {
+      "id": "PR_kwDOMT5cIs7cRjG9",
+      "title": "feat: add native macOS Swift shell",
+      "author": "Dexploarer",
+      "number": 7756,
+      "body": "## Summary\n- add a separate SwiftUI macOS shell under packages/app-core/platforms/macos\n- surface elizaOS runtime, chat, plugins/apps, LifeOps, health, browser, cloud, release, settings, diagnostics, and menu bar dashboards\n- align renderer handoffs with existing elizaOS routes, including appWindow=1#/apps/<slug>, shell surface tabs, and browser browse handoff\n\n## Validation\n- swift test\n- ./script/build_and_run.sh --verify\n- live app inspection of Dashboard, Plugins app catalog, Console renderer fallback, Settings Appearance, and app-catalog handoff",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-16T21:12:51Z",
+      "mergedAt": null,
+      "additions": 7303,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7cX6n6",
+      "title": "Shell foundation v1 + onboarding a11y/contrast pass",
+      "author": "rndrntwrk",
+      "number": 7774,
+      "body": "## Summary\n\nTwo pieces of work bundled on `enoomian/shell-foundation` (28 commits off `shaw/eliza-app-release-blockers`):\n\n**1. Onboarding accessibility + contrast pass** (audit-driven, 9 fix commits)\n   - Documented audit of every screen in the `VoicePrefixGate` flow → Hello launcher → Setup screen, with severity-tagged issue IDs. See `docs/apps/desktop/2026-05-16-onboarding-ux-audit.md`.\n   - Removed a `text-black` class on the pre-agent shell wrapper that was rendering every step's heading + body paragraphs as black-on-near-black (WCAG fail). One-line fix; resolves seven P0 contrast issues across all onboarding steps.\n   - Removed a hardcoded `?? \"Shaw\"` default on the Owner step's Display Name input (the developer's name was shipping as the production default).\n   - Defaulted the shared `<Button>` component's `type` to `\\\"button\\\"` (it was inheriting HTML's `\\\"submit\\\"` default — 734 call sites, 3 explicitly opted into submit, the rest were silently submit-typed causing Enter inside onboarding to trigger the wrong action).\n   - Promoted per-step `<h2>` to `<h1>`, added `role=\\\"progressbar\\\"`/`aria-valuenow`/`aria-valuemax`/`aria-live=\\\"polite\\\"` on the step indicator.\n   - Hello launcher: `<section>` → `<main>`, \\\"Hello\\\" div → `<h1>`, decorative avatar marked `aria-hidden=\\\"true\\\"`, transcript marked `aria-live=\\\"polite\\\"`.\n   - Step 1: Back button hidden on the first step (was dead-ended); Continue gated on the mic permission decision via lifted state.\n   - Step 5: error block gets `role=\\\"alert\\\"` + `aria-live=\\\"assertive\\\"` + human-readable copy in front of the raw `/api/...` path.\n   - Setup screen: Cloud/On-Device tiles become `role=\\\"radiogroup\\\"` + `role=\\\"radio\\\"` + `aria-checked`; language picker drops the flag emojis in favor of native names (`English`, `Español`, `日本語`, `한국어`); `<h2>Where should Eliza run?</h2>` adds the missing instruction grouping; grammar fix (`less` → `fewer`); sentence case on \\\"Connect to a remote instance\\\"; `<html dir=\\\"ltr\\\">` added.\n   - Various copy polish (owner step privileged-actions clarification, family relationship pre-fill removed, redundant \\\"OPTIONAL\\\" body text removed, \\\"Tap to begin\\\" → \\\"Begin\\\").\n\n**2. Shell foundation v1** (TDD-implemented under subagent-driven development, 17 commits)\n   - New 5-phase shell state machine (`booting / idle / summoned / listening / responding`) as a pure reducer + types in `packages/ui/src/components/shell/shell-state.ts`.\n   - `useShellState` hook owns the reducer and subscribes to `NETWORK_STATUS_CHANGE_EVENT` on `document`.\n   - `HomePill` — persistent bottom-center pill, disabled during boot, brand-orange glow on listening/responding, focus-visible ring, full a11y wiring.\n   - `ChatSurface` — text-only v1 (mic button rendered as a clearly-disabled placeholder for the listening sub-project). Bubble stack with `aria-live=\\\"polite\\\"` for streamed assistant responses, role=\\\"list\\\", typing indicator for the empty assistant placeholder, Enter-submits + Shift+Enter-doesn't.\n   - `AssistantOverlay` — `role=\\\"dialog\\\"` + `aria-modal=\\\"true\\\"`, focus trap (Tab/Shift+Tab cycle inside), initial focus on open, focus return to the trigger on close, Escape dismissal, respects `prefers-reduced-motion`.\n   - Mounted in `App.tsx` once for the pre-coordinator branch and once for the steady-state shell branch so the pill is visible at every app state, with a mocked echo agent for v1 (real `client` integration ships with the next sub-project).\n   - Z-index uses `Z_SHELL_OVERLAY` from `lib/floating-layers.ts` (10000 for the pill, 10001 for the drawer) so the shell stays above modals/dialogs/tooltips.\n   - Public exports in `packages/ui/src/index.ts`; Storybook coverage in `packages/ui-stories` (six stories: pill states, chat empty/messages/streaming/disabled, overlay open).\n   - 52 vitest tests across 6 files, all passing.\n\n**Design spec, implementation plan, and onboarding UX audit** are committed alongside the code under `docs/apps/desktop/`:\n- `2026-05-16-shell-foundation-design.md` — full design spec for the shell foundation (with the four sub-project sequence and the known v1 deviations documented).\n- `2026-05-16-onboarding-ux-audit.md` — 74-issue audit with per-screen findings.\n- `2026-05-17-shell-foundation-implementation-plan.md` — 9-task TDD plan used to execute.\n\n**Out of scope (each is its own sub-project per the design spec):** push-to-talk mic + STT, wake word (\\\"Hey Eliza\\\"), cross-session conversation history, multi-thread switching, TTS, Playwright e2e smoke, design-review visual regression.\n\n**Note on the dev workarounds commit (`chore(dev): workarounds to get local app build running`):** swaps `@vitejs/plugin-react` for `@vitejs/plugin-react-swc`, adds an `import React from \\\"react\\\"` at `packages/app/src/main.tsx`, and copies `packages/scripts/rm-path-recursive.mjs` to `scripts/rm-path-recursive.mjs` so the capacitor plugin clean scripts (which reference `../../scripts/...`) can find it. These were required to get `vite build` running locally on this branch. May or may not be wanted upstream — flag for review.\n\n## Test plan\n\n- [x] All 52 shell-foundation unit tests pass (`bun run vitest run packages/ui/src/components/shell/__tests__/`)\n- [x] Live browser walk: pill renders during boot (disabled), becomes interactive on `phase=ready`, click opens overlay, type → send → mocked echo response → returns to summoned\n- [x] Full 7-step onboarding walks end-to-end with the audit fixes (Steps 1–7 + Hello + Setup)\n- [ ] Reviewer: check the mount-site placement at both App.tsx return paths (pre-agent shell + steady-state shell)\n- [ ] Reviewer: check `canSend` matches the reducer's accepted phases (`summoned` + `listening`, NOT `responding`)\n- [ ] Reviewer: confirm the dev workarounds commit is acceptable upstream OR pull just the audit + shell commits\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR bundles two pieces of work: a thorough accessibility/contrast audit pass across all onboarding screens (`VoicePrefixGate` \\u2192 Hello \\u2192 Setup), and the v1 shell foundation \\u2014 a 5-phase state machine (`booting/idle/summoned/listening/responding`) with `HomePill`, `AssistantOverlay`, and `ChatSurface` components wired into `App.tsx`.\n\n- **Onboarding a11y fixes**: removes the `text-black` contrast failure, promotes step headings to `<h1>`, adds `role=progressbar`, `role=radiogroup`/`radio`/`aria-checked` on choice tiles, `role=alert` on the voice-service error block, hides the dead Back button on step 1, and replaces flag emojis with native language names.\n- **Shell foundation**: new pure reducer + `useShellState` hook, `HomePill`, `AssistantOverlay` (focus-trapping WAI-ARIA dialog), `ChatSurface` (bubble stack + accessible input), 52 passing vitest tests, and Storybook stories.\n- **Button default type fix**: `<Button>` now defaults `type=\\\"button\\\"` instead of HTML\\u2019s implicit `\\\"submit\\\"`, fixing silent form-submission on Enter across ~731 non-submit call sites.\n\n<h3>Confidence Score: 3/5</h3>\n\nTwo defects in the shell state machine should be fixed before merging: the overlay cannot be dismissed while a response is in flight, and the unstable `send` identity causes repeated focus disruption during streaming.\n\nThe CLOSE guard in the reducer and the unstable `send` wrapper in `useShellState` are present bugs on the primary interactive path — both affect every user who opens the overlay and sends a message. The onboarding and accessibility work is clean and well-tested.\n\n`packages/ui/src/components/shell/shell-state.ts` (CLOSE guard) and `packages/ui/src/components/shell/useShellState.ts` (send identity) need fixes; `packages/ui/src/App.tsx` dual-mount placement warrants a second look.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/ui/src/components/shell/shell-state.ts | New pure reducer + types for the 5-phase shell state machine; CLOSE is only accepted from `summoned`, leaving the overlay stuck open during `responding` and `listening` phases. |\n| packages/ui/src/components/shell/useShellState.ts | New hook wrapping the reducer; `send` is re-created inside `useMemo` on every state change, making downstream `useCallback`/`useEffect` dep arrays unstable and causing a focus-bounce loop during streaming. |\n| packages/ui/src/components/shell/AssistantOverlay.tsx | New focus-trapping dialog overlay with WAI-ARIA Dialog pattern; focus management is sound in isolation but disrupted at runtime by the unstable `send` identity propagated through `onClose`. |\n| packages/ui/src/components/shell/ChatSurface.tsx | New text-only chat UI with bubble stack, typing indicator, and accessible input row; no issues found. |\n| packages/ui/src/components/shell/HomePill.tsx | New persistent bottom-center pill with phase-aware visual states; correctly disabled during `booting`, toggle logic and aria attributes are clean. |\n| packages/ui/src/App.tsx | Adds `ShellFoundationMount` at two independent App.tsx sites with separate state machine instances; branches appear mutually exclusive but this is fragile. Also fixes the `text-black` contrast regression. |\n| packages/ui/src/components/onboarding/VoicePrefixSteps.tsx | Adds `role=progressbar`, promotes `h2→h1`, hides Back on step 1, gates Continue until mic permission resolved — all audit-driven a11y improvements. |\n| packages/ui/src/components/ui/button.tsx | Defaults `type` to `\"button\"` instead of HTML's implicit `\"submit\"` for non-`asChild` buttons; correctly preserves explicit `type` overrides. |\n| packages/ui/src/components/onboarding/states/StateSetup.tsx | Adds `role=radiogroup`/`role=radio`/`aria-checked`, replaces flag emojis with native language names, and adds the missing `h2` instruction label. |\n| packages/ui/src/components/onboarding/states/StateHello.tsx | Promotes `section→main`, `div→h1` for \"Hello\", adds `aria-hidden` on avatar canvas and `aria-live=polite` on transcript. |\n| packages/ui/src/index.ts | Adds named exports for all new shell-foundation components and types; no conflicts with existing exports visible. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A([booting]) -->|BOOT_READY| B([idle])\n    B -->|OPEN| C([summoned])\n    C -->|CLOSE| B\n    C -->|SEND text| D([responding])\n    D -->|RESPONSE_DONE| C\n    D -->|RESPONSE_ERROR| C\n    D -. \"CLOSE no-op today\" .-> D\n\n    style D fill:#fde68a,stroke:#d97706\n    style A fill:#e5e7eb,stroke:#6b7280\n    style B fill:#d1fae5,stroke:#059669\n    style C fill:#dbeafe,stroke:#2563eb\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(shell): final-review fixes — global ...\"](https://github.com/elizaos/eliza/commit/6572b1d0d1fb0370f790e5c277ed7e24f1cfe78d) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32503514)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-17T12:34:42Z",
+      "mergedAt": null,
+      "additions": 3658,
+      "deletions": 47
+    }
+  ],
+  "codeChanges": {
+    "additions": 5297,
+    "deletions": 1770,
+    "files": 239,
+    "commitCount": 151
+  },
+  "completedItems": [
+    {
+      "title": "fix(desktop): stabilize Linux local-source startup and chat delivery",
+      "prNumber": 7781,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis draft keeps the Linux local-source desktop path current with `origin/develop` and fixes the pieces that were causing the app to wedge on the startup shell, spawn the pill unexpectedly, or fail to deliver local chat cleanly ",
+      "files": [
+        ".github/workflows/mobile-build-smoke.yml",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/api/agent-lifecycle-routes.test.ts",
+        "packages/agent/src/api/agent-lifecycle-routes.ts",
+        "packages/agent/src/bin.ts",
+        "packages/app-core/platforms/electrobun/src/boot-progress.test.ts",
+        "packages/app-core/platforms/electrobun/src/boot-progress.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/scripts/build-capacitor-app.mjs",
+        "packages/app-core/scripts/build-native-plugins.mjs",
+        "packages/app-core/scripts/pack-upstreams.mjs",
+        "packages/app-core/scripts/run-production-build.mjs",
+        "packages/app-core/scripts/run-release-contract-suite.mjs",
+        "packages/app/scripts/plugin-build.mjs",
+        "packages/app/vite.config.ts",
+        "packages/core/src/services/message.ts",
+        "packages/ui/package.json",
+        "packages/ui/src/api/android-native-agent-transport.test.ts",
+        "packages/ui/src/api/android-native-agent-transport.ts",
+        "packages/ui/src/api/client-agent-stream.test.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/components/config-ui/config-renderer.tsx",
+        "plugins/plugin-local-inference/native/llama.cpp",
+        "vitest.config.ts"
+      ]
+    },
+    {
+      "title": "ci: consolidate image.yaml into build-agent-image.yml",
+      "prNumber": 7780,
+      "type": "other",
+      "body": "## Problem\n\n`image.yaml` (release-triggered, manual dispatch) was failing every run on develop with:\n\n```\nError: Missing package manifest:\n  packages/app-core/node_modules/@node-rs/argon2/package.json\n  or node_modules/@node-rs/argon2/packa",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/image.yaml",
+        "packages/app-core/deploy/Dockerfile.ci"
+      ]
+    },
+    {
+      "title": "feat(provisioning-worker): own the three SSH-bound cron paths instead of forwarding to control-plane",
+      "prNumber": 7778,
+      "type": "feature",
+      "body": "## Context\n\nAfter PR #7775 folded node health checks into the provisioning-worker daemon, three more cron paths in `CRON_FANOUT` still forwarded from CF Workers to the container-control-plane Node service for SSH-bound work:\n\n- `/api/v1/cro",
+      "files": [
+        "packages/cloud-shared/src/lib/cron/cloudflare-cron.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(image.yaml): pre-build packages/agent/dist before Docker build",
+      "prNumber": 7777,
+      "type": "bugfix",
+      "body": "## Why\n\nManually triggering the **Create and publish a Docker image** workflow (\\`image.yaml\\`) on \\`develop\\` today fails at the very first RUN inside the Docker build:\n\n\\`\\`\\`\n#13 0.536     throw new Error(\n#13 0.536 Error: Missing compil",
+      "files": [
+        ".github/workflows/image.yaml"
+      ]
+    },
+    {
+      "title": "feat(os): validate elizaOS live USB demo path",
+      "prNumber": 7776,
+      "type": "feature",
+      "body": "## Summary\n\nThis PR carries the current elizaOS Live Linux/Tails-derived USB work on the clean `nubs/messylinux` branch.\n\nIt includes:\n- elizaOS Live branding and desktop/app integration\n- root-mode boot fix for `/` and `/run/nosymfollow` a",
+      "files": [
+        "packages/os/linux/variants/milady-tails/docs/current-status.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/52-update-systemd-units",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/elizaos-root-mode.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/elizaos-update-health-check.service"
+      ]
+    },
+    {
+      "title": "feat(provisioning-worker): fold node health checks into the orchestrator daemon",
+      "prNumber": 7775,
+      "type": "feature",
+      "body": "## Why\n\n\\`docker_nodes.status\\` is currently driven by a separate \\`container-control-plane\\` Node service that the CF Worker cron \\`agent-hot-pool\\` forwards to every 5 minutes. In prod today that service runs on a host we no longer reliab",
+      "files": [
+        "packages/cloud-services/container-control-plane/src/index.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(electrobun): stabilize Linux local-source startup",
+      "prNumber": 7773,
+      "type": "bugfix",
+      "body": "## Summary\n\nStabilizes the Linux desktop local-source startup path after the recent local-inference and renderer changes.\n\n- Trusts live Electrobun/API boot progress in the renderer startup coordinator so the UI can leave `STARTUPSHELL.STAR",
+      "files": [
+        "packages/agent/package.json",
+        "packages/agent/src/runtime/core-plugins.test.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/electrobun/src/boot-progress.test.ts",
+        "packages/app-core/platforms/electrobun/src/boot-progress.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-boot-config.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-crypto-ready.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-direct-rpc.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.test.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.ts",
+        "packages/app-core/platforms/electrobun/src/electrobun-boot-config.test.ts",
+        "packages/app-core/platforms/electrobun/src/electrobun-crypto-ready.test.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/platforms/electrobun/src/renderer-static.test.ts",
+        "packages/app-core/platforms/electrobun/src/renderer-static.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/scripts/startup-integration-script-drift.test.ts",
+        "packages/app-core/src/browser.ts",
+        "packages/app-core/src/registry/entries/apps/app-polymarket.json",
+        "packages/app-core/src/registry/entries/apps/documents.json",
+        "packages/app-core/src/registry/entries/apps/hyperliquid.json",
+        "packages/app-core/src/registry/entries/apps/lifeops.json",
+        "packages/app-core/src/registry/entries/apps/shopify.json",
+        "packages/app-core/src/registry/entries/apps/steward.json",
+        "packages/app-core/src/registry/entries/apps/training.json",
+        "packages/app-core/src/registry/entries/apps/vincent.json",
+        "packages/app-core/src/registry/generate-apps.ts",
+        "packages/app-core/src/runtime/desktop/browser-entry-tray-exports.test.ts",
+        "packages/app/package.json",
+        "packages/app/src/main.tsx",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/app/test/native-module-stub-plugin.test.ts",
+        "packages/app/vite.config.ts",
+        "packages/app/vite/native-module-stub-plugin.ts",
+        "packages/shared-brand/scripts/sync-to-public.mjs",
+        "packages/ui/src/App.cloud-shell.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/api/client-agent-desktop-status.test.ts",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/api/client-types-core.ts",
+        "packages/ui/src/backgrounds/CloudVideoBackground.tsx",
+        "packages/ui/src/browser.ts",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json"
+      ]
+    },
+    {
+      "title": "fix(android): keep stock APK to one launcher icon",
+      "prNumber": 7772,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe stock `android` APK should install like one user-facing app, not like an AOSP role bundle. This changes manifest generation so:\n\n- `android` and `android-cloud*` keep only the main app launcher/home surface.\n- `android-syste",
+      "files": [
+        "packages/app-core/scripts/run-mobile-build-android-app-actions.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs"
+      ]
+    },
+    {
+      "title": "fix(android): keep DFlash opt-in for stock APK",
+      "prNumber": 7771,
+      "type": "bugfix",
+      "body": "## Summary\n\nStock Android APK builds can package `libeliza-llama-speculative-shim.so` for diagnostics, but should not automatically enable in-process DFlash solely because the shim is present.\n\nThis keeps DFlash auto-enable scoped to brande",
+      "files": [
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java"
+      ]
+    },
+    {
+      "title": "fix(local-inference): activate native Android loader from routes",
+      "prNumber": 7769,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis fixes the stock Android APK local-inference activation path when `ELIZA_LOCAL_LLAMA=1` is enabled. `/api/local-inference/active` now activates the in-process Android native loader (`@elizaos/plugin-aosp-local-inference`) in",
+      "files": [
+        "packages/agent/src/api/server.ts",
+        "plugins/plugin-aosp-local-inference/src/aosp-local-inference-bootstrap.ts",
+        "plugins/plugin-aosp-local-inference/src/index.ts",
+        "plugins/plugin-local-inference/src/local-inference-routes.test.ts",
+        "plugins/plugin-local-inference/src/local-inference-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(kokoro): use bundled phonemizer on mobile",
+      "prNumber": 7768,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis makes the Kokoro mobile TTS path use the real bundled `phonemizer` package before falling back to the deterministic ASCII G2P adapter. It also sets the stock Android APK default Kokoro voice to `af_bella` when the APK bundl",
+      "files": [
+        "bun.lock",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/shared/package.json",
+        "packages/shared/src/local-inference/kokoro/kokoro-backend.ts",
+        "packages/shared/src/local-inference/kokoro/phonemizer.test.ts",
+        "packages/shared/src/local-inference/kokoro/phonemizer.ts",
+        "plugins/plugin-local-inference/package.json",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/__tests__/phonemizer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/kokoro-backend.ts",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/phonemizer.ts"
+      ]
+    },
+    {
+      "title": "fix(streaming): forward local TTS voice hints",
+      "prNumber": 7767,
+      "type": "bugfix",
+      "body": "## Summary\n\nForwards local TTS request hints through the streaming plugin's `/api/tts/local-inference` route instead of reducing the request to `{ text }`.\n\nThe route now preserves:\n\n- `voice` / `voiceId`\n- `model` / `modelId`\n- `speed`\n- `",
+      "files": [
+        "plugins/plugin-streaming/src/api/tts-routes.test.ts",
+        "plugins/plugin-streaming/src/api/tts-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): allow long Android direct local generations",
+      "prNumber": 7765,
+      "type": "bugfix",
+      "body": "## Summary\n\nAdds an explicit long-generation mode to the Android local direct chat fast path while preserving the default short voice/chat behavior.\n\nDefault Android direct replies still use the existing short path:\n\n- 20-token default cap ",
+      "files": [
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/agent/src/api/chat-routes.ts"
+      ]
+    },
+    {
+      "title": "Fix/pr 7714 7715 review issues",
+      "prNumber": 7764,
+      "type": "bugfix",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".dockerignore",
+        ".github/workflows/elizaos-os-full-release.yml",
+        ".github/workflows/elizaos-os-release.yml",
+        ".github/workflows/publish-android-update-manifest.yml",
+        ".github/workflows/publish-apt-repo.yml",
+        ".github/workflows/release-all.yml",
+        ".github/workflows/update-vendor-checksums.yml",
+        ".github/workflows/windows-store-release.yml",
+        "BRAND-TODO.md",
+        "bun.lock",
+        "design-assets/elizaos-ai/assets.txt",
+        "design-assets/elizaos-ai/assets/coingecko.svg",
+        "design-assets/elizaos-ai/assets/contact/Float_Loop_HQ_480p_SD.mp4",
+        "design-assets/elizaos-ai/assets/contact/Float_Loop_Mobile_1080p_HD.mp4",
+        "design-assets/elizaos-ai/assets/contact/floating-eliza.svg",
+        "design-assets/elizaos-ai/assets/features/feature-1-icon.svg",
+        "design-assets/elizaos-ai/assets/features/feature-2-icon.svg",
+        "design-assets/elizaos-ai/assets/features/feature-3-icon.svg",
+        "design-assets/elizaos-ai/assets/features/feature-4-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/discord-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/farcaster.svg",
+        "design-assets/elizaos-ai/assets/footer/github-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/github-white-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/logo.svg",
+        "design-assets/elizaos-ai/assets/footer/x-icon.svg",
+        "design-assets/elizaos-ai/assets/header/eliza-header-logo.svg",
+        "design-assets/elizaos-ai/assets/header/hamburger.svg",
+        "design-assets/elizaos-ai/assets/hero/Hero_Loop_HQ_480p_SD.mp4",
+        "design-assets/elizaos-ai/assets/hero/Hero_Loop_Mobile_1080p_HD.mp4",
+        "design-assets/elizaos-ai/assets/hero/divider-bar-mobile.svg",
+        "design-assets/elizaos-ai/assets/hero/divider-bar.svg",
+        "design-assets/elizaos-ai/assets/hero/hero-eliza-2.png",
+        "design-assets/elizaos-ai/assets/hero/hero-eliza-mobile.png",
+        "design-assets/elizaos-ai/assets/icon.png",
+        "design-assets/elizaos-ai/assets/trusted-groups/chainlink.png",
+        "design-assets/elizaos-ai/assets/trusted-groups/dreamnet.png",
+        "design-assets/elizaos-ai/assets/trusted-groups/org1.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org10.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org2.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org3.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org4.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org5.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org6.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org7.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org8.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org9.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/stanford.png",
+        "design-assets/elizaos-ai/design-system.md",
+        "design-assets/elizaos-ai/homepage-screenshot.png",
+        "design-assets/elizaos-ai/index.html"
+      ]
+    },
+    {
+      "title": "fix(talkmode): play local inference TTS natively on Android",
+      "prNumber": 7763,
+      "type": "bugfix",
+      "body": "## Summary\n\nAdds an Android native local-inference TTS playback path to TalkMode.\n\nWhen the UI asks TalkMode to speak with `useLocalInferenceTts: true`, the Android plugin now:\n\n- posts to the embedded agent at `127.0.0.1:31337/api/tts/loca",
+      "files": [
+        "packages/ui/src/bridge/native-plugins.d.ts",
+        "packages/ui/src/bridge/native-plugins.ts",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "plugins/plugin-native-talkmode/android/src/main/java/ai/eliza/plugins/talkmode/TalkModePlugin.kt",
+        "plugins/plugin-native-talkmode/src/definitions.ts"
+      ]
+    },
+    {
+      "title": "feat(os): add elizaOS live update architecture",
+      "prNumber": 7762,
+      "type": "feature",
+      "body": "## Summary\n\nAdds the production updater/security architecture foundation for the elizaOS Live USB variant, plus VM-proven boot/runtime fixes and the latest elizaOS branding/docs audit cleanup.\n\n- Adds signed app/runtime update manifest and ",
+      "files": [
+        ".github/workflows/quality.yml",
+        "docs/apps/desktop/release-heavy-inventory.md",
+        "docs/apps/desktop/release-regression-checklist.md",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-mobile-linux.png",
+        "packages/os/DOWNLOADS.md",
+        "packages/os/linux/README.md",
+        "packages/os/linux/variants/milady-tails/PLAN.md"
+      ]
+    },
+    {
+      "title": "fix(app-core): harden browser fallback stubs",
+      "prNumber": 7760,
+      "type": "bugfix",
+      "body": "## Summary\n\nHardens the browser fallback stubs used when renderer/browser bundles statically reach server-only modules.\n\nThe prior fallback proxy returned the same noop for all property reads but did not behave like a normal function/object",
+      "files": [
+        "packages/app-core/src/platform/elizaos-agent-browser-stub.ts",
+        "packages/app-core/src/platform/elizaos-plugin-elizacloud-browser-stub.ts",
+        "packages/app-core/src/platform/empty-node-module.ts"
+      ]
+    },
+    {
+      "title": "fix(core): emit llama-safe grammar rule names",
+      "prNumber": 7759,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes response/planner GBNF rule names so generated grammars stay compatible with llama.cpp.\n\nThe previous sanitizer left underscores in generated rule identifiers such as `callofaction_ALPHA` and `paramsofaction_PAYMENT_p_payme",
+      "files": [
+        "packages/core/src/runtime/__tests__/response-grammar.test.ts",
+        "packages/core/src/runtime/response-grammar.ts"
+      ]
+    },
+    {
+      "title": "fix(os): harden elizaOS live USB integration",
+      "prNumber": 7757,
+      "type": "bugfix",
+      "body": "## Summary\n- hardens the elizaOS Live USB app/runtime integration after the merged distro PR (#7754)\n- keeps inherited launcher labels branded as elizaOS, adds the missing UDisks typelib required by the greeter, and updates release CI to va",
+      "files": [
+        ".github/workflows/elizaos-os-release.yml",
+        "packages/agent/src/api/server.ts",
+        "packages/os-homepage/tests/homepage.spec.ts",
+        "packages/os/DOWNLOADS.md",
+        "packages/os/docs/beta-release-manifest.md",
+        "packages/os/docs/installers-release-plan.md",
+        "packages/os/linux/variants/milady-tails/PLAN.md",
+        "packages/os/linux/variants/milady-tails/README.md",
+        "packages/os/linux/variants/milady-tails/ROADMAP.md",
+        "packages/os/linux/variants/milady-tails/docs/distribution-and-updates.md",
+        "packages/os/linux/variants/milady-tails/docs/mode-parity.md",
+        "packages/os/linux/variants/milady-tails/docs/privacy-mode-v1-gap.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/docs/user-experience.md",
+        "packages/os/linux/variants/milady-tails/scripts/prepare-milady-app-overlay.mjs",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/9100-install-milady",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/9150-brand-inherited-strings",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/99-zzzzzz_permissions",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/milady.path",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/milady.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/user/elizaos-agent.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/user/elizaos-renderer.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/user/milady.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/lib/python3/dist-packages/tps/configuration/features.py",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/bin/milady",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/milady-keeper",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/persistence-maintenance",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/renderer-server.mjs",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/start-elizaos-agent-user",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/start-elizaos-browser-user",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/start-elizaos-renderer-user",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-packageslists/tails-common.list"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 466.23217584131294,
+      "prScore": 465.79417584131295,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 210.68404273475105,
+      "prScore": 210.68404273475105,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 87.2875477931522,
+      "prScore": 87.0875477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 58.76577389657611,
+      "prScore": 56.4257738965761,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 45.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "rndrntwrk",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/180591682?u=0e7124e4e8ca7ea9899b147e0f7289ff3ffc7126&v=4",
+      "totalScore": 43.7437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sunfishloop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64062070?u=6edc4d659415d7b6326abe48a7ec60d053cc44a8&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "infiniteezverse",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175495935?u=2718a0ed681d6fd243a4a32d69049bdd43ab1a87&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 24,
+  "mergedPRs": 19,
+  "newIssues": 2,
+  "closedIssues": 3,
+  "activeContributors": 9
+}

@@ -5,8 +5,56 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-05-01 to 2026-06-01, elizaos/eliza had 144 new PRs (90 merged), 14 new issues, and 15 active contributors.",
+  "overview": "From 2026-05-01 to 2026-06-01, elizaos/eliza had 170 new PRs (109 merged), 20 new issues, and 18 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABCFsSVw",
+      "title": "vulkan: Qwen2.5-14B Q4_K_M bandwidth-efficiency cliff on Lunar Lake iGPU (n=1, kernel-selection suspected)",
+      "author": "NubsCarson",
+      "number": 7638,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`Qwen2.5-14B-Instruct Q4_K_M` (~8.5 GB) runs at **1.15 t/s tg** on Intel Arc 140V iGPU via Shaw's Vulkan + W4-B kernels — only ~22% of the LPDDR5X bandwidth ceiling, vs 63-87% on the other Llama / Qwen3-family Q4_K_M models I tested with the **same Vulkan build, same drivers, same `-ngl 99 -c 2048` invocation**.\n\n**n=1 caveat upfront**: I have only tested *Qwen2.5-14B-Instruct Q4_K_M* in the 14B param class on this hardware. The cliff may be Qwen2.5-14B-specific (head-dim / GQA-factor / tile-alignment) rather than a general \"14B param-class\" issue. A second 14B (Phi-4-14B, Mistral-Nemo-12B) would tell us which. I'm filing it now because the gap is large enough to be worth investigating even at n=1, and the diagnostic ask is the same either way.\n\n## Bandwidth ceiling derivation\n\nFor a memory-bandwidth-bound decoder (the steady-state regime on integrated GPUs with Q4_K_M weights), every token needs ~one full pass of the weight bytes. So:\n\n```\nceiling_t_per_s ≈ sustained_bandwidth_GB_per_s / weights_GB\n```\n\nFor Lunar Lake on-package LPDDR5X-8533:\n- Theoretical peak: 8533 MT/s × 16 B/transfer = 136.5 GB/s\n- Sustained iGPU-effective (after refresh, CPU-shared, page traffic): **~75 GB/s** (Intel-published ~67 GB/s sustained; rounded up slightly for cool-laptop, fresh-server best case)\n\nSo the ceiling-t/s column below is `75 / weights_GB`. The measured t/s is `timings.predicted_per_second` from `/v1/chat/completions`. Efficiency is `measured / ceiling`.\n\n## Bench (cool laptop, no contention, same prompt, fresh server per row)\n\n| Model | Q4_K_M weights | 75 GB/s ceiling | Measured tg | Efficiency |\n|---|---|---|---|---|\n| Llama-3.2-3B-Instruct | 1.9 GB | 39.5 t/s | 20.0 t/s | **51%** |\n| Llama-3.1-8B-Instruct | 4.9 GB | 15.3 t/s | 5.7 t/s | **37%** |\n| Llama-3.1-8B-Instruct Q3_K_M | 3.8 GB | 19.7 t/s | 6.3 t/s | 32% |\n| **Qwen2.5-14B-Instruct** | **8.5 GB** | **8.8 t/s** | **1.15 t/s** | **13%** |\n| Qwen3.6-27B Q4_K_M (body-only, DFlash disabled) | 16 GB | 4.7 t/s | 1.15 t/s | 25% |\n\n(Earlier draft of this issue used a more optimistic 50% sustained-headroom assumption that bumped the column to a \"60-87% efficiency\" framing. The numbers above use the conservative 75 GB/s ceiling, which produces the same qualitative cliff. Pick whichever interpretation you prefer; the 14B → others gap is consistent across both.)\n\nThe cleanest cliff is **3B → 8B → 14B = 51% → 37% → 13%**. The 27B suffers from the SWA spec-decode gate too ([#7635](https://github.com/elizaOS/eliza/issues/7635)) which masks its true efficiency, so it is excluded from the cliff trend.\n\n## Repro\n\nSame `linux-x64-vulkan` build via `packages/app-core/scripts/build-llama-cpp-dflash.mjs`:\n\n```bash\nLD_LIBRARY_PATH=~/.eliza/local-inference/bin/dflash/linux-x64-vulkan \\\n~/.eliza/local-inference/bin/dflash/linux-x64-vulkan/llama-server \\\n  -m <model>.gguf \\\n  -ngl 99 -c 2048 --host 127.0.0.1 --port 31xxx\n```\n\nCapture `timings.predicted_per_second` from `/v1/chat/completions`.\n\n## Why this matters\n\nThis is the difference between \"Qwen2.5-14B is the obvious next quality step from Llama-3.1-8B on 30 GB unified\" (would be ~3 t/s if it tracked the bandwidth curve) and \"Qwen2.5-14B is actively unusable\" (1.15 t/s is below human-perceptible chat rate). It is also relevant to the `linux-gpu` recommender ladder in `packages/shared/src/local-inference/catalog.ts:86-89` which lists `TIER_9B` and `TIER_4B` — those tiers would likely sit on the same kernel paths as the 14B if any future 13-15B param model gets added.\n\n## Hypothesis (untested)\n\nQwen2.5-14B has a specific combo of params that may trigger a sub-optimal kernel selection in `ggml-vulkan`'s `ggml_vk_mul_mat` dispatch:\n- `n_head = 40` (not a power of 2)\n- `n_head_kv = 8` (GQA factor 5, unusual)\n- `n_embd = 5120`\n- Hidden size that may not align to coopmat tile boundaries (Arc 140V uses KHR_coopmat with specific tile sizes)\n\nShaw's W4-B Vulkan kernels (`turbo3`, `qjl_full`, `polarquant`) target Qwen3.x quant types specifically, so a plain Q4_K_M model falls through to the **generic** ggml-vulkan kernels. The generic path may pick a slow variant when the head-dim / GQA-factor combination doesn't match the optimized tile cases. The 3B (Llama, head 24, GQA 3) and 8B (Llama, head 32, GQA 4) shapes likely hit the optimized path; Qwen2.5-14B's shape may not.\n\n## Diagnostic asks\n\n1. Capture the Vulkan kernel-selection log under `GGML_VK_DEBUG=1 GGML_VK_DEBUG_DISPATCH=1` for both Llama-3.1-8B and Qwen2.5-14B running the same prompt. Diff the kernel names invoked. If Llama-8B hits `mul_mat_id_subgroup_q4_k_q8_1` and Qwen-14B hits `mul_mat_q4_k_q8_1` (no `_subgroup` variant), the kernel-selection heuristic in `ggml/src/ggml-vulkan/ggml-vulkan.cpp` is biased toward Llama-shaped models.\n\n2. Test a second 14B-class model (Phi-4-14B, Mistral-Nemo-12B) under the same setup. If it sits closer to the 8B efficiency, the cliff is Qwen2.5-specific. If it also drops to ~13%, it is a 14B-param-class kernel-selection issue.\n\n3. Check if `--n-cpu-moe` or moving a few layers to CPU would be faster — i.e., the Vulkan kernel is slower than AVX-VNNI for these op sizes.\n\n## Related\n\n- [#7634](https://github.com/elizaOS/eliza/pull/7634) — full bench dataset for this hardware class\n- [#7635](https://github.com/elizaOS/eliza/issues/7635) — SWA-on-27B spec-decode failure (different root cause; relevant because 27B's efficiency in the table above is also bandwidth-related)\n- [#7636](https://github.com/elizaOS/eliza/issues/7636) — Shaw-merge tracker; some Vulkan kernels may have been touched by the upstream merge\n\n## Test environment\n\n- Intel Core Ultra 7 258V (Lunar Lake), Arc 140V iGPU (Xe2, KHR_coopmat / XMX)\n- 30 GB LPDDR5X-8533 unified\n- Vulkan 1.3.295, glslc shaderc 2026.1-1+b1, ANV driver\n- Submodule HEAD: `d629a3768` (`milady/main`) + my 5 fix commits on `nubs/swa-spec-decode-probe-fallback` (none of them touch Vulkan kernels)\n- Cool laptop (73-75 °C), no concurrent processes, fresh server start per row\n",
+      "createdAt": "2026-05-13T05:32:08Z",
+      "closedAt": "2026-05-17T02:37:57Z",
+      "state": "CLOSED",
+      "commentCount": 9
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABCDp_Jw",
+      "title": "speculative decoding: M-RoPE position validation rejects cross-drafter Qwen3.5 batches (acceptance collapses to 9%, tg drops below 1 t/s)",
+      "author": "NubsCarson",
+      "number": 7631,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen `llama-speculative-simple` runs a Qwen3.5 body + a same-vocab Qwen3.5 drafter, every batch the drafter proposes is rejected by the body's position-validation path with:\n\n```\ninit: the tokens of sequence 0 in the input batch have inconsistent sequence positions:\n - the last position stored in the memory module of the context (i.e. the KV cache) for sequence 0 is X = 151\n - the tokens for sequence 0 in the input batch have a starting position of Y = 146\n for M-RoPE, it is required that the position satisfies: X < Y\ndecode: failed to initialize batch\nllama_decode: failed to decode, ret = -1\n```\n\nThese errors fire continuously throughout the generation. Spec-decode degenerates: acceptance falls to **9.5%** (21/222 drafts), effective tg drops to **0.33 t/s** (vs ~3-4 t/s body-only would give). The harness keeps going by re-feeding single tokens, but the speculation path is effectively dead.\n\n## Why this matters\n\nQwen3.5 uses multimodal RoPE (M-RoPE) positions even for text-only inference. The spec-decode driver assumes a 1-D position cursor — when the drafter proposes K tokens at positions `[X-K+1, X-K+2, ..., X]`, the M-RoPE check on the body's side sees a drafted position `Y < X` and rejects the batch. This means **any** Qwen3.5 body paired with **any** cross-drafter (same vocab or not) hits this immediately.\n\nThis blocks both:\n\n- **End-user DIY spec-decode** (Qwen3.5-9B body + Qwen3.5-0.8B drafter, both from `unsloth/Qwen3.5-*-GGUF`).\n- **Shaw's intended Eliza-1 flow** when distilled Qwen3.5 drafters land — same code path, same M-RoPE check.\n\nReported here because the planned recommender ladder (per the 2026-05-12 directive in `packages/shared/src/local-inference/catalog.ts`) routes most users to Qwen3.5 tiers — the spec-decode harness needs M-RoPE awareness before that flow ships.\n\n## Repro\n\nLinux x64, Intel Arc 140V iGPU, this fork at `v1.2.0-eliza` (`a61c93aaa5`), Vulkan build via `build-llama-cpp-dflash.mjs --target linux-x64-vulkan` with the glslc fix from #7626 applied.\n\n```bash\nLD_LIBRARY_PATH=~/.eliza/local-inference/bin/dflash/linux-x64-vulkan \\\\\n~/.eliza/local-inference/bin/dflash/linux-x64-vulkan/llama-speculative-simple \\\\\n  -m Qwen3.5-9B-Q4_K_M.gguf \\\\\n  -md Qwen3.5-0.8B-Q8_0.gguf \\\\\n  --draft-min 2 --draft-max 8 --draft-p-min 0.4 \\\\\n  -ngl 99 -ngld 99 -c 4096 -cd 4096 -n 128 \\\\\n  -p \\\"Write a single concise paragraph explaining speculative decoding.\\\"\n```\n\nOutput:\n\n```\nencoded   19 tokens in    1.046 seconds, speed:   18.167 t/s\ndecoded  129 tokens in  388.786 seconds, speed:    0.332 t/s\n\nn_draft   = 8\nn_predict = 129\nn_drafted = 222\nn_accept  = 21\naccept    = 9.459%\n```\n\nThe `init: the tokens of sequence 0...` error block repeats ~30 times during generation.\n\nGGUFs used:\n\n- Body: `unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf` (sha matches upstream)\n- Drafter: `unsloth/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf`\n\nBoth carry the Qwen3.5 BPE vocab (248320 tokens — confirmed by the `n_vocab` line in the load log), so vocab divergence is NOT the issue. The harness validates that and starts decoding; the M-RoPE check fires later, per-batch.\n\n## Where the check lives\n\nThe M-RoPE validation is in the model's input-position check (the `for M-RoPE, it is required that the position satisfies: X < Y` string). The speculative-decode driver in `examples/speculative-simple/speculative-simple.cpp` doesn't appear to advance / synchronize the drafter's M-RoPE position track relative to the body's KV-cache position. I have not traced the exact validation site yet — happy to dig deeper if maintainers want a more precise file:line.\n\n## Suggested fixes (any subset)\n\n1. **Spec-decode harness fix**: detect M-RoPE bodies (`llama_model_rope_type() == ROPE_TYPE_MROPE` or similar) and either (a) bypass the M-RoPE validation for draft batches by synthesizing a monotonic position sequence per draft, or (b) reject the body+drafter pair upfront with a clear \\\"M-RoPE bodies not supported in spec-decode\\\" diagnostic rather than degenerate to 0.3 t/s silently.\n\n2. **Recommender guard**: in `packages/app-core/src/services/local-inference/recommendation.ts`, tag Qwen3.5/3.6 tiers with a `requiresMRopeSpecDecode: true` capability and refuse to wire them through the spec-decode path until the harness supports M-RoPE.\n\n3. **Per-tier kernel-caps check**: `target-meta.json` already has a `kernelCaps.required` array (`turboquant_q3, qjl, polarquant, dflash`). Add `mrope-spec-decode` to the list for Qwen3.5/3.6 tiers and have the runtime gate on it.\n\n## Related\n\n- #7629 — Qwen3.5/3.6 drafter publication gap (Shaw needs distilled drafters published on HF; this issue surfaces a *different* blocker that those drafters will hit even once published)\n- #7626 — glslc fix (required to build the Vulkan binary that reproduces this)\n- #7630 — v1.2.0-eliza submodule bump (reproduced on this submodule sha)\n\n## Note\n\nI do not have a CUDA host. The Vulkan-side repro above is what surfaced this; happy to retest on CUDA if a maintainer wants confirmation it is not Vulkan-specific. The error message comes from llama-core (not a Vulkan-specific shader path), so I expect it to fire on CUDA too — the validation happens before any backend-specific compute.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-05-12T22:20:26Z",
+      "closedAt": "2026-05-17T02:38:15Z",
+      "state": "CLOSED",
+      "commentCount": 8
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABCEBTMA",
+      "title": "RFC: add openvino (CPU/GPU/NPU) runtime kernel for Intel hardware — bench numbers + scaffolding ready",
+      "author": "NubsCarson",
+      "number": 7633,
+      "repository": "elizaos/eliza",
+      "body": "# RFC: add `openvino` (CPU/GPU/NPU) as a `LocalRuntimeKernel` for Intel hardware\n\n## Tl;dr\n\nWire the upstream `ggml-openvino` backend (now in `elizaOS/llama.cpp` now in Shaw's `milady/main` via his upstream-merge commit `79079c25e` (2026-05-12) and the eliza-side scaffold in [#7634](https://github.com/elizaOS/eliza/pull/7634)) into the `LocalRuntimeKernel` slot in `packages/shared/src/local-inference/types.ts`. Surface it through the recommender so Intel users on Lunar Lake / Meteor Lake / Arrow Lake / Panther Lake hosts can route inference onto the on-die NPU (or iGPU) without leaving the existing GGUF / `~/.eliza/local-inference/models/` / `llama-server` plumbing.\n\n## Why now\n\n> **Update 2026-05-13:** the Whisper-on-NPU killer-app framing in this section is now measured — Whisper-base.en INT8 = 49.8× realtime on Lunar Lake NPU, driving an end-to-end voice agent at 2.5-3.4 sec TTFA. See the \"Whisper-NPU measurement\" update at the bottom of this issue for numbers and repro.\n\nPre-April 8 2026, OpenVINO and `llama.cpp` were two separate ecosystems with no GGUF interop and no shared runtime — putting NPU support into Eliza would have meant a 1-3 month engineering project. Post that date, mainline `ggml-org/llama.cpp` has a self-contained `ggml/src/ggml-openvino/` directory that compiles into the same `libggml-openvino.so` via `-DGGML_OPENVINO=ON` and selects device at runtime via `GGML_OPENVINO_DEVICE={CPU,GPU,NPU,GPU.0,GPU.1}`. Shaw merged the same backend into `milady/main` himself (commit `79079c25e`); eliza PR [#7634](https://github.com/elizaOS/eliza/pull/7634) wires a `linux-x64-openvino` target into `build-llama-cpp-dflash.mjs`.\n\nThis RFC is the next step: surface that capability through Eliza's local-inference layer the same way `cuda`/`vulkan`/`metal`/`cpu` are surfaced today.\n\n## What this unlocks\n\nHardware coverage:\n\n- Intel Lunar Lake (Core Ultra 7 258V class, ~48 TOPS NPU, Arc 140V iGPU, AVX-VNNI CPU) — every Copilot+ laptop shipping today\n- Intel Meteor Lake (~11 TOPS NPU) — ~30M devices shipped 2023-2025\n- Intel Arrow Lake (desktop chips, late 2024-2025)\n- Intel Panther Lake (~50+ TOPS NPU, late 2025-2026)\n\nThe NPU specifically is **not reachable** through any of the existing runtime kernels (`vulkan`, `sycl`, `cuda`, `metal`, `cpu`). OpenVINO is the only llama.cpp path that targets it.\n\nPower efficiency: on Lunar Lake, the NPU draws ~2-3 W vs ~15-25 W for the iGPU. Running on battery, a voice-agent loop that lives on the NPU is **4-5× the battery life** of the same workload on the iGPU.\n\nConcurrent workloads: NPU runs while iGPU is gaming / video encoding / WebGL. Real pipelining for the voice agent — Whisper on NPU + body on iGPU + TTS on CPU all in flight simultaneously.\n\n## Hardware bench (Intel Core Ultra 7 258V, Lunar Lake, OpenVINO 2026.1.0)\n\nLlama-3.1-8B-Instruct Q4_K_M, single-prompt warm-load chat completion, `-c 2048 -ngl 99`:\n\n| Device | Decode tg | Prompt eval pp | Output | Notes |\n|---|---|---|---|---|\n| OpenVINO CPU (8B) | 3.89 t/s | 40.7 t/s | coherent | 8-core CPU, AVX-VNNI |\n| OpenVINO GPU (8B) | aborted on init | — | — | Intel Compute Runtime missing built-ins (`built_ins.cpp:42`); needs `apt install intel-opencl-icd` + `libigc2` + `libigdfcl2` on the host (the `intel-opencl-icd` deb alone is insufficient — it depends on the full Intel Compute Runtime stack at runtime, which is not extractable cleanly without sudo) |\n| OpenVINO NPU (8B) | crashed mid-prompt | — | — | Llama-3.1-8B exceeds the NPU plugin's per-graph memory budget on Lunar Lake (server processed 61-token prompt then died silently). Likely needs an NPU-specific OpenVINO INT4 weight-only quant; the GGUF Q4_K_M dequant→FP16→NPU path is too memory-heavy for this NPU class |\n| OpenVINO NPU (1B) | **2.07 t/s** | 72.2 t/s | coherent | Lunar Lake AI Boost 48 TOPS — Llama-3.2-1B-Instruct Q4_K_M, 77 tokens generated. Output coherent, but the NPU is **slower than the CPU** for autoregressive LLM tg — confirms NPU is well-tuned for fixed-graph CNN/audio workloads (Whisper), not the QKV/RoPE/SwiGLU hot path of token-by-token decode |\n| Vulkan iGPU (8B, W4-B kernels) | 5.7 t/s | 172 t/s | coherent | the existing baseline for this host |\n| Vulkan iGPU (3B, W4-B kernels) | **20.0 t/s** ⭐ | 285.9 t/s | coherent | **the practical winner** — Llama-3.2-3B-Instruct Q4_K_M; uses Shaw's existing W4-B Vulkan kernels (turbo3/qjl/polarquant for any tier with those quants; plain Q4_K_M here) |\n| Vulkan iGPU (3B body + 1B drafter, spec-decode) | 6.9 t/s | 137 t/s | coherent | low draft acceptance (31.8%) — overhead of running drafter + verifying outweighs the savings on this body/drafter ratio. NOT recommended |\n\n## Honest takeaways from the bench\n\n1. **The OpenVINO backend integration works end-to-end on Lunar Lake.** CPU, GPU (with full Intel Compute Runtime installed), and NPU devices are all discoverable and runnable through `GGML_OPENVINO_DEVICE`. The cherry-picked backend in `elizaOS/llama.cpp#1` is a real, working scaffold.\n\n2. **The NPU is NOT a speed win for autoregressive LLM tg today.** Llama-3.2-1B Q4_K_M on the Lunar Lake NPU clocked 2.07 t/s — slower than the CPU on the same model class. The NPU is optimized for static graphs and fixed-shape ops (CNN classifiers, audio encoders, diffusion), not the per-token KV-cache update of an autoregressive LM. Larger models (Llama-3.1-8B) outright crash on the NPU plugin due to memory budget.\n\n3. **Whisper-on-NPU remains the real product win.** Voice-agent ASR is exactly the workload the Lunar Lake NPU was designed for. That's the follow-up — not Llama bodies.\n\n4. **Smaller bodies on Vulkan/Shaw kernels beat NPU/iGPU OpenVINO for chat.** The honest fastest config we found for this hardware is **Llama-3.2-3B-Instruct Q4_K_M on Vulkan iGPU (the existing W4-B target)** — 20 t/s tg, 285 t/s pp, coherent output, ~2.4 GB iGPU memory used of 23.7 GB available. Tool-calling works. The OpenVINO/NPU path doesn't compete on this workload.\n\n5. **The right place to surface OpenVINO in the Eliza catalog**: as the **voice-agent ASR runtime** + an **opt-in inference path for users without iGPU** (Intel desktops without Arc, headless CPU-only servers, etc.). NOT as the recommended default for LLM tg on Lunar Lake laptops with iGPUs.\n\nReference cost on the same host: plain Vulkan iGPU with Shaw's turbo3/qjl/polarquant kernels via the existing `linux-x64-vulkan` target gives 5.7 t/s tg / 172 t/s pp on Llama-3.1-8B Q4_K_M, and **20 t/s tg / 285 t/s pp on Llama-3.2-3B Q4_K_M** — both significantly faster than every OpenVINO device on the same hardware.\n\n## Concrete proposal\n\n### 1. Type extension\n\nIn `packages/shared/src/local-inference/types.ts`:\n\n```diff\n export type LocalRuntimeKernel =\n   | \"cpu\"\n   | \"cuda\"\n   | \"metal\"\n   | \"vulkan\"\n   | \"rocm\"\n+  | \"openvino\"\n   ;\n```\n\nOptionally split into `openvino-cpu`, `openvino-gpu`, `openvino-npu` if the recommender needs to differentiate, but a single `openvino` slot + a runtime `device` sub-selector keeps the kernel matrix simpler. The latter is what the upstream backend does (`GGML_OPENVINO_DEVICE=...` env var, not three separate libraries).\n\n### 2. Hardware probe\n\nIn `packages/app-core/src/services/local-inference/hardware.ts`, add a `detectOpenVinoDevices()` that:\n\n- Linux: probes for `/dev/dri/renderD*` (iGPU) and `/dev/accel/accel*` (NPU). Existence + readable permissions means the device is wireable.\n- Windows: probes for Intel Graphics Driver registry keys + the Neural Compute Engine registration.\n- macOS: skip (Intel Macs lack the NCE; Apple Silicon has its own thing).\n\nResult: `{ cpu: true|false, gpu: 0..n, npu: true|false }`. Empty NPU + no GPU → kernel slot is unavailable, fall back to existing recommender.\n\n### 3. Recommender wiring\n\nIn `packages/app-core/src/services/local-inference/recommendation.ts`:\n\n- When a user is on a host with `npu` available, surface the existing tiers (`eliza-1-0_8b`, `eliza-1-2b`, `eliza-1-9b`, `eliza-1-27b`) with an additional `runtime: \"openvino\"` slot.\n- Prefer NPU > iGPU > CPU when the kernel is `openvino` (the NPU is faster *and* more power-efficient on every Intel host where it exists).\n- Battery-aware routing as a v2: when AC unplugged, prefer NPU over iGPU even if iGPU is faster.\n\n### 4. Runtime spawn plumbing\n\nIn `packages/app-core/src/services/local-inference/backend.ts`:\n\n- When the active `LocalRuntimeKernel` is `openvino`, spawn `llama-server` with `GGML_OPENVINO_DEVICE` in the env, value picked by the device sub-selector (NPU / GPU / CPU).\n- Pre-flight check: confirm `libggml-openvino.so` is in the bin dir before claiming the kernel is available.\n- LD_LIBRARY_PATH includes the OpenVINO Runtime install dir.\n\n### 5. Catalog support\n\nMark which tiers are OpenVINO-eligible. Q4_K_M / Q4_0 / Q4_1 / Q4_K / Q8_0 / FP16 are natively supported. Q5_K / Q6_K runtime-convert with a startup cost. Anything that requires a Shaw custom kernel (QJL1_256, Q4_POLAR, TBQ3) is **not** OpenVINO-eligible — flag in `kernelCaps.unsupported: [\"openvino\"]` to keep the recommender from routing those tiers through this path.\n\n### 6. Voice agent: Whisper on NPU\n\nSeparate but related: the canonical NPU-on-laptop success story is Whisper-on-NPU at ~1 W. The OpenVINO backend covers Whisper too. The voice agent pipeline (`packages/app-core/src/services/local-inference/voice/transcriber.ts`) could route Whisper inference through the same OpenVINO path. Out of scope for this RFC, but it's the real product win.\n\n## Costs / maintenance\n\n- The `ggml-openvino/` directory is upstream-maintained — we follow ggml-org's PRs the same way we do for ggml-cuda / ggml-vulkan.\n- OpenCL + Level Zero runtime dependencies need to ship in install docs / a one-shot installer. The Eliza catalog could include a \"install OpenVINO\" CTA in the model picker when an Intel host is detected and the kernel is missing.\n- The W4-B custom kernels do not have OpenVINO ports today. Tiers that depend on them stay on Vulkan / CUDA / Metal / CPU. The RFC does not change that.\n\n## Out of scope\n\n- AMD XDNA NPU support — similar story (separate runtime kernel, ROCm-based, different probe). Independent RFC.\n- Qualcomm Hexagon NPU support — same.\n- A real W4-B kernel port to OpenVINO. Needs Intel-paid contributor (or a community contributor with an NPU dev box). Unblocked by this RFC.\n- Power-aware routing (battery → NPU). v2.\n\n## Links\n\n- Plan doc with full execution log: `/tmp/openvino-npu-integration-plan.md`\n- [elizaOS/llama.cpp#1](https://github.com/elizaOS/llama.cpp/pull/1) — cherry-pick of the OpenVINO backend\n- [elizaOS/eliza#7632](https://github.com/elizaOS/eliza/pull/7632) — `linux-x64-openvino` build target + submodule bump\n- [elizaOS/eliza#7628](https://github.com/elizaOS/eliza/pull/7628) — sibling `linux-x64-sycl` target (parallel Intel iGPU/CPU path, no NPU coverage)\n\n\n## Update 2026-05-13 — interaction with #7635 (SWA + DFlash gate)\n\nSubsequent testing on `Qwen3.6-27B + spiritbuun/Qwen3.6-27B-DFlash-GGUF` through the same OpenVINO build surfaced [#7635](https://github.com/elizaOS/eliza/issues/7635): `common_speculative_is_compat: the target context does not support partial sequence removal` — DFlash is silently disabled for any SWA-based body, regardless of which backend (Vulkan / OpenVINO-iGPU / OpenVINO-NPU) it's running on. That means:\n\n- The OpenVINO/NPU path is still real (the bench numbers in this RFC stand for non-spec-decode workloads — Whisper ASR is the canonical win)\n- But **OpenVINO/NPU + 27B-class DFlash for chat-tg is double-blocked** today: the NPU plugin can't fit the 8B+ body, and the SWA gate would block DFlash even if it did\n- Practical chat-tg on Lunar Lake unified-memory: still **Vulkan iGPU + Shaw W4-B kernels + smaller body** (Llama-3.2-3B @ 20 t/s, Llama-3.1-8B @ 5.7 t/s — clean numbers, 71 °C, no contention)\n\nThe right framing remains: surface OpenVINO as the **voice-agent ASR runtime + CPU-only fallback**, not the primary autoregressive chat runtime on Intel hardware.\n\n## Update 2026-05-13 — Whisper-NPU measurement (the killer-app claim, now measured)\n\nThe \"Voice agent: Whisper on NPU\" item at the bottom of the Concrete proposal section was forward-looking when first filed. It's now measured.\n\nSetup:\n\n- OpenVINO 2026.1.0 Runtime tarball\n- Intel pre-converted `whisper-base.en-int8-ov/` IR (81 MB, INT8)\n- `openvino_genai.WhisperPipeline(device=\"NPU\")`\n- 10.4 second LibriSpeech-style English clip\n- Cool laptop, fresh process, no contention\n\nResult: **210 ms avg generation time = 49.8× realtime** on the NPU. CPU and GPU comparisons on the same setup:\n\n| Device | Avg gen | RTF | Notes |\n|---|---|---|---|\n| CPU (OpenVINO) | 349 ms | 29.9× | 8-core, AVX-VNNI |\n| GPU (OpenVINO) | 267 ms | 39.1× | Arc 140V via Intel Compute Runtime |\n| **NPU (OpenVINO)** | **210 ms** | **49.8×** | **AI Boost 48 TOPS — winner** |\n\nEnd-to-end voice agent (Whisper-NPU + Llama-Vulkan + Kokoro-CPU, concurrent pipelining, phrase-chunked TTS streaming):\n\n| LLM body | TTFA | Sustained tg | Notes |\n|---|---|---|---|\n| Llama-3.2-1B Q4_K_M | 2.54 s | 32.4 t/s | best TTFA — 1B quality is the tradeoff |\n| Llama-3.2-3B Q4_K_M | 3.36 s | 18.0 t/s | recommended balance for usable assistant quality |\n| Llama-3.1-8B Q4_K_M | 3.32 s | 9.7 t/s | LLM is slow enough that Kokoro catches up |\n\nThis is the practical voice-agent UX target on Lunar Lake **today, without sudo, without upstream maintainer action**. The forward-looking \"ChatGPT voice mode on laptop\" framing in the original RFC is no longer aspirational — the gap to 1.5 s TTFA requires only landing [elizaOS/llama.cpp#3](https://github.com/elizaOS/llama.cpp/pull/3) (SWA spec-decode probe) and a one-shot host install of `intel-opencl-icd` / `libigc2` / `libigdfcl2`.\n\nThis update reinforces the RFC's core proposal: **surface OpenVINO as the voice-agent ASR runtime** in the recommender. The NPU is the right place for Whisper. The autoregressive LLM body stays on Vulkan iGPU + Shaw W4-B kernels for the foreseeable future.\n\n",
+      "createdAt": "2026-05-12T23:42:42Z",
+      "closedAt": "2026-05-16T15:49:01Z",
+      "state": "CLOSED",
+      "commentCount": 7
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABCEbSeg",
+      "title": "speculative decoding: 'target context does not support partial sequence removal' silently disables --spec-type dflash for SWA-based bodies (Qwen3.6, gemma-4, etc.)",
+      "author": "NubsCarson",
+      "number": 7635,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen pairing a Qwen3.6-style body (Sliding Window Attention, hybrid SWA + full pattern) with a community DFlash drafter and `--spec-type dflash`, this fork silently disables speculative decoding because the SWA-based KV cache can't do partial sequence removal:\n\n```\ncommon_speculative_is_compat: the target context does not support partial sequence removal\nsrv    load_model: speculative decoding not supported by this context\n```\n\nThe server then runs as plain body-only inference — **no draft tokens are ever generated** — but does not surface this in the API response or in any post-load summary line. Users will believe DFlash is firing while getting baseline single-stream throughput.\n\nAffects every SWA-based body that has a community DFlash drafter today:\n\n- `Qwen/Qwen3.6-27B` + `spiritbuun/Qwen3.6-27B-DFlash-GGUF/dflash-draft-3.6-*.gguf`\n- `Qwen/Qwen3.6-35B-A3B` + `z-lab/Qwen3.6-35B-A3B-DFlash`\n- `google/gemma-4-31B-it` + `z-lab/gemma-4-31B-it-DFlash`\n- Future Eliza-1-27b once Shaw publishes the distilled drafter (the upstream `Qwen/Qwen3.6-27B` body has the same `attention.sliding_window` field, see manifest at `packages/shared/src/local-inference/catalog.ts`)\n\n## Why this matters for the eliza recommender\n\n`packages/shared/src/local-inference/catalog.ts` lists `eliza-1-27b` and `eliza-1-27b-256k` in the `linux-gpu` `TEXT_LARGE` ladder for any host with sufficient VRAM (mine: Intel Arc 140V / 30 GB unified, fits 27B Q4_K_M with room). Once the planned Qwen3.6-based bundles ship with their DFlash drafters, the recommender will surface them to users, and `--spec-type dflash` is the only thing that makes 27B usable on iGPU-class hardware (memory-bandwidth math caps body-only at ~1-2 t/s on Arc 140V). If this incompatibility isn't fixed, recommending a DFlash-eligible 27B tier on this hardware class is a no-op.\n\n## Repro\n\nThis fork at `d629a3768` (current `milady/main` HEAD), Vulkan build via the existing `linux-x64-vulkan` target (PR #7626 glslc fix applied). All artifacts public on HF.\n\n```bash\n# Body\nhuggingface-cli download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-Q4_K_M.gguf\n# Drafter (DFlash)\nhuggingface-cli download spiritbuun/Qwen3.6-27B-DFlash-GGUF dflash-draft-3.6-q4_k_m.gguf\n# (Q8_0 drafter has the same issue — this is not a drafter-quant problem)\n\nLD_LIBRARY_PATH=~/.eliza/local-inference/bin/dflash/linux-x64-vulkan \\\n~/.eliza/local-inference/bin/dflash/linux-x64-vulkan/llama-server \\\n  -m Qwen3.6-27B-Q4_K_M.gguf \\\n  -md dflash-draft-3.6-q4_k_m.gguf \\\n  --spec-type dflash \\\n  -ngl 99 -ngld 99 \\\n  -np 1 -c 4096 -cd 256 \\\n  -fa on -b 256 -ub 64 \\\n  --jinja --reasoning-budget 0 \\\n  --host 127.0.0.1 --port 31551\n```\n\nServer log:\n\n```\nprint_info: arch                  = dflash-draft\nload_tensors: offloaded 6/6 layers to GPU\ncommon_speculative_is_compat: the target context does not support partial sequence removal\nsrv    load_model: speculative decoding not supported by this context\nsrv          init: init: chat template, thinking = 0\nmain: server is listening on http://127.0.0.1:31551\nmain: starting the main loop...\n```\n\nNote how the drafter loads correctly with the canonical `arch = dflash-draft` and 6/6 layers offloaded, but the spec-decode is then disabled — yet the server bootstraps and serves requests as if everything is fine.\n\nGeneration works, just without speculation: a chat completion returns the right text but the `timings` object has no `n_drafted` / `n_accept` (and `n_predicted_per_second` is body-only single-stream throughput).\n\n## Where the check fires\n\n`common_speculative_is_compat` in `common/speculative.cpp` (or the equivalent file in this fork). The check asks the target's KV cache backend whether it can remove a partial sequence of cells (which spec-decode needs to roll back rejected drafts). The Qwen3.6 hybrid SWA cache returns `false` for this — the SWA window's tail cells can't be selectively dropped without invalidating the window contract.\n\nThe `spiritbuun/buun-llama-cpp` fork (which the spiritbuun drafter README points at) has SWA support for the DFlash drafter landed in commit `b9d01582b` (SD-073 per their README). That's likely the missing piece — a SWA-aware partial-sequence-removal path in the body's KV cache backend, plus the matching changes in the spec-decode driver.\n\n## Suggested fixes (any subset)\n\n1. **Loud failure at load time:** if `--spec-type dflash` is passed with `-md <drafter>` but the body's context returns `is_compat=false`, abort with a clear error message instead of silently falling through. Users today see the warning buried 200 lines into the log and have no signal in the API response.\n\n2. **Surface in the runtime API:** add a `spec_decode_active: bool` field to the `/health` and `/v1/models/<id>` responses so callers (the eliza runtime, the model picker) can show \"speculative decoding disabled — fall back\" instead of pretending DFlash is firing.\n\n3. **Port the SWA partial-sequence-removal path** from `spiritbuun/buun-llama-cpp` (commit b9d01582b or whatever lineage). This is the real fix — without it, every Qwen3.6 / gemma-4 DFlash bundle is dead on arrival in this fork.\n\n4. **Catalog gate:** in `packages/shared/src/local-inference/catalog.ts`, mark Qwen3.6 / gemma-4 tiers with `kernelCaps.unsupported: [\"spec-decode-on-swa-body\"]` until (3) lands. The recommender can then refuse to surface those tiers on hosts that would only be usable WITH spec-decode (i.e., iGPU-class).\n\n## Related\n\n- #7626 — glslc fix (required to build the Vulkan binary that reproduces this)\n- #7628 — `linux-x64-sycl` target (parallel work)\n- #7629 — Qwen3.5/3.6 drafter publication gap (this PR's premise was \"use community drafter while waiting\"; the SWA gate then blocks the community drafter too)\n- #7631 — M-RoPE position validation in spec-decode (different gate, same class of \"spec-decode silently doesn't work on modern Qwen architectures\")\n- #7633 — RFC for openvino runtime kernel\n- #7634 — linux-x64-openvino target\n\n## Note\n\nI do not have a CUDA host. The Vulkan-side repro above is what surfaced this; the underlying check is backend-agnostic (it's in `common_speculative_is_compat`, which queries the target's KV cache layer), so I expect the same warning fires on CUDA / Metal / CPU targets with SWA-based bodies. Happy to verify if a maintainer wants confirmation.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-05-13T01:15:51Z",
+      "closedAt": "2026-05-15T00:53:26Z",
+      "state": "CLOSED",
+      "commentCount": 6
+    },
     {
       "id": "I_kwDOMT5cIs8AAAABA4Rdow",
       "title": "build: dev-ui.mjs references `./claude-code-stealth.mjs` preload that doesn't exist on fresh clone",
@@ -16,54 +64,6 @@
       "body": "## Summary\n\n`packages/app-core/scripts/dev-ui.mjs` declares `./claude-code-stealth.mjs` as a Bun `--preload` entry when the user has an Anthropic subscription, but **no build step generates that file** and **it isn't checked in**. The script's existence check (`existsSync(path.join(cwd, filePath))`) silently filters the missing file out of the preload list, so the stealth fetch interceptor never installs.\n\nThe interceptor is what prepends the Claude Code system prefix and identity headers (`anthropic-beta`, `user-agent: claude-cli/...`, `x-app: cli`) that Anthropic's API requires for OAuth subscription tokens. Without it, every `api.anthropic.com` request from a subscription user gets `401 Invalid authentication credentials` even though the token is valid and registered correctly.\n\nThe TypeScript source is at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`, but the dev preload expects a different file at the **repo root**, named `.mjs`, that auto-runs on import.\n\n## Reproduction\n\nOn a fresh clone of any consumer repo (e.g. milady on `develop`):\n\n1. Sign in to an Anthropic subscription via `POST /api/subscription/anthropic/start` + `/exchange` so `~/.eliza/auth/anthropic-subscription.json` is written.\n2. Manually enable `@elizaos/plugin-anthropic` in `~/.<branding>/<branding>.json` (auto-enable refuses for subscription-only).\n3. Set `ANTHROPIC_AUTH_MODE=oauth` and `CLAUDE_CODE_OAUTH_TOKEN=<token>` in the runtime env.\n4. `bun run dev`\n5. Boot log shows:\n   ```\n   [milady] Stealth imports enabled: \n   ```\n   (notice — empty list because the file doesn't exist; it was silently filtered)\n6. Send any chat message → backend retries 3× with `AI_APICallError: Invalid authentication credentials` and surfaces the parse error to the user.\n\n## Diagnostic trail\n\n- `packages/app-core/scripts/dev-ui.mjs:785` declares the preload:\n  ```js\n  if (stealth.claude) nodeStealthImports.push(\"./claude-code-stealth.mjs\");\n  ```\n- Then filters by existence:\n  ```js\n  const resolvedStealthImports = nodeStealthImports.filter((filePath) =>\n    existsSync(path.join(cwd, filePath)),\n  );\n  ```\n- `find . -name claude-code-stealth.mjs -not -path '*/node_modules/*'` returns nothing on a fresh clone.\n- The TS source exists at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`. Nothing builds it into the expected location.\n\n## Suggested fix\n\nEither of:\n\n1. **Check in / generate the `.mjs`** at the repo root (or wherever `cwd` resolves to in `dev-ui.mjs`), with a self-installing call at the bottom. I verified locally that creating this file unblocks the Anthropic subscription auth path end-to-end (successful chat turns, zero 401s, model calls confirmed via `[stealth] →anthropic` debug logs with `ELIZA_STEALTH_DEBUG=1`).\n\n2. **Fail loud instead of silent**: in `dev-ui.mjs`, when `stealth.claude === true` but the resolved preload file is missing, log a clear warning so users know what's wrong instead of chasing parse errors.\n\nBoth would help; (1) makes the feature work out of the box, (2) prevents the same multi-hour debug hunt for the next person.\n\n## Why this matters\n\nWithout the stealth interceptor, subscription auth is **completely non-functional** on the runtime side, which:\n- Makes the `/api/subscription/anthropic/*` flow look broken (it works correctly, but the runtime that consumes its credentials can't actually use them).\n- Forces users to either get a paid API key or sign up for Eliza Cloud — even though the codebase clearly intends to support direct subscription OAuth via the stealth path.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad`\n- Discovered while booting milady on `develop`",
       "createdAt": "2026-04-29T22:09:53Z",
       "closedAt": "2026-05-01T20:04:54Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABBDbGSw",
-      "title": "plugin-sql runtime-migrator missing drizzle pgTable defs for entity_identities, entity_merge_candidates, fact_candidates",
-      "author": "Sw4pIO",
-      "number": 7222,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\nThe abstract schema declarations at `packages/typescript/src/schemas/entity-identity.ts` declare three tables (`entity_identities`, `entity_merge_candidates`, `fact_candidates`) which are:\n\n- Exported through the schemas barrel (`packages/typescript/src/schemas/index.ts`)\n- Actively queried by `packages/typescript/src/services/relationships.ts` and the `RELATIONSHIP_EXTRACTION` evaluator\n- Referenced by the `RECENT_MESSAGES` provider and `longTermMemoryProvider`\n\nBut the corresponding **drizzle `pgTable` definitions in `plugins/plugin-sql/typescript/schema/` were never added**. The runtime-migrator (`plugins/plugin-sql/typescript/runtime-migrator/`) only emits `CREATE TABLE` from drizzle pgTables — it does not consume the abstract `SchemaTable` definitions — so on every fresh PGLite boot, these three tables silently never get created.\n\n## Symptoms\n\nOn every chat turn the runtime emits 5+ errors per message:\n\n```\nError #agent:Chen [AGENT] Provider failed during state composition (provider=RECENT_MESSAGES,\n  error=Failed query: SELECT entity_id, platform, handle\n                     FROM entity_identities\n                     WHERE agent_id = '<uuid>' AND entity_id IN ('<uuid>')\n  params: )\n\nError [PROVIDER:MEMORY] Error in longTermMemoryProvider (err=Failed query: SELECT entity_id, platform, handle FROM entity_identities ...)\n\nError [EVALUATOR:MEMORY] Error during long-term memory extraction (err=Failed query: ...)\n```\n\nThe agent still appears to respond, but the prompt is composed from a half-empty state (no recent messages, no entity facts, no long-term memory), so:\n\n- The model receives essentially an empty user message\n- It replies \"I don't see a specific user message — could you provide...\"\n- The structured-output parser fails to find required XML tags\n- 3× retries, all empty\n- Surfaces to the user as: `I hit an internal parsing error while preparing the reply. Reason: No structured output could be parsed from the model response.`\n\nThis makes chat **completely unusable** on a fresh PGLite database.\n\n## Reproduction\n\n1. Fresh clone of any consumer (e.g. milady on `develop` or `alice` post-PR#105)\n2. `bun install && bun run dev`\n3. Complete onboarding, send any chat message\n4. Boot log: `[PLUGIN:SQL] Executing SQL statements (pluginName=@elizaos/plugin-sql, statementCount=83)`\n5. Subsequent chat turns: continuous `Failed query: SELECT entity_id, platform, handle FROM entity_identities ...` errors\n\n## Diagnostic trail\n\n- Schema declared: `packages/typescript/src/schemas/entity-identity.ts:13` (`entityIdentitySchema`), `:134` (`entityMergeCandidateSchema`), `:243` (`factCandidateSchema`)\n- Schema exported: `packages/typescript/src/schemas/index.ts:28-31, :61-65`\n- Service consuming: `packages/typescript/src/services/relationships.ts:347` (and many more), with `entity_identities` referenced 30+ times in that file alone\n- Drizzle schema directory listing (`plugins/plugin-sql/typescript/schema/`): contains 25 schema files for agent, cache, channel, channelParticipant, component, embedding, entity, log, longTermMemories, memory, memoryAccessLogs, message, messageServer, messageServerAgent, pairingAllowlist, pairingRequest, participant, relationship, room, server, sessionSummaries, tasks, world. **Three tables missing: `entityIdentity`, `entityMergeCandidate`, `factCandidate`.**\n\n## Fix\n\nAdd `plugins/plugin-sql/typescript/schema/entityIdentity.ts` mirroring all three abstract schemas as drizzle `pgTable` definitions, including:\n\n- All columns with their types/defaults/notNull constraints (matches `entity-identity.ts` column-for-column)\n- All indexes (`idx_entity_identities_entity`, `idx_entity_identities_platform_handle`, `idx_entity_merge_candidates_status`, `idx_entity_merge_candidates_pair`, `idx_fact_candidates_status`, `idx_fact_candidates_entity`)\n- All foreign keys to `entities` and `agents` with `onDelete: \"cascade\"` (6 FKs total)\n- Unique constraint `unique_entity_identity` on `(entity_id, platform, handle, agent_id)` for `entity_identities`\n\nThen export from `schema/index.ts`.\n\nI verified the fix locally: statement count goes from **83 → 99** on next migration (3 tables + 6 indexes + 6 FKs + 1 unique = 16 new statements). Zero `entity_identities` query failures during chat after the fix. State composition succeeds, `RELATIONSHIP_EXTRACTION` evaluator completes without errors.\n\nI have a working diff — happy to PR.\n\n## Why this slipped through\n\nThe abstract `SchemaTable` shape and drizzle `pgTable` definitions are two parallel schema sources of truth that drifted apart. The migration generator only reads drizzle, so adding a new abstract schema produces no warning at build time, no runtime check at boot, and no error until application code actually queries the missing table — which can be far later in the user journey (after onboarding, on first chat).\n\nWorth considering: a sanity check at plugin-sql init that verifies every name in the abstract schemas barrel has a corresponding drizzle pgTable in the runtime-migrator's schema set, and warns/errors loudly otherwise. Would have caught this immediately.\n\n## Environment\n\n- `bun 1.3.13`\n- `node ≥ 22`\n- PGLite (via `@elizaos/plugin-sql` runtime-migrator)\n- Discovered booting milady on alice (eliza submodule pinned at `05c636c004bf8c59e1b698ae755bdddfc7431ed5`)",
-      "createdAt": "2026-05-01T17:09:58Z",
-      "closedAt": "2026-05-01T20:04:44Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABBHeRuA",
-      "title": "telegram: milady wrapper + @elizaos/plugin-telegram both poll the same bot — race causes silent message loss",
-      "author": "Sw4pIO",
-      "number": 7245,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\nTwo independent Telegraf consumers run against the same bot token concurrently:\n\n1. **`@elizaos/plugin-telegram`** — auto-enabled when `connectors.telegram.enabled === true`. Spawns its own Telegraf instance and starts long-polling.\n2. **milady's standalone wrapper** at `packages/app-core/src/runtime/eliza.ts:534` (function `ensureTelegramBotPolling`) — spawns a *second* Telegraf instance with the same token, calls `bot.startPolling()`.\n\nTelegram's `getUpdates` long-poll API delivers each update to **exactly one consumer**. Whichever long-poll wins the race for a given message gets it; the other sees nothing. Updates routed to the upstream plugin go through elizaOS message handling — which on milady is not wired to a Telegram-channel-aware agent — and silently drop. Updates routed to milady's wrapper go through `useModel` directly and reply correctly.\n\nEnd result: **every other Telegram message (roughly) gets dropped silently**. From the user's perspective, the bot replies sometimes, ignores others.\n\n## Why both exist\n\nThe wrapper was added with this comment (`packages/app-core/src/runtime/eliza.ts:531-533`):\n\n> *\"Ensure Telegram bot is polling. The upstream plugin's `bot.launch()` is not awaited and silently fails on bun/Windows. We create a standalone Telegraf instance with proper lifecycle management.\"*\n\nSo milady spawns its own Telegraf to work around #7241 (Bun + Telegraf 4.16.3 `launch()` readonly-property bug). But it never disables the upstream plugin to avoid the duplicate poller.\n\n## Symptoms\n\n- Inconsistent: bot replies to ~50% of messages, ignores the rest.\n- Logs show `[milady] Telegram bot polling started` AND `[PLUGIN:TELEGRAM] Starting Telegram bot` on boot.\n- `curl https://api.telegram.org/bot<token>/getUpdates` returns empty (something *did* consume them) but no `[milady] Telegram message from @user: ...` log entry for the dropped messages.\n\n## Reproduction\n\n1. Fresh milady, telegram connector enabled with a valid bot token.\n2. `bun run dev` — both pollers start.\n3. From a Telegram client, DM the bot 5 messages back to back.\n4. ~2-3 will get a reply, ~2-3 will be silently dropped depending on which poller wins each `getUpdates` race.\n\n## Workaround (verified locally)\n\nDisable the upstream plugin so milady's wrapper is the only consumer:\n\n```json\n// ~/.milady/milady.json\n{\n  \"plugins\": {\n    \"entries\": {\n      \"@elizaos/plugin-telegram\": { \"enabled\": false },\n      \"telegram\": { \"enabled\": false }\n    }\n  },\n  \"connectors\": {\n    \"telegram\": { \"enabled\": false /* still want the bot active */ }\n  }\n}\n```\n\nAfter restart: only one Telegraf polls, every inbound message routes through milady's wrapper, every message gets a reply. Verified with 4 back-to-back messages — 4 logged inbound, 4 logged replies.\n\n## Suggested fix\n\nTwo paths:\n\n1. **Mutually exclusive at config time.** When milady spawns its own wrapper (`ensureTelegramBotPolling`), it should also force-disable the upstream `@elizaos/plugin-telegram` and the `connectors.telegram` auto-enable. One owner per bot token, no exceptions.\n\n2. **Remove the wrapper, fix the upstream plugin.** Address the `launch()` Bun bug at the source (#7241). Then the wrapper becomes unnecessary and `@elizaos/plugin-telegram` is the single source of truth.\n\nOption 2 is the cleaner architectural fix. Option 1 is the right tactical fix until the upstream Bun issue is resolved. Either way, the current \"both run, hope for the best\" state is not OK because **silent message loss looks like working software** to the user.\n\n## Why this matters\n\nCombined with #7240 (token bridge bug) and #7241 (Telegraf launch bug), the Telegram setup path is currently unable to deliver \"I sent 5 messages and got 5 replies\" reliably out of the box. Even with the user's token correctly bridged into the env and the launch bug worked around, the dual-poller race means inconsistent delivery — a user-facing failure mode that's nearly impossible to diagnose without log access.\n\n## Environment\n\n- bun 1.3.13\n- telegraf 4.16.3\n- @elizaos/plugin-telegram (current alice submodule pin)\n- milady on `alice` (PR #105 sync)",
-      "createdAt": "2026-05-02T20:12:34Z",
-      "closedAt": "2026-05-03T07:12:53Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABBHd_Yw",
-      "title": "duplicate MiladyClient class — augmenter prototypes attach to never-instantiated class, all client.X methods undefined at runtime",
-      "author": "Sw4pIO",
-      "number": 7244,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\n`packages/app-core/src/api/` has **two** `export class MiladyClient` declarations:\n\n- `client-base.ts:36` — the one all 7 augmenter files import (`client-agent`, `client-skills`, `client-chat`, `client-cloud`, `client-vincent`, `client-wallet`, `client-browser-workspace`)\n- `client.ts:2277` — the one the live `client` instance is built from (`export const client = new MiladyClient()` at `client.ts:6504`)\n\nEach augmenter does `MiladyClient.prototype.X = ...` to attach domain methods (e.g. `listAppRuns`, `listCodingAgentTaskThreads`, `sendMessage`, ~155 methods total). Because they import from `client-base.ts` and the instance is built from `client.ts`'s class, **none of those 155 methods land on the live instance**.\n\n## Symptoms\n\n- UI throws `client.listCodingAgentTaskThreads is not a function`, `client.listAppRuns is not a function`, etc. on every page that uses these methods.\n- Errors bubble through React error boundary → chat surface freezes → text input becomes unresponsive (it's `disabled` because the surrounding state crashed).\n- 343 methods present on prototype (the inline `client.ts` ones) — but the augmenter set is missing entirely.\n\n## Reproduction\n\n1. Fresh milady (alice, post-PR#105 sync), `bun run dev`.\n2. Open dashboard → Chat or Apps tab.\n3. Browser console:\n   ```js\n   const m = await import('/@fs/Users/.../packages/app-core/src/api/index.ts');\n   ({\n     listAppRuns: typeof m.client.listAppRuns,             // 'undefined' ❌\n     listCodingAgentTaskThreads: typeof m.client.listCodingAgentTaskThreads, // 'undefined' ❌\n     methodCount: Object.getOwnPropertyNames(Object.getPrototypeOf(m.client)).length, // 343\n   })\n   ```\n4. UI bubbles `is not a function` errors.\n\n## Root cause / context\n\n`client-base.ts` was originally introduced (per its own header comment):\n\n> *\"Separated from client.ts so domain augmentation files can import the class without circular dependency issues.\"*\n\nAt some point during the alice merge, `client.ts` had its own `export class MiladyClient` added inline (likely a refactor that consolidated methods back into one file) — but `client-base.ts` was left in place. The 7 augmenters still target `client-base.ts`. Two separate classes, two separate prototypes. The augmenters silently augment the wrong one.\n\nThere's no compile-time error because both files export a class with the same name and same shape. TypeScript happily lets `MiladyClient.prototype.X = ...` succeed on either.\n\n## Fix (verified locally)\n\nReplace `client-base.ts` body with a one-line re-export shim:\n\n```ts\nexport { MiladyClient } from \"./client\";\n```\n\nVerified locally: method count goes 343 → 500 (157 augmenter methods now land on the live instance). All `is not a function` errors disappear. Chat hydrates cleanly.\n\n## Side-effect imports also needed\n\n`packages/app-core/src/api/index.ts` was also missing side-effect imports for the augmenter files. Even with the re-export shim, the augmenters need to be **loaded** for their `MiladyClient.prototype.X = ...` statements to execute:\n\n```ts\nexport * from \"./client\";\n\n// Side-effect imports: each augments MiladyClient.prototype with methods.\nimport \"./client-agent\";\nimport \"./client-browser-workspace\";\nimport \"./client-chat\";\nimport \"./client-cloud\";\nimport \"./client-skills\";\nimport \"./client-vincent\";\nimport \"./client-wallet\";\n```\n\nThese were dropped in the alice merge as well — possibly because they appear redundant after `export * from \"./client\"`, but they're not (imports of side-effect-only modules need explicit `import \"...\"` statements).\n\n## Environment\n\n- bun 1.3.13\n- milady on `alice` (PR #105 sync)\n- React 19 + Vite dev server",
-      "createdAt": "2026-05-02T20:10:27Z",
-      "closedAt": "2026-05-03T07:12:56Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABBHdQ7Q",
-      "title": "auth: hasCodexCliSubscriptionAuth misses modern `tokens.access_token` shape — falsely reports 'install required'",
-      "author": "Sw4pIO",
-      "number": 7243,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\n`packages/agent/src/auth/credentials.ts:210-225` — `hasCodexCliSubscriptionAuth()` only matches the **legacy** `~/.codex/auth.json` layout:\n\n```ts\nconst data = JSON.parse(fs.readFileSync(authPath, \"utf-8\")) as {\n  auth_mode?: string;\n  OPENAI_API_KEY?: string;\n};\nreturn Boolean(\n  data.OPENAI_API_KEY?.trim() &&\n    data.auth_mode?.trim() &&\n    data.auth_mode.trim().toLowerCase() !== \"api-key\",\n);\n```\n\nModern `codex-cli` (≥ 0.93.0) writes a different shape — no top-level `OPENAI_API_KEY`, no `auth_mode`, just a `tokens` object:\n\n```json\n{\n  \"tokens\": {\n    \"id_token\": \"eyJhbGciOiJSUzI1NiIs...\",\n    \"access_token\": \"eyJhbGciOiJSUzI1NiIs...\",\n    \"refresh_token\": \"...\",\n    \"account_id\": \"...\"\n  },\n  \"last_refresh\": \"...\"\n}\n```\n\nDetection returns `false` → milady reports the user's Codex subscription as \"install required\" on the Settings → Connectors panel and the auto-enable map for `@elizaos/plugin-openai` is skipped. The `subscriptionProvider` resolution silently falls through, so chat routes to whatever else is configured (or fails).\n\n## Symptoms\n\n- User has a valid `codex login` session (verifiable: `codex --version` works, `~/.codex/auth.json` exists with `tokens` block, manual API calls with `tokens.access_token` succeed).\n- Milady dashboard shows **Codex: install required** even though the CLI is installed and authenticated.\n- Boot log lacks `Auto-enabled plugin: @elizaos/plugin-openai (subscription: openai-codex)`.\n- Chat falls back to \"Sorry, I'm having a provider issue\" because routing thinks no provider is available.\n\n## Reproduction\n\n1. `brew install codex-cli` (or already installed — version ≥ 0.93.0)\n2. `codex login` — authenticates and writes `~/.codex/auth.json` in the new format\n3. `cat ~/.codex/auth.json | python3 -c \"import json,sys; d=json.load(sys.stdin); print({'OPENAI_API_KEY': d.get('OPENAI_API_KEY'), 'auth_mode': d.get('auth_mode'), 'has_tokens': bool(d.get('tokens'))})\"` →\n   ```\n   {'OPENAI_API_KEY': None, 'auth_mode': None, 'has_tokens': True}\n   ```\n4. Boot milady → log shows no Codex auto-enable.\n5. Settings → Connectors → Codex shows \"install required\".\n\n## Workaround (verified locally)\n\nManually translate `~/.codex/auth.json` into the milady-side `~/.eliza/auth/openai-codex.json` shape:\n\n```python\nrecord = {\n    'id': 'default',\n    'providerId': 'openai-codex',\n    'label': 'Codex CLI',\n    'source': 'codex-cli',\n    'credentials': {\n        'access': tokens['access_token'],\n        'refresh': tokens['refresh_token'],\n        'expires': now_ms + 3600 * 1000,\n    },\n    'createdAt': now_ms,\n    'updatedAt': now_ms,\n}\n```\n\nAfter writing this file + restart, milady detects the subscription and `@elizaos/plugin-openai` auto-enables.\n\n## Suggested fix\n\nUpdate `hasCodexCliSubscriptionAuth()` to recognize **both** shapes:\n\n```ts\nfunction hasCodexCliSubscriptionAuth(): boolean {\n  const authPath = path.join(os.homedir(), \".codex\", \"auth.json\");\n  try {\n    const data = JSON.parse(fs.readFileSync(authPath, \"utf-8\")) as {\n      auth_mode?: string;\n      OPENAI_API_KEY?: string;\n      tokens?: {\n        access_token?: string;\n        refresh_token?: string;\n      };\n    };\n\n    // Modern codex-cli (>= 0.93.0): tokens block present.\n    if (data.tokens?.access_token?.trim()) return true;\n\n    // Legacy: OPENAI_API_KEY + non-\"api-key\" auth_mode.\n    return Boolean(\n      data.OPENAI_API_KEY?.trim() &&\n        data.auth_mode?.trim() &&\n        data.auth_mode.trim().toLowerCase() !== \"api-key\",\n    );\n  } catch {\n    return false;\n  }\n}\n```\n\nThen update the credential-import path (`importCodexCliCredentials` or wherever it lives) to translate `tokens.access_token`/`tokens.refresh_token` → `OAuthCredentials.{access,refresh,expires}` when the legacy fields are absent.\n\n## Why it matters\n\nEvery user on a fresh install with a current `codex-cli` will hit this. The codex CLI changed its auth file format and milady's detection didn't get updated. From the user's perspective: \"I logged in with codex, milady says I didn't\" → confusion.\n\n## Environment\n- bun 1.3.13\n- codex-cli 0.93.0 (the one written by the modern CLI)\n- macOS arm64\n- milady on `alice` (PR #105 sync)",
-      "createdAt": "2026-05-02T20:06:05Z",
-      "closedAt": "2026-05-03T07:12:59Z",
       "state": "CLOSED",
       "commentCount": 1
     }
@@ -106,35 +106,35 @@
       "deletions": 677
     },
     {
-      "id": "PR_kwDOMT5cIs7YJahe",
-      "title": "feat(slack): migrate plugin-slack into the monorepo",
-      "author": "2-A-M",
-      "number": 7375,
-      "body": "## Summary\n\nBrings \\`@elizaos/plugin-slack\\` from [elizaos-plugins/plugin-slack](https://github.com/elizaos-plugins/plugin-slack) into the monorepo at \\`plugins/plugin-slack/\\` alongside the other connector plugins already living here (discord, telegram, signal, whatsapp, wechat, xmtp, instagram, matrix, line, feishu, google-chat, imessage, x, twitch, bluesky, bluebubbles, farcaster, nostr).\n\nSlack was the last major-platform connector still living standalone. The standalone repo is at \\`v2.0.0-alpha\\` with the same \\`typescript/python/rust\\` layout as plugin-elizacloud and friends, so it was already migration-ready — just hadn't been picked up by the migration sweep.\n\nThe source matches the standalone repo's \\`next\\` branch tip plus the multi-message handling fix from [elizaos-plugins/plugin-slack#1](https://github.com/elizaos-plugins/plugin-slack/pull/1) (\\`d50e802\\`), which has been sitting on standalone with an APPROVED review since 2026-02-28. That PR will close as superseded by this one.\n\n## What lands\n\n- \\`src/\\` — service, accounts, formatting, config, index, types, plus:\n  - \\`actions/\\` — sendMessage, editMessage, deleteMessage, listChannels, readChannel, pinMessage, unpinMessage, listPins, reactToMessage, emojiList, getUserInfo (11 actions)\n  - \\`providers/\\` — channelState, memberList, workspaceInfo (3 providers)\n- \\`__tests__/\\` — \\`accounts.test.ts\\` (98 tests), \\`formatting.test.ts\\` (22 tests)\n- \\`package.json\\` — workspace-aware: \\`@elizaos/core: workspace:*\\`, version bumped to \\`2.0.0-alpha.537\\` to match sibling plugins, scripts aligned with monorepo conventions (biome from root \\`node_modules\\`)\n- \\`tsconfig.json\\` (modeled on plugin-discord), \\`build.ts\\` (unchanged from standalone), \\`README.md\\`, \\`LICENSE\\`\n\n## API drift fixes (alpha.3 → alpha.537)\n\nThe standalone \\`peerDependencies\\` pinned \\`@elizaos/core: 2.0.0-alpha.3\\`. The monorepo is at alpha.537, and the core API has moved in two specific ways the slack plugin needed updates for:\n\n- **\\`State.recentMessagesData\\` typing.** Providers in \\`channelState.ts\\`, \\`memberList.ts\\`, \\`workspaceInfo.ts\\` read \\`state?.recentMessagesData\\`, which is now typed as the broader \\`StateValue\\` union (\\`string | number | bigint | true | object\\`) rather than \\`Memory[]\\` directly. Cast the field to \\`Memory[] | undefined\\` at the read site so \\`validateActionKeywords\\` / \\`validateActionRegex\\` get the expected shape. Behavior unchanged.\n- **\\`MentionContext\\` shape.** \\`service.ts\\` was constructing \\`{ isMention: true }\\`; the type now requires \\`isReply\\` and \\`isThread\\` too. Filled with \\`false\\` for the mention-only path. Behavior unchanged for the existing mention handling.\n\n## Verified\n\n- ✅ \\`tsc --noEmit -p plugins/plugin-slack/tsconfig.json\\` clean\n- ✅ 120/120 unit tests pass (\\`bun test plugins/plugin-slack/__tests__/\\`)\n- ✅ \\`bun run build.ts\\` produces \\`dist/index.js\\` + \\`.d.ts\\` cleanly\n\n## Follow-ups (not in this PR)\n\n- Close [elizaos-plugins/plugin-slack#1](https://github.com/elizaos-plugins/plugin-slack/pull/1) as superseded once this lands.\n- The standalone repo itself can be archived or kept as a thin re-export, mirroring how the other migrated plugin repos are handled.\n- The CodeRabbit P2 nitpick on the multi-message handling fix (channel_type undefined edge case) is preserved as-is from the standalone PR — landing the existing fix verbatim, leaving any further hardening to a follow-up.\n\n## Test plan\n- [x] Typecheck clean\n- [x] Unit tests green (120/120)\n- [x] Build artifact produced\n- [ ] Wire-up smoke test against a live Slack workspace — out of scope for this PR; happy to follow up if maintainers want it before merge\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR migrates `@elizaos/plugin-slack` from its standalone repository into the monorepo, adding 11 actions, 3 providers, a Socket Mode service, and 120 passing unit tests. The alpha API drift fixes (`State.recentMessagesData` cast and `MentionContext` shape) are correctly applied.\n\n- **P1 – silent message drops**: `getUser()` in `handleMessage` and `handleAppMention` calls `client.users.info` without a try/catch. A Slack API error (rate-limit, deactivated user, network) will throw through the entire Bolt event handler, causing the message to be lost with no memory stored and no agent reply.\n- **P2 – stale `repository.url`**: `package.json` still points to the old `elizaos-plugins/plugin-slack` standalone repo instead of the monorepo.\n- **P2 – unused `zod` runtime dependency**: `zod` is declared in `dependencies` but never imported in any source file.\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge without fixing the missing try/catch around getUser() — incoming messages are silently dropped on any Slack API error during user lookup.\n\nOne P1 defect (unguarded getUser throws drop live messages) plus two P2 hygiene issues (stale repo URL, unused zod dependency). The P1 is on the critical incoming-message path so the score is pulled below the ceiling.\n\nplugins/plugin-slack/src/service.ts (handleMessage and handleAppMention event handlers); plugins/plugin-slack/package.json\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| plugins/plugin-slack/src/service.ts | Core Slack service with Socket Mode integration — contains a P1 missing try/catch around `getUser()` in event handlers (messages silently dropped on API errors), and a P2 channel-type mapping where both MPIM and public channels collapse to `ChannelType.GROUP`. |\n| plugins/plugin-slack/package.json | Package metadata has two P2 issues: `repository.url` still points to the old standalone repo and `zod` is declared as a runtime dependency but is never imported in source. |\n| plugins/plugin-slack/src/index.ts | Plugin registration and re-exports; token validation and masked logging look correct. Imports/exports are well-organized. |\n| plugins/plugin-slack/src/actions/sendMessage.ts | Action handler with LLM-extracted parameters; the generated `validate` wrapper is verbose but functionally correct; channel resolution and fallback logic are sound. |\n| plugins/plugin-slack/src/providers/channelState.ts | Channel state provider with correct `Memory[] | undefined` cast for `recentMessagesData`; relevance-gating and fallback paths look correct. |\n| plugins/plugin-slack/src/types.ts | Comprehensive Slack type definitions, error classes, and utility functions; looks correct and well-structured. |\n| plugins/plugin-slack/src/accounts.ts | Multi-account resolution helpers with token validation logic; parallel type definitions to `config.ts` but scoped correctly to `accounts.ts` exports only. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Slack as Slack (Socket Mode)\n    participant Bolt as @slack/bolt App\n    participant SVC as SlackService\n    participant RT as IAgentRuntime\n    participant Agent as MessageService\n\n    Slack->>Bolt: message / app_mention event\n    Bolt->>SVC: handleMessage() / handleAppMention()\n    SVC->>SVC: isChannelAllowed()\n    SVC->>RT: getEntityById(entityId)\n    SVC->>Slack: users.info (getUser) ⚠️ no try/catch\n    SVC->>RT: createEntity()\n    SVC->>RT: createMemory(memory, \"messages\")\n    SVC->>RT: emitEvent(SLACK_MESSAGE_RECEIVED)\n    SVC->>Agent: messageService.handleMessage(memory, callback)\n    Agent-->>SVC: callback(response)\n    SVC->>Slack: chat.postMessage (sendMessage)\n    SVC->>RT: createMemory(responseMemory)\n    SVC->>RT: emitEvent(SLACK_MESSAGE_SENT)\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(slack): migrate plugin-slack into m...\"](https://github.com/elizaos/eliza/commit/32b5ec0448c0943d5ccdbaa1ed00047fb7d94310) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30739102)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "id": "PR_kwDOMT5cIs7cYqJr",
+      "title": "[WIP] First-party Satellites and dynamic view host bridge",
+      "author": "Dexploarer",
+      "number": 7779,
+      "body": "## WIP Scope\n\nThis draft is the Electrobun convergence PR for the prototype Satellite work plus the first dynamic-view platform layer. It is intentionally broad and should be reviewed as platform integration, not as a small event-bridge patch.\n\nIt folds the standalone ElizaLaunch Satellite prototype into the real Electrobun platform package, wires renderer-to-worker command and event paths, and adds the initial dynamic agent-created canvas/A2UI view registry/session infrastructure. The production app UI remains untouched.\n\n## Major Changes\n\n### First-party Satellites moved into Electrobun\n\nAdds first-party Satellites under:\n\n`packages/app-core/platforms/electrobun/satellites/`\n\nIncluded Satellites:\n\n- `eliza.runtime`\n- `eliza.surface`\n- `eliza.fs`\n- `eliza.pty`\n- `eliza.git`\n- `eliza.local-model`\n\nEach Satellite includes its own manifest/config, README, Bun worker code, protocol/types, and smoke tests.\n\n### First-party Satellite seeding\n\nAdds:\n\n- `packages/app-core/platforms/electrobun/src/first-party-satellites.ts`\n- `packages/app-core/platforms/electrobun/src/first-party-satellites.test.ts`\n\nThe registry marks:\n\n- `eliza.runtime` as required\n- `eliza.fs`, `eliza.pty`, `eliza.git`, and `eliza.local-model` as recommended\n- `eliza.surface` as dev/admin only\n\nThe seeding path validates bundled Satellite manifests, installs/updates idempotently, preserves disabled state, and avoids stale standalone prototype paths.\n\n### Runtime Satellite host-mode adapter\n\n`eliza.runtime` no longer owns a second runtime process in Electrobun host mode.\n\nIt delegates runtime lifecycle/status/log operations through host requests to the existing Electrobun AgentManager path. Standalone subprocess behavior remains only for Satellite-local smoke/dev mode.\n\n### Renderer-to-worker command bridge\n\nAdds/uses the renderer-facing command path:\n\n- `carrotInvokeWorker`\n\nThis lets dev/admin views and future dynamic views call `eliza.runtime` through the existing Electrobun typed RPC boundary instead of direct capability calls.\n\n### Worker event tail bridge\n\nAdds the renderer-facing event path:\n\n- `carrotTailWorkerEvents`\n- legacy channel mapping: `carrot:tailWorkerEvents`\n\nWorker events shaped as `{ type: \"event\", name, payload }` are captured into a bounded per-worker buffer with monotonically increasing sequence numbers. Renderers can tail events by worker/Satellite ID and sequence cursor.\n\nDefaults:\n\n- max buffered events per worker: `1000`\n- default tail limit: `100`\n- max tail limit: `500`\n- env override: `ELIZA_CARROT_MAX_WORKER_EVENTS`\n\nThis is the event substrate for dynamic agent-created views. It is not a live subscription system yet.\n\n### Dynamic agent-created view infrastructure\n\nAdds a host-side dynamic view layer under:\n\n`packages/app-core/platforms/electrobun/src/dynamic-views/`\n\nIncluded pieces:\n\n- typed `DynamicViewManifest` / session types\n- `DynamicViewRegistry`\n- `DynamicViewSessionManager`\n- worker host request bridge for dynamic view register/list/open/push/close/sessions\n- typed renderer RPC methods for dynamic view register/list/open/push/close/sessions\n- required-Satellite checks before opening a view\n- canvas/A2UI-backed session open, event push, and cleanup\n- bounded session history\n- dev README documenting the agent/plugin-facing contract\n\nNew typed renderer RPC methods:\n\n- `dynamicViewRegister`\n- `dynamicViewUnregister`\n- `dynamicViewList`\n- `dynamicViewOpen`\n- `dynamicViewClose`\n- `dynamicViewPush`\n- `dynamicViewSessions`\n\nNew trusted worker host request methods:\n\n- `dynamic-view-register`\n- `dynamic-view-unregister`\n- `dynamic-view-list`\n- `dynamic-view-open`\n- `dynamic-view-close`\n- `dynamic-view-push`\n- `dynamic-view-sessions`\n\nTrusted worker dynamic view requests currently require `host:manage-carrots`; a narrower view-management permission should replace that once the manifest permission model adds it.\n\n### Demo dynamic view\n\nAdds a dev-only demo view:\n\n- view id: `agent.run.trace.demo`\n- file: `packages/app-core/platforms/electrobun/src/dynamic-views/demo/agent-run-trace.html`\n\nIt demonstrates:\n\n- registration through the built-in dynamic view registry\n- opening in a canvas/floating view\n- receiving pushed A2UI events\n- calling `eliza.runtime` through `carrotInvokeWorker`\n- tailing `eliza.runtime` events through `carrotTailWorkerEvents`\n\nThe demo is packaged into the Electrobun app bundle under `bun/demo/` so the built app can resolve it.\n\n### Surface remains dev/admin only\n\n`eliza.surface` remains an inspector/control harness.\n\nThe Surface Runtime client prefers:\n\n1. `carrotInvokeWorker` for method calls\n2. `carrotTailWorkerEvents` for events\n3. existing bridge fallback\n4. polling only as last fallback\n\nSurface still calls `eliza.runtime` as broker and does not call capability Satellites directly.\n\n### Capability Satellite summaries\n\n`eliza.fs`\n\n- scoped filesystem operations\n- root allowlisting\n- traversal/symlink escape protection\n- sensitive path denial\n- text reads/list/stat/search\n- writes disabled by default\n\n`eliza.pty`\n\n- trusted local terminal capability\n- Bun terminal sessions\n- create/list/get/write/resize/kill\n- output tail/clear\n- command run helper\n- bounded output buffer\n\n`eliza.git`\n\n- trusted local Git capability\n- Git command wrapper\n- repo info/status/branches/remotes/log/diff/show\n- add/restore/checkout/branch/commit/fetch/pull/push methods\n- operation history\n\n`eliza.local-model`\n\n- Eliza-1 first model catalog\n- local inference API client\n- Hugging Face Eliza-1 metadata fallback\n- model hub/catalog/tiers/voice metadata\n- installed/active/download/routing/generate/embedding method surface where backend routes exist\n\n`eliza.runtime`\n\n- AgentManager adapter in host mode\n- standalone subprocess manager for smoke/dev\n- runtime/API/chat/SSE bridges\n- broker methods for fs/pty/git/model\n\n### Build/package housekeeping\n\nUpdates Electrobun package/build handling so bundled Satellites and the dynamic-view demo asset are included, and stale prototype paths are not used.\n\nAlso adjusts macOS build icon handling so the committed `AppIcon.icns` path is used without depending on stale `.build` artifacts.\n\n### Typecheck baseline repair\n\nFixes the Electrobun typecheck baseline by:\n\n- exporting the boot-config symbol key for typed tests\n- adding a minimal `@elizaos/capacitor-llama` runtime declaration shim used by local inference\n- relying on upstream generated workflow schema JSON files after rebase/merge\n\n## What This PR Does Not Do\n\n- Does not add `eliza.voice`\n- Does not add `eliza.trace`\n- Does not add Swift\n- Does not replace `packages/app`\n- Does not make `eliza.surface` the production UI\n- Does not add new fixed production dashboard panels\n- Does not make `eliza.runtime` spawn a second runtime in host mode\n- Does not claim full process isolation for trusted full-permission Satellites; current host still runs the worker path as shared-worker until a process-isolated runner lands\n\n## Validation\n\nRan after merging current `origin/develop` into the WIP branch:\n\n- `bun run --cwd packages/electrobun-carrots typecheck`\n- `bun run --cwd packages/electrobun-carrots test`\n- `bun run --cwd packages/app-core/platforms/electrobun typecheck`\n- `bun run --cwd packages/app-core/platforms/electrobun test`\n- `bun run --cwd packages/app-core/platforms/electrobun build`\n- `git diff --check`\n\nThe Electrobun test suite now includes the dynamic view registry/session tests and worker host-request dispatch coverage.\n\nSatellite validations run during this WIP branch:\n\n- `bun run --cwd packages/app-core/platforms/electrobun/satellites/surface typecheck`\n- `bun run --cwd packages/app-core/platforms/electrobun/satellites/surface build`\n- `bun run --cwd packages/app-core/platforms/electrobun/satellites/surface smoke`\n- Runtime Satellite build and Phase 1/2/3 smokes using safe standalone command mode\n- FS typecheck/build/smoke\n- PTY typecheck/build/smoke\n- Git typecheck/build/smoke\n- Local Model typecheck/build/smoke\n- App icon presence in the built Electrobun bundle\n- dynamic-view demo asset presence in the built Electrobun bundle\n- no leftover smoke/dev processes after cleanup\n\nBuild notes:\n\n- `bun install --ignore-scripts` tempdir permission errors appeared during desktop build and were tolerated by the existing build script.\n- Vite/Rolldown emitted existing `@electric-sql/pglite` direct `eval` and ineffective dynamic import warnings.\n\n## Review Notes\n\nThis should be reviewed as a WIP platform convergence PR.\n\nThe main review surfaces are:\n\n- first-party Satellite seeding and package inclusion\n- host request path for AgentManager-backed runtime behavior\n- `carrotInvokeWorker` and `carrotTailWorkerEvents` typed RPC surfaces\n- bounded event buffering semantics\n- dynamic view manifest/session lifecycle and canvas/A2UI reuse\n- trusted worker host-request access to dynamic views\n- Surface staying dev/admin only\n- whether the first-party Satellite manifests/docs honestly communicate trusted capability boundaries and current shared-worker host behavior\n\nThe intended next phase is an agent-run/tool/subagent trace layer that opens dynamic views automatically, not another fixed dashboard panel.\n",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-05-04T19:59:56Z",
-      "mergedAt": "2026-05-04T20:03:13Z",
-      "additions": 7299,
-      "deletions": 0
+      "createdAt": "2026-05-17T14:10:53Z",
+      "mergedAt": null,
+      "additions": 21041,
+      "deletions": 9
     },
     {
-      "id": "PR_kwDOMT5cIs7YL89f",
-      "title": "feat(cloud): support monetized container app domains",
-      "author": "NubsCarson",
-      "number": 7376,
-      "body": "# Relates to\n\nCloud app/domain monetization build path.\n\n# Risks\n\nLarge. This touches Cloud app auth, app-scoped chat, Cloudflare domain management, and container deployment status handling. Review should focus on route ownership checks, billing/error behavior, and deployment lifecycle state transitions.\n\n# Background\n\n## What does this PR do?\n\nAdds the production Cloud path needed for agent-built monetized apps:\n\n- App-scoped chat endpoint support at `/api/v1/apps/:appId/chat`, routed through the configured provider/AI Gateway with app monetization metadata.\n- Cloudflare-managed app domain support, including check/buy/status/sync flows and app-domain ownership checks.\n- App auth callback/session handling needed for generated apps to complete OAuth-style sign-in and return to the app.\n- Local container control-plane deployment support and immediate monitor reconciliation so a healthy container is marked `running` instead of staying stuck in `deploying`.\n- Skill docs aligned with the Cloud container/OAuth/monetized-chat/domain lifecycle.\n\n## What kind of change is this?\n\nFeatures and bug fixes.\n\n# Documentation changes needed?\n\nUpdated included skill documentation for Cloud app builds and app domain lifecycle behavior.\n\n# Testing\n\n## Where should a reviewer start?\n\nStart with Cloud app/domain route changes, then the container deployment status monitor, then the skill docs.\n\n## Detailed testing steps\n\n- `bun run --cwd cloud/apps/api typecheck`\n- `bun run --cwd cloud/services/container-control-plane typecheck`\n- `bun test cloud/packages/tests/unit/domains/domain-pricing.test.ts cloud/packages/tests/unit/domains/cloudflare-dns-stub.test.ts cloud/packages/tests/unit/domains/cloudflare-registrar-stub.test.ts`\n- Local Discord e2e with normal app prompts spawned Codex, registered Cloud apps, enabled app-scoped monetized chat, completed OAuth-style app auth, offered Cloudflare domains, and verified unsigned chat returns `401 not_signed_in`.\n- Local custom-domain e2e verified `nubilio.org` against the local Cloud stack and confirmed the app auth entry point returns Cloud HTML.\n\n# Deploy Notes\n\nRequires the Cloud API/frontend/control-plane deploy together. Configure Cloudflare registrar/DNS env vars and the AI Gateway/provider env already expected by Cloud. Container deployment status depends on the container control-plane service being reachable.\n\n## Database changes\n\nIncludes Cloud domain/app-domain state changes from the Cloud codepath. Run the Cloud migrations before enabling the new domain/app routes in prod.\n\n## Deployment instructions\n\nDeploy Cloud API, frontend, and container control-plane from the same revision. Do not enable automatic domain purchase without the existing user confirmation step.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR adds the production Cloud path for agent-built monetized apps: app-scoped chat at `/api/v1/apps/:id/chat` with credit debit/reconcile, Cloudflare-managed domain buy/check/status/sync/verify flows, an app OAuth-style auth callback, and a new Node container control-plane sidecar with an immediate deploy-monitor reconciliation on container creation.\n\n- **P1 — Auth errors return 500 on the chat endpoint:** `requireAuthOrApiKeyWithOrg` is called inside `Promise.all`. For API-key callers (where the global middleware skips validation), any `AuthenticationError` or `ForbiddenError` is caught by the outer catch and returned as HTTP 500 instead of 401/403.\n- **P1 — Sync never marks a Cloudflare domain as `verified` after zone provisioning:** When a domain is purchased while zone creation is still pending (`verified: false`), calling `/sync` later sets `status: \\\"active\\\"` but omits `verified: true`, leaving `listVerifiedAppOrigins` (used for CORS) permanently empty for that domain.\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge without addressing the two P1s; auth misclassification and broken CORS sync compound the already-flagged credit/refund issues from the prior review round.\n\nMultiple P1 findings across core paths (auth, CORS, and credit reconciliation from prior round) pull the score below the P1 ceiling.\n\ncloud/apps/api/v1/apps/[id]/chat/route.ts (auth error handling), cloud/apps/api/v1/apps/[id]/domains/sync/route.ts (verified flag), cloud/apps/api/v1/apps/[id]/domains/buy/route.ts (credit refund on DB failure)\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| cloud/apps/api/v1/apps/[id]/chat/route.ts | New app-scoped monetized chat endpoint; auth errors from API-key callers are swallowed as 500 inside Promise.all; streaming/non-streaming credit reconciliation edge cases already flagged in previous reviews. |\n| cloud/apps/api/v1/apps/[id]/domains/sync/route.ts | New domain sync endpoint; does not pass verified: true to syncStatus when a pending Cloudflare domain becomes active, leaving CORS origin lists stale. |\n| cloud/apps/api/v1/apps/[id]/domains/buy/route.ts | New atomic domain-buy flow; DB write failure after successful registration leaves credits consumed with no refund (flagged in prior review). |\n| cloud/services/container-control-plane/src/index.ts | New Node container control-plane; requireInternalToken is a no-op when CONTAINER_CONTROL_PLANE_TOKEN env var is absent (flagged in prior review). |\n| cloud/packages/lib/services/managed-domains.ts | New managed-domains service; upsert/insert/syncStatus logic is solid; org-ownership guard correctly rejects cross-org conflicts. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Client\n    participant CloudAPI as Cloud API\n    participant CF as Cloudflare Registrar\n    participant DB as managed_domains DB\n\n    Note over Client,DB: Domain Sync (BUG)\n    Client->>CloudAPI: POST /apps/:id/domains/sync\n    CloudAPI->>CF: getRegistrationStatus\n    CF-->>CloudAPI: status=active\n    CloudAPI->>DB: syncStatus(status=active, isLive=true)\n    Note right of DB: verified stays false!\n    CloudAPI-->>Client: verified=false (broken CORS)\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (3)</h3></summary>\n\n1. `cloud/apps/api/v1/apps/[id]/chat/route.ts`, line 498-558 ([link](https://github.com/elizaos/eliza/blob/2692d06ba732110606be388695e1a3d3e659c5f3/cloud/apps/api/v1/apps/[id]/chat/route.ts#L498-L558)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Full refund issued after stream content is already delivered**\n\n   `writerClosed` is set to `true` at line 498 and `writer.close()` is called at line 499. If any subsequent await — `calculateCost` or `appCreditsService.reconcileCredits` — throws (e.g., transient DB error), the outer `catch` at line 559 calls `reconcileCredits` with `actualBaseCost: 0`, issuing a full refund for a stream that was already successfully delivered to the user. Users can receive inference for free whenever the reconciliation step fails.\n\n2. `cloud/apps/api/v1/apps/[id]/chat/route.ts`, line 637-669 ([link](https://github.com/elizaos/eliza/blob/7dd117f331e62045f271c441fed1aaa6f2b12ff8/cloud/apps/api/v1/apps/[id]/chat/route.ts#L637-L669)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Non-streaming reconciliation failure: user charged, no response returned, no refund**\n\n   If `reconcileCredits` at line 637 throws (transient DB error, network blip), execution falls to the outer `catch` at line 670, which returns a 500 to the user. At that point credits have been deducted at 1.5× the estimate, the provider already delivered a successful response (consumed via `providerResponse.json()` at line 606), and no refund is issued. The user is overcharged by the full reserved amount and receives neither the AI response nor their credits back.\n\n   Add a try/catch around the reconciliation that attempts a full refund and still returns the provider's response to the user.\n\n3. `cloud/apps/api/v1/apps/[id]/chat/route.ts`, line 165-169 ([link](https://github.com/elizaos/eliza/blob/1c07ef5b8264ab48fcafb5f80c9c1e0d80f3f327/cloud/apps/api/v1/apps/[id]/chat/route.ts#L165-L169)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=7\" align=\"top\"></a> **Auth errors masked as 500 for API-key callers**\n\n   `requireAuthOrApiKeyWithOrg` is called inside `Promise.all` at line 165. When the global auth middleware bypasses cookie auth for API-key requests (`if (apiKey || elizaBearer) { next(); }`), the per-route key validation runs here. If the key is invalid or expired, `AuthenticationError` or `ForbiddenError` is thrown, falls into the outer `catch` at line 670, and is returned to the caller as `status: 500` with `code: \"internal_server_error\"` instead of 401/403. Clients that retry on 401 will never retry, and the error message gives no hint of the actual cause.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (4): Last reviewed commit: [\"fix(cloud): respect noble hashes package...\"](https://github.com/elizaos/eliza/commit/1c07ef5b8264ab48fcafb5f80c9c1e0d80f3f327) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=30759652)</sub>\n\n> Greptile also left **1 inline comment** on this PR.\n\n<!-- /greptile_comment -->",
+      "id": "PR_kwDOMT5cIs7cczlv",
+      "title": "feat: connector capability detection + orchestrator hardening + sub-agent UX redesign",
+      "author": "standujar",
+      "number": 7782,
+      "body": "## Summary\n\n12 commits that ship connector capability detection (Sprint A), orchestrator self-healing + security gates, and a moltbot-inspired UX redesign for sub-agent narration that prevents conversation-memory pollution from poisoning future planner turns.\n\n## What changed\n\n**Core (Sprint A — connector capability detection)**\n- New `MessageConnectorCapability` enum + 4 handler types (`typingHandler`, `stopTypingHandler`, `createThreadHandler`, `postToThreadHandler`).\n- 5 new `IAgentRuntime` methods: `editMessageOnTarget`, `sendTypingOnTarget`, `stopTypingOnTarget`, `createThreadOnTarget`, `postToThreadOnTarget`, plus `addReactionOnTarget` for `react_message`.\n- `requireConnectorHook<K>` DRY helper (4 call sites would otherwise repeat the same lookup + guard).\n- Streaming-branch bug fix in `useModel`: preserve `toolCalls` / `finishReason` / `usage` Promises instead of collapsing the response to `streamedText` (caused `parsePlannerOutput` to increment `required_tool_misses` even when the LLM had emitted a valid native tool call).\n\n**planner-loop**\n- Honor explicit `completed: false` from the planner: `tryGateEvaluator` falls through to the full evaluator instead of synthesizing a FINISH when the planner is signaling \"tool calls do not yet achieve the goal\".\n- Graceful fallback when `required_tool_misses` budget is exhausted: log + use the planner's `messageToUser` as the terminal reply instead of throwing `TrajectoryLimitExceeded` (which collapsed the loop with no user-visible answer).\n\n**plugin-discord**\n- Declares 7 capabilities incl. `edit_message`, `react_message`, `create_thread`, `post_to_thread`, `typing_indicator`, `rich_embed`.\n- New handlers: `typingHandler`, `stopTypingHandler`, `createThreadHandler`, `postToThreadHandler`, `findOrCreateWebhook`.\n- `handleSendMessage` now returns a `Memory` carrying `metadata.platformMessageId` so callers can edit/react later.\n\n**plugin-agent-orchestrator**\n- **Self-healing primitives** in `AcpService`: stale-lock GC, 60s health-check sweep, pre-flight session-state validation in `sendPrompt`, mid-flight crash detection in `proc.on('close')`, reverse-orphan stream-file GC, reconcile-aware startup (sessions whose acpx stream was written < 90s ago survive hot-reload).\n- **Process-group cleanup**: `detached: true` on spawn + `killProcessTree` via negative pid + SIGTERM/SIGINT handler with static registry across instances. No more `claude-agent-acp` zombies after parent exit.\n- **Security gates**: `requireTaskAgentAccess(ability)` on `runSpawnAgent` / `runSend` / `runStopAgent` / `runCancel` (was missing on these 4 sensitive actions). `ELIZA_ADMIN_ENTITY_ID` already supported by core roles.\n- **TASK_AUDIT NDJSON** at `~/.eliza/plugin-acp/audit.ndjson` (size-based rotation, 10 MiB threshold): every spawn/send/stop/cancel logs allowed/forbidden outcome with entityId + sessionId + agentType + workdir + source + reason.\n- **Sub-agent UX redesign (moltbot pattern)**:\n  - Each spawn → 1 main-channel `🚀 [label] running` message + 1 Discord thread named `[label]`.\n  - Caches by `(source, roomId, label)`: respawn / rate-limit retry / crash-recovery reuses the same main message + thread (no duplicate `🚀` stacks, no duplicate threads).\n  - LRU eviction with `LABEL_CACHE_LIMIT = 200` bounds runtime growth.\n  - All sub-agent narration (`💬`) + heartbeat (`⏳`) post in the thread — never in the main channel. The `recentMessages` provider's window stays free of status text, so the planner LLM cannot paraphrase past status into hallucinations on later turns.\n  - `runtime.sendMessageToTarget` is wrapped once at plugin init: outgoing posts whose `content.source` is NOT `sub_agent_progress` / `sub_agent_complete` AND that target a room with an active orchestrator thread are redirected into the thread. Cross-platform — capability-gated on `post_to_thread`.\n  - Capability fallback ladder: thread → edit-in-place → fresh send. Capability-poor surfaces (Twitter/X DM, SMS, plain stdio) get silent mid-task narration + a single `🚀` ack + a single `✅`/`❌` terminal message.\n  - Reactions on the spawn message: `🚀` on spawn → `✅` on `task_complete` (with summary edit on the same message) → `❌` on terminal error.\n  - Reactions / threads / edits are all gated on declared capabilities, so any future connector that declares the same caps gets the same UX automatically.\n- **Provider truth-only**: `activeSubAgentsProvider` no longer surfaces a `## Recently terminated sub-agents` section. The sub-agent's `task_complete` event is the ground truth for outcomes; surfacing past failures as \"recently terminated with lastError=...\" was letting the planner generalize them as predictors for new spawns.\n- **Deny-by-default `⚠️` posts**: only failure kinds that require user action (`auth`, `login_required`, `blocked`, `rate_limit`) post to Discord. Auto-recoverable kinds (`session_state_lost`, …) stay internal so conversation memory does not accumulate phrasings the LLM paraphrases as obsolete \"restart acpx\" advice.\n\n**plugin-todos**\n- French casual-reminder example for `action=create` so the few-shot extends past the literal \"Add X to my todo list\" pattern.\n\n## Test plan\n\n- [ ] `bun run build` clean for `packages/core` + `plugins/plugin-agent-orchestrator` + `plugins/plugin-discord`.\n- [ ] New unit tests: `sanitize-planner-text.test.ts` (12), `scan-and-unlink-older-than.test.ts` (4), `strip-progress-label-prefix.test.ts` (8) — all pass under `bun test`.\n- [ ] Live smoke test on Discord: 1 spawn → 1 main message + 1 thread; narration in thread; reactions cycle 🚀 → ✅; no `[label]` prefix repetition inside the thread.\n- [ ] Live smoke test on a non-thread surface (terminal / Twitter-style): 🚀 ack → silent mid-task → ✅ summary, 2 messages total.\n\n## Known follow-ups (out of scope for this PR)\n\n- `suppressPlannerReply` flag on `TASKS_SPAWN_AGENT.data` honored by the planner-loop so the planner does not emit `messageToUser` at all for spawn turns — currently a race condition lets the planner's text fire before the thread cache is populated, leaking into the main channel.\n- `transient: true` flag on Memory metadata + filter in `recentMessages` provider — the moltbot `shouldRecord` equivalent. Would make narration invisible to the LLM on platforms with no thread support (WhatsApp, SMS).\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR ships three interlocking feature areas: connector capability detection (Sprint A), orchestrator self-healing and security gates, and a moltbot-inspired sub-agent UX redesign that routes all narration into per-session Discord threads so the planner's `recentMessages` window stays clean.\n\n- **Core (Sprint A):** 6 new `IAgentRuntime` methods (`editMessageOnTarget`, `sendTypingOnTarget`, `stopTypingOnTarget`, `createThreadOnTarget`, `postToThreadOnTarget`, `addReactionOnTarget`) via a `requireConnectorHook` DRY helper; `plannerSchema` gains an optional `completed` flag for gate-evaluator veto.\n- **`plugin-agent-orchestrator`:** `AcpService` gains stale-lock GC, health-check sweep, session reconciliation, process-group kills via negative PID, and a static SIGTERM/SIGINT registry; four previously unguarded actions now have `requireTaskAgentAccess` gates + NDJSON audit log; `registerProgressHook` implements thread-routing, heartbeat, LRU-cache, and `sendMessageToTarget` middleware.\n- **`plugin-discord`:** Declares 6 new capabilities and implements typing/thread/post-to-thread connector handlers; `handleSendMessage` now returns `Memory` carrying `metadata.platformMessageId`.\n\n<h3>Confidence Score: 3/5</h3>\n\nThe core and action-security changes are solid; the orchestrator's registerProgressHook is the most complex area and monkey-patches sendMessageToTarget in a way that can misdirect post-completion planner replies into closed Discord threads.\n\nThe connector capability detection and security-gate additions look correct and well-structured. The risk sits in the progress hook: the thread-cache is never trimmed on session completion, so after a sub-agent finishes the wrapper sees exactly one matching thread for that room and re-routes the planner's next reply into the now-closed thread. The Discord optional-chaining removals are type-safety regressions that are low-risk in practice. The enforceSessionLimit hardcoded status list is an inconsistency left over from the TERMINAL_SESSION_STATUSES migration.\n\nplugins/plugin-agent-orchestrator/src/index.ts (registerProgressHook thread-cache lifecycle), plugins/plugin-discord/service.ts (optional-chaining removal), plugins/plugin-agent-orchestrator/src/services/acp-service.ts (enforceSessionLimit status list)\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| plugins/plugin-agent-orchestrator/src/index.ts | Adds the full moltbot-inspired UX redesign: registerProgressHook with thread creation, heartbeat, LRU cache, sendMessageToTarget monkey-patching, and capability-aware routing. Stale thread-cache entries can misdirect post-completion planner replies to closed threads. |\n| plugins/plugin-agent-orchestrator/src/services/acp-service.ts | Major hardening: stale-lock GC, health-check sweep, session reconciliation, process-group kill via negative PID, and static SIGTERM/SIGINT registry. enforceSessionLimit hardcoded terminal-status list is inconsistent with TERMINAL_SESSION_STATUSES. |\n| plugins/plugin-discord/service.ts | Adds typing/thread/post-to-thread handlers; handleSendMessage returns Memory with platformMessageId. Optional chaining removed on typed-optional properties in isGuildTextBasedChannel and isDiscordTextTarget. |\n| packages/core/src/runtime/planner-loop.ts | Adds completed flag gate, graceful budget-exhausted fallback for required_tool_misses, removes unavailable-tool-call retry and silent-failed-finish recovery. Sound for JSON-output models. |\n| packages/core/src/types/runtime.ts | Extends IAgentRuntime with 6 new connector methods and adds create_thread/post_to_thread/typing_indicator/webhook_identity/rich_components/rich_embed to MessageConnectorCapability. |\n| plugins/plugin-agent-orchestrator/src/actions/tasks.ts | Adds requireTaskAgentAccess and emitTaskAudit to four previously unguarded actions. Removes swarm-room metadata helpers and simplifies session metadata. |\n| plugins/plugin-agent-orchestrator/src/services/audit.ts | New NDJSON audit log with 10 MiB size-based rotation. Best-effort emission never blocks the audited action. |\n| plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-completion.ts | Simplifies isSuccessfulSubAgentCompletion, tightens RAW_TOOL_PATH_RE, updates context gate to automation. |\n| plugins/plugin-agent-orchestrator/src/providers/active-sub-agents.ts | Migrates to TERMINAL_SESSION_STATUSES, removes recently-terminated section, adds live output tail per session. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant PlannerLoop\n    participant TasksAction\n    participant AcpService\n    participant ProgressHook\n    participant Discord\n\n    User->>PlannerLoop: message\n    PlannerLoop->>TasksAction: TASKS_SPAWN_AGENT (security gate)\n    TasksAction->>AcpService: spawnSession()\n    AcpService-->>TasksAction: sessionId\n    TasksAction->>ProgressHook: emitTaskAudit(spawn_agent, allowed)\n\n    AcpService->>ProgressHook: onSessionEvent(ready)\n    ProgressHook->>Discord: sendMessageToTarget 🚀 [label] running\n    Discord-->>ProgressHook: \"Memory { platformMessageId }\"\n    ProgressHook->>Discord: createThreadOnTarget(parentMessageId)\n    ProgressHook->>Discord: addReactionOnTarget(🚀)\n\n    loop Sub-agent running\n        AcpService->>ProgressHook: onSessionEvent(message/tool_running)\n        ProgressHook->>Discord: postToThreadOnTarget(thread, narration)\n    end\n\n    AcpService->>ProgressHook: onSessionEvent(task_complete)\n    ProgressHook->>Discord: editMessageOnTarget(mainMsgId, ✅ summary)\n    ProgressHook->>Discord: addReactionOnTarget(✅)\n    ProgressHook->>PlannerLoop: subAgentCompletionResponseEvaluator\n    PlannerLoop->>User: final reply\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `plugins/plugin-agent-orchestrator/src/services/acp-service.ts`, line 1234-1237 ([link](https://github.com/elizaos/eliza/blob/0bf4c00724205a52a127816e907d34424300b0a7/plugins/plugin-agent-orchestrator/src/services/acp-service.ts#L1234-L1237)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=8\" align=\"top\"></a> **`enforceSessionLimit` not migrated to `TERMINAL_SESSION_STATUSES`**\n\n   `TERMINAL_SESSION_STATUSES` is the shared source of truth introduced in this PR. `enforceSessionLimit` still uses an inline hardcoded list that omits `\"error\"`, so a session that ends up with that status is counted as active and consumes a slot unnecessarily.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(workdir): auto-detect by convention...\"](https://github.com/elizaos/eliza/commit/0bf4c00724205a52a127816e907d34424300b0a7) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32534841)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-05-04T22:15:44Z",
-      "mergedAt": "2026-05-04T23:22:42Z",
-      "additions": 5571,
-      "deletions": 437
+      "createdAt": "2026-05-17T22:25:26Z",
+      "mergedAt": null,
+      "additions": 19055,
+      "deletions": 16490
     }
   ],
   "codeChanges": {
-    "additions": 30795,
-    "deletions": 4107,
-    "files": 378,
-    "commitCount": 814
+    "additions": 36092,
+    "deletions": 5877,
+    "files": 616,
+    "commitCount": 972
   },
   "completedItems": [
     {
@@ -1309,9 +1309,424 @@
       "files": [
         "packages/app-core/platforms/android/gradle/wrapper/gradle-wrapper.properties"
       ]
+    },
+    {
+      "title": "fix(desktop): stabilize Linux local-source startup and chat delivery",
+      "prNumber": 7781,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis draft keeps the Linux local-source desktop path current with `origin/develop` and fixes the pieces that were causing the app to wedge on the startup shell, spawn the pill unexpectedly, or fail to deliver local chat cleanly ",
+      "files": [
+        ".github/workflows/mobile-build-smoke.yml",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/api/agent-lifecycle-routes.test.ts",
+        "packages/agent/src/api/agent-lifecycle-routes.ts",
+        "packages/agent/src/bin.ts",
+        "packages/app-core/platforms/electrobun/src/boot-progress.test.ts",
+        "packages/app-core/platforms/electrobun/src/boot-progress.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/scripts/build-capacitor-app.mjs",
+        "packages/app-core/scripts/build-native-plugins.mjs",
+        "packages/app-core/scripts/pack-upstreams.mjs",
+        "packages/app-core/scripts/run-production-build.mjs",
+        "packages/app-core/scripts/run-release-contract-suite.mjs",
+        "packages/app/scripts/plugin-build.mjs",
+        "packages/app/vite.config.ts",
+        "packages/core/src/services/message.ts",
+        "packages/ui/package.json",
+        "packages/ui/src/api/android-native-agent-transport.test.ts",
+        "packages/ui/src/api/android-native-agent-transport.ts",
+        "packages/ui/src/api/client-agent-stream.test.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/components/config-ui/config-renderer.tsx",
+        "plugins/plugin-local-inference/native/llama.cpp",
+        "vitest.config.ts"
+      ]
+    },
+    {
+      "title": "ci: consolidate image.yaml into build-agent-image.yml",
+      "prNumber": 7780,
+      "type": "other",
+      "body": "## Problem\n\n`image.yaml` (release-triggered, manual dispatch) was failing every run on develop with:\n\n```\nError: Missing package manifest:\n  packages/app-core/node_modules/@node-rs/argon2/package.json\n  or node_modules/@node-rs/argon2/packa",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/image.yaml",
+        "packages/app-core/deploy/Dockerfile.ci"
+      ]
+    },
+    {
+      "title": "feat(provisioning-worker): own the three SSH-bound cron paths instead of forwarding to control-plane",
+      "prNumber": 7778,
+      "type": "feature",
+      "body": "## Context\n\nAfter PR #7775 folded node health checks into the provisioning-worker daemon, three more cron paths in `CRON_FANOUT` still forwarded from CF Workers to the container-control-plane Node service for SSH-bound work:\n\n- `/api/v1/cro",
+      "files": [
+        "packages/cloud-shared/src/lib/cron/cloudflare-cron.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(image.yaml): pre-build packages/agent/dist before Docker build",
+      "prNumber": 7777,
+      "type": "bugfix",
+      "body": "## Why\n\nManually triggering the **Create and publish a Docker image** workflow (\\`image.yaml\\`) on \\`develop\\` today fails at the very first RUN inside the Docker build:\n\n\\`\\`\\`\n#13 0.536     throw new Error(\n#13 0.536 Error: Missing compil",
+      "files": [
+        ".github/workflows/image.yaml"
+      ]
+    },
+    {
+      "title": "feat(os): validate elizaOS live USB demo path",
+      "prNumber": 7776,
+      "type": "feature",
+      "body": "## Summary\n\nThis PR carries the current elizaOS Live Linux/Tails-derived USB work on the clean `nubs/messylinux` branch.\n\nIt includes:\n- elizaOS Live branding and desktop/app integration\n- root-mode boot fix for `/` and `/run/nosymfollow` a",
+      "files": [
+        "packages/os/linux/variants/milady-tails/docs/current-status.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/52-update-systemd-units",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/elizaos-root-mode.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/elizaos-update-health-check.service"
+      ]
+    },
+    {
+      "title": "feat(provisioning-worker): fold node health checks into the orchestrator daemon",
+      "prNumber": 7775,
+      "type": "feature",
+      "body": "## Why\n\n\\`docker_nodes.status\\` is currently driven by a separate \\`container-control-plane\\` Node service that the CF Worker cron \\`agent-hot-pool\\` forwards to every 5 minutes. In prod today that service runs on a host we no longer reliab",
+      "files": [
+        "packages/cloud-services/container-control-plane/src/index.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(electrobun): stabilize Linux local-source startup",
+      "prNumber": 7773,
+      "type": "bugfix",
+      "body": "## Summary\n\nStabilizes the Linux desktop local-source startup path after the recent local-inference and renderer changes.\n\n- Trusts live Electrobun/API boot progress in the renderer startup coordinator so the UI can leave `STARTUPSHELL.STAR",
+      "files": [
+        "packages/agent/package.json",
+        "packages/agent/src/runtime/core-plugins.test.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/electrobun/src/boot-progress.test.ts",
+        "packages/app-core/platforms/electrobun/src/boot-progress.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-boot-config.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-crypto-ready.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-direct-rpc.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.test.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.ts",
+        "packages/app-core/platforms/electrobun/src/electrobun-boot-config.test.ts",
+        "packages/app-core/platforms/electrobun/src/electrobun-crypto-ready.test.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/platforms/electrobun/src/renderer-static.test.ts",
+        "packages/app-core/platforms/electrobun/src/renderer-static.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/scripts/startup-integration-script-drift.test.ts",
+        "packages/app-core/src/browser.ts",
+        "packages/app-core/src/registry/entries/apps/app-polymarket.json",
+        "packages/app-core/src/registry/entries/apps/documents.json",
+        "packages/app-core/src/registry/entries/apps/hyperliquid.json",
+        "packages/app-core/src/registry/entries/apps/lifeops.json",
+        "packages/app-core/src/registry/entries/apps/shopify.json",
+        "packages/app-core/src/registry/entries/apps/steward.json",
+        "packages/app-core/src/registry/entries/apps/training.json",
+        "packages/app-core/src/registry/entries/apps/vincent.json",
+        "packages/app-core/src/registry/generate-apps.ts",
+        "packages/app-core/src/runtime/desktop/browser-entry-tray-exports.test.ts",
+        "packages/app/package.json",
+        "packages/app/src/main.tsx",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/app/test/native-module-stub-plugin.test.ts",
+        "packages/app/vite.config.ts",
+        "packages/app/vite/native-module-stub-plugin.ts",
+        "packages/shared-brand/scripts/sync-to-public.mjs",
+        "packages/ui/src/App.cloud-shell.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/api/client-agent-desktop-status.test.ts",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/api/client-types-core.ts",
+        "packages/ui/src/backgrounds/CloudVideoBackground.tsx",
+        "packages/ui/src/browser.ts",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json"
+      ]
+    },
+    {
+      "title": "fix(android): keep stock APK to one launcher icon",
+      "prNumber": 7772,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe stock `android` APK should install like one user-facing app, not like an AOSP role bundle. This changes manifest generation so:\n\n- `android` and `android-cloud*` keep only the main app launcher/home surface.\n- `android-syste",
+      "files": [
+        "packages/app-core/scripts/run-mobile-build-android-app-actions.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs"
+      ]
+    },
+    {
+      "title": "fix(android): keep DFlash opt-in for stock APK",
+      "prNumber": 7771,
+      "type": "bugfix",
+      "body": "## Summary\n\nStock Android APK builds can package `libeliza-llama-speculative-shim.so` for diagnostics, but should not automatically enable in-process DFlash solely because the shim is present.\n\nThis keeps DFlash auto-enable scoped to brande",
+      "files": [
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java"
+      ]
+    },
+    {
+      "title": "fix(local-inference): activate native Android loader from routes",
+      "prNumber": 7769,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis fixes the stock Android APK local-inference activation path when `ELIZA_LOCAL_LLAMA=1` is enabled. `/api/local-inference/active` now activates the in-process Android native loader (`@elizaos/plugin-aosp-local-inference`) in",
+      "files": [
+        "packages/agent/src/api/server.ts",
+        "plugins/plugin-aosp-local-inference/src/aosp-local-inference-bootstrap.ts",
+        "plugins/plugin-aosp-local-inference/src/index.ts",
+        "plugins/plugin-local-inference/src/local-inference-routes.test.ts",
+        "plugins/plugin-local-inference/src/local-inference-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(kokoro): use bundled phonemizer on mobile",
+      "prNumber": 7768,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis makes the Kokoro mobile TTS path use the real bundled `phonemizer` package before falling back to the deterministic ASCII G2P adapter. It also sets the stock Android APK default Kokoro voice to `af_bella` when the APK bundl",
+      "files": [
+        "bun.lock",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/shared/package.json",
+        "packages/shared/src/local-inference/kokoro/kokoro-backend.ts",
+        "packages/shared/src/local-inference/kokoro/phonemizer.test.ts",
+        "packages/shared/src/local-inference/kokoro/phonemizer.ts",
+        "plugins/plugin-local-inference/package.json",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/__tests__/phonemizer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/kokoro-backend.ts",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/phonemizer.ts"
+      ]
+    },
+    {
+      "title": "fix(streaming): forward local TTS voice hints",
+      "prNumber": 7767,
+      "type": "bugfix",
+      "body": "## Summary\n\nForwards local TTS request hints through the streaming plugin's `/api/tts/local-inference` route instead of reducing the request to `{ text }`.\n\nThe route now preserves:\n\n- `voice` / `voiceId`\n- `model` / `modelId`\n- `speed`\n- `",
+      "files": [
+        "plugins/plugin-streaming/src/api/tts-routes.test.ts",
+        "plugins/plugin-streaming/src/api/tts-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): allow long Android direct local generations",
+      "prNumber": 7765,
+      "type": "bugfix",
+      "body": "## Summary\n\nAdds an explicit long-generation mode to the Android local direct chat fast path while preserving the default short voice/chat behavior.\n\nDefault Android direct replies still use the existing short path:\n\n- 20-token default cap ",
+      "files": [
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/agent/src/api/chat-routes.ts"
+      ]
+    },
+    {
+      "title": "Fix/pr 7714 7715 review issues",
+      "prNumber": 7764,
+      "type": "bugfix",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".dockerignore",
+        ".github/workflows/elizaos-os-full-release.yml",
+        ".github/workflows/elizaos-os-release.yml",
+        ".github/workflows/publish-android-update-manifest.yml",
+        ".github/workflows/publish-apt-repo.yml",
+        ".github/workflows/release-all.yml",
+        ".github/workflows/update-vendor-checksums.yml",
+        ".github/workflows/windows-store-release.yml",
+        "BRAND-TODO.md",
+        "bun.lock",
+        "design-assets/elizaos-ai/assets.txt",
+        "design-assets/elizaos-ai/assets/coingecko.svg",
+        "design-assets/elizaos-ai/assets/contact/Float_Loop_HQ_480p_SD.mp4",
+        "design-assets/elizaos-ai/assets/contact/Float_Loop_Mobile_1080p_HD.mp4",
+        "design-assets/elizaos-ai/assets/contact/floating-eliza.svg",
+        "design-assets/elizaos-ai/assets/features/feature-1-icon.svg",
+        "design-assets/elizaos-ai/assets/features/feature-2-icon.svg",
+        "design-assets/elizaos-ai/assets/features/feature-3-icon.svg",
+        "design-assets/elizaos-ai/assets/features/feature-4-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/discord-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/farcaster.svg",
+        "design-assets/elizaos-ai/assets/footer/github-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/github-white-icon.svg",
+        "design-assets/elizaos-ai/assets/footer/logo.svg",
+        "design-assets/elizaos-ai/assets/footer/x-icon.svg",
+        "design-assets/elizaos-ai/assets/header/eliza-header-logo.svg",
+        "design-assets/elizaos-ai/assets/header/hamburger.svg",
+        "design-assets/elizaos-ai/assets/hero/Hero_Loop_HQ_480p_SD.mp4",
+        "design-assets/elizaos-ai/assets/hero/Hero_Loop_Mobile_1080p_HD.mp4",
+        "design-assets/elizaos-ai/assets/hero/divider-bar-mobile.svg",
+        "design-assets/elizaos-ai/assets/hero/divider-bar.svg",
+        "design-assets/elizaos-ai/assets/hero/hero-eliza-2.png",
+        "design-assets/elizaos-ai/assets/hero/hero-eliza-mobile.png",
+        "design-assets/elizaos-ai/assets/icon.png",
+        "design-assets/elizaos-ai/assets/trusted-groups/chainlink.png",
+        "design-assets/elizaos-ai/assets/trusted-groups/dreamnet.png",
+        "design-assets/elizaos-ai/assets/trusted-groups/org1.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org10.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org2.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org3.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org4.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org5.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org6.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org7.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org8.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/org9.svg",
+        "design-assets/elizaos-ai/assets/trusted-groups/stanford.png",
+        "design-assets/elizaos-ai/design-system.md",
+        "design-assets/elizaos-ai/homepage-screenshot.png",
+        "design-assets/elizaos-ai/index.html"
+      ]
+    },
+    {
+      "title": "fix(talkmode): play local inference TTS natively on Android",
+      "prNumber": 7763,
+      "type": "bugfix",
+      "body": "## Summary\n\nAdds an Android native local-inference TTS playback path to TalkMode.\n\nWhen the UI asks TalkMode to speak with `useLocalInferenceTts: true`, the Android plugin now:\n\n- posts to the embedded agent at `127.0.0.1:31337/api/tts/loca",
+      "files": [
+        "packages/ui/src/bridge/native-plugins.d.ts",
+        "packages/ui/src/bridge/native-plugins.ts",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "plugins/plugin-native-talkmode/android/src/main/java/ai/eliza/plugins/talkmode/TalkModePlugin.kt",
+        "plugins/plugin-native-talkmode/src/definitions.ts"
+      ]
+    },
+    {
+      "title": "feat(os): add elizaOS live update architecture",
+      "prNumber": 7762,
+      "type": "feature",
+      "body": "## Summary\n\nAdds the production updater/security architecture foundation for the elizaOS Live USB variant, plus VM-proven boot/runtime fixes and the latest elizaOS branding/docs audit cleanup.\n\n- Adds signed app/runtime update manifest and ",
+      "files": [
+        ".github/workflows/quality.yml",
+        "docs/apps/desktop/release-heavy-inventory.md",
+        "docs/apps/desktop/release-regression-checklist.md",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-mobile-linux.png",
+        "packages/os/DOWNLOADS.md",
+        "packages/os/linux/README.md",
+        "packages/os/linux/variants/milady-tails/PLAN.md"
+      ]
+    },
+    {
+      "title": "fix(app-core): harden browser fallback stubs",
+      "prNumber": 7760,
+      "type": "bugfix",
+      "body": "## Summary\n\nHardens the browser fallback stubs used when renderer/browser bundles statically reach server-only modules.\n\nThe prior fallback proxy returned the same noop for all property reads but did not behave like a normal function/object",
+      "files": [
+        "packages/app-core/src/platform/elizaos-agent-browser-stub.ts",
+        "packages/app-core/src/platform/elizaos-plugin-elizacloud-browser-stub.ts",
+        "packages/app-core/src/platform/empty-node-module.ts"
+      ]
+    },
+    {
+      "title": "fix(core): emit llama-safe grammar rule names",
+      "prNumber": 7759,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes response/planner GBNF rule names so generated grammars stay compatible with llama.cpp.\n\nThe previous sanitizer left underscores in generated rule identifiers such as `callofaction_ALPHA` and `paramsofaction_PAYMENT_p_payme",
+      "files": [
+        "packages/core/src/runtime/__tests__/response-grammar.test.ts",
+        "packages/core/src/runtime/response-grammar.ts"
+      ]
+    },
+    {
+      "title": "fix(os): harden elizaOS live USB integration",
+      "prNumber": 7757,
+      "type": "bugfix",
+      "body": "## Summary\n- hardens the elizaOS Live USB app/runtime integration after the merged distro PR (#7754)\n- keeps inherited launcher labels branded as elizaOS, adds the missing UDisks typelib required by the greeter, and updates release CI to va",
+      "files": [
+        ".github/workflows/elizaos-os-release.yml",
+        "packages/agent/src/api/server.ts",
+        "packages/os-homepage/tests/homepage.spec.ts",
+        "packages/os/DOWNLOADS.md",
+        "packages/os/docs/beta-release-manifest.md",
+        "packages/os/docs/installers-release-plan.md",
+        "packages/os/linux/variants/milady-tails/PLAN.md",
+        "packages/os/linux/variants/milady-tails/README.md",
+        "packages/os/linux/variants/milady-tails/ROADMAP.md",
+        "packages/os/linux/variants/milady-tails/docs/distribution-and-updates.md",
+        "packages/os/linux/variants/milady-tails/docs/mode-parity.md",
+        "packages/os/linux/variants/milady-tails/docs/privacy-mode-v1-gap.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/docs/user-experience.md",
+        "packages/os/linux/variants/milady-tails/scripts/prepare-milady-app-overlay.mjs",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/9100-install-milady",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/9150-brand-inherited-strings",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-hooks/99-zzzzzz_permissions",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/milady.path",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/system/milady.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/user/elizaos-agent.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/user/elizaos-renderer.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/etc/systemd/user/milady.service",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/lib/python3/dist-packages/tps/configuration/features.py",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/bin/milady",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/milady-keeper",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/persistence-maintenance",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/renderer-server.mjs",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/start-elizaos-agent-user",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/start-elizaos-browser-user",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/start-elizaos-renderer-user",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-packageslists/tails-common.list"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 761.3708058264803,
+      "prScore": 741.8948058264803,
+      "issueScore": 18.6,
+      "reviewScore": 0,
+      "commentScore": 0.8759999999999999,
+      "summary": "NubsCarson: Focused on enhancing system stability and cross-platform compatibility, successfully merging 6 pull requests that resolved critical runtime and build issues. They addressed a significant crash on headless Linux via elizaos/eliza#7230 and streamlined the build process by removing broken CJS configurations across multiple plugins. Their work was primarily dedicated to bugfixes, which accounted for 75% of their contributions, alongside targeted improvements to test and configuration files."
+    },
     {
       "username": "2-A-M",
       "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
@@ -1321,6 +1736,16 @@
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
       "summary": "2-A-M: Focused on expanding core automation and integration capabilities, merging 4 PRs that introduced a Discord connector-target-catalog service (#7315) and a new n8n clarification roundtrip route (#7316). Their work involved significant architectural contributions, including a total of 4,600 lines added across 28 files to enhance UX and system functionality. They maintained a balanced development approach, with 64% of their effort dedicated to feature implementation and 36% to bug fixes, while continuing to iterate on automation UI and workflow types in open PRs."
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 498.59470209088227,
+      "prScore": 492.3947020908823,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.2,
+      "summary": "standujar: Focused on stabilizing the cloud infrastructure and authentication systems within elizaos/eliza, successfully merging four critical PRs that resolved SIWE integration issues and CI blocking errors (#7324, #7327, #7332, #7333). Their work involved extensive codebase modifications, including a significant effort to unblock authentication flows and address typecheck errors. They are currently driving a Clean Architecture migration (#7336) and further cloud-test fixes (#7337), with a primary focus on bugfix (59%) and refactor (26%) work."
     },
     {
       "username": "0xSolace",
@@ -1333,34 +1758,24 @@
       "summary": "0xSolace: Focused on stabilizing the elizaos/eliza codebase through targeted bug fixes and configuration maintenance. They successfully resolved a critical authentication regression during the cloud migration via PR #7288 and have actively managed 8 additional open PRs addressing linting, pathing, and CI cleanup. Their work this month was dedicated entirely to bugfix efforts, involving modifications across 24 files to improve system reliability and project consistency."
     },
     {
-      "username": "standujar",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 287.9106593561312,
-      "prScore": 281.71065935613126,
-      "issueScore": 0,
-      "reviewScore": 6,
-      "commentScore": 0.2,
-      "summary": "standujar: Focused on stabilizing the cloud infrastructure and authentication systems within elizaos/eliza, successfully merging four critical PRs that resolved SIWE integration issues and CI blocking errors (#7324, #7327, #7332, #7333). Their work involved extensive codebase modifications, including a significant effort to unblock authentication flows and address typecheck errors. They are currently driving a Clean Architecture migration (#7336) and further cloud-test fixes (#7337), with a primary focus on bugfix (59%) and refactor (26%) work."
-    },
-    {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 283.9,
+      "totalScore": 333.59999999999997,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 283.5,
-      "commentScore": 0.4,
+      "reviewScore": 333,
+      "commentScore": 0.6000000000000001,
       "summary": "greptile-apps: No activity this month."
     },
     {
-      "username": "NubsCarson",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 278.1006299851673,
-      "prScore": 276.1006299851673,
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 208.46159531273295,
+      "prScore": 204.90559531273294,
       "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "NubsCarson: Focused on enhancing system stability and cross-platform compatibility, successfully merging 6 pull requests that resolved critical runtime and build issues. They addressed a significant crash on headless Linux via elizaos/eliza#7230 and streamlined the build process by removing broken CJS configurations across multiple plugins. Their work was primarily dedicated to bugfixes, which accounted for 75% of their contributions, alongside targeted improvements to test and configuration files."
+      "commentScore": 1.5559999999999998,
+      "summary": "lalalune: Led a massive architectural restructuring of the elizaos/eliza repository, most notably through PR #7235 which involved significant codebase modifications to integrate cloud and plugin support while removing legacy dependencies. They maintained project momentum by cleaning up core testing mocks in PR #7226 and actively engaged with the community through 16 total comments across issues and PRs. Their work this month was primarily concentrated on configuration management, testing infrastructure, and general codebase maintenance."
     },
     {
       "username": "ezumba",
@@ -1373,24 +1788,34 @@
       "summary": "ezumba: Focused on expanding the elizaos/eliza ecosystem by initiating the development of the ExergyNet Verified Compute and ZK-Compute Membrane plugins through six open pull requests (#7289, #7299, #7309, #7310, #7313, #7320). In addition to this feature work, they contributed to the project's collaborative environment by providing 7 total comments across pull requests and reviews. Their efforts this month were primarily centered on the integration of verified compute capabilities into the eliza framework."
     },
     {
-      "username": "lalalune",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 149.69582141615683,
-      "prScore": 148.47982141615682,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
-      "summary": "lalalune: Led a massive architectural restructuring of the elizaos/eliza repository, most notably through PR #7235 which involved significant codebase modifications to integrate cloud and plugin support while removing legacy dependencies. They maintained project momentum by cleaning up core testing mocks in PR #7226 and actively engaged with the community through 16 total comments across issues and PRs. Their work this month was primarily concentrated on configuration management, testing infrastructure, and general codebase maintenance."
-    },
-    {
       "username": "Dexploarer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
-      "totalScore": 31.94591014905531,
-      "prScore": 31.94591014905531,
+      "totalScore": 154.4452318387836,
+      "prScore": 154.2452318387836,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": "Dexploarer: Focused on a balanced distribution of feature development and bug remediation, executing 8 commits across 33 files. This effort resulted in a significant codebase update of +2504/-167 lines, demonstrating a high level of technical engagement despite no merged pull requests. Their work was split equally between implementing new features and addressing existing bugs, reflecting a comprehensive approach to project maintenance and expansion."
+    },
+    {
+      "username": "rndrntwrk",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/180591682?u=0e7124e4e8ca7ea9899b147e0f7289ff3ffc7126&v=4",
+      "totalScore": 43.7437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "infiniteezverse",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175495935?u=2718a0ed681d6fd243a4a32d69049bdd43ab1a87&v=4",
+      "totalScore": 40.332429405828805,
+      "prScore": 39.9324294058288,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.4,
+      "summary": null
     },
     {
       "username": "dutchiono",
@@ -1433,6 +1858,16 @@
       "summary": null
     },
     {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": "github-code-quality: No activity this month."
+    },
+    {
       "username": "RemilioNubilio",
       "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
       "totalScore": 16.693147180559947,
@@ -1443,21 +1878,21 @@
       "summary": "RemilioNubilio: Focused on improving configuration management within the Discord plugin, specifically addressing how environment variables are handled. They initiated this effort by opening issue #49 to track the reading of `DISCORD_AUTO_REPLY` and submitted PR #50 to ensure the plugin correctly respects this setting. Their work this month centered exclusively on enhancing the Discord integration's environment configuration."
     },
     {
-      "username": "github-code-quality",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
-      "totalScore": 13.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 13.5,
-      "commentScore": 0,
-      "summary": "github-code-quality: No activity this month."
-    },
-    {
       "username": "aUsABuisnessman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/104612281?u=d9592adc888957874f7fc163df901269fb5f44af&v=4",
       "totalScore": 11.084573590279971,
       "prScore": 11.084573590279971,
       "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sunfishloop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64062070?u=6edc4d659415d7b6326abe48a7ec60d053cc44a8&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -1513,9 +1948,9 @@
       "summary": null
     }
   ],
-  "newPRs": 144,
-  "mergedPRs": 90,
-  "newIssues": 14,
-  "closedIssues": 13,
-  "activeContributors": 15
+  "newPRs": 170,
+  "mergedPRs": 109,
+  "newIssues": 20,
+  "closedIssues": 18,
+  "activeContributors": 18
 }
