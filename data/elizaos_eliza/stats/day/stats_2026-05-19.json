@@ -5,20 +5,481 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-05-19 to 2026-05-20, elizaos/eliza had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-19 to 2026-05-20, elizaos/eliza had 26 new PRs (17 merged), 1 new issues, and 10 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABCqbAdw",
+      "title": "cloud-api: non-streaming /v1/chat/completions returns 500 when the ai_billing_records insert fails",
+      "author": "jqmwa",
+      "number": 7794,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nA non-streaming `POST /api/v1/chat/completions` against Eliza Cloud currently fails for every request. The model inference succeeds and credits are reconciled, but the request still returns **HTTP 500** because the durable `ai_billing_records` audit-row insert throws — and the non-streaming handler treats that as fatal.\n\nThree issues are bundled here:\n\n1. The non-streaming handler treats an audit-record write failure as fatal — **inconsistent with the streaming path**, which swallows the identical failure.\n2. The `ai_billing_records` INSERT fails — the underlying Postgres cause is not surfaced, so it can't be diagnosed from outside.\n3. The API leaks raw SQL + bind params (including internal UUIDs) in the error body.\n\n## Environment\n\n- Eliza Cloud — `https://www.elizacloud.ai/api/v1/chat/completions`\n- Non-streaming (`stream` unset / `false`)\n- Model-independent — reproduced with `openai/gpt-4o-mini`, `anthropic/claude-haiku-4.5`, `google/gemini-2.5-flash`, `google/gemini-2.0-flash-001`\n- 100% reproducible, including the first request on a freshly-funded org\n\n## Reproduction\n\n```bash\ncurl -sS https://www.elizacloud.ai/api/v1/chat/completions \\\n  -H \"Authorization: Bearer <API_KEY>\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"openai/gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\nResponse (HTTP 500), with the org/user UUIDs redacted:\n\n```json\n{\"error\":{\"message\":\"Failed query: insert into \\\"ai_billing_records\\\" (\\\"id\\\", \\\"organization_id\\\", \\\"user_id\\\", \\\"usage_record_id\\\", \\\"reservation_transaction_id\\\", \\\"settlement_transaction_ids\\\", \\\"idempotency_key\\\", \\\"request_id\\\", \\\"provider\\\", \\\"model\\\", \\\"billing_source\\\", \\\"pricing_snapshot_ids\\\", \\\"provider_request_id\\\", \\\"provider_instance_id\\\", \\\"provider_endpoint\\\", \\\"usage_total_cost\\\", \\\"ledger_total\\\", \\\"status\\\", \\\"metadata\\\", \\\"created_at\\\") values (default, $1, ... $18, default) on conflict (\\\"organization_id\\\",\\\"idempotency_key\\\") do nothing returning ...\\nparams: <org_id>,<user_id>,<usage_record_id>,<reservation_txn_id>,[\\\"<settlement_txn_id>\\\"],<idempotency_key>,<request_id>,openai,openai/gpt-4o-mini,openrouter,[],,,,0.000007,0.000007,recorded,{...}\",\"type\":\"api_error\"}}\n```\n\nThe `metadata` param shows billing already completed before this insert: `\"reservation\":{\"reservedAmount\":0.00054,\"actualCost\":0.000007,\"adjustmentType\":\"refund\"}` — inference and credit settlement both succeeded.\n\n## Analysis\n\n### 1. Non-streaming handler aborts on audit-row failure\n\nIn `packages/cloud-api/v1/chat/completions/route.ts`, `handleNonStreamingRequest()`:\n\n```ts\ntry {\n  const result = await generateText({ ... });                       // inference OK\n  const billing = await billUsage(billingContext, result.usage);\n  const reconciliation = await settleReservation(billing.totalCost); // credits settled\n  ...\n  const usageRecord = await recordUsageAnalytics(billingContext, billing, { ... });\n  if (usageRecord) {\n    await aiBillingRecordsService.record({ ... });                   // <-- throws\n  }\n  ...\n  return addCorsHeaders(Response.json({ /* completion */ }));\n} catch (error) {\n  await settleReservation(0);   // re-settles an already-settled reservation\n  throw error;                  // -> 500, the completed response is discarded\n}\n```\n\nWhen `aiBillingRecordsService.record()` throws:\n\n- the already-generated completion is discarded and the caller gets a 500;\n- `settleReservation(0)` runs a **second time**, after `settleReservation(billing.totalCost)` already ran for the same reservation.\n\nThe **streaming** path handles the identical call differently — `streamText({ onFinish })` wraps `aiBillingRecordsService.record()` in its own `try/catch` that logs and continues:\n\n```ts\nonFinish: async ({ text, usage }) => {\n  try {\n    ...\n    if (usageRecord) {\n      await aiBillingRecordsService.record({ ... });\n    }\n    ...\n  } catch (error) {\n    await settleReservation(0);\n    logger.error(\"[Chat Completions] onFinish error\", { ... });\n  }\n}\n```\n\nThe schema doc comment describes `ai_billing_records` as a reconciliation/audit join record, so the streaming behavior (log + continue) looks like the intended one. The non-streaming path should not fail a request — and discard a paid-for completion — because an audit row didn't persist.\n\n### 2. The INSERT itself fails (root cause not visible)\n\n`AiBillingRecordsRepository.createDeduped()` in `packages/cloud-shared/src/db/repositories/ai-billing-records.ts`:\n\n```ts\n.insert(aiBillingRecords).values(data)\n.onConflictDoNothing({ target: [aiBillingRecords.organization_id, aiBillingRecords.idempotency_key] })\n.returning();\n```\n\nThe API surfaces Drizzle's `Failed query: ...` wrapper message but not the underlying `pg` error (`error.cause`), so the real reason is invisible from outside. Since it is 100% reproducible from the first request, plausible causes:\n\n- the `ai_billing_records_org_idempotency_unique` unique index is missing in the deployed DB, so `ON CONFLICT (\"organization_id\",\"idempotency_key\")` matches no constraint (Postgres `42P10`). Migration `0118_add_ai_billing_and_alert_events.sql` creates it with `CREATE UNIQUE INDEX IF NOT EXISTS`, so a partially-applied migration would produce exactly this.\n- a foreign-key violation on `usage_record_id` or `reservation_transaction_id` if the referenced row isn't visible to the writer connection.\n\nLogging `error.cause` alongside the Drizzle wrapper would make this self-diagnosable.\n\n### 3. Information disclosure\n\nThe error response returns the full SQL statement, every bind parameter, and internal UUIDs (organization_id, user_id, usage_record_id, transaction IDs) to the API client. DB-layer errors should be logged server-side and returned to clients as a generic message.\n\n## Impact\n\nNon-streaming chat completions are currently unusable on Eliza Cloud — every call 500s after the model has already run and credits have been settled.\n",
+      "createdAt": "2026-05-19T01:13:45Z",
+      "closedAt": "2026-05-19T10:43:42Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7dEvUV",
+      "title": "ci(flatpak): commit node-sources.json + flip elizaos-app to --offline (Flathub-ready)",
+      "author": "2-A-M",
+      "number": 7802,
+      "body": "## Summary\n\nCompletes the Flathub-readiness work begun in #7787. That PR added the\n`generate-sources.sh` script and wired it into `test-flatpak.yml` so CI\nregenerates `node-sources.json` on every run and uploads it as the\n`flatpak-node-sources` artifact. This PR finishes the flip:\n\n- **Commits `node-sources.json`** (691 KB, 1202 entries) next to the\n  manifest so Flathub's network-less builder can reproduce the install\n  offline. Generated against the current `elizaos@latest` (`1.7.2`)\n  dependency closure.\n- **Flips `ai.elizaos.App.yml`** (direct/power-user variant): the\n  `elizaos-app` module now runs `npm install -g --offline --prefix=/app\n  --ignore-scripts elizaos`, and `build-options.build-args:\n  --share=network` is gone. The build phase no longer needs network\n  access, which is exactly what Flathub's submission pipeline requires.\n- **Rewrites the long-form comment block** above the `elizaos-app`\n  module — the 3-step Flathub-prep playbook from #7787 is no longer\n  aspirational; it's how the manifest works today.\n- **README**: rewrites the \"Flathub submission checklist\" step 1 to\n  point at the now-automated CI artifact path.\n\n### Bug fix in `generate-sources.sh`\n\nWhile generating the artifact, hit a real bug in the helper script:\n`flatpak-node-generator 0.1.1` crashes with `KeyError: 'name'` when it\nparses the root `packages.\"\"` entry of the lockfile, because\n`npm install --package-lock-only elizaos@latest` writes a `package.json`\nwith only a `dependencies` block (no `name` field).\n\nFix: seed a minimal `package.json` with `\"name\":\n\"elizaos-flatpak-sources-shim\"` before invoking `npm install`. The\ngenerator now reads the root entry cleanly and emits all 1202 source\nrecords.\n\nWithout this fix the CI `Generate offline node sources` step would\nsilently `continue-on-error`-fail forever and the artifact would never\nappear in upload-artifact's output — which is exactly the state we were\nin before this PR.\n\n### After this lands\n\nThe direct manifest builds with no network access during `build`, which\nis the Flathub submission requirement. Next step (separate PR, separate\nrepo): open `flathub/flathub` submission issue for `ai.elizaos.App`.\n\n## Test plan\n\n- [ ] `Test Flatpak Build` workflow goes green on this PR with the\n      committed `node-sources.json` and `--offline` install path.\n- [ ] `Generate offline node sources` CI step succeeds (verifies the\n      `KeyError: 'name'` fix on the runner's `flatpak-node-generator`\n      version).\n- [ ] `appstream-util validate-relax` and `desktop-file-validate` still\n      pass (already covered by the workflow).\n- [ ] `flatpak run ai.elizaos.App --version` still succeeds inside the\n      sandboxed build.\n\nVerified locally on WSL Ubuntu 24.04 + Node 18 + `flatpak-node-generator\n0.1.1` (uv tool install): script generates 691 KB / 1202-entry\n`node-sources.json` against `elizaos@1.7.2` with the fix; crashes\ndeterministically with `KeyError: 'name'` without it.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR completes the Flathub-readiness work for the elizaOS App Flatpak by committing a `node-sources.json` manifest (1202 entries, elizaos@1.7.2) and flipping the `elizaos-app` module to a fully offline build.\n\n- **`ai.elizaos.App.yml`**: Removes `--share=network` from build options, adds `npm_config_cache` pointing at the vendored cache, switches npm to `--offline --ignore-scripts`, and correctly references `node-sources.json` as a bare-string include so flatpak-builder processes its archive/script entries rather than treating it as an opaque file.\n- **`generate-sources.sh`**: Fixes the `KeyError: 'name'` crash in `flatpak-node-generator 0.1.1` by seeding a minimal `package.json` before `npm install --package-lock-only`; however, the end-of-run hint still prints the now-incorrect `- type: file` snippet instead of the bare-string `- node-sources.json` syntax used in the manifest.\n- **`README.md` + `node-sources.json`**: Checklist and committed source manifest updated to reflect the automated CI workflow and offline build capability.\n\n<h3>Confidence Score: 4/5</h3>\n\nThe manifest changes are correctly applied, but the generate-sources.sh hint message directs future maintainers to use the old broken `type: file` syntax, which would silently regress the offline build if followed.\n\nThe offline build wiring in the manifest is correct and addresses all prior review findings. The one remaining defect is in generate-sources.sh: the end-of-run help text still instructs users to add `- type: file / path: node-sources.json`, which would cause a regression if a future maintainer regenerates and re-integrates the file by following that prompt.\n\npackages/app-core/packaging/flatpak/generate-sources.sh — the trailing hint message needs to be updated to match the bare-string syntax now used in the manifest.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/app-core/packaging/flatpak/ai.elizaos.App.yml | Removes --share=network build-arg, adds npm_config_cache env var pointing at the vendored cache directory, switches npm install to --offline --ignore-scripts, and changes node-sources.json from type: file to bare-string include — correctly implementing the offline Flathub-ready build. |\n| packages/app-core/packaging/flatpak/generate-sources.sh | Fixes the KeyError: 'name' bug by seeding package.json before npm install --package-lock-only, but the script's end-of-run hint message still instructs users to use the now-incorrect `- type: file` syntax instead of the bare-string `- node-sources.json`. |\n| packages/app-core/packaging/flatpak/README.md | Updates Flathub submission checklist step 1 to describe the automated CI artifact path and the now-committed node-sources.json; content is accurate. |\n| packages/app-core/packaging/flatpak/node-sources.json | Adds the 691 KB / 1202-entry flatpak-node-generator manifest for elizaos@1.7.2; pinned to a specific version and will need to be refreshed on each new elizaos release, as documented in the README and CI workflow. |\n\n</details>\n\n\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[generate-sources.sh] -->|npm install --package-lock-only elizaos@latest| B[package-lock.json]\n    B -->|flatpak-node-generator npm --recursive| C[node-sources.json\\n691 KB / 1202 entries]\n    C -->|committed to repo| D[ai.elizaos.App.yml\\nbuild-time source]\n\n    D -->|bare-string include| E{flatpak-builder\\nprocesses entries}\n    E -->|archive entries| F[flatpak-node/npm-cache/\\nvendored tarballs]\n    E -->|script/shell entries| G[setup scripts]\n\n    F -->|npm_config_cache points here| H[npm install -g --offline\\n--prefix=/app --ignore-scripts elizaos]\n    G --> H\n    H -->|no network needed| I[elizaos installed in /app]\n    I --> J[Flathub-submittable build]\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `packages/app-core/packaging/flatpak/generate-sources.sh`, line 72-74 ([link](https://github.com/elizaos/eliza/blob/4deb0d708ea1fabe5d90ab51cf4260d22cbc8514/packages/app-core/packaging/flatpak/generate-sources.sh#L72-L74)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=8\" align=\"top\"></a> The hint message at the end of the script still instructs users to add `- type: file` syntax for `node-sources.json`, but the manifest now uses the bare-string syntax (`- node-sources.json`) so that flatpak-builder processes the file as a JSON source manifest rather than copying it as an opaque file. Following this printed guidance would silently regress the fix introduced in this PR.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (3): Last reviewed commit: [\"fix(flatpak): set npm\\_config\\_cache so --...\"](https://github.com/elizaos/eliza/commit/4deb0d708ea1fabe5d90ab51cf4260d22cbc8514) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32804491)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-19T12:57:04Z",
+      "mergedAt": "2026-05-19T20:26:25Z",
+      "additions": 7991,
+      "deletions": 43
+    },
+    {
+      "id": "PR_kwDOMT5cIs7dExwh",
+      "title": "fix(os): polish elizaOS live demo",
+      "author": "NubsCarson",
+      "number": 7803,
+      "body": "## Summary\n\nThis keeps the elizaOS Live / USB-demo branch current with `develop` and hardens the parts that were breaking fresh installs, package-mode validation, mobile packaging, live CI validation, and the Linux live demo surface.\n\n- Polishes the elizaOS Live visual path across greeter, GNOME shell/window list, startup/failure shell, and voice onboarding.\n- Keeps the bundled elizaOS/Milady app as the auto-starting home surface while preserving normal GNOME/Tails desktop use.\n- Keeps the broken voice pill path opt-in until the pill renderer has a production UI.\n- Hardens the USB installer write flow, backend contracts, startup-shell fallback assets, package-mode UI/test wiring, and runtime packaging checks.\n- Carries the current local-inference/native merge state, including the latest `elizaOS/llama.cpp` submodule tip used by this branch.\n- Fixes latest `develop` merge fallout around duplicate package exports, the Capacitor llama patcher/patch conflict, voice diarizer/phone package conflicts, Android mobile ONNX sidecars, duplicate SMS gateway package scripts, lockfile drift, formatting drift, and the local-inference CI build path.\n- Adds the missing remote-capability GitHub live artifact validation path so manual/nightly live runs download and validate both Cloud and provider evidence artifacts.\n\n## Current Source Base\n\nUpdated 2026-05-19 with normal merges, not rebases.\n\n- PR head: `d3eb80c11ebeb72739a9ad59cada31b8a682ed9f`\n- Latest merged `origin/develop`: `d32b6a446185e77267f1e51005a1796de244b43b`\n- `plugins/plugin-local-inference/native/llama.cpp`: `96dd1a8466c84bdd419faf3866425260623fb6b0`\n- Branch was pushed normally; no force-push was used for this refresh.\n- GitHub currently reports `mergeStateStatus: UNSTABLE` because checks are rerunning on the latest pushed head.\n\n## Latest Local Validation\n\nFresh local validation after merging latest `develop` and resolving the local-inference build-path conflict to upstream's cleaner `bun run build.ts` implementation:\n\n```bash\nbun install --frozen-lockfile\nbun run --cwd plugins/plugin-local-inference build\nbun run --cwd plugins/plugin-local-inference format:check\ngit diff --check\n```\n\nResults:\n\n- Frozen install passed; postinstall reported `patch-llama-cpp-capacitor patched=0 already-applied=1 repaired=0 failed=0`.\n- `@elizaos/plugin-local-inference` build passed using `bun run build.ts`, avoiding the previous CI failure from a bare `tsup` binary.\n- `@elizaos/plugin-local-inference` format check passed: 339 files checked, no fixes applied.\n- PR delta whitespace check passed.\n\nAdditional validation from the immediately preceding merge head:\n\n```bash\nbun run build:core\n```\n\nResult: 38/38 build tasks passed, including `@elizaos/plugin-local-inference`.\n\nEarlier validation retained from this PR after previous latest-`develop` merges:\n\n```bash\nbun run format:check\nbun run test:remote-capabilities\nbun run test:remote-capabilities:live-ci-audit\nbun run test:remote-capabilities:live-ci-audit:self-test\nbun run --cwd packages/agent build:mobile\nnode --test packages/app-core/scripts/run-mobile-build-policy.test.mjs\nnode --check packages/scripts/audit-capability-router-live-ci.ts\nnode --check packages/scripts/audit-capability-router-live-ci.self-test.ts\n```\n\nResults:\n\n- Full workspace format check passed: 75 tasks successful.\n- Remote capability suite passed: 9 files, 190 tests passed, 3 skipped.\n- Live CI audit passed: 45 checks.\n- Live CI audit self-test passed: 45 checks.\n- Android mobile bundle builds after the OmniVoice/ONNX cleanup and generated CSS-string step; bundle output no longer requires ONNX sidecars.\n- Mobile build policy node:test passed: 24 tests.\n- Live CI audit scripts parse cleanly under `node --check`.\n\nEarlier validation retained from this PR:\n\n```bash\nbunx vitest run --config vitest.config.ts \\\n  plugins/plugin-local-inference/__tests__/voice-speaker-diarizer.test.ts \\\n  plugins/plugin-local-inference/__tests__/voice-speaker-encoder.test.ts \\\n  plugins/plugin-local-inference/src/services/engine.voice.test.ts \\\n  plugins/plugin-local-inference/src/services/voice/whisper-cpp-asr.test.ts\nbun run verify:cloud\nbun run --cwd packages/os/usb-installer test\nbun packages/agent/scripts/build-mobile-bundle.mjs --target=ios\nbun --config=/tmp/bunfig-no-coverage.toml test \\\n  plugins/plugin-aosp-local-inference/__tests__/aosp-kokoro-tts-handler.test.ts \\\n  plugins/plugin-aosp-local-inference/__tests__/aosp-local-inference-bootstrap.test.ts \\\n  --reporter=dots\n```\n\nResults: USB installer validation passed locally on the current branch lineage: unit/integration tests (9 files, 76 pass, 1 opt-in virtual-device skip), typecheck, build, expanded Biome lint over src/tests/server/config, Playwright e2e (6 pass across desktop/mobile mocked browser flows), and the guarded Linux virtual USB proof (scsi_debug block device, sudo -n dd write, readback SHA-256, cleanup verified). Earlier voice/local-inference, cloud verification, mobile bundle, and AOSP OmniVoice/TTS checks remain documented here but were not rerun after the final merge.\n\nEarlier artifact validation from this PR remains documented here, but it was not re-run after the final `develop` merge:\n\n- Built ISO: `packages/os/linux/variants/milady-tails/out/binary.iso`\n- Validated ISO SHA256: `3a26c4990a5dcc53c4a5f3dcf3e6c400a0df5a06aeb6cf37c5fb03c210dfb9f2`\n- QEMU visual validation confirmed the elizaOS greeter, light branding, normal GNOME desktop, app auto-launch, white/blue onboarding, and no broken pill-loader takeover.\n- `./scripts/static-smoke.sh`, `./scripts/security-smoke.sh`, and `./scripts/runtime-api-smoke.sh` were previously run for that artifact.\n\n## Current GitHub Status\n\n- PR is draft while CI re-runs on `d3eb80c11e`.\n- The previous red `Server Tests` failure was reproduced locally and fixed by adding the missing GitHub live artifact validation workflow path.\n- The later `tsup: command not found` CI failure was addressed by merging upstream's `plugin-local-inference` `build.ts` fix and validating the package build locally.\n- Current checks are queued/running on the new head; skipped fork/security/manual gates are expected.\n\n## Remaining Hardware/Product Gaps\n\nBefore making hardware/product claims, still needed:\n\n- Repeat guarded physical USB flash/readback for a fresh ISO built from the current head. The Linux fake-media and scsi_debug virtual block-device E2Es prove the guarded server/backend write path safely, including real Linux dd/readback, but they are not a hardware boot substitute.\n- Boot that USB on real hardware.\n- Validate real USB Persistent Storage create/unlock/delete behavior.\n- Validate privacy/direct networking behavior for app, renderer, embedded browser, OAuth, and external web surfaces.\n- Production release still needs real update keyring, revocation metadata, downloader UX, rollback health policy, SBOM, provenance, and formal inherited Tails sudoers review.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-19T12:58:27Z",
+      "mergedAt": null,
+      "additions": 7938,
+      "deletions": 1956
+    },
+    {
+      "id": "PR_kwDOMT5cIs7cX6n6",
+      "title": "Shell foundation v1 + onboarding a11y/contrast pass",
+      "author": "rndrntwrk",
+      "number": 7774,
+      "body": "## Summary\n\nTwo pieces of work bundled on `enoomian/shell-foundation` (28 commits off `shaw/eliza-app-release-blockers`):\n\n**1. Onboarding accessibility + contrast pass** (audit-driven, 9 fix commits)\n   - Documented audit of every screen in the `VoicePrefixGate` flow → Hello launcher → Setup screen, with severity-tagged issue IDs. See `docs/apps/desktop/2026-05-16-onboarding-ux-audit.md`.\n   - Removed a `text-black` class on the pre-agent shell wrapper that was rendering every step's heading + body paragraphs as black-on-near-black (WCAG fail). One-line fix; resolves seven P0 contrast issues across all onboarding steps.\n   - Removed a hardcoded `?? \"Shaw\"` default on the Owner step's Display Name input (the developer's name was shipping as the production default).\n   - Defaulted the shared `<Button>` component's `type` to `\\\"button\\\"` (it was inheriting HTML's `\\\"submit\\\"` default — 734 call sites, 3 explicitly opted into submit, the rest were silently submit-typed causing Enter inside onboarding to trigger the wrong action).\n   - Promoted per-step `<h2>` to `<h1>`, added `role=\\\"progressbar\\\"`/`aria-valuenow`/`aria-valuemax`/`aria-live=\\\"polite\\\"` on the step indicator.\n   - Hello launcher: `<section>` → `<main>`, \\\"Hello\\\" div → `<h1>`, decorative avatar marked `aria-hidden=\\\"true\\\"`, transcript marked `aria-live=\\\"polite\\\"`.\n   - Step 1: Back button hidden on the first step (was dead-ended); Continue gated on the mic permission decision via lifted state.\n   - Step 5: error block gets `role=\\\"alert\\\"` + `aria-live=\\\"assertive\\\"` + human-readable copy in front of the raw `/api/...` path.\n   - Setup screen: Cloud/On-Device tiles become `role=\\\"radiogroup\\\"` + `role=\\\"radio\\\"` + `aria-checked`; language picker drops the flag emojis in favor of native names (`English`, `Español`, `日本語`, `한국어`); `<h2>Where should Eliza run?</h2>` adds the missing instruction grouping; grammar fix (`less` → `fewer`); sentence case on \\\"Connect to a remote instance\\\"; `<html dir=\\\"ltr\\\">` added.\n   - Various copy polish (owner step privileged-actions clarification, family relationship pre-fill removed, redundant \\\"OPTIONAL\\\" body text removed, \\\"Tap to begin\\\" → \\\"Begin\\\").\n\n**2. Shell foundation v1** (TDD-implemented under subagent-driven development, 17 commits)\n   - New 5-phase shell state machine (`booting / idle / summoned / listening / responding`) as a pure reducer + types in `packages/ui/src/components/shell/shell-state.ts`.\n   - `useShellState` hook owns the reducer and subscribes to `NETWORK_STATUS_CHANGE_EVENT` on `document`.\n   - `HomePill` — persistent bottom-center pill, disabled during boot, brand-orange glow on listening/responding, focus-visible ring, full a11y wiring.\n   - `ChatSurface` — text-only v1 (mic button rendered as a clearly-disabled placeholder for the listening sub-project). Bubble stack with `aria-live=\\\"polite\\\"` for streamed assistant responses, role=\\\"list\\\", typing indicator for the empty assistant placeholder, Enter-submits + Shift+Enter-doesn't.\n   - `AssistantOverlay` — `role=\\\"dialog\\\"` + `aria-modal=\\\"true\\\"`, focus trap (Tab/Shift+Tab cycle inside), initial focus on open, focus return to the trigger on close, Escape dismissal, respects `prefers-reduced-motion`.\n   - Mounted in `App.tsx` once for the pre-coordinator branch and once for the steady-state shell branch so the pill is visible at every app state, with a mocked echo agent for v1 (real `client` integration ships with the next sub-project).\n   - Z-index uses `Z_SHELL_OVERLAY` from `lib/floating-layers.ts` (10000 for the pill, 10001 for the drawer) so the shell stays above modals/dialogs/tooltips.\n   - Public exports in `packages/ui/src/index.ts`; Storybook coverage in `packages/ui-stories` (six stories: pill states, chat empty/messages/streaming/disabled, overlay open).\n   - 52 vitest tests across 6 files, all passing.\n\n**Design spec, implementation plan, and onboarding UX audit** are committed alongside the code under `docs/apps/desktop/`:\n- `2026-05-16-shell-foundation-design.md` — full design spec for the shell foundation (with the four sub-project sequence and the known v1 deviations documented).\n- `2026-05-16-onboarding-ux-audit.md` — 74-issue audit with per-screen findings.\n- `2026-05-17-shell-foundation-implementation-plan.md` — 9-task TDD plan used to execute.\n\n**Out of scope (each is its own sub-project per the design spec):** push-to-talk mic + STT, wake word (\\\"Hey Eliza\\\"), cross-session conversation history, multi-thread switching, TTS, Playwright e2e smoke, design-review visual regression.\n\n**Note on the dev workarounds commit (`chore(dev): workarounds to get local app build running`):** swaps `@vitejs/plugin-react` for `@vitejs/plugin-react-swc`, adds an `import React from \\\"react\\\"` at `packages/app/src/main.tsx`, and copies `packages/scripts/rm-path-recursive.mjs` to `scripts/rm-path-recursive.mjs` so the capacitor plugin clean scripts (which reference `../../scripts/...`) can find it. These were required to get `vite build` running locally on this branch. May or may not be wanted upstream — flag for review.\n\n## Test plan\n\n- [x] All 52 shell-foundation unit tests pass (`bun run vitest run packages/ui/src/components/shell/__tests__/`)\n- [x] Live browser walk: pill renders during boot (disabled), becomes interactive on `phase=ready`, click opens overlay, type → send → mocked echo response → returns to summoned\n- [x] Full 7-step onboarding walks end-to-end with the audit fixes (Steps 1–7 + Hello + Setup)\n- [ ] Reviewer: check the mount-site placement at both App.tsx return paths (pre-agent shell + steady-state shell)\n- [ ] Reviewer: check `canSend` matches the reducer's accepted phases (`summoned` + `listening`, NOT `responding`)\n- [ ] Reviewer: confirm the dev workarounds commit is acceptable upstream OR pull just the audit + shell commits\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR bundles two pieces of work: a thorough accessibility/contrast audit pass across all onboarding screens (`VoicePrefixGate` \\u2192 Hello \\u2192 Setup), and the v1 shell foundation \\u2014 a 5-phase state machine (`booting/idle/summoned/listening/responding`) with `HomePill`, `AssistantOverlay`, and `ChatSurface` components wired into `App.tsx`.\n\n- **Onboarding a11y fixes**: removes the `text-black` contrast failure, promotes step headings to `<h1>`, adds `role=progressbar`, `role=radiogroup`/`radio`/`aria-checked` on choice tiles, `role=alert` on the voice-service error block, hides the dead Back button on step 1, and replaces flag emojis with native language names.\n- **Shell foundation**: new pure reducer + `useShellState` hook, `HomePill`, `AssistantOverlay` (focus-trapping WAI-ARIA dialog), `ChatSurface` (bubble stack + accessible input), 52 passing vitest tests, and Storybook stories.\n- **Button default type fix**: `<Button>` now defaults `type=\\\"button\\\"` instead of HTML\\u2019s implicit `\\\"submit\\\"`, fixing silent form-submission on Enter across ~731 non-submit call sites.\n\n<h3>Confidence Score: 3/5</h3>\n\nTwo defects in the shell state machine should be fixed before merging: the overlay cannot be dismissed while a response is in flight, and the unstable `send` identity causes repeated focus disruption during streaming.\n\nThe CLOSE guard in the reducer and the unstable `send` wrapper in `useShellState` are present bugs on the primary interactive path — both affect every user who opens the overlay and sends a message. The onboarding and accessibility work is clean and well-tested.\n\n`packages/ui/src/components/shell/shell-state.ts` (CLOSE guard) and `packages/ui/src/components/shell/useShellState.ts` (send identity) need fixes; `packages/ui/src/App.tsx` dual-mount placement warrants a second look.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/ui/src/components/shell/shell-state.ts | New pure reducer + types for the 5-phase shell state machine; CLOSE is only accepted from `summoned`, leaving the overlay stuck open during `responding` and `listening` phases. |\n| packages/ui/src/components/shell/useShellState.ts | New hook wrapping the reducer; `send` is re-created inside `useMemo` on every state change, making downstream `useCallback`/`useEffect` dep arrays unstable and causing a focus-bounce loop during streaming. |\n| packages/ui/src/components/shell/AssistantOverlay.tsx | New focus-trapping dialog overlay with WAI-ARIA Dialog pattern; focus management is sound in isolation but disrupted at runtime by the unstable `send` identity propagated through `onClose`. |\n| packages/ui/src/components/shell/ChatSurface.tsx | New text-only chat UI with bubble stack, typing indicator, and accessible input row; no issues found. |\n| packages/ui/src/components/shell/HomePill.tsx | New persistent bottom-center pill with phase-aware visual states; correctly disabled during `booting`, toggle logic and aria attributes are clean. |\n| packages/ui/src/App.tsx | Adds `ShellFoundationMount` at two independent App.tsx sites with separate state machine instances; branches appear mutually exclusive but this is fragile. Also fixes the `text-black` contrast regression. |\n| packages/ui/src/components/onboarding/VoicePrefixSteps.tsx | Adds `role=progressbar`, promotes `h2→h1`, hides Back on step 1, gates Continue until mic permission resolved — all audit-driven a11y improvements. |\n| packages/ui/src/components/ui/button.tsx | Defaults `type` to `\"button\"` instead of HTML's implicit `\"submit\"` for non-`asChild` buttons; correctly preserves explicit `type` overrides. |\n| packages/ui/src/components/onboarding/states/StateSetup.tsx | Adds `role=radiogroup`/`role=radio`/`aria-checked`, replaces flag emojis with native language names, and adds the missing `h2` instruction label. |\n| packages/ui/src/components/onboarding/states/StateHello.tsx | Promotes `section→main`, `div→h1` for \"Hello\", adds `aria-hidden` on avatar canvas and `aria-live=polite` on transcript. |\n| packages/ui/src/index.ts | Adds named exports for all new shell-foundation components and types; no conflicts with existing exports visible. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A([booting]) -->|BOOT_READY| B([idle])\n    B -->|OPEN| C([summoned])\n    C -->|CLOSE| B\n    C -->|SEND text| D([responding])\n    D -->|RESPONSE_DONE| C\n    D -->|RESPONSE_ERROR| C\n    D -. \"CLOSE no-op today\" .-> D\n\n    style D fill:#fde68a,stroke:#d97706\n    style A fill:#e5e7eb,stroke:#6b7280\n    style B fill:#d1fae5,stroke:#059669\n    style C fill:#dbeafe,stroke:#2563eb\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"fix(shell): final-review fixes — global ...\"](https://github.com/elizaos/eliza/commit/6572b1d0d1fb0370f790e5c277ed7e24f1cfe78d) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32503514)</sub>\n\n> Greptile also left **4 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-17T12:34:42Z",
+      "mergedAt": "2026-05-19T01:15:27Z",
+      "additions": 3658,
+      "deletions": 47
+    },
+    {
+      "id": "PR_kwDOMT5cIs7dO-OO",
+      "title": "feat(cloud): all agent lifecycle ops via job queue (Workers don't call cores)",
+      "author": "standujar",
+      "number": 7810,
+      "body": "> **Note**: this PR supersedes [#7808](https://github.com/elizaOS/eliza/pull/7808), which was auto-closed when the branch was renamed (\\`feat/orchestrator-http-server\\` → \\`feat/agent-lifecycle-via-job-queue\\`). The first three commits (\\`d29da4c\\`, \\`fb1a92b\\`, \\`7f670b9\\`) are identical to what reviewers saw on #7808 — including the Greptile findings and the fix commit \\`7f670b9\\`.\n\n## Architectural shift\n\n**Cloudflare Workers never talk to Hetzner cores directly.** Every cores-bound op flows through the job queue, the orchestrator daemon (the only context with SSH keys + a stable outbound network identity) executes it, and the Worker reads the result from \\`jobs.result\\`.\n\nPreviously the Worker code path called \\`elizaSandboxService.shutdown()\\` / \\`provision()\\` / \\`snapshot()\\` / bridge-HTTP-fetch inline. SSH-bound calls silently no-op'd from Workers; bridge-HTTP calls failed for stopped or crashed agents (no bridge to fetch from). Result: DB rows that claimed \\`stopped\\` while containers kept burning RAM, \"save snapshot\" 500s, and a logs view that returned empty for any non-trivially-running agent.\n\n## Scope (all shipped in this PR)\n\nSix lifecycle operations, five new job types, six route rewrites. Pattern mirrors the shipped \\`agent_delete\\` (PR #7746).\n\n| Op | Job type | Daemon executor | Route(s) |\n|---|---|---|---|\n| Suspend | \\`AGENT_SUSPEND\\` | \\`executeSuspend\\` — SSH \\`docker stop\\`, DB→stopped, keeps sandbox_id | \\`PATCH /v1/eliza/agents/[id]\\`, \\`POST /v1/eliza/agents/[id]/suspend\\`, \\`POST /v1/agents/[id]/suspend\\`, \\`POST /compat/agents/[id]/suspend\\` |\n| Resume | \\`AGENT_RESUME\\` | \\`executeResume\\` → \\`provision()\\` (URLs + DB restored) | \\`POST /v1/eliza/agents/[id]/resume\\` |\n| Restart | \\`AGENT_RESTART\\` | \\`executeRestart\\` — shutdown + provision atomic | \\`POST /v1/agents/[id]/restart\\` |\n| Logs | \\`AGENT_LOGS\\` | \\`executeLogs\\` — SSH \\`docker logs --tail N\\` via \\`provider.fetchLogs()\\` | \\`GET /v1/agents/[id]/logs\\`, \\`GET /compat/agents/[id]/logs\\` |\n| Snapshot | \\`AGENT_SNAPSHOT\\` | \\`executeSnapshot\\` — daemon-side snapshot() | \\`POST /v1/eliza/agents/[id]/snapshot\\` |\n\n## Greptile-resolved (from #7808, commit \\`7f670b9\\`)\n\nThe fast-path \\`docker start\\` in \\`executeResume\\` was dead code on \\`DockerSandboxProvider\\` (no standalone \\`start()\\` exposed), so every resume already paid the full re-provision cost. Greptile flagged three derived issues: bridge_url not restored, no lifecycle lock, silent fallback. Fix: drop the fast path. \\`provision()\\` restores URLs and holds its own advisory lock. Real fast path returns when the provider grows a \\`start(sandboxId): Promise<SandboxHandle>\\` — tracked as follow-up.\n\n## What I tested\n\n**Locally:**\n- [x] \\`tsc --noEmit\\` clean on cloud-shared (touched files filtered)\n- [x] biome check clean on all 10 touched files\n- [x] \\`bun test packages/cloud-shared/src/lib/services/__tests__/provisioning-job-types.test.ts\\` → 4 pass, 100% coverage on the registry file. Catches typos / missing entries / duplicates / non-snake-case.\n- [x] Manual /clean single-pass on the diff: no slop, no defensive overkill, no \\`any\\` / \\`as unknown\\` casts. JSDocs explain Why.\n\n**What I did NOT test (needs deploy on both Worker + daemon VM):**\n- [ ] e2e dashboard: each of suspend / resume / restart / logs / snapshot via the dashboard against a live agent\n- [ ] Idempotency: rapid double-click on any op → second returns existing job\n- [ ] Logs job uniqueness: completed logs job is NOT reused on a fresh click (only in-flight ones are)\n- [ ] \\`/api/v1/jobs/<id>\\` polling surfaces status transitions correctly\n\n**Test gap:**\nThe \\`execute*\\` methods aren't unit-tested. cloud-shared has no harness for mocking \\`dbWrite.transaction\\` + advisory locks + SSH provider. Same gap as the shipped \\`agent_delete\\` / \\`agent_provision\\` paths. Follow-up of its own size.\n\n## Frontend UX note\n\nSnapshot / suspend / restart toasts fire optimistically (the same as today for the already-shipped suspend route): the user sees \"Snapshot saved\" before the job actually completes. The DB eventually reflects reality. To make the toast truthful, the frontend needs to extend its existing \\`poller.track(agentId, jobId)\\` flow (used today for provision/resume) to cover the new 202 paths. Follow-up frontend PR.\n\n## Follow-up\n\n- Frontend poller for the new 202 routes (suspend, restart, snapshot, logs) — kills the optimistic-toast lie.\n- Real fast-path \\`docker start\\` via \\`provider.start()\\` returning a fresh handle (perf optimization, ~5s vs ~60s for resume).\n- DRY the now-seven \\`enqueue*Once\\` methods — ~80 LOC of near-identical lock + idempotency code per method. Touches shipped code, so out of scope here.\n- Test harness for the execute* methods (covers this PR + the existing \\`agent_delete\\` / \\`agent_provision\\` paths).\n- 5 remaining \\`elizaSandboxService.shutdown()\\` callers from non-route contexts (\\`agent-managed-github\\`, \\`agent-managed-discord\\`, \\`eliza-managed-launch\\`, \\`active-billing\\`). Architectural question: should those services run as Workers or daemon? Same Worker-side gap applies.\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR shifts all agent lifecycle operations (suspend, resume, restart, logs, snapshot) from inline Cloudflare Worker calls to a job-queue pattern executed by the daemon — the only context with SSH access to Hetzner cores. It adds five new job types mirroring the shipped `agent_delete` pattern, rewrites six route handlers to return `202 + jobId`, and implements five daemon-side `execute*` methods in `ElizaSandboxService`.\n\n- **Six route rewrites** across `v1/`, `v1/eliza/`, and `compat/` replace direct `elizaSandboxService` calls with `provisioningJobService.enqueue*Once` + `triggerImmediate()`, returning `202` and a polling envelope.\n- **Five new `execute*` methods** in `eliza-sandbox.ts` handle the actual SSH operations daemon-side: `executeSuspend` (advisory-locked transaction), `executeResume` (delegates to `provision()`), `executeRestart` (sequential `shutdown` + `provision`), `executeLogs` (SSH `docker logs`), and `executeSnapshot` (delegates to existing `snapshot()`).\n- **`DockerSandboxProvider.fetchLogs`** is added with integer-clamped `safeTail` and `2>&1` stderr merge so crashed agents' boot traces are included.\n\n<h3>Confidence Score: 4/5</h3>\n\nThe structural change is sound — six routes correctly shifted from inline Worker calls to job-queue dispatched by the daemon — but the `triggerImmediate()` calls without CF Worker env bindings mean the orchestrator kick is a no-op at runtime, so jobs sit pending until the next cron tick.\n\nThe `triggerImmediate` / missing env-binding issue carried from the prior review is a present runtime defect: the daemon wake-up call silently fails in every new route that adds the pattern, so suspend, restart, logs, and snapshot operations will always incur the full cron-tick latency rather than the near-instant dispatch intended.\n\nThe `triggerImmediate()` calls across the new route handlers (restart, suspend, logs in `v1/agents/`, PATCH in `v1/eliza/agents/[agentId]/route.ts`, and the newly added resume/snapshot/suspend under `v1/eliza/agents/`) all need the `c.env` pass-through addressed before deploy.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/cloud-shared/src/lib/services/provisioning-jobs.ts | Core of the PR: adds five new enqueue methods and five executor methods following the existing agent_delete/provision pattern. The `enqueueAgentSnapshotOnce` idempotency check doesn't filter by `snapshotType`, mirroring the already-flagged `tail`/logs issue. |\n| packages/cloud-shared/src/lib/services/eliza-sandbox.ts | Adds five daemon-side execute* methods. `executeSuspend` is properly transaction-locked; `executeResume` and `executeRestart` rely on provision()'s own lock but are not wrapped in a single atomic boundary (already flagged in previous review). |\n| packages/cloud-api/v1/agents/[agentId]/restart/route.ts | Route correctly enqueues AGENT_RESTART and returns 202; `triggerImmediate()` called without `c.env` (already flagged in previous review). |\n| packages/cloud-api/v1/eliza/agents/[agentId]/snapshot/route.ts | Enqueues AGENT_SNAPSHOT and returns 202; pre-gates on agent.status === \"running\". The idempotency check in the underlying enqueue method ignores snapshotType. |\n| packages/cloud-api/v1/agents/[agentId]/suspend/route.ts | Route enqueues AGENT_SUSPEND with correct idempotency fast-paths for stopped/provisioning. `triggerImmediate()` missing `c.env` (already flagged). |\n| packages/cloud-api/v1/agents/[agentId]/logs/route.ts | Route enqueues AGENT_LOGS; `triggerImmediate()` missing `c.env` (already flagged). Idempotency ignores `tail` (already flagged). |\n| packages/cloud-api/v1/eliza/agents/[agentId]/route.ts | PATCH handler now enqueues AGENT_SUSPEND; `triggerImmediate()` missing `c.env` in the new path (already flagged), whereas DELETE correctly passes c.env. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/resume/route.ts | Switches from enqueueAgentProvisionOnce to enqueueAgentResumeOnce; drops expectedUpdatedAt check. Clean change, no issues found. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/suspend/route.ts | Correctly rewired to enqueue AGENT_SUSPEND with proper 409/already-stopped fast-paths. Clean implementation. |\n| packages/cloud-api/compat/agents/[id]/logs/route.ts | Compat logs route rewired to job queue; shares the same `triggerImmediate()` without env context issue as the v1 routes (same pattern flagged in previous review). |\n| packages/cloud-api/compat/agents/[id]/suspend/route.ts | Compat suspend route correctly handles stopped/provisioning fast-paths and enqueues AGENT_SUSPEND with 202 response. |\n| packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts | Adds fetchLogs with integer-clamped tail (1-5000), shellQuote protection, and stderr merge via 2>&1. Clean implementation. |\n| packages/cloud-shared/src/lib/services/provisioning-job-types.ts | Adds five new job type constants; tested for uniqueness and snake_case convention in the new provisioning-job-types.test.ts. |\n| packages/cloud-shared/src/lib/services/__tests__/provisioning-job-types.test.ts | New smoke tests validate the job type registry for uniqueness, snake_case format, and correct wire values. Good coverage for the registry file. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant C as Client\n    participant W as CF Worker (route)\n    participant DB as Database (jobs)\n    participant D as Daemon (orchestrator)\n    participant H as Hetzner Core (SSH)\n\n    C->>W: \"POST /suspend | /restart | /snapshot\"\n    W->>DB: \"enqueue*Once() advisory lock, idempotency check, INSERT job\"\n    DB-->>W: \"job {id, status: pending}\"\n    W->>D: triggerImmediate() best-effort\n    W-->>C: \"202 {jobId, polling.endpoint}\"\n\n    Note over D: Cron tick or triggerImmediate kick\n    D->>DB: SELECT pending jobs\n    DB-->>D: job row\n\n    alt AGENT_SUSPEND or AGENT_RESTART\n        D->>H: SSH docker stop container\n        H-->>D: ok\n        D->>DB: \"UPDATE status=stopped, bridge_url=NULL\"\n    else AGENT_RESUME\n        D->>H: provision() docker run + health check\n        H-->>D: bridgeUrl, healthUrl\n        D->>DB: \"UPDATE status=running, bridge_url, health_url\"\n    else AGENT_LOGS\n        D->>H: SSH docker logs --tail N\n        H-->>D: stdout+stderr\n    else AGENT_SNAPSHOT\n        D->>H: fetch bridge_url/snapshot\n        H-->>D: backup metadata\n        D->>DB: INSERT agent_sandbox_backups\n    end\n\n    D->>DB: \"UPDATE jobs SET status=completed, result\"\n    C->>DB: \"GET /api/v1/jobs/{id} poll until completed\"\n    DB-->>C: \"{status, result}\"\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `packages/cloud-shared/src/lib/services/provisioning-jobs.ts`, line 936-957 ([link](https://github.com/elizaos/eliza/blob/e8f60f9765a3bf8a44848d297701dcd89642909c/packages/cloud-shared/src/lib/services/provisioning-jobs.ts#L936-L957)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=8\" align=\"top\"></a> **Idempotency key for `AGENT_LOGS` ignores the `tail` parameter**\n\n   The in-flight dedup query matches any `pending`/`in_progress` `agent_logs` job for the same agent, regardless of `tail`. A second request for `tail=5000` while a `tail=100` job is executing returns the `tail=100` job, but both route handlers respond with the caller's own `tail` value in the envelope. The client sees `alreadyInProgress: true` but the job stored in `jobs.data.tail` and eventually written to `jobs.result.tail` is 100 — clients polling the job will receive 100-line logs when they asked for 5000. Either include `tail` in the idempotency check, or make the response tail field come from the returned job's data rather than the caller's parameter.\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (2): Last reviewed commit: [\"chore(cloud-shared): biome format drift ...\"](https://github.com/elizaos/eliza/commit/3f873db40c04d2824a6b5e9e2d5d43ea237f69e2) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32895524)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-19T20:10:04Z",
+      "mergedAt": null,
+      "additions": 1781,
+      "deletions": 278
+    },
+    {
+      "id": "PR_kwDOMT5cIs7c4Q_B",
+      "title": "fix(android): wire local MTP and OmniVoice inference",
+      "author": "NubsCarson",
+      "number": 7792,
+      "body": "## Summary\n\nThis PR wires the Android local-inference path to the current Shaw `llama.cpp` fork contract on `develop`:\n\n- builds and packages the real Android speculative shim against `llama.cpp` headers/libs instead of the previous headerless shim path\n- stages `libllama-common.so` and other DT_NEEDED siblings required by the speculative shim and merged server artifacts\n- exposes `eliza_llama_context_params_set_ctx_type(...)` so mobile can request `LLAMA_CONTEXT_TYPE_MTP`\n- adds MTP-first / DFlash-fallback model-load selection for the AOSP local inference adapter\n- validates DFlash metadata before auto-pairing a drafter with a target model\n- routes Android local TTS through stock-safe Kokoro by default, with OmniVoice auto/explicit support and fallback behavior\n- bundles the mobile-safe OmniVoice/plugin-workflow surfaces needed by the Android agent bundle\n- fixes the OmniVoice FFI pointer write path for numeric and bigint pointers\n\nThere is also one formatter-only commit for three homepage files from the latest `develop` merge, because the repo-wide format CI currently checks the full workspace.\n\n## Current Source Base\n\n- `elizaOS/eliza` base merged: `develop` at `d750978dc7`\n- `plugins/plugin-local-inference/native/llama.cpp`: `3de6dc888a5fbccdb989b8b7be87d42c8ad0c925` (`v1.0.1-eliza-748-g3de6dc888`)\n\n## Validation\n\nHost checks run locally on 2026-05-19:\n\n- `git diff --cached --check` and `git diff --check`\n- `node --check packages/agent/scripts/build-mobile-bundle.mjs`\n- `node --check packages/agent/scripts/mobile-stubs/null-plugin.cjs`\n- `node --check packages/app-core/scripts/aosp/compile-libllama.mjs`\n- `bun test packages/app-core/scripts/aosp/compile-libllama-fused.test.mjs --runInBand` (`12 pass`)\n- `bun run typecheck` in `plugins/plugin-aosp-local-inference`\n- `bun run test` in `plugins/plugin-aosp-local-inference` (`49 pass`)\n- `bun run typecheck` in `plugins/plugin-omnivoice`\n- `bun run test` in `plugins/plugin-omnivoice` (`28 pass`, `1 skipped`)\n- `bun run format:check` in `packages/homepage`\n- Android fused native dry-run against the in-repo `3de6dc888` submodule\n\nFull native Android build also passed with:\n\n```sh\nnode packages/app-core/scripts/aosp/compile-libllama.mjs \\\n  --target android-arm64-cpu-fused \\\n  --src-dir plugins/plugin-local-inference/native/llama.cpp \\\n  --assets-dir /home/nubs/.eliza/local-inference/bin/dflash/apk-android-arm64-cpu-fused-shawlatest-3de6dc888 \\\n  --jobs 8\n```\n\nThat build produced `libllama.so`, `libllama-common.so`, `libmtmd.so`, `libelizainference.so`, `libomnivoice.so`, `llama-server`, `libeliza-llama-shim.so`, and `libeliza-llama-speculative-shim.so`. Artifact checks found Qwen35/Qwen35MoE/Qwen3Next/DFlash symbols, MTP markers, and the QJL/Polar/TBQ/fused-attention kernels.\n\nA Milady wrapper APK build using those artifacts also completed successfully and packaged the native set into the debug APK.\n\n## Hardware Caveat\n\nThis is intentionally a draft because there is no Pixel device available right now. I am not claiming on-device chat latency, audio quality, NNAPI/TPU behavior, or end-to-end voice conversation proof from this PR. The host/native/APK build evidence is real; final Pixel validation still needs hardware.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-19T01:10:14Z",
+      "mergedAt": null,
+      "additions": 1240,
+      "deletions": 179
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 14382,
+    "deletions": 1278,
+    "files": 162,
+    "commitCount": 98
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "Shell foundation v1 + onboarding a11y/contrast pass",
+      "prNumber": 7774,
+      "type": "other",
+      "body": "## Summary\n\nTwo pieces of work bundled on `enoomian/shell-foundation` (28 commits off `shaw/eliza-app-release-blockers`):\n\n**1. Onboarding accessibility + contrast pass** (audit-driven, 9 fix commits)\n   - Documented audit of every screen i",
+      "files": [
+        "bun.lock",
+        "docs/apps/desktop/2026-05-16-onboarding-ux-audit.md",
+        "docs/apps/desktop/2026-05-16-shell-foundation-design.md",
+        "docs/apps/desktop/2026-05-17-shell-foundation-implementation-plan.md",
+        "packages/app/index.html",
+        "packages/app/src/main.tsx",
+        "packages/app/vite.config.ts",
+        "packages/ui-stories/src/App.tsx",
+        "packages/ui-stories/src/stories/shell-foundation.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/onboarding/VoicePrefixSteps.tsx",
+        "packages/ui/src/components/onboarding/states/StateDeviceMode.tsx",
+        "packages/ui/src/components/onboarding/states/StateHello.tsx",
+        "packages/ui/src/components/onboarding/states/StateSetup.tsx",
+        "packages/ui/src/components/onboarding/states/device-profiles.ts",
+        "packages/ui/src/components/shell/AssistantOverlay.tsx",
+        "packages/ui/src/components/shell/ChatSurface.tsx",
+        "packages/ui/src/components/shell/HomePill.tsx",
+        "packages/ui/src/components/shell/__tests__/AssistantOverlay.test.tsx",
+        "packages/ui/src/components/shell/__tests__/ChatSurface.test.tsx",
+        "packages/ui/src/components/shell/__tests__/HomePill.test.tsx",
+        "packages/ui/src/components/shell/__tests__/exports.test.ts",
+        "packages/ui/src/components/shell/__tests__/shell-state.test.ts",
+        "packages/ui/src/components/shell/__tests__/useShellState.test.tsx",
+        "packages/ui/src/components/shell/shell-state.ts",
+        "packages/ui/src/components/shell/useShellState.ts",
+        "packages/ui/src/components/ui/button.tsx",
+        "packages/ui/src/index.ts",
+        "packages/ui/src/styles/base.css",
+        "scripts/rm-path-recursive.mjs"
+      ]
+    },
+    {
+      "title": "fix(release): force npm token publishing",
+      "prNumber": 7811,
+      "type": "bugfix",
+      "body": "## Summary\n- remove id-token permission from the npm release workflow so npm/lerna does not attempt trusted-publishing OIDC\n- set npm provenance off for publish and dist-tag verification so NPM_TOKEN remains the auth path\n\n## Validation\n- g",
+      "files": [
+        ".github/workflows/release.yaml"
+      ]
+    },
+    {
+      "title": "Add iOS Bun engine artifact",
+      "prNumber": 7809,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".gitattributes",
+        ".gitignore",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/Info.plist",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/ElizaBunEngine",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/Headers/ElizaBunEngine.h",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/Info.plist",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/Modules/module.modulemap",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/ElizaBunEngine",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/Headers/ElizaBunEngine.h",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/Info.plist",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/Modules/module.modulemap",
+        "packages/native/bun-runtime/.gitignore"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 5 directories with 8 updates",
+      "prNumber": 7807,
+      "type": "other",
+      "body": "Bumps the uv group with 3 updates in the /packages/benchmarks/OSWorld directory: [numpy](https://github.com/numpy/numpy), [requests](https://github.com/psf/requests) and [idna](https://github.com/kjd/idna).\nBumps the uv group with 1 update ",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer/requirements_old.txt",
+        "packages/benchmarks/webshop/pyproject.toml",
+        "packages/benchmarks/webshop/upstream/requirements.txt",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the pip group across 2 directories with 6 updates",
+      "prNumber": 7806,
+      "type": "other",
+      "body": "Bumps the pip group with 1 update in the /packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer directory: [numpy](https://github.com/numpy/numpy).\nBumps the pip group with 5 updates in the /packages/benchmark",
+      "files": [
+        "packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer/requirements_old.txt",
+        "packages/benchmarks/webshop/upstream/requirements.txt"
+      ]
+    },
+    {
+      "title": "feat(training): low-VRAM smoke config for 2b SFT on 12GB consumer GPUs",
+      "prNumber": 7805,
+      "type": "feature",
+      "body": "## Summary\n\nAdds a `--low-vram-smoke` CLI preset to `train_local.py` that brings the\n2B SFT path inside a 12 GB envelope so train→quant→bench plumbing can be\nvalidated end-to-end on commodity hardware (RTX 3060 / 4070 class) before\nreaching",
+      "files": [
+        "packages/training/README.md",
+        "packages/training/scripts/test_train_local_low_vram_smoke.py",
+        "packages/training/scripts/train_local.py"
+      ]
+    },
+    {
+      "title": "feat(cloud): POST /api/v1/apps/[id]/deploy + GET …/deploy/status",
+      "prNumber": 7804,
+      "type": "feature",
+      "body": "## What\n\nCompletes the cloud half of `elizaos deploy` (PR #7786, already merged). The CLI keel from that PR documents an 8-step deploy sequence; steps 5 and 7 need server endpoints that didn't exist yet. This PR adds them:\n\n- `POST /api/v1/",
+      "files": [
+        "packages/cloud-api/__tests__/app-deployments-helpers.test.ts",
+        "packages/cloud-api/src/_generate-router.mjs",
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/apps/[id]/deploy/route.ts",
+        "packages/cloud-api/v1/apps/[id]/deploy/schema.ts",
+        "packages/cloud-api/v1/apps/[id]/deploy/status/route.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deployments-helpers.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments-helpers.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments.ts"
+      ]
+    },
+    {
+      "title": "ci(flatpak): commit node-sources.json + flip elizaos-app to --offline (Flathub-ready)",
+      "prNumber": 7802,
+      "type": "other",
+      "body": "## Summary\n\nCompletes the Flathub-readiness work begun in #7787. That PR added the\n`generate-sources.sh` script and wired it into `test-flatpak.yml` so CI\nregenerates `node-sources.json` on every run and uploads it as the\n`flatpak-node-sour",
+      "files": [
+        "packages/app-core/packaging/flatpak/README.md",
+        "packages/app-core/packaging/flatpak/ai.elizaos.App.yml",
+        "packages/app-core/packaging/flatpak/generate-sources.sh",
+        "packages/app-core/packaging/flatpak/node-sources.json"
+      ]
+    },
+    {
+      "title": "fix(boot): eliminate TLA + barrel-import deadlock in cloud Docker boot",
+      "prNumber": 7801,
+      "type": "bugfix",
+      "body": "## Why\n\nProvisioning a fresh sandbox in a cloud Docker container hangs silently: no logs past `[eliza] Generated SECRET_SALT`, Node PID 1 in `ep_poll`, port 2138 never listens, daemon kills the container at the 180s health timeout. PR #7783",
+      "files": [
+        "packages/agent/package.json",
+        "packages/app-core/src/services/account-pool.ts"
+      ]
+    },
+    {
+      "title": "fix(os): package elizaOS live runtime plugins",
+      "prNumber": 7800,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the current elizaOS Live packaged-runtime blocker found during QEMU validation: the app window opened, but the backend timed out because `@elizaos/plugin-app-manager` and `@elizaos/plugin-registry` were staged as package f",
+      "files": [
+        "packages/os/DOWNLOADS.md",
+        "packages/os/linux/variants/milady-tails/Justfile",
+        "packages/os/linux/variants/milady-tails/PLAN.md",
+        "packages/os/linux/variants/milady-tails/README.md",
+        "packages/os/linux/variants/milady-tails/ROADMAP.md",
+        "packages/os/linux/variants/milady-tails/docs/current-status.md",
+        "packages/os/linux/variants/milady-tails/docs/distribution-and-updates.md",
+        "packages/os/linux/variants/milady-tails/docs/mode-parity.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/README.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-3-privacy-mode.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-4-bake-milady-app.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-5-6-autolaunch-and-agent.md",
+        "packages/os/linux/variants/milady-tails/docs/user-experience.md",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.AdditionalSoftware.desktop.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-backup.desktop.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-documentation.desktop.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tca.desktop.in",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-service.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-app-manager/build.ts",
+        "plugins/plugin-local-inference/src/services/__stress__/cache-restart-corruption.test.ts",
+        "plugins/plugin-local-inference/src/services/backend.ts",
+        "plugins/plugin-local-inference/src/services/dflash-server.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-backend.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core): resolve Capacitor CLI from workspace installs",
+      "prNumber": 7799,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the mobile smoke failure where `run-mobile-build.mjs` hard-coded `packages/app/node_modules/@capacitor/cli/bin/capacitor`, which breaks clean CI/workspace installs where dependencies are hoisted to the repo root or stored ",
+      "files": [
+        ".github/workflows/mobile-build-smoke.yml",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/res/values/styles.xml",
+        "packages/app-core/scripts/run-mobile-build-policy.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs"
+      ]
+    },
+    {
+      "title": "fix(app-core): support nested desktop workspace builds",
+      "prNumber": 7798,
+      "type": "bugfix",
+      "body": "## Summary\n- Resolve desktop runtime package directories from either a standalone Eliza checkout or an outer wrapper with `eliza/packages/*`.\n- Generate the fallback root runtime entry relative to the resolved app-core package path.\n- Build",
+      "files": [
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "fix(os): polish elizaOS live branding and update materialization",
+      "prNumber": 7797,
+      "type": "bugfix",
+      "body": "## Summary\n\n- rebrand a few remaining first-boot/live-tool polish strings from inherited Tails wording to elizaOS wording\n- harden app/runtime update materialization with no-follow source opens, temp-file replacement, and manifest-declared ",
+      "files": [
+        ".github/workflows/quality.yml",
+        "packages/os/linux/variants/milady-tails/Justfile",
+        "packages/os/linux/variants/milady-tails/scripts/security-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/lib/live/config/2000-aesthetics",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/lib/live/config/2000-import-gnupg-key",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/bin/milady",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/update-manager",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/desktop-directories/Tails.directory.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/initramfs-tools/scripts/init-premount/partitioning",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/initramfs-tools/scripts/init-top/read-and-update-random-seed-sector",
+        "packages/os/linux/variants/milady-tails/tails/data/debootstrap/scripts/debian-common.patch",
+        "packages/os/linux/variants/milady-tails/tails/data/splash.png",
+        "packages/os/linux/variants/milady-tails/tails/data/splash.svg",
+        "packages/os/linux/variants/milady-tails/tails/data/wrappers/apt-get"
+      ]
+    },
+    {
+      "title": "feat(local-inference): wire slot save/restore + prewarm through FFI",
+      "prNumber": 7796,
+      "type": "feature",
+      "body": "Closes three of the five FFI parity gaps left after the desktop adapter landed:\r\n\r\n1. **Slot save/restore via direct libllama bindings**. `llama_state_seq_save_file` / `_load_file` are pointer-style upstream APIs — no shim wrapper needed; b",
+      "files": [
+        "plugins/plugin-local-inference/src/services/desktop-llama-adapter.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-backend.ts"
+      ]
+    },
+    {
+      "title": "fix(os-homepage): refresh elizaOS E2E baselines",
+      "prNumber": 7795,
+      "type": "bugfix",
+      "body": "## Summary\n- update os-homepage Playwright assertions for the current CloudVideoBackground and shared-brand resized USB asset\n- remove the stale `cloud-video` test mask reference\n- refresh Linux visual regression baselines against the curre",
+      "files": [
+        "packages/os-homepage/src/App.tsx",
+        "packages/os-homepage/src/ProductDetail.tsx",
+        "packages/os-homepage/tests/VISUAL-REGRESSION.md",
+        "packages/os-homepage/tests/homepage.spec.ts",
+        "packages/os-homepage/tests/visual.spec.ts",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-mobile-linux.png"
+      ]
+    },
+    {
+      "title": "fix(os): harden elizaOS smoke checks and USB installer boundary",
+      "prNumber": 7790,
+      "type": "bugfix",
+      "body": "## Summary\n- make elizaOS Live static smoke mode checks stable in shared Git worktrees by reading executable modes from the Git index before falling back to filesystem modes\n- keep raw USB/disk platform backends out of the Vite renderer bun",
+      "files": [
+        ".github/workflows/elizaos-os-release.yml",
+        "packages/homepage/src/components/ChatUI/renderChatToCanvas.ts",
+        "packages/os-usb-installer/README.md",
+        "packages/os-usb-installer/src/main.tsx",
+        "packages/os/RELEASE.md",
+        "packages/os/android/installer/README.md",
+        "packages/os/android/installer/manifests/android-release-manifest.example.json",
+        "packages/os/android/installer/scripts/validate-release-manifest.mjs",
+        "packages/os/android/installer/tests/run-tests.sh",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/release/beta-2026-05-16/README.md"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the npm_and_yarn group across 2 directories with 2 updates",
+      "prNumber": 7789,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/cloud-services/operator directory: [uuid](https://github.com/uuidjs/uuid).\nBumps the npm_and_yarn group with 1 update in the /plugins/plugin-elizacloud directory: [ws](https://gith",
+      "files": [
+        "packages/cloud-services/operator/package.json",
+        "plugins/plugin-elizacloud/package.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 398.9137237773861,
+      "prScore": 398.9137237773861,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 227.14593121466868,
+      "prScore": 193.2079312146687,
+      "issueScore": 0,
+      "reviewScore": 33.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 175.94759156774379,
+      "prScore": 175.7475915677438,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 141.05514745748894,
+      "prScore": 141.05514745748894,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 99,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 99,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 48.187930798631925,
+      "prScore": 48.187930798631925,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 30.818770477563863,
+      "prScore": 30.818770477563863,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jqmwa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/95416268?u=aa05f4d49acc8c161a83f6a313231f63904521e9&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 26,
+  "mergedPRs": 17,
+  "newIssues": 1,
+  "closedIssues": 1,
+  "activeContributors": 10
 }

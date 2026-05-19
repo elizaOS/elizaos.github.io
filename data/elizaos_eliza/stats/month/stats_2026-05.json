@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-05-01 to 2026-06-01, elizaos/eliza had 174 new PRs (114 merged), 20 new issues, and 18 active contributors.",
+  "overview": "From 2026-05-01 to 2026-06-01, elizaos/eliza had 204 new PRs (132 merged), 21 new issues, and 19 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABCFsSVw",
@@ -90,8 +90,8 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-05-17T14:10:53Z",
       "mergedAt": null,
-      "additions": 47142,
-      "deletions": 636
+      "additions": 49188,
+      "deletions": 4500
     },
     {
       "id": "PR_kwDOMT5cIs7X8Akl",
@@ -125,16 +125,16 @@
       "body": "## Summary\n\n12 commits that ship connector capability detection (Sprint A), orchestrator self-healing + security gates, and a moltbot-inspired UX redesign for sub-agent narration that prevents conversation-memory pollution from poisoning future planner turns.\n\n## What changed\n\n**Core (Sprint A — connector capability detection)**\n- New `MessageConnectorCapability` enum + 4 handler types (`typingHandler`, `stopTypingHandler`, `createThreadHandler`, `postToThreadHandler`).\n- 5 new `IAgentRuntime` methods: `editMessageOnTarget`, `sendTypingOnTarget`, `stopTypingOnTarget`, `createThreadOnTarget`, `postToThreadOnTarget`, plus `addReactionOnTarget` for `react_message`.\n- `requireConnectorHook<K>` DRY helper (4 call sites would otherwise repeat the same lookup + guard).\n- Streaming-branch bug fix in `useModel`: preserve `toolCalls` / `finishReason` / `usage` Promises instead of collapsing the response to `streamedText` (caused `parsePlannerOutput` to increment `required_tool_misses` even when the LLM had emitted a valid native tool call).\n\n**planner-loop**\n- Honor explicit `completed: false` from the planner: `tryGateEvaluator` falls through to the full evaluator instead of synthesizing a FINISH when the planner is signaling \"tool calls do not yet achieve the goal\".\n- Graceful fallback when `required_tool_misses` budget is exhausted: log + use the planner's `messageToUser` as the terminal reply instead of throwing `TrajectoryLimitExceeded` (which collapsed the loop with no user-visible answer).\n\n**plugin-discord**\n- Declares 7 capabilities incl. `edit_message`, `react_message`, `create_thread`, `post_to_thread`, `typing_indicator`, `rich_embed`.\n- New handlers: `typingHandler`, `stopTypingHandler`, `createThreadHandler`, `postToThreadHandler`, `findOrCreateWebhook`.\n- `handleSendMessage` now returns a `Memory` carrying `metadata.platformMessageId` so callers can edit/react later.\n\n**plugin-agent-orchestrator**\n- **Self-healing primitives** in `AcpService`: stale-lock GC, 60s health-check sweep, pre-flight session-state validation in `sendPrompt`, mid-flight crash detection in `proc.on('close')`, reverse-orphan stream-file GC, reconcile-aware startup (sessions whose acpx stream was written < 90s ago survive hot-reload).\n- **Process-group cleanup**: `detached: true` on spawn + `killProcessTree` via negative pid + SIGTERM/SIGINT handler with static registry across instances. No more `claude-agent-acp` zombies after parent exit.\n- **Security gates**: `requireTaskAgentAccess(ability)` on `runSpawnAgent` / `runSend` / `runStopAgent` / `runCancel` (was missing on these 4 sensitive actions). `ELIZA_ADMIN_ENTITY_ID` already supported by core roles.\n- **TASK_AUDIT NDJSON** at `~/.eliza/plugin-acp/audit.ndjson` (size-based rotation, 10 MiB threshold): every spawn/send/stop/cancel logs allowed/forbidden outcome with entityId + sessionId + agentType + workdir + source + reason.\n- **Sub-agent UX redesign (moltbot pattern)**:\n  - Each spawn → 1 main-channel `🚀 [label] running` message + 1 Discord thread named `[label]`.\n  - Caches by `(source, roomId, label)`: respawn / rate-limit retry / crash-recovery reuses the same main message + thread (no duplicate `🚀` stacks, no duplicate threads).\n  - LRU eviction with `LABEL_CACHE_LIMIT = 200` bounds runtime growth.\n  - All sub-agent narration (`💬`) + heartbeat (`⏳`) post in the thread — never in the main channel. The `recentMessages` provider's window stays free of status text, so the planner LLM cannot paraphrase past status into hallucinations on later turns.\n  - `runtime.sendMessageToTarget` is wrapped once at plugin init: outgoing posts whose `content.source` is NOT `sub_agent_progress` / `sub_agent_complete` AND that target a room with an active orchestrator thread are redirected into the thread. Cross-platform — capability-gated on `post_to_thread`.\n  - Capability fallback ladder: thread → edit-in-place → fresh send. Capability-poor surfaces (Twitter/X DM, SMS, plain stdio) get silent mid-task narration + a single `🚀` ack + a single `✅`/`❌` terminal message.\n  - Reactions on the spawn message: `🚀` on spawn → `✅` on `task_complete` (with summary edit on the same message) → `❌` on terminal error.\n  - Reactions / threads / edits are all gated on declared capabilities, so any future connector that declares the same caps gets the same UX automatically.\n- **Provider truth-only**: `activeSubAgentsProvider` no longer surfaces a `## Recently terminated sub-agents` section. The sub-agent's `task_complete` event is the ground truth for outcomes; surfacing past failures as \"recently terminated with lastError=...\" was letting the planner generalize them as predictors for new spawns.\n- **Deny-by-default `⚠️` posts**: only failure kinds that require user action (`auth`, `login_required`, `blocked`, `rate_limit`) post to Discord. Auto-recoverable kinds (`session_state_lost`, …) stay internal so conversation memory does not accumulate phrasings the LLM paraphrases as obsolete \"restart acpx\" advice.\n\n**plugin-todos**\n- French casual-reminder example for `action=create` so the few-shot extends past the literal \"Add X to my todo list\" pattern.\n\n## Test plan\n\n- [ ] `bun run build` clean for `packages/core` + `plugins/plugin-agent-orchestrator` + `plugins/plugin-discord`.\n- [ ] New unit tests: `sanitize-planner-text.test.ts` (12), `scan-and-unlink-older-than.test.ts` (4), `strip-progress-label-prefix.test.ts` (8) — all pass under `bun test`.\n- [ ] Live smoke test on Discord: 1 spawn → 1 main message + 1 thread; narration in thread; reactions cycle 🚀 → ✅; no `[label]` prefix repetition inside the thread.\n- [ ] Live smoke test on a non-thread surface (terminal / Twitter-style): 🚀 ack → silent mid-task → ✅ summary, 2 messages total.\n\n## Known follow-ups (out of scope for this PR)\n\n- `suppressPlannerReply` flag on `TASKS_SPAWN_AGENT.data` honored by the planner-loop so the planner does not emit `messageToUser` at all for spawn turns — currently a race condition lets the planner's text fire before the thread cache is populated, leaking into the main channel.\n- `transient: true` flag on Memory metadata + filter in `recentMessages` provider — the moltbot `shouldRecord` equivalent. Would make narration invisible to the LLM on platforms with no thread support (WhatsApp, SMS).\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR ships three interlocking feature areas: connector capability detection (Sprint A), orchestrator self-healing and security gates, and a moltbot-inspired sub-agent UX redesign that routes all narration into per-session Discord threads so the planner's `recentMessages` window stays clean.\n\n- **Core (Sprint A):** 6 new `IAgentRuntime` methods (`editMessageOnTarget`, `sendTypingOnTarget`, `stopTypingOnTarget`, `createThreadOnTarget`, `postToThreadOnTarget`, `addReactionOnTarget`) via a `requireConnectorHook` DRY helper; `plannerSchema` gains an optional `completed` flag for gate-evaluator veto.\n- **`plugin-agent-orchestrator`:** `AcpService` gains stale-lock GC, health-check sweep, session reconciliation, process-group kills via negative PID, and a static SIGTERM/SIGINT registry; four previously unguarded actions now have `requireTaskAgentAccess` gates + NDJSON audit log; `registerProgressHook` implements thread-routing, heartbeat, LRU-cache, and `sendMessageToTarget` middleware.\n- **`plugin-discord`:** Declares 6 new capabilities and implements typing/thread/post-to-thread connector handlers; `handleSendMessage` now returns `Memory` carrying `metadata.platformMessageId`.\n\n<h3>Confidence Score: 3/5</h3>\n\nThe core and action-security changes are solid; the orchestrator's registerProgressHook is the most complex area and monkey-patches sendMessageToTarget in a way that can misdirect post-completion planner replies into closed Discord threads.\n\nThe connector capability detection and security-gate additions look correct and well-structured. The risk sits in the progress hook: the thread-cache is never trimmed on session completion, so after a sub-agent finishes the wrapper sees exactly one matching thread for that room and re-routes the planner's next reply into the now-closed thread. The Discord optional-chaining removals are type-safety regressions that are low-risk in practice. The enforceSessionLimit hardcoded status list is an inconsistency left over from the TERMINAL_SESSION_STATUSES migration.\n\nplugins/plugin-agent-orchestrator/src/index.ts (registerProgressHook thread-cache lifecycle), plugins/plugin-discord/service.ts (optional-chaining removal), plugins/plugin-agent-orchestrator/src/services/acp-service.ts (enforceSessionLimit status list)\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| plugins/plugin-agent-orchestrator/src/index.ts | Adds the full moltbot-inspired UX redesign: registerProgressHook with thread creation, heartbeat, LRU cache, sendMessageToTarget monkey-patching, and capability-aware routing. Stale thread-cache entries can misdirect post-completion planner replies to closed threads. |\n| plugins/plugin-agent-orchestrator/src/services/acp-service.ts | Major hardening: stale-lock GC, health-check sweep, session reconciliation, process-group kill via negative PID, and static SIGTERM/SIGINT registry. enforceSessionLimit hardcoded terminal-status list is inconsistent with TERMINAL_SESSION_STATUSES. |\n| plugins/plugin-discord/service.ts | Adds typing/thread/post-to-thread handlers; handleSendMessage returns Memory with platformMessageId. Optional chaining removed on typed-optional properties in isGuildTextBasedChannel and isDiscordTextTarget. |\n| packages/core/src/runtime/planner-loop.ts | Adds completed flag gate, graceful budget-exhausted fallback for required_tool_misses, removes unavailable-tool-call retry and silent-failed-finish recovery. Sound for JSON-output models. |\n| packages/core/src/types/runtime.ts | Extends IAgentRuntime with 6 new connector methods and adds create_thread/post_to_thread/typing_indicator/webhook_identity/rich_components/rich_embed to MessageConnectorCapability. |\n| plugins/plugin-agent-orchestrator/src/actions/tasks.ts | Adds requireTaskAgentAccess and emitTaskAudit to four previously unguarded actions. Removes swarm-room metadata helpers and simplifies session metadata. |\n| plugins/plugin-agent-orchestrator/src/services/audit.ts | New NDJSON audit log with 10 MiB size-based rotation. Best-effort emission never blocks the audited action. |\n| plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-completion.ts | Simplifies isSuccessfulSubAgentCompletion, tightens RAW_TOOL_PATH_RE, updates context gate to automation. |\n| plugins/plugin-agent-orchestrator/src/providers/active-sub-agents.ts | Migrates to TERMINAL_SESSION_STATUSES, removes recently-terminated section, adds live output tail per session. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant User\n    participant PlannerLoop\n    participant TasksAction\n    participant AcpService\n    participant ProgressHook\n    participant Discord\n\n    User->>PlannerLoop: message\n    PlannerLoop->>TasksAction: TASKS_SPAWN_AGENT (security gate)\n    TasksAction->>AcpService: spawnSession()\n    AcpService-->>TasksAction: sessionId\n    TasksAction->>ProgressHook: emitTaskAudit(spawn_agent, allowed)\n\n    AcpService->>ProgressHook: onSessionEvent(ready)\n    ProgressHook->>Discord: sendMessageToTarget 🚀 [label] running\n    Discord-->>ProgressHook: \"Memory { platformMessageId }\"\n    ProgressHook->>Discord: createThreadOnTarget(parentMessageId)\n    ProgressHook->>Discord: addReactionOnTarget(🚀)\n\n    loop Sub-agent running\n        AcpService->>ProgressHook: onSessionEvent(message/tool_running)\n        ProgressHook->>Discord: postToThreadOnTarget(thread, narration)\n    end\n\n    AcpService->>ProgressHook: onSessionEvent(task_complete)\n    ProgressHook->>Discord: editMessageOnTarget(mainMsgId, ✅ summary)\n    ProgressHook->>Discord: addReactionOnTarget(✅)\n    ProgressHook->>PlannerLoop: subAgentCompletionResponseEvaluator\n    PlannerLoop->>User: final reply\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `plugins/plugin-agent-orchestrator/src/services/acp-service.ts`, line 1234-1237 ([link](https://github.com/elizaos/eliza/blob/0bf4c00724205a52a127816e907d34424300b0a7/plugins/plugin-agent-orchestrator/src/services/acp-service.ts#L1234-L1237)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=8\" align=\"top\"></a> **`enforceSessionLimit` not migrated to `TERMINAL_SESSION_STATUSES`**\n\n   `TERMINAL_SESSION_STATUSES` is the shared source of truth introduced in this PR. `enforceSessionLimit` still uses an inline hardcoded list that omits `\"error\"`, so a session that ends up with that status is counted as active and consumes a slot unnecessarily.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(workdir): auto-detect by convention...\"](https://github.com/elizaos/eliza/commit/0bf4c00724205a52a127816e907d34424300b0a7) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=32534841)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
       "repository": "elizaos/eliza",
       "createdAt": "2026-05-17T22:25:26Z",
-      "mergedAt": null,
+      "mergedAt": "2026-05-18T23:35:13Z",
       "additions": 19783,
       "deletions": 16505
     }
   ],
   "codeChanges": {
-    "additions": 37260,
-    "deletions": 5932,
-    "files": 637,
-    "commitCount": 1014
+    "additions": 71425,
+    "deletions": 23715,
+    "files": 769,
+    "commitCount": 1116
   },
   "completedItems": [
     {
@@ -1322,6 +1322,41 @@
       ]
     },
     {
+      "title": "feat: connector capability detection + orchestrator hardening + sub-agent UX redesign",
+      "prNumber": 7782,
+      "type": "feature",
+      "body": "## Summary\n\n12 commits that ship connector capability detection (Sprint A), orchestrator self-healing + security gates, and a moltbot-inspired UX redesign for sub-agent narration that prevents conversation-memory pollution from poisoning fu",
+      "files": [
+        "packages/core/src/features/basic-capabilities/providers/recentMessages.test.ts",
+        "packages/core/src/features/basic-capabilities/providers/recentMessages.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/__tests__/message-post-connectors.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/types/runtime.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/resolve-spawn-workdir.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sanitize-planner-text.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/scan-and-unlink-older-than.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/strip-progress-label-prefix.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-completion-evaluator.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-completion.ts",
+        "plugins/plugin-agent-orchestrator/src/index.ts",
+        "plugins/plugin-agent-orchestrator/src/providers/active-sub-agents.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/audit.ts",
+        "plugins/plugin-agent-orchestrator/src/services/session-store.ts",
+        "plugins/plugin-agent-orchestrator/src/services/task-agent-routing.ts",
+        "plugins/plugin-agent-orchestrator/src/services/types.ts",
+        "plugins/plugin-discord/__tests__/extract-content-metadata.test.ts",
+        "plugins/plugin-discord/service.ts",
+        "plugins/plugin-todos/src/actions/todo.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/extract-completion-summary.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/session-resume.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/common.ts"
+      ]
+    },
+    {
       "title": "fix(desktop): stabilize Linux local-source startup and chat delivery",
       "prNumber": 7781,
       "type": "bugfix",
@@ -1405,6 +1440,44 @@
       "files": [
         "packages/cloud-services/container-control-plane/src/index.ts",
         "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "Shell foundation v1 + onboarding a11y/contrast pass",
+      "prNumber": 7774,
+      "type": "other",
+      "body": "## Summary\n\nTwo pieces of work bundled on `enoomian/shell-foundation` (28 commits off `shaw/eliza-app-release-blockers`):\n\n**1. Onboarding accessibility + contrast pass** (audit-driven, 9 fix commits)\n   - Documented audit of every screen i",
+      "files": [
+        "bun.lock",
+        "docs/apps/desktop/2026-05-16-onboarding-ux-audit.md",
+        "docs/apps/desktop/2026-05-16-shell-foundation-design.md",
+        "docs/apps/desktop/2026-05-17-shell-foundation-implementation-plan.md",
+        "packages/app/index.html",
+        "packages/app/src/main.tsx",
+        "packages/app/vite.config.ts",
+        "packages/ui-stories/src/App.tsx",
+        "packages/ui-stories/src/stories/shell-foundation.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/onboarding/VoicePrefixSteps.tsx",
+        "packages/ui/src/components/onboarding/states/StateDeviceMode.tsx",
+        "packages/ui/src/components/onboarding/states/StateHello.tsx",
+        "packages/ui/src/components/onboarding/states/StateSetup.tsx",
+        "packages/ui/src/components/onboarding/states/device-profiles.ts",
+        "packages/ui/src/components/shell/AssistantOverlay.tsx",
+        "packages/ui/src/components/shell/ChatSurface.tsx",
+        "packages/ui/src/components/shell/HomePill.tsx",
+        "packages/ui/src/components/shell/__tests__/AssistantOverlay.test.tsx",
+        "packages/ui/src/components/shell/__tests__/ChatSurface.test.tsx",
+        "packages/ui/src/components/shell/__tests__/HomePill.test.tsx",
+        "packages/ui/src/components/shell/__tests__/exports.test.ts",
+        "packages/ui/src/components/shell/__tests__/shell-state.test.ts",
+        "packages/ui/src/components/shell/__tests__/useShellState.test.tsx",
+        "packages/ui/src/components/shell/shell-state.ts",
+        "packages/ui/src/components/shell/useShellState.ts",
+        "packages/ui/src/components/ui/button.tsx",
+        "packages/ui/src/index.ts",
+        "packages/ui/src/styles/base.css",
+        "scripts/rm-path-recursive.mjs"
       ]
     },
     {
@@ -1777,68 +1850,345 @@
         "packages/benchmarks/swe_bench/harness/comparison.py",
         "packages/benchmarks/swe_bench/harness/fixtures/comparison_smoke.json"
       ]
+    },
+    {
+      "title": "fix(release): force npm token publishing",
+      "prNumber": 7811,
+      "type": "bugfix",
+      "body": "## Summary\n- remove id-token permission from the npm release workflow so npm/lerna does not attempt trusted-publishing OIDC\n- set npm provenance off for publish and dist-tag verification so NPM_TOKEN remains the auth path\n\n## Validation\n- g",
+      "files": [
+        ".github/workflows/release.yaml"
+      ]
+    },
+    {
+      "title": "Add iOS Bun engine artifact",
+      "prNumber": 7809,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".gitattributes",
+        ".gitignore",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/Info.plist",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/ElizaBunEngine",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/Headers/ElizaBunEngine.h",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/Info.plist",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64-simulator/ElizaBunEngine.framework/Modules/module.modulemap",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/ElizaBunEngine",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/Headers/ElizaBunEngine.h",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/Info.plist",
+        "packages/bun-ios-runtime/artifacts/ElizaBunEngine.xcframework/ios-arm64/ElizaBunEngine.framework/Modules/module.modulemap",
+        "packages/native/bun-runtime/.gitignore"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 5 directories with 8 updates",
+      "prNumber": 7807,
+      "type": "other",
+      "body": "Bumps the uv group with 3 updates in the /packages/benchmarks/OSWorld directory: [numpy](https://github.com/numpy/numpy), [requests](https://github.com/psf/requests) and [idna](https://github.com/kjd/idna).\nBumps the uv group with 1 update ",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer/requirements_old.txt",
+        "packages/benchmarks/webshop/pyproject.toml",
+        "packages/benchmarks/webshop/upstream/requirements.txt",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the pip group across 2 directories with 6 updates",
+      "prNumber": 7806,
+      "type": "other",
+      "body": "Bumps the pip group with 1 update in the /packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer directory: [numpy](https://github.com/numpy/numpy).\nBumps the pip group with 5 updates in the /packages/benchmark",
+      "files": [
+        "packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer/requirements_old.txt",
+        "packages/benchmarks/webshop/upstream/requirements.txt"
+      ]
+    },
+    {
+      "title": "feat(training): low-VRAM smoke config for 2b SFT on 12GB consumer GPUs",
+      "prNumber": 7805,
+      "type": "feature",
+      "body": "## Summary\n\nAdds a `--low-vram-smoke` CLI preset to `train_local.py` that brings the\n2B SFT path inside a 12 GB envelope so train→quant→bench plumbing can be\nvalidated end-to-end on commodity hardware (RTX 3060 / 4070 class) before\nreaching",
+      "files": [
+        "packages/training/README.md",
+        "packages/training/scripts/test_train_local_low_vram_smoke.py",
+        "packages/training/scripts/train_local.py"
+      ]
+    },
+    {
+      "title": "feat(cloud): POST /api/v1/apps/[id]/deploy + GET …/deploy/status",
+      "prNumber": 7804,
+      "type": "feature",
+      "body": "## What\n\nCompletes the cloud half of `elizaos deploy` (PR #7786, already merged). The CLI keel from that PR documents an 8-step deploy sequence; steps 5 and 7 need server endpoints that didn't exist yet. This PR adds them:\n\n- `POST /api/v1/",
+      "files": [
+        "packages/cloud-api/__tests__/app-deployments-helpers.test.ts",
+        "packages/cloud-api/src/_generate-router.mjs",
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/apps/[id]/deploy/route.ts",
+        "packages/cloud-api/v1/apps/[id]/deploy/schema.ts",
+        "packages/cloud-api/v1/apps/[id]/deploy/status/route.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deployments-helpers.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments-helpers.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments.ts"
+      ]
+    },
+    {
+      "title": "ci(flatpak): commit node-sources.json + flip elizaos-app to --offline (Flathub-ready)",
+      "prNumber": 7802,
+      "type": "other",
+      "body": "## Summary\n\nCompletes the Flathub-readiness work begun in #7787. That PR added the\n`generate-sources.sh` script and wired it into `test-flatpak.yml` so CI\nregenerates `node-sources.json` on every run and uploads it as the\n`flatpak-node-sour",
+      "files": [
+        "packages/app-core/packaging/flatpak/README.md",
+        "packages/app-core/packaging/flatpak/ai.elizaos.App.yml",
+        "packages/app-core/packaging/flatpak/generate-sources.sh",
+        "packages/app-core/packaging/flatpak/node-sources.json"
+      ]
+    },
+    {
+      "title": "fix(boot): eliminate TLA + barrel-import deadlock in cloud Docker boot",
+      "prNumber": 7801,
+      "type": "bugfix",
+      "body": "## Why\n\nProvisioning a fresh sandbox in a cloud Docker container hangs silently: no logs past `[eliza] Generated SECRET_SALT`, Node PID 1 in `ep_poll`, port 2138 never listens, daemon kills the container at the 180s health timeout. PR #7783",
+      "files": [
+        "packages/agent/package.json",
+        "packages/app-core/src/services/account-pool.ts"
+      ]
+    },
+    {
+      "title": "fix(os): package elizaOS live runtime plugins",
+      "prNumber": 7800,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the current elizaOS Live packaged-runtime blocker found during QEMU validation: the app window opened, but the backend timed out because `@elizaos/plugin-app-manager` and `@elizaos/plugin-registry` were staged as package f",
+      "files": [
+        "packages/os/DOWNLOADS.md",
+        "packages/os/linux/variants/milady-tails/Justfile",
+        "packages/os/linux/variants/milady-tails/PLAN.md",
+        "packages/os/linux/variants/milady-tails/README.md",
+        "packages/os/linux/variants/milady-tails/ROADMAP.md",
+        "packages/os/linux/variants/milady-tails/docs/current-status.md",
+        "packages/os/linux/variants/milady-tails/docs/distribution-and-updates.md",
+        "packages/os/linux/variants/milady-tails/docs/mode-parity.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/README.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-3-privacy-mode.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-4-bake-milady-app.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-5-6-autolaunch-and-agent.md",
+        "packages/os/linux/variants/milady-tails/docs/user-experience.md",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.AdditionalSoftware.desktop.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-backup.desktop.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-documentation.desktop.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tca.desktop.in",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-service.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-app-manager/build.ts",
+        "plugins/plugin-local-inference/src/services/__stress__/cache-restart-corruption.test.ts",
+        "plugins/plugin-local-inference/src/services/backend.ts",
+        "plugins/plugin-local-inference/src/services/dflash-server.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-backend.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core): resolve Capacitor CLI from workspace installs",
+      "prNumber": 7799,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the mobile smoke failure where `run-mobile-build.mjs` hard-coded `packages/app/node_modules/@capacitor/cli/bin/capacitor`, which breaks clean CI/workspace installs where dependencies are hoisted to the repo root or stored ",
+      "files": [
+        ".github/workflows/mobile-build-smoke.yml",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/res/values/styles.xml",
+        "packages/app-core/scripts/run-mobile-build-policy.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs"
+      ]
+    },
+    {
+      "title": "fix(app-core): support nested desktop workspace builds",
+      "prNumber": 7798,
+      "type": "bugfix",
+      "body": "## Summary\n- Resolve desktop runtime package directories from either a standalone Eliza checkout or an outer wrapper with `eliza/packages/*`.\n- Generate the fallback root runtime entry relative to the resolved app-core package path.\n- Build",
+      "files": [
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "fix(os): polish elizaOS live branding and update materialization",
+      "prNumber": 7797,
+      "type": "bugfix",
+      "body": "## Summary\n\n- rebrand a few remaining first-boot/live-tool polish strings from inherited Tails wording to elizaOS wording\n- harden app/runtime update materialization with no-follow source opens, temp-file replacement, and manifest-declared ",
+      "files": [
+        ".github/workflows/quality.yml",
+        "packages/os/linux/variants/milady-tails/Justfile",
+        "packages/os/linux/variants/milady-tails/scripts/security-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/lib/live/config/2000-aesthetics",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/lib/live/config/2000-import-gnupg-key",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/bin/milady",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/local/lib/elizaos/update-manager",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/desktop-directories/Tails.directory.in",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/initramfs-tools/scripts/init-premount/partitioning",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/initramfs-tools/scripts/init-top/read-and-update-random-seed-sector",
+        "packages/os/linux/variants/milady-tails/tails/data/debootstrap/scripts/debian-common.patch",
+        "packages/os/linux/variants/milady-tails/tails/data/splash.png",
+        "packages/os/linux/variants/milady-tails/tails/data/splash.svg",
+        "packages/os/linux/variants/milady-tails/tails/data/wrappers/apt-get"
+      ]
+    },
+    {
+      "title": "feat(local-inference): wire slot save/restore + prewarm through FFI",
+      "prNumber": 7796,
+      "type": "feature",
+      "body": "Closes three of the five FFI parity gaps left after the desktop adapter landed:\r\n\r\n1. **Slot save/restore via direct libllama bindings**. `llama_state_seq_save_file` / `_load_file` are pointer-style upstream APIs — no shim wrapper needed; b",
+      "files": [
+        "plugins/plugin-local-inference/src/services/desktop-llama-adapter.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-backend.ts"
+      ]
+    },
+    {
+      "title": "fix(os-homepage): refresh elizaOS E2E baselines",
+      "prNumber": 7795,
+      "type": "bugfix",
+      "body": "## Summary\n- update os-homepage Playwright assertions for the current CloudVideoBackground and shared-brand resized USB asset\n- remove the stale `cloud-video` test mask reference\n- refresh Linux visual regression baselines against the curre",
+      "files": [
+        "packages/os-homepage/src/App.tsx",
+        "packages/os-homepage/src/ProductDetail.tsx",
+        "packages/os-homepage/tests/VISUAL-REGRESSION.md",
+        "packages/os-homepage/tests/homepage.spec.ts",
+        "packages/os-homepage/tests/visual.spec.ts",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-cancel-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/checkout-success-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-box-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-case-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-chibi-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-mini-pc-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-phone-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-raspberry-pi-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/hardware-usb-mobile-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-desktop-mobile-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-desktop-linux.png",
+        "packages/os-homepage/tests/visual.spec.ts-snapshots/landing-mobile-mobile-linux.png"
+      ]
+    },
+    {
+      "title": "fix(os): harden elizaOS smoke checks and USB installer boundary",
+      "prNumber": 7790,
+      "type": "bugfix",
+      "body": "## Summary\n- make elizaOS Live static smoke mode checks stable in shared Git worktrees by reading executable modes from the Git index before falling back to filesystem modes\n- keep raw USB/disk platform backends out of the Vite renderer bun",
+      "files": [
+        ".github/workflows/elizaos-os-release.yml",
+        "packages/homepage/src/components/ChatUI/renderChatToCanvas.ts",
+        "packages/os-usb-installer/README.md",
+        "packages/os-usb-installer/src/main.tsx",
+        "packages/os/RELEASE.md",
+        "packages/os/android/installer/README.md",
+        "packages/os/android/installer/manifests/android-release-manifest.example.json",
+        "packages/os/android/installer/scripts/validate-release-manifest.mjs",
+        "packages/os/android/installer/tests/run-tests.sh",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/release/beta-2026-05-16/README.md"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the npm_and_yarn group across 2 directories with 2 updates",
+      "prNumber": 7789,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/cloud-services/operator directory: [uuid](https://github.com/uuidjs/uuid).\nBumps the npm_and_yarn group with 1 update in the /plugins/plugin-elizacloud directory: [ws](https://gith",
+      "files": [
+        "packages/cloud-services/operator/package.json",
+        "plugins/plugin-elizacloud/package.json"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "2-A-M",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
-      "totalScore": 797.9403847695805,
-      "prScore": 797.5023847695807,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
-      "summary": "2-A-M: Focused on expanding core automation and integration capabilities, merging 4 PRs that introduced a Discord connector-target-catalog service (#7315) and a new n8n clarification roundtrip route (#7316). Their work involved significant architectural contributions, including a total of 4,600 lines added across 28 files to enhance UX and system functionality. They maintained a balanced development approach, with 64% of their effort dedicated to feature implementation and 36% to bug fixes, while continuing to iterate on automation UI and workflow types in open PRs."
-    },
-    {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 761.3708058264803,
-      "prScore": 741.8948058264803,
+      "totalScore": 1160.2845296038663,
+      "prScore": 1140.8085296038664,
       "issueScore": 18.6,
       "reviewScore": 0,
       "commentScore": 0.8759999999999999,
       "summary": "NubsCarson: Focused on enhancing system stability and cross-platform compatibility, successfully merging 6 pull requests that resolved critical runtime and build issues. They addressed a significant crash on headless Linux via elizaos/eliza#7230 and streamlined the build process by removing broken CJS configurations across multiple plugins. Their work was primarily dedicated to bugfixes, which accounted for 75% of their contributions, alongside targeted improvements to test and configuration files."
     },
     {
-      "username": "standujar",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 498.59470209088227,
-      "prScore": 492.3947020908823,
-      "issueScore": 0,
-      "reviewScore": 6,
-      "commentScore": 0.2,
-      "summary": "standujar: Focused on stabilizing the cloud infrastructure and authentication systems within elizaos/eliza, successfully merging four critical PRs that resolved SIWE integration issues and CI blocking errors (#7324, #7327, #7332, #7333). Their work involved extensive codebase modifications, including a significant effort to unblock authentication flows and address typecheck errors. They are currently driving a Clean Architecture migration (#7336) and further cloud-test fixes (#7337), with a primary focus on bugfix (59%) and refactor (26%) work."
-    },
-    {
-      "username": "0xSolace",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
-      "totalScore": 365.43402383270654,
-      "prScore": 364.79602383270657,
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 938.9955322270696,
+      "prScore": 938.5575322270695,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.6379999999999999,
-      "summary": "0xSolace: Focused on stabilizing the elizaos/eliza codebase through targeted bug fixes and configuration maintenance. They successfully resolved a critical authentication regression during the cloud migration via PR #7288 and have actively managed 8 additional open PRs addressing linting, pathing, and CI cleanup. Their work this month was dedicated entirely to bugfix efforts, involving modifications across 24 files to improve system reliability and project consistency."
+      "commentScore": 0.43799999999999994,
+      "summary": "2-A-M: Focused on expanding core automation and integration capabilities, merging 4 PRs that introduced a Discord connector-target-catalog service (#7315) and a new n8n clarification roundtrip route (#7316). Their work involved significant architectural contributions, including a total of 4,600 lines added across 28 files to enhance UX and system functionality. They maintained a balanced development approach, with 64% of their effort dedicated to feature implementation and 36% to bug fixes, while continuing to iterate on automation UI and workflow types in open PRs."
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 674.542293658626,
+      "prScore": 668.142293658626,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.4,
+      "summary": "standujar: Focused on stabilizing the cloud infrastructure and authentication systems within elizaos/eliza, successfully merging four critical PRs that resolved SIWE integration issues and CI blocking errors (#7324, #7327, #7332, #7333). Their work involved extensive codebase modifications, including a significant effort to unblock authentication flows and address typecheck errors. They are currently driving a Clean Architecture migration (#7336) and further cloud-test fixes (#7337), with a primary focus on bugfix (59%) and refactor (26%) work."
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 360.59999999999997,
+      "totalScore": 473.09999999999997,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 360,
+      "reviewScore": 472.5,
       "commentScore": 0.6000000000000001,
       "summary": "greptile-apps: No activity this month."
     },
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 208.46159531273295,
-      "prScore": 204.90559531273294,
+      "totalScore": 435.6075265274016,
+      "prScore": 398.11352652740163,
       "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 1.5559999999999998,
+      "reviewScore": 33.5,
+      "commentScore": 1.9939999999999998,
       "summary": "lalalune: Led a massive architectural restructuring of the elizaos/eliza repository, most notably through PR #7235 which involved significant codebase modifications to integrate cloud and plugin support while removing legacy dependencies. They maintained project momentum by cleaning up core testing mocks in PR #7226 and actively engaged with the community through 16 total comments across issues and PRs. Their work this month was primarily concentrated on configuration management, testing infrastructure, and general codebase maintenance."
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 396.2527943102704,
+      "prScore": 395.61479431027044,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6379999999999999,
+      "summary": "0xSolace: Focused on stabilizing the elizaos/eliza codebase through targeted bug fixes and configuration maintenance. They successfully resolved a critical authentication regression during the cloud migration via PR #7288 and have actively managed 8 additional open PRs addressing linting, pathing, and CI cleanup. Their work this month was dedicated entirely to bugfix efforts, involving modifications across 24 files to improve system reliability and project consistency."
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 202.63316263741552,
+      "prScore": 202.43316263741553,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": "Dexploarer: Focused on a balanced distribution of feature development and bug remediation, executing 8 commits across 33 files. This effort resulted in a significant codebase update of +2504/-167 lines, demonstrating a high level of technical engagement despite no merged pull requests. Their work was split equally between implementing new features and addressing existing bugs, reflecting a comprehensive approach to project maintenance and expansion."
     },
     {
       "username": "ezumba",
@@ -1849,16 +2199,6 @@
       "reviewScore": 13.5,
       "commentScore": 0.43799999999999994,
       "summary": "ezumba: Focused on expanding the elizaos/eliza ecosystem by initiating the development of the ExergyNet Verified Compute and ZK-Compute Membrane plugins through six open pull requests (#7289, #7299, #7309, #7310, #7313, #7320). In addition to this feature work, they contributed to the project's collaborative environment by providing 7 total comments across pull requests and reviews. Their efforts this month were primarily centered on the integration of verified compute capabilities into the eliza framework."
-    },
-    {
-      "username": "Dexploarer",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
-      "totalScore": 154.4452318387836,
-      "prScore": 154.2452318387836,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": "Dexploarer: Focused on a balanced distribution of feature development and bug remediation, executing 8 commits across 33 files. This effort resulted in a significant codebase update of +2504/-167 lines, demonstrating a high level of technical engagement despite no merged pull requests. Their work was split equally between implementing new features and addressing existing bugs, reflecting a comprehensive approach to project maintenance and expansion."
     },
     {
       "username": "rndrntwrk",
@@ -1961,6 +2301,16 @@
       "summary": "sunfishloop: Focused on project ideation and community engagement, initiating a discussion on agent connectivity in elizaos/eliza via issue #7758. This contribution was successfully addressed and closed within the month. There were no code changes or pull requests submitted during this period."
     },
     {
+      "username": "jqmwa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/95416268?u=aa05f4d49acc8c161a83f6a313231f63904521e9&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Agnuxo1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/166046035?u=4654f0706d2f6e9cf6894bd6717003d19f74645c&v=4",
       "totalScore": 4,
@@ -2011,9 +2361,9 @@
       "summary": null
     }
   ],
-  "newPRs": 174,
-  "mergedPRs": 114,
-  "newIssues": 20,
-  "closedIssues": 18,
-  "activeContributors": 18
+  "newPRs": 204,
+  "mergedPRs": 132,
+  "newIssues": 21,
+  "closedIssues": 19,
+  "activeContributors": 19
 }
