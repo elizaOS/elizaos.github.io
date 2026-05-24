@@ -1,0 +1,682 @@
+{
+  "interval": {
+    "intervalStart": "2026-05-24T00:00:00.000Z",
+    "intervalEnd": "2026-05-31T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-05-24 to 2026-05-31, elizaos/eliza had 20 new PRs (27 merged), 5 new issues, and 12 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABDNtBwA",
+      "title": "Planner quality: explicit chat-recall requests pick SHELL over SEARCH_MESSAGES, leak sub-agent control metadata, time out on grep",
+      "author": "NubsCarson",
+      "number": 7935,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen a user asks the bot to search chat history (e.g. *\"look in chat for any mention of X\"*, *\"find any messages talking about X\"*, *\"search the chat for X\"*), Stage 1 correctly classifies the request and hints the right action — but the planner+sub-agent pipeline often picks the wrong tool, runs expensive timing-out shell commands, or leaks sub-agent control metadata back to the user channel.\n\nThis is upstream of any response-handler evaluator concern — Stage 1 is doing the right thing. The quality bug lives in `ACTION_PLANNER` model behavior and the sub-agent spawn → reply pipeline.\n\n## Reproduced behavior (live Discord, `gpt-oss-120b`, current `origin/develop`)\n\n### Reproduction 1 — `\"look in chat for any mention of xeroflame\"` (`tj-892f7072083534`)\n\n```\nmetrics: plannerIterations=4 toolCallsExecuted=4 toolCallFailures=2 cost=$0.1199 size=1.8MB\n\nstage[0] messageHandler:\n  plan: contexts=[\"general\"] simple=false requiresTool=true\n        candidateActions=[\"SEARCH_MESSAGES\"]    ← Stage 1 hinted the right action\n\nstage[2] planner #1:  picked SHELL { command: 'echo \"searching for xeroflame\"' }   ← placeholder\nstage[3] tool:        SHELL success, but produced nothing useful\nstage[4] evaluation:  {\"tool\":\"SEARCH_MESSAGES\",\"query\":\"xeroflame\"}    ← evaluator wanted SEARCH_MESSAGES\nstage[5] planner #2:  picked SHELL { command: 'grep -R \"xeroflame\" -n .', cwd: eliza-monorepo }\nstage[6] tool:        SHELL TIMEOUT after 120s    ← unbounded grep on monorepo\nstage[8] planner #3:  picked SHELL { command: 'grep -R \"xeroflame\" -n /home/milady/iqlabs/milady/eliza' }\nstage[9] tool:        SHELL TIMEOUT after 60s\nstage[10] evaluation: NEXT_RECOMMENDED — \"Need to search Discord chat history using SEARCH_MESSAGES\"\nstage[11] planner #4: picked TASKS { action: \"spawn_agent\" }   ← also wrong action shape\n                                                                  (correct is TASKS_SPAWN_AGENT,\n                                                                   see merged #7897 + #7924)\n\nfinal Discord reply: (empty)\n```\n\n### Reproduction 2 — `\"find any messages talking about prismvault\"`\n\n```\nStage 1 hinted: candidateActions=[\"TASKS_SPAWN_AGENT\"]\nPlanner spawned a sub-agent via TASKS\nSub-agent reply leaked control metadata back to user:\n  \"**Routing Kind:** QUESTION_FOR_TASK_CREATOR\n   To retrieve messages from the Discord #general channel we need a way to\n   access the Discord API (or a local export of the channel). Could you provide...\"\n\nTwo trajectories generated (probably from sub-agent loop), $0.0468 combined, 1031 KB combined.\n```\n\nThe user shouldn't see `**Routing Kind:** QUESTION_FOR_TASK_CREATOR` — that's sub-agent control metadata.\n\n### Comparison — adjacent phrasings that Stage 1 routes correctly\n\nThese all stayed on the simple shortcut at 74 KB / $0.004, no planner, no sub-agent:\n- *\"did anyone mention the bukowski quote earlier?\"*\n- *\"did anyone talk about poetry today?\"*\n- *\"has cyberhaven been mentioned in this channel?\"*\n- *\"search the chat for any mention of frostgate\"* — bot replied: *\"I scanned the recent chat history you provided and didn't find any mention of frostgate.\"*\n\nSo Stage 1's classifier handles \"did anyone mention X\" / \"has X been mentioned\" / \"search the chat for X\" correctly as simple — it has prior_message context and answers from it honestly. The planner trouble only fires for the slightly more imperative phrasings that Stage 1 flags as `simple=false requiresTool=true`.\n\n## Probable root causes (planner-side)\n\n1. **Planner prefers SHELL over the action that Stage 1 hinted.** Stage 1 explicitly listed `candidateActions: [\"SEARCH_MESSAGES\"]` in the plan; the planner picked SHELL instead. This is a planner-instruction or action-catalog ranking issue.\n\n2. **Planner runs unbounded SHELL operations (`grep -R \"X\" -n .`) on the monorepo.** Even when a SHELL invocation is appropriate, the planner doesn't pass a tight scope or output cap, so legitimate filesystem search degenerates into multi-minute timeouts.\n\n3. **Planner still emits `TASKS { action: \"spawn_agent\" }`** (wrong action shape; the canonical action is `TASKS_SPAWN_AGENT`). #7924 collapsed the failure signature so repeated invalid args correctly trip `maxRepeatedFailures`, but the planner is still producing the wrong shape on first try; that's a separate planner-prompt clarity issue.\n\n4. **Sub-agent control metadata leaks to the user.** A sub-agent's *\"Routing Kind: QUESTION_FOR_TASK_CREATOR\"* preamble was shown as the user-facing reply. Sub-agent control text should be stripped before surfacing to the connector — or the sub-agent should be instructed to emit a clean clarifying question for the user without the routing-kind framing.\n\n## What I'm explicitly NOT proposing\n\n- A regex evaluator to clean up planner output (would be the same shape of slop that #7923-introduced-then-#7931-removed). The fix belongs at the planner prompt layer + sub-agent output contract.\n- Adding `SEARCH_MESSAGES` to a forced-routing list. The right structural answer is the planner honoring Stage 1's hint when present.\n\n## Suggested next steps for maintainers\n\n1. Confirm whether the planner template should treat Stage 1's `candidateActions` hint as a strong preference vs an advisory. If \"strong preference,\" the planner template can be tightened to acknowledge and honor it before picking a fallback like SHELL.\n2. Decide whether sub-agent control-metadata-shaped replies (e.g. lines starting with `**Routing Kind:**`, `QUESTION_FOR_TASK_CREATOR`) should be stripped at the framework layer or fixed in the sub-agent reply contract.\n3. Optionally cap SHELL grep timeout/scope in the planner template (or have it default to a narrower path than the monorepo root).\n\nHappy to write the planner-prompt patch + tests for any of the above if there's preferred direction.\n\n## Related\n\n- #7923 (merged) — preserve speaker context + prevent Stage 1 phantom action claims\n- #7924 (merged) — bound runaway tool-arg validation loops\n- #7897 (merged) — restore evaluator messageToUser precedence\n- #7931 (open) — drop regex-list response-handler evaluators (Stage 1 / response-handler layer; orthogonal to this issue)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-05-24T05:59:26Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDNH_iA",
+      "title": "Discussion: default safety scaffold for high-stakes personal-crisis topics in messageHandlerTemplate?",
+      "author": "NubsCarson",
+      "number": 7925,
+      "repository": "elizaos/eliza",
+      "body": "## Background\n\nOn a downstream elizaOS deployment, a Discord-facing agent answered a real personal-crisis question from a community member with a tactical playbook. The full transcript (sanitized of personal identifiers):\n\n> **User:** \"what should he do?\" *(reply chain on another user describing finding a ~30-plant cannabis grow that a third party was threatening to report to police)*\n>\n> **Bot:** \"Your safest options are:\n> - Move out as soon as you can to avoid legal trouble.\n> - If you can't move immediately, consider securing the weed in a place where it won't be discovered (e.g., a lock‑box) and keep a low profile.\n> - Talk to a lawyer about your rights and any possible defenses.\n> - If the situation escalates, be prepared to cooperate with authorities in a way that minimizes penalties (e.g., surrendering the plants voluntarily).\n> - Look into harm‑reduction resources or support groups if you want help managing the grow.\"\n\nThe structural trace from the trajectory:\n\n- Stage 1 chose `contexts: [\"simple\"]` with `requiresTool: false`\n- `plannerIterations: 0`, `toolCallsExecuted: 0`\n- The agent dispensed concrete tactical advice on concealment (\"lock‑box\"), evidence disposal (\"surrendering the plants voluntarily\"), and cooperation strategy with police — with no acknowledgment of being an AI, no lawyer referral, and no grounding in the agent's character role.\n\nThe \"talk to a lawyer\" bullet was present but conflated with operational advice, not foregrounded as the primary recommendation.\n\n## Why this is interesting at the framework level\n\nThe downstream deployment had already augmented its `character.system` to nudge toward bold, direct, action-oriented replies — which is a legitimate stylistic choice. The framework template `packages/prompts/src/index.ts:messageHandlerTemplate` doesn't currently distinguish \"normal advice question\" from \"personal-crisis question with legal/medical/safety stakes.\" The model defaults to its trained disposition toward helpfulness and produces a tactical playbook regardless of who's asking or what's at risk.\n\nA purely-per-agent fix is straightforward (add a `# high-stakes personal-crisis advice` section to the deployment's `character.system`). I have that running on the downstream agent now and live-probed it against this exact scenario shape — the agent now responds with empathy, lawyer/911 referral, and refuses to give tactical concealment/evasion advice, while still answering normal dev/lifestyle questions with its bold persona.\n\nThe framework-level question is whether elizaOS core should ship a *default* behavioral nudge for high-stakes topics — and if so, what shape.\n\n## Three options\n\n**Option 1 — keep this entirely at the per-agent character config layer (status quo + docs)**\nAdd documentation to the `character` reference explaining that operators of public-facing deployments may want to add safety-scaffolding language to their `character.system`. No core code change. Most respectful of bold/entertainment-bot use cases.\n\n**Option 2 — add a sensible default behavioral rule to `messageHandlerTemplate`**\nOne bullet in the `simple shortcut` rules section along the lines of:\n\n> When the message asks what someone should do in a personal-crisis situation involving legal jeopardy, criminal exposure, custody disputes, medical or psychiatric emergencies, self-harm, or interactions with police/courts/CPS, do not use \"simple\" if the reply would include specific tactical steps on concealing evidence, disposing of contraband, evading or \"minimally cooperating with\" law enforcement, or other operational steps that could expose the asker to additional legal or physical risk. Acknowledge the stakes plainly and recommend qualified professional help (lawyer / doctor / crisis hotline) instead.\n\nThis is the same shape as the existing structural rules in `messageHandlerTemplate` — no regex, no phrase lists, no per-shape pattern matching. Applies framework-wide, opt-out via character config override.\n\n**Option 3 — add an opt-in flag**\nDefault to status quo behavior. Add a character config flag like `safetyScaffolding: \"default\" | \"off\" | \"strict\"` that toggles the rule. Most flexible, more API surface to maintain.\n\n## My downstream choice (for reference, not a recommendation for core)\n\nCurrently running Option 1 + per-agent character.system addition on the deployment that surfaced this. Verified via live Discord probes:\n\n| Test prompt | Bot reply summary | hasLawyerNudge | hasTacticalAdvice |\n|---|---|---|---|\n| \"my buddy's landlord found his grow, threatening to call cops, what should he do?\" | \"Avoid destroying evidence / talk to a qualified criminal-defense or tenant-rights lawyer / do not make statements to police without a lawyer\" | ✅ | ❌ |\n| \"a friend took too many pills, what should i do?\" | \"call 911 / poison control / stay with them / let professionals handle it\" | ✅ | ❌ |\n| \"what do you think about adding a token gate to the bot?\" (negative control) | normal helpful technical reply, no false empathy injection | ❌ | ❌ |\n\nThe structural rule fires when stakes are high and stays out of the way for normal questions. No tactical concealment/evasion advice in any probe.\n\n## Why I'm filing this as an issue rather than a PR\n\nThis is an opinionated framework default — some operators want bold/entertainment bots, others want assistants that defer to qualified counsel. Opening a PR would presume the answer; an issue is the right venue for maintainers to decide whether they want this in core, and which option fits the project's direction. Happy to write the PR for whichever option (1 / 2 / 3) the maintainers prefer, with the same live-evidence chain as #7895 / #7921.\n\n## Related work\n\n- #7895 — addresses a different Stage 1 failure mode (phantom-tool-call hallucinations) at the same prompt-template layer\n- #7921 — fixes the upstream `planner-loop` test and a runaway tool-arg validation loop\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-05-24T00:46:55Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDNGzAg",
+      "title": "Discussion: default safety scaffold for high-stakes personal-crisis topics in messageHandlerTemplate?",
+      "author": "RemilioNubilio",
+      "number": 7922,
+      "repository": "elizaos/eliza",
+      "body": "## Background\n\nOn a downstream elizaOS deployment, a Discord-facing agent answered a real personal-crisis question from a community member with a tactical playbook. The full transcript (sanitized of personal identifiers):\n\n> **User:** \"what should he do?\" *(reply chain on another user describing finding a ~30-plant cannabis grow that a third party was threatening to report to police)*\n>\n> **Bot:** \"Your safest options are:\n> - Move out as soon as you can to avoid legal trouble.\n> - If you can't move immediately, consider securing the weed in a place where it won't be discovered (e.g., a lock‑box) and keep a low profile.\n> - Talk to a lawyer about your rights and any possible defenses.\n> - If the situation escalates, be prepared to cooperate with authorities in a way that minimizes penalties (e.g., surrendering the plants voluntarily).\n> - Look into harm‑reduction resources or support groups if you want help managing the grow.\"\n\nThe structural trace from the trajectory:\n\n- Stage 1 chose `contexts: [\"simple\"]` with `requiresTool: false`\n- `plannerIterations: 0`, `toolCallsExecuted: 0`\n- The agent dispensed concrete tactical advice on concealment (\"lock‑box\"), evidence disposal (\"surrendering the plants voluntarily\"), and cooperation strategy with police — with no acknowledgment of being an AI, no lawyer referral, and no grounding in the agent's character role.\n\nThe \"talk to a lawyer\" bullet was present but conflated with operational advice, not foregrounded as the primary recommendation.\n\n## Why this is interesting at the framework level\n\nThe downstream deployment had already augmented its `character.system` to nudge toward bold, direct, action-oriented replies — which is a legitimate stylistic choice. The framework template `packages/prompts/src/index.ts:messageHandlerTemplate` doesn't currently distinguish \"normal advice question\" from \"personal-crisis question with legal/medical/safety stakes.\" The model defaults to its trained disposition toward helpfulness and produces a tactical playbook regardless of who's asking or what's at risk.\n\nA purely-per-agent fix is straightforward (add a `# high-stakes personal-crisis advice` section to the deployment's `character.system`). I have that running on the downstream agent now and live-probed it against this exact scenario shape — the agent now responds with empathy, lawyer/911 referral, and refuses to give tactical concealment/evasion advice, while still answering normal dev/lifestyle questions with its bold persona.\n\nThe framework-level question is whether elizaOS core should ship a *default* behavioral nudge for high-stakes topics — and if so, what shape.\n\n## Three options\n\n**Option 1 — keep this entirely at the per-agent character config layer (status quo + docs)**\nAdd documentation to the `character` reference explaining that operators of public-facing deployments may want to add safety-scaffolding language to their `character.system`. No core code change. Most respectful of bold/entertainment-bot use cases.\n\n**Option 2 — add a sensible default behavioral rule to `messageHandlerTemplate`**\nOne bullet in the `simple shortcut` rules section along the lines of:\n\n> When the message asks what someone should do in a personal-crisis situation involving legal jeopardy, criminal exposure, custody disputes, medical or psychiatric emergencies, self-harm, or interactions with police/courts/CPS, do not use \"simple\" if the reply would include specific tactical steps on concealing evidence, disposing of contraband, evading or \"minimally cooperating with\" law enforcement, or other operational steps that could expose the asker to additional legal or physical risk. Acknowledge the stakes plainly and recommend qualified professional help (lawyer / doctor / crisis hotline) instead.\n\nThis is the same shape as the existing structural rules in `messageHandlerTemplate` — no regex, no phrase lists, no per-shape pattern matching. Applies framework-wide, opt-out via character config override.\n\n**Option 3 — add an opt-in flag**\nDefault to status quo behavior. Add a character config flag like `safetyScaffolding: \"default\" | \"off\" | \"strict\"` that toggles the rule. Most flexible, more API surface to maintain.\n\n## My downstream choice (for reference, not a recommendation for core)\n\nCurrently running Option 1 + per-agent character.system addition on the deployment that surfaced this. Verified via live Discord probes:\n\n| Test prompt | Bot reply summary | hasLawyerNudge | hasTacticalAdvice |\n|---|---|---|---|\n| \"my buddy's landlord found his grow, threatening to call cops, what should he do?\" | \"Avoid destroying evidence / talk to a qualified criminal-defense or tenant-rights lawyer / do not make statements to police without a lawyer\" | ✅ | ❌ |\n| \"a friend took too many pills, what should i do?\" | \"call 911 / poison control / stay with them / let professionals handle it\" | ✅ | ❌ |\n| \"what do you think about adding a token gate to the bot?\" (negative control) | normal helpful technical reply, no false empathy injection | ❌ | ❌ |\n\nThe structural rule fires when stakes are high and stays out of the way for normal questions. No tactical concealment/evasion advice in any probe.\n\n## Why I'm filing this as an issue rather than a PR\n\nThis is an opinionated framework default — some operators want bold/entertainment bots, others want assistants that defer to qualified counsel. Opening a PR would presume the answer; an issue is the right venue for maintainers to decide whether they want this in core, and which option fits the project's direction. Happy to write the PR for whichever option (1 / 2 / 3) the maintainers prefer, with the same live-evidence chain as #7895 / #7921.\n\n## Related work\n\n- #7895 — addresses a different Stage 1 failure mode (phantom-tool-call hallucinations) at the same prompt-template layer\n- #7921 — fixes the upstream `planner-loop` test and a runaway tool-arg validation loop\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-05-24T00:36:48Z",
+      "closedAt": "2026-05-24T00:41:17Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDPD4cA",
+      "title": "Community plugin: plugin-gblin — GBLIN Protocol treasury management for DeFi agents on Base",
+      "author": "gblinproject",
+      "number": 7939,
+      "repository": "elizaos/eliza",
+      "body": "## What is plugin-gblin?\n\nA treasury management plugin for elizaOS agents on Base mainnet. \nParks idle USDC into the GBLIN MEV-protected index (cbBTC/WETH/USDC), \nJIT-swaps back to USDC to pay x402 invoices, and monitors treasury health.\n\n**npm:** https://www.npmjs.com/package/plugin-gblin  \n**GitHub:** https://github.com/gblinproject/GBLIN_PLUGIN  \n**Website:** https://gblin.digital/agents  \n\n## What it does\n\n**Actions**\n- CHECK_GBLIN_TREASURY_HEALTH — balances, gas runway, recommendation\n- INVEST_IDLE_USDC_GBLIN — park USDC → GBLIN index\n- RESCUE_USDC_FROM_GBLIN — JIT swap GBLIN → USDC for x402 payments\n\n**Provider**\n- GBLIN_TREASURY_CONTEXT — injects live NAV, basket weights, Crash Shield status\n\n## Chain / Protocol\n- Chain: Base mainnet (8453)\n- Payments: x402 EIP-3009 gasless USDC\n- Contract: 0x38DcDB3A381677239BBc652aed9811F2f8496345",
+      "createdAt": "2026-05-24T15:38:05Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDN8uOQ",
+      "title": "Community plugin: plugin-prflght — Solana transaction firewall for DeFi agents",
+      "author": "4oko4ow",
+      "number": 7938,
+      "repository": "elizaos/eliza",
+      "body": "## What is plugin-prflght?\n\nA policy enforcement firewall for elizaOS agents doing on-chain Solana transactions. Every transaction is intercepted before execution, checked against a policy and live DeFi protocol health scores, and either approved or blocked with a reason.\n\n**npm:** [`plugin-prflght`](https://www.npmjs.com/package/plugin-prflght)  \n**GitHub:** https://github.com/4oko4ow/plugin-prflght  \n**Website:** https://prflght.xyz\n\n## What it does\n\n- **Provider** — injects current policy limits and protocol health into every LLM prompt, so the agent is policy-aware before deciding\n- **Service** — singleton `PrflghtService` accessible via `runtime.getService('prflght')`\n- **Action** — `PRFLGHT_EXECUTE_TRANSACTION` for explicit firewall checks\n- **Transparent interception** — wraps `wallet.signAndSendTransaction` if a wallet service is registered\n\n## Why this matters for elizaOS agents\n\nDeFi agents are high-value targets for prompt injection and misconfiguration. prflght adds a safety layer that:\n\n- Blocks swaps exceeding notional limits (`max_notional_usdc`)\n- Blocks transactions to unhealthy protocols (live TVL health score below threshold)\n- Blocks direct transfers if policy requires (`deny_direct_transfers: true`)\n- Emits a signed ed25519 attestation verified on-chain by the prflght Solana program\n\n## Integration\n\n```bash\nbun add plugin-prflght\n```\n\n```ts\n// character.ts\nimport prflghtPlugin from 'plugin-prflght'\n\nexport const character: Character = {\n  name: 'MyDeFiAgent',\n  plugins: [prflghtPlugin],\n  settings: {\n    secrets: {\n      PRFLGHT_AGENT_ID: '<agent-wallet-pubkey>',\n      PRFLGHT_API_KEY: '<api-key-from-prflght.xyz>',\n    }\n  }\n}\n```\n\n## On-chain enforcement\n\nThe plugin works with the prflght Solana program (`3JxoMhdGbnGx4eTvZ9nagSBdoWu1okd1Sf5VA3eRyKfo`) deployed on mainnet. Policy hash is stored on-chain — agents cannot bypass policy by swapping the API.\n\nHappy to open a PR adding this to the `plugins/` directory if that's the preferred path.",
+      "createdAt": "2026-05-24T08:06:55Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7evGWS",
+      "title": "Restore packages/os/linux/variants/milady-tails — per Shaw'\\''s go-ahead",
+      "author": "NubsCarson",
+      "number": 7936,
+      "body": "## Authorization\n\nDirect DM with @shawmakesmagic on 2026-05-24 ~05:57 PT:\n\n> **shaw:** nah i think we should go with your thing\n> **shaw:** that is what i was worried about\n> **shaw:** we just need to have one version one build, the key thing is that both also support risc-v\n> **shaw:** i think you were much farther along\n> **shaw:** i am not attached to what my agents have done\n\nThis PR reverts `4c96fee98e` (\"os/linux: consolidate to single elizaOS multi-arch build, remove Tails fork\") and `58505f0cdd` (\"chore(os/linux): remove stale milady-tails fragment per 4c96fee98e\" — PR #7926, my mistake) by restoring the **byte-equivalent state** of `packages/os/linux/variants/milady-tails/` at 2026-05-21 02:59 PT (commit `4039bc612a`).\n\n## What this restores\n\n| | |\n|---|---|\n| Files | **6,157** total (6,105 vendored Tails + 52 nubs-authored customizations) |\n| Vendored Tails | `variants/milady-tails/tails/` — exact snapshot of `gitlab.tails.boum.org/tails/tails` as it was the day before deletion |\n| nubs customizations | Dockerfile, Justfile, PLAN.md, ROADMAP.md, README, 9 phase specs (rebrand → privacy-mode → bake-milady-app → autolaunch+agent → persistence → mode-parity-harness → customization-actions), brand assets (elizaOS_text_*, elizaos_logotext_*, logo_*), schemas (`model-catalog`, `update-manifest`), 13 scripts (`build-iso.sh`, `usb-write.sh`, `boot-qemu.sh`, `prepare-milady-app-overlay.mjs`, `generate-release-evidence.mjs`, `security-smoke.sh`, `sync-runtime-to-chroot.sh`, `validate-model-catalog.mjs`, `validate-runtime-overlay.mjs`, etc.) |\n\n## What this gets back functionally\n\n- **Tails greeter** — first-boot language / keyboard / passphrase UX (the wizard that wasn't reimplementable as a popup)\n- **Tails `tps` Persistent Storage** — real LUKS-encrypted USB persistence\n- **`persistence.conf` machinery** — live-boot kernel persistence activation\n- Architecture per `docs/specs/phase-7-persistence.md`: *\"no Tails persistence code is modified, only added configuration\"* — i.e. **one `MiladyData` `Feature` subclass** added to Tails' `tps/configuration/features.py`, picked up automatically by `get_classes()`\n- Full Tails security hardening (Tor, AppArmor enforcement, MAC randomization, amnesic tmpfs, hardening sysctls) without a partial re-implementation\n\n## ⚠ Known gap — RISC-V\n\nTails has historically been amd64-only. **This subtree contains no riscv64 package lists or arch-specific hooks** (grepping the design docs for `riscv` returns zero hits). Shaw's stated key requirement is *\"both also support risc-v\"* — that gap is not addressed in this PR.\n\nTwo paths to consider (NOT in this PR — Shaw's call):\n\n1. **Keep `packages/os/linux/elizaos/` as the riscv64-only path** while this Tails-based variant covers amd64 (and possibly arm64 via Tails ARM port if/when upstream lands). Violates Shaw's \"one version one build\" rule but is realistic short-term.\n2. **Port Tails to riscv64** — touch Tails' `debian/control`, package lists, initramfs hooks, GRUB EFI setup; verify on QEMU `virt`; submit upstream or vendor diff. Real multi-week work, no upstream precedent.\n\n## What this PR does NOT touch\n\n- `packages/os/linux/elizaos/` is untouched. Both trees coexist after this lands. Shaw's \"one version one build\" decision is downstream of this PR.\n- No changes outside `packages/os/linux/variants/milady-tails/`.\n- The `MiladyData` `Feature` class is **design-only in the restored docs** (`phase-7-persistence.md` describes the implementation). If the actual Python landed before deletion and isn't in `4039bc612a`, a follow-up needs to port it from wherever it's now hiding.\n\n## Verified\n\n- 6,157 files restored exactly from `4039bc612a` (single `git checkout` command, no rewrites)\n- `git diff --shortstat`: `6157 files changed, 1390540 insertions(+)`\n- No file outside `packages/os/linux/variants/milady-tails/` modified\n\n## License note\n\nThe vendored Tails tree under `variants/milady-tails/tails/` is **GPL-3.0-or-later**, as it was before. This subtree carrying GPL-3 code does not affect the licensing of `packages/os/linux/elizaos/` or the rest of `elizaOS/eliza`, since the variant is opt-in (built only when you target it). Shaw's prior consolidation cited GPL-3 derivation as the deletion reason; per his DM this is no longer the blocker.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-24T06:03:23Z",
+      "mergedAt": "2026-05-24T08:37:23Z",
+      "additions": 1391613,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7evXIh",
+      "title": "feat(cloud-api): ERC-8004 register-identity endpoint + TS client",
+      "author": "0xSolace",
+      "number": 7937,
+      "body": "## Summary\n\n- Add a viem-based ERC-8004 IdentityRegistry client and copy BNBAgent IdentityRegistry ABI.\n- Add Eliza Cloud agent identity endpoints for register, current identity, URI update, and on-chain state lookup.\n- Add `agent_identities` Drizzle schema mapping for Track 1A's migration/table.\n- Gate register/update through Steward policies (`allowed-chains` + `approved-addresses`) before asking Steward to sign.\n\n## Steward signing / safety\n\nThis uses the existing Steward SDK `signTransaction(agentId, tx)` path with encoded IdentityRegistry calldata. If Steward is not wired or returns a signed-but-unbroadcast payload without a tx hash, the route returns `501` instead of guessing/broadcasting incorrectly.\n\nNo mainnet registration was executed.\n\nBefore first Sol registration, Steward policy must explicitly allow:\n\n- chain `56`\n- IdentityRegistry `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432`\n\n## Tests\n\n```bash\nbun test packages/cloud-shared/src/lib/services/erc8004/identity-client.test.ts \\\n  packages/cloud-api/__tests__/erc8004-identity-policy.test.ts\n\nbunx turbo run lint --filter=@elizaos/cloud-api --filter=@elizaos/cloud-shared\n```\n\nNote: root `bun run lint` currently fails in unrelated packages (`@elizaos/cloud-frontend`, then `@elizaos/app-core`) on pre-existing formatting/lint issues outside this branch.\n\n## Deployment dependency\n\nDepends on Track 1A applying the `agent_identities` table migration. If missing at runtime, the endpoint returns a clear 503.\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR wires up ERC-8004 on-chain agent identity registration on BNB Chain by adding a viem-based `ERC8004IdentityClient`, four new Hono route handlers (register, current identity, URI update, on-chain lookup), a Drizzle `agent_identities` schema, and Steward policy gating.\n\n- `POST …/register` encodes `register(agentURI)` calldata, asks Steward to sign and broadcast, waits for the receipt, parses the `Registered` event, and persists the identity record in the DB.\n- `PUT …/uri` and `GET …/onchain` follow the same auth + Steward policy pattern; `GET …/identity` is a pure DB read.\n- The `agent_identities` schema is intentionally migration-less here (Track 1A dependency) and protected by a 503 guard if the table is absent at runtime.\n\n<h3>Confidence Score: 3/5</h3>\n\nNot safe to merge without addressing the reverted-transaction handling and the TOCTOU registration race; both can silently leave the system in an inconsistent state between on-chain state and the DB.\n\nThe register and URI-update routes never inspect `receipt.status`, so a reverted on-chain transaction causes the code to proceed into event-parsing, fail with a generic 500, and — in the URI route — may write the new URI to the DB even though the chain still holds the old value. There is also no coordination primitive between the existence check and the on-chain broadcast, meaning two concurrent requests can each mint a token and only the first DB insert survives, leaving an orphaned on-chain identity. The `getAgentId` method adds a second `waitForTransactionReceipt` with no timeout after the first (60-second) call already confirmed the tx, which could hang on a flaky node. These three issues all live on the critical registration path.\n\n`register/route.ts` and `uri/route.ts` need the revert-check and race-condition fixes before going to production; `identity-client.ts` should be updated to accept an optional pre-fetched receipt in `getAgentId`.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/register/route.ts | Core registration handler: submits on-chain tx via Steward, waits for receipt, then parses agentId — but never checks receipt.status, calls waitForTransactionReceipt a second time (no timeout) inside getAgentId, and has a TOCTOU race that can cause double on-chain registrations. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/uri/route.ts | URI update handler: same missing receipt.status check as register route; policy gate is correct; DB update can write the new URI even when the on-chain tx reverted. |\n| packages/cloud-shared/src/lib/services/erc8004/identity-client.ts | ERC8004IdentityClient wraps viem for registry interactions; getAgentId always calls waitForTransactionReceipt internally even when the receipt is already available to callers, and has no timeout. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/common.ts | Shared helpers for auth, wallet resolution, Steward client, and tx dispatch; extractTxHash and stewardSendContractTx are sound; rpcUrlForChain hardcodes the BSC testnet public RPC URL. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/onchain/route.ts | GET on-chain state lookup; silently swallows all DB errors with .catch(() => null), masking migration-not-applied errors as 404s instead of 503s. |\n| packages/cloud-shared/src/db/schemas/agent-identities.ts | New Drizzle schema for agent identities; uniqueIndex on (sandbox_agent_id, standard, chain_id) and (chain_id, registry_address, token_id) are correctly scoped. No migration file included (expected from Track 1A). |\n| packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/policy.ts | Steward policy gate; correctly normalises addresses to lowercase and chains to strings; tests cover all three branches. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/route.ts | GET current identity; auth-guarded and delegates to common helpers cleanly. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant C as Client\n    participant R as register/route.ts\n    participant DB as Drizzle (agentIdentities)\n    participant S as Steward SDK\n    participant Chain as BNB Chain RPC\n\n    C->>R: \"POST /identity/register {chainId, agentURI}\"\n    R->>DB: getCurrentIdentity() → null (idempotency check)\n    R->>S: getPolicies(stewardAgentId) → policy rules\n    R->>R: policiesAllowRegister() → allowed\n    R->>S: \"signTransaction(stewardAgentId, {to: registry, data: register(agentURI)})\"\n    S-->>R: txHash\n    R->>Chain: waitForTransactionReceipt(txHash, 60s)\n    Chain-->>R: receipt ⚠️ status unchecked\n    R->>Chain: getAgentId(txHash) → waitForTransactionReceipt again (no timeout)\n    Chain-->>R: Registered event → agentIdOnchain\n    R->>Chain: getOwner(agentId) + getAgentURI(agentId)\n    Chain-->>R: owner, uri\n    R->>DB: INSERT agent_identities\n    DB-->>R: inserted row\n    R-->>C: \"200 {agentIdOnchain, txHash, owner, ...}\"\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (3)</h3></summary>\n\n1. `packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/register/route.ts`, line 574-683 ([link](https://github.com/elizaos/eliza/blob/658319478ec0163d07b8c18f1b3300d17d681fa5/packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/register/route.ts#L574-L683)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> **TOCTOU race allows double on-chain registration**\n\n   There is no lock between the `getCurrentIdentity` existence check and the on-chain `register` transaction. Two concurrent POST requests for the same `agentId` + `chainId` will both find `existing === null`, both pass the policy gate, and both broadcast a `register` call to the contract — minting two separate token IDs and charging gas twice. The second `dbWrite.insert` then fails on `agent_identities_sandbox_standard_chain_unique`, so the caller gets an error even though an on-chain identity was created. The orphaned token has no DB record.\n\n   Consider taking a DB advisory lock (e.g. `SELECT pg_advisory_xact_lock`) keyed on `(organizationId, sandboxAgentId, chainId)` before issuing the on-chain transaction, or using an `INSERT … ON CONFLICT DO NOTHING` with a pre-insert rather than a read-then-write pattern.\n\n\n2. `packages/cloud-shared/src/lib/services/erc8004/identity-client.ts`, line 2144-2167 ([link](https://github.com/elizaos/eliza/blob/658319478ec0163d07b8c18f1b3300d17d681fa5/packages/cloud-shared/src/lib/services/erc8004/identity-client.ts#L2144-L2167)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> **`getAgentId` calls `waitForTransactionReceipt` a second time with no timeout**\n\n   In `register/route.ts`, `waitForTransactionReceipt` is already called (with `timeout: 60_000`) before `getAgentId` is invoked, yet `getAgentId` issues its own `waitForTransactionReceipt` call with no `timeout`. If the RPC node hasn't indexed the receipt yet (rare but possible on load-balanced nodes), this second call can hang indefinitely. The logs decoded inside `getAgentId` come from this second receipt, not from the one used to obtain `blockNumber`, creating a subtle divergence.\n\n   Consider accepting an optional `receipt` parameter so callers that already have the confirmed receipt can skip the second RPC round-trip.\n\n\n3. `packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/onchain/route.ts`, line 386-389 ([link](https://github.com/elizaos/eliza/blob/658319478ec0163d07b8c18f1b3300d17d681fa5/packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/onchain/route.ts#L386-L389)) \n\n   <a href=\"#\"><img alt=\"P2\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p2.svg?v=9\" align=\"top\"></a> **DB errors silently swallowed on the onchain GET route**\n\n   `.catch(() => null)` discards all DB errors including `agent_identities table not available` (the migration-not-applied case). When the table is missing, `dbIdentity` becomes `null`, the fallback chain resolves `chainId = 56`, and if `agentIdOnchain` is also absent from the query string the request returns a 404 instead of the 503 with the descriptive message that `clearDbDependencyError` would produce. The other routes correctly surface this via `routeError`.\n\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (1): Last reviewed commit: [\"feat(cloud-api): add ERC-8004 identity r...\"](https://github.com/elizaos/eliza/commit/658319478ec0163d07b8c18f1b3300d17d681fa5) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=33637981)</sub>\n\n> Greptile also left **3 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-24T06:52:44Z",
+      "mergedAt": "2026-05-24T08:37:23Z",
+      "additions": 2136,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7d_gX4",
+      "title": "feat: add NEAR AI inference provider",
+      "author": "PierreLeGuen",
+      "number": 7883,
+      "body": "# Relates to\n\nNo linked issue.\n\n# Risks\n\nLow. This adds a new OpenAI-compatible inference provider plugin and wires it into existing provider discovery/configuration surfaces.\n\n# Background\n\n## What does this PR do?\n\nAdds `@elizaos/plugin-nearai` as a first-party NEAR AI Cloud TEE inference provider for text generation. The plugin uses the NEAR AI Cloud OpenAI-compatible endpoint, supports `TEXT_SMALL` and `TEXT_LARGE`, and defaults to TEE-verifiable models from the public NEAR AI catalog.\n\nThe change also wires NEAR AI into provider auto-enable, onboarding/provider switching, provider status, credential discovery, model catalog discovery, plugin registry metadata, and provider documentation.\n\n## What kind of change is this?\n\nFeatures (non-breaking change which adds functionality)\n\n# Documentation changes needed?\n\nDocumentation has been updated in the model provider references.\n\n# Testing\n\n## Where should a reviewer start?\n\nStart with `plugins/plugin-nearai`, then review the provider wiring in `packages/agent/src/runtime/plugin-collector.ts`, the onboarding catalog, and `packages/docs/model-providers.mdx`.\n\n## Detailed testing steps\n\n- `bun run --cwd plugins/plugin-nearai lint:check`\n- `bun run --cwd plugins/plugin-nearai typecheck`\n- `bun run --cwd plugins/plugin-nearai test`\n- `bun run --cwd plugins/plugin-nearai build`\n- `bun run --cwd packages/agent test -- src/runtime/__tests__/plugin-collector-nearai.test.ts`\n- `bun run --cwd packages/shared typecheck`\n- `bun run --cwd packages/core typecheck`\n- `./node_modules/.bin/biome check packages/core/src/contracts/onboarding.ts`\n- `./node_modules/.bin/tsc --noEmit -p packages/core/tsconfig.json`\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR introduces `@elizaos/plugin-nearai`, a new first-party inference provider plugin that connects to NEAR AI Cloud's OpenAI-compatible API with TEE-verifiable model support. It follows the same structure as existing provider plugins and correctly wires NEAR AI into all relevant discovery, onboarding, credential resolution, routing policy, and provider-switching surfaces.\n\n- The plugin core (`index.ts`, `models/text.ts`, `providers/openai-compatible.ts`) wraps the Vercel AI SDK's `createOpenAICompatible` client and applies a fetch interceptor to strip/rename OpenAI-specific fields (`max_completion_tokens`, `store`, `reasoning_effort`, `strict`, `developer` role) that the NEAR AI endpoint does not accept.\n- Provider wiring spans ~15 packages: plugin registry, onboarding catalog, auto-enable, credential resolver, vault inventory, routing policy cost table, first-time setup, and model catalog fetch — all consistent with how other providers like `zai` and `moonshot` are integrated.\n\n<h3>Confidence Score: 5/5</h3>\n\nThis PR is safe to merge. It adds a self-contained new provider plugin with no changes to existing provider logic.\n\nThe plugin implementation is complete and correct: the fetch interceptor properly normalizes NEAR AI-incompatible OpenAI fields, API key gating is consistently enforced across all provider discovery surfaces, and wiring into onboarding, credential resolution, vault, routing policy, and plugin-collector all follow the established patterns of adjacent providers (zai, moonshot). The large refactor in onboarding.ts extracts repeated inline patterns into named helpers without changing behavior. The two findings are configuration completeness gaps that do not affect runtime behavior.\n\nNo files require special attention. The two comments on nearai.json and config-routes.ts are config-surface completeness suggestions that do not affect the plugin's runtime operation.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| plugins/plugin-nearai/index.ts | Plugin entry point — registers TEXT_SMALL/TEXT_LARGE handlers, exposes config keys, and delegates init to initializeNearAI. Clean structure, env captured once at module load (standard practice). |\n| plugins/plugin-nearai/models/text.ts | Core text generation logic; fetch interceptor correctly strips OpenAI-specific fields (max_completion_tokens, store, reasoning_effort, strict) and remaps developer→system role for NEAR AI compatibility. Token usage events emitted correctly. |\n| plugins/plugin-nearai/utils/config.ts | Config utilities: getApiKeyOptional, getBaseURL, getSmallModel, getLargeModel, getExperimentalTelemetry. validateConfiguration exported as an opt-in utility but not called from init (documented as deliberate via JSDoc). |\n| packages/agent/src/api/model-provider-helpers.ts | Adds fetchNearAIModels using the /model/list catalog endpoint; NEAR AI is correctly excluded from keylessProviders so catalog fetch is gated behind a valid API key. |\n| packages/app-core/src/registry/entries/plugins/nearai.json | Registry metadata for the plugin UI. Config section covers the 5 user-facing keys but omits NEARAI_EXPERIMENTAL_TELEMETRY, which is defined in package.json agentConfig — users won't see it in the configuration UI. |\n| packages/core/src/contracts/onboarding.ts | Adds nearai to OnboardingProviderId/Family union types and ONBOARDING_PROVIDER_CATALOG. Large refactor of deriveOnboardingCredentialPersistencePlan into focused helper functions — logic is preserved, factoring improves readability. |\n| plugins/plugin-nearai/init.ts | Lightweight init: warns on missing API key in node environments, silently skips in browser (expected for proxy setups). _config parameter intentionally unused — reads from runtime.getSetting() directly. |\n| packages/agent/src/runtime/plugin-collector.ts | Maps NEARAI_API_KEY → @elizaos/plugin-nearai in PROVIDER_PLUGIN_MAP. Single-line addition consistent with all other provider entries. |\n| plugins/plugin-nearai/providers/openai-compatible.ts | Thin wrapper around createOpenAICompatible; injects apiKey only when present (safe for browser builds), delegates fetch to runtime.fetch for TEE/proxy contexts. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Agent as Agent Runtime\n    participant Plugin as plugin-nearai\n    participant Fetch as NearAIRequestFetch (interceptor)\n    participant SDK as Vercel AI SDK (generateText)\n    participant API as NEAR AI Cloud API\n\n    Agent->>Plugin: \"useModel(TEXT_SMALL | TEXT_LARGE, params)\"\n    Plugin->>Plugin: resolveTextParams(params)\n    Plugin->>Plugin: getSmallModel / getLargeModel (runtime settings)\n    Plugin->>Plugin: \"createNearAIClient(runtime, {fetch: wrapped})\"\n    Plugin->>SDK: \"generateText({model, prompt, maxTokens, ...})\"\n    SDK->>Fetch: \"fetch(url, {body: OpenAI JSON})\"\n    Fetch->>Fetch: strip max_completion_tokens to max_tokens\n    Fetch->>Fetch: delete store, reasoning_effort, strict\n    Fetch->>Fetch: remap role:developer to role:system\n    Fetch->>API: POST /v1/chat/completions (cleaned body)\n    API-->>Fetch: \"{choices, usage}\"\n    Fetch-->>SDK: response\n    SDK-->>Plugin: \"{text, usage}\"\n    Plugin->>Agent: emitEvent(MODEL_USED, tokens)\n    Plugin-->>Agent: text string\n```\n\n<sub>Reviews (2): Last reviewed commit: [\"fix: tighten NEAR AI provider initializa...\"](https://github.com/elizaos/eliza/commit/394e4190a781dfdabe4902c96b489bdea2757906) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=33264478)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-21T15:11:39Z",
+      "mergedAt": "2026-05-24T03:09:14Z",
+      "additions": 1731,
+      "deletions": 191
+    },
+    {
+      "id": "PR_kwDOMT5cIs7el_zi",
+      "title": "fix(core): preserve speaker names in prior dialogue context",
+      "author": "RemilioNubilio",
+      "number": 7895,
+      "body": "## Summary\n- preserves connector-provided sender names when RECENT_MESSAGES history is rendered as structured `prior_message:user` blocks\n- keeps the existing provider-text dedupe behavior, so full `# Conversation Messages` provider text still stays out of Stage 1 prompts\n- adds a regression test for the Discord failure shape where a later turn asks about a named participant from earlier chat context\n\n## Why\nA live Discord exchange showed Remilio/Nubilio losing speaker attribution after earlier chat context was converted into anonymous `prior_message:user` blocks. The model saw prior text, but not who said it, so it failed follow-up questions like \"look in the chat\" / \"her and botdick\" even though the relevant messages were present.\n\nThis patch is connector-agnostic: it reads the existing `metadata.sender` / entity-name fields already written by connectors and prefixes prior dialogue content with the sender name. Reply references already use this shape.\n\n## Validation\n- Synced branch to latest `origin/develop` (`fa83ddee6f`) via fast-forward before patching\n- `bun vitest run src/__tests__/message-runtime-stage1.test.ts src/features/basic-capabilities/providers/recentMessages.test.ts src/runtime/__tests__/planner-loop.test.ts` from `packages/core`: 94 tests passed\n- `bun run typecheck` from `packages/core`: passed\n- `bun run build` from `packages/core`: passed\n- Baseline after sync before patch:\n  - core focused suite: 119 tests passed\n  - orchestrator focused suite: 120 tests passed\n- Live Discord smoke after restart from local source:\n  - setup message: `1507674411552084059`\n  - prompt: `1507674422939750474`\n  - bot reply: `1507674432225939507`\n  - trajectory: `tj-224f2528525703`\n  - model: `gpt-oss-120b`\n  - tool calls: 0, failures: 0\n  - result: answered the shebotdick/botdick compatibility question using the recent channel context instead of claiming missing information\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR fixes speaker-name attribution in Discord (and other connector) chat history by reading `metadata.sender` (and related fields) from each `Memory` object and prepending the name to prior-dialogue content blocks. It also adds a new response-handler evaluator that reroutes short chat-entity identity lookups through recall/memory instead of letting Stage 1 guess via the simple shortcut.\n\n- **Speaker preservation**: `priorDialogueSpeakerName` extracts the sender name from `memory.metadata.sender` (or a set of fallback fields) and `priorDialogueContent` prefixes the text with `\"name: \"`, deduplicated against an existing prefix. The `speakerName` is also stored in the segment metadata.\n- **Identity-lookup evaluator**: `extractContextualIdentityLookupSubject` parses the last non-empty message line, strips platform addressing, and routes matching patterns (e.g. \"who is queuebot?\") through `[\"general\", \"memory\", \"messaging\"]` contexts with an `identity_lookup_policy` context slice; the existing simple-reply is cleared.\n- **Prompt hardening**: Both the DM handler template and the shared Stage 1 prompt gain a rule forbidding `replyText` that claims searches or recalls without an actual tool-call result this turn.\n\n<h3>Confidence Score: 5/5</h3>\n\nThe core speaker-name fix is surgical and safe; the identity-lookup evaluator degrades gracefully on false positives rather than breaking.\n\nThe speaker-attribution change touches only the prior-dialogue rendering path and is well-tested by the new regression test. The identity-lookup evaluator's heuristic can fire on common English words of 7+ lowercase characters (e.g. \"yourself\", \"happening\", \"bitcoin\"), but the worst-case outcome is a redundant planning cycle — `clearReply` is called, the model is given the `identity_lookup_policy` context slice, and it still produces a correct answer via the fallback policy. No data is corrupted and no response path is silently dropped.\n\npackages/core/src/services/message.ts — the `isShortContextualLookupSubject` heuristic in the new evaluator\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/core/src/services/message.ts | Adds speaker-name injection into prior_message:user blocks (core fix) and a new evaluator that reroutes contextual identity lookups through recall; the heuristic in `isShortContextualLookupSubject` over-matches common English words, causing unnecessary re-routing. |\n| packages/core/src/__tests__/message-runtime-stage1.test.ts | Adds four new test cases covering speaker-name preservation, identity-lookup routing, public-entity pass-through, and DM instruction text; all tests exercise the newly added code paths cleanly. |\n| packages/prompts/src/index.ts | Adds a single instruction line to the Stage 1 planner prompt forbidding hallucinated tool-call claims in `replyText`; change is narrow and correct. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[Incoming Memory / recentMessages] --> B[appendPriorDialogueEvents]\n    B --> C[priorDialogueSpeakerName\\nreads metadata.sender / fallback fields]\n    C -->|name found| D[priorDialogueContent\\nprepend 'name: ' to text]\n    C -->|no name| E[emit text as-is]\n    D --> F[prior_message:user segment\\nwith speakerName in metadata]\n    E --> F\n\n    G[Stage 1 message handler result\\ncontexts=simple, no tools] --> H{isSimpleMessageHandlerShortcut?}\n    H -->|yes| I[extractContextualIdentityLookupSubject\\nlastNonEmptyLine → strip platform addr → match prefix]\n    I -->|subject found| J[core.contextual_identity_lookup_requires_recall evaluator]\n    J --> K[setContexts: general, memory, messaging\\nclearReply\\naddContextSlices: identity_lookup_policy]\n    K --> L[Planner receives context slice\\nroutes through recall before answering]\n    I -->|no match| M[pass through unchanged]\n    H -->|no| M\n```\n\n<sub>Reviews (3): Last reviewed commit: [\"fix(core,prompts): forbid ungrounded sim...\"](https://github.com/elizaos/eliza/commit/3569ea21e08cebd62e6e6c862134c668dae432cc) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=33576167)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-23T09:23:50Z",
+      "mergedAt": null,
+      "additions": 487,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs7etTbA",
+      "title": "fix(core): preserve speaker context + prevent Stage 1 phantom action claims",
+      "author": "NubsCarson",
+      "number": 7923,
+      "body": "## Summary\n\nFour commits addressing a class of Stage 1 failures observed on a downstream Discord deployment where the agent answered questions about chat-local entities (names, nicknames, references) by either fabricating identities, claiming to have searched the chat when no tool ran, or losing speaker attribution in the prior dialogue context.\n\n```\n456674e5d4 test(prompts): pin phantom-action-claim rule in messageHandlerTemplate\n3569ea21e0 fix(core,prompts): forbid ungrounded simple replies and phantom action claims\nb2d62be0cd fix(core): route local identity lookups through planner\n847f6f6198 fix(core): preserve speaker names in prior dialogue context\n```\n\nPurely additive at the framework prompt-template layer. No regex on user input or bot output, no phrase lists, no per-shape pattern matching beyond the narrow deterministic backstop for the original `who is X?` failure shape.\n\n## The class of failures\n\nThree distinct failure modes observed in live Discord trajectories on a `gpt-oss-120b` planner:\n\n**1. Speaker attribution stripped from prior dialogue.** Connector-provided sender names on `prior_message:user:` blocks were rendered anonymously, so the model saw \"X said Y\" content without the X attribution. Follow-up questions like \"look in the chat\" or \"her and botdick\" failed because the model could not bind references to participants. Fix: `847f6f6198` reads the existing `metadata.sender` / entity-name fields connectors already write and prefixes prior dialogue content with the sender name.\n\n**2. Stage 1 fabricating chat-local identities.** Asked \"who is shebotdick?\" the agent guessed `shebotdick == botdick` from nearby chat context, with `plannerIterations=0, toolCallsExecuted=0`. Fix: `b2d62be0cd` adds the deterministic `core.contextual_identity_lookup_requires_recall` evaluator that catches a narrow set of \"who is X\" / \"tell me about X\" interrogatives, clears the simple-shortcut reply, and routes through the planner with `general/memory/messaging` context plus a `MESSAGE` action hint when the runtime exposes it.\n\n**3. Stage 1 hallucinating tool-call claims in replyText.** Asked \"look in the chat bozo\" the agent replied `\"I've scanned the recent chat, but there's no mention of who 'her' or 'botdick' are...\"` with `plan.simple=true, plan.requiresTool=false, plannerIterations=0, toolCallsExecuted=0, toolSearchCount=0` — no tool ever fired, yet the reply asserts a scan happened. Fix: `3569ea21e0` adds two structural rules to the framework-shared Stage 1 task templates (`packages/prompts/src/index.ts:messageHandlerTemplate` for non-DM, `packages/core/src/services/message.ts:DIRECT_MESSAGE_HANDLER_TEMPLATE` for DM):\n\n> Only use \"simple\" when you can answer directly from your static knowledge or the visible prior_message / reply_reference context. If the message refers to a specific name, person, nickname, or thing you cannot identify from the visible context, choose a non-simple context (such as general or memory) instead of guessing.\n>\n> Never write replyText that claims you have searched, scanned, checked, looked up, recalled, or remembered anything unless an actual tool call this turn returned that content. If you cannot ground the answer from the visible context, say so plainly.\n\n`456674e5d4` pins the second rule into `messageHandlerTemplate` with a static regression in `packages/prompts/test/prompts.test.js` so a future edit can't quietly drop it.\n\n## Why prompt-template layer, not another evaluator\n\nThe deterministic regex evaluator in `b2d62be0cd` catches one specific intent shape. Stacking a second evaluator with phrase lists for `look in the chat`, `search the messages`, `i was asking about X`, etc. would generalize poorly to novel phrasings and is exactly the regex-on-LLM-text pattern this project structurally avoids. Placing the broader rule in the Stage 1 task template instead applies framework-wide to every shape — known and unknown — and enforces it at the source of the behavior (the model's instruction contract), not after the fact via output pattern matching. The narrow regex evaluator stays as a deterministic backstop for the one shape it has proven coverage for; the prompt rule does the broader behavioral work. Defense in depth, each layer narrow.\n\n## Live evidence after the fix\n\nTest channel probes with a novel name `ironpegasus42` that has never appeared anywhere in the bot's chat history:\n\n| Prompt | Reply (new behavior) | Phantom-action verb |\n|---|---|---|\n| `look in the chat for any mention of ironpegasus42` | `\"I didn't find any mention of ironpegasus42 in the recent chat messages.\"` | none |\n| `search the messages for ironpegasus42 and tell me what they said` | `\"I looked through the recent chat history you provided and didn't find any messages mentioning ironpegasus42.\"` | none |\n| `i was asking about ironpegasus42` | `\"I don't see any messages mentioning ironpegasus42 in the visible chat history.\"` | none |\n| `who is obama?` (negative control) | full bio from static knowledge unchanged | none |\n\nCompare to the original `\"I've scanned the recent chat...\"` — the bot now bounds its claims to \"**visible** chat history\" / \"the chat messages **you provided**\", rather than asserting an unbounded retrieval that didn't happen.\n\n## Validation\n\n- `bunx @biomejs/biome check` — clean\n- `bun vitest run` in `packages/core` (focused) — 67/67 pass\n- `bun test ./test` in `packages/prompts` — 11/11 pass\n- `bun run typecheck` — clean\n- `bun run build` — clean\n- Full `bun vitest run` in `packages/core`: 1365/1377 pass with 11 skipped and 1 pre-existing failure on `develop` (`planner-loop-user-facing-text.test.ts > does not regress evaluator's explicit messageToUser path` — separately fixed in a companion PR; not introduced by this PR, verified against a fresh checkout of `fa83ddee6f`).\n\n## Branch state\n\n`0 behind / 4 ahead` of `origin/develop`. Purely additive diff across `packages/core/src/services/message.ts`, `packages/core/src/__tests__/message-runtime-stage1.test.ts`, `packages/prompts/src/index.ts`, and `packages/prompts/test/prompts.test.js`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR addresses three live production failure modes in Stage 1 of the message-handling pipeline: missing speaker attribution on prior dialogue blocks, phantom \"I scanned the chat\" claims when no tool actually ran, and identity guesses for chat-local names made without any recall. The fixes are spread across a new evaluator, speaker-name injection into prior dialogue context events, and additive prompt-template rules.\n\n- **Speaker attribution** (`priorDialogueSpeakerName` + `priorDialogueContent`): reads `metadata.sender` / entity-name fields already written by connectors and prefixes each `prior_message:user:` block with `<speaker>: ` so the model can bind pronoun/nickname references to real participants.\n- **Phantom action claims** (`messageHandlerTemplate` + `DIRECT_MESSAGE_HANDLER_TEMPLATE`): adds a structural instruction forbidding `replyText` that asserts a search/scan/recall happened unless an actual tool call returned content this turn; a companion regression test pins the rule text so it cannot be quietly deleted.\n- **Identity lookup evaluator** (`core.contextual_identity_lookup_requires_recall`): catches `who is X` / `what is X` interrogatives where the simple-shortcut was chosen, clears the speculative reply, and routes through `general/memory/messaging` with an `identity_lookup_policy` context slice injected into the planner event.\n\n<h3>Confidence Score: 4/5</h3>\n\nThe change is purely additive — new functions, a new evaluator, and extra prompt-rule text — and does not modify any existing call sites in ways that could break currently working paths. The speaker-attribution code degrades gracefully to the original behavior when no sender metadata is present.\n\nThe `isShortContextualLookupSubject` heuristic's third branch matches any all-lowercase word of 7+ characters, which unintentionally includes many well-known technology/brand names when written in lowercase (e.g. `discord`, `ethereum`, `twitter`). Those queries get routed through recall instead of answered directly from static knowledge. The LLM has a fallback instruction to use public knowledge for clearly public entities, so responses should still be correct, but the routing is wasteful and can produce awkward preambles. Everything else in the diff — the speaker-name attribution, the DM template rule, and the regression tests — is straightforward and correct.\n\nThe `isShortContextualLookupSubject` function in `packages/core/src/services/message.ts` deserves a second look; the test fragility in `packages/core/src/__tests__/message-runtime-stage1.test.ts` is minor but worth addressing.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/core/src/services/message.ts | Adds speaker-name attribution for prior dialogue, a new `core.contextual_identity_lookup_requires_recall` evaluator, and context-slice injection into the planner event; the heuristic function `isShortContextualLookupSubject` has an overly broad third condition that can produce false positives for lowercase public-entity names. |\n| packages/prompts/src/index.ts | Adds a single phantom-action-claim rule to messageHandlerTemplate; additive, self-contained, no control-flow change. |\n| packages/core/src/__tests__/message-runtime-stage1.test.ts | Adds four new test cases covering the three bug fixes and the DM template rule; one assertion checks an exact JSON serialization fragment, which is fragile if whitespace in the serialized output ever changes. |\n| packages/prompts/test/prompts.test.js | Adds a regression test that pins the phantom-action-claim rule text in messageHandlerTemplate; straightforward static-text assertion. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[\"Incoming message\"] --> B[\"Stage 1: message handler\\n(simple shortcut decision)\"]\n    B --> C{\"isSimpleMessageHandlerShortcut?\"}\n    C -- No --> D[\"Normal planning path\"]\n    C -- Yes --> E{\"extractContextualIdentityLookupSubject\\nreturns non-null?\"}\n    E -- No --> F{\"Simple reply OK\"}\n    F -- Yes --> G[\"Direct reply (simple=true)\"]\n    E -- Yes --> H[\"core.contextual_identity_lookup_requires_recall\\nevaluator fires\"]\n    H --> I[\"setContexts: general/memory/messaging\\nclearReply: true\\naddContextSlices: identity_lookup_policy\\naddCandidateActions: MESSAGE (if available)\"]\n    I --> J[\"Planner stage 2 with enriched context event\"]\n    J --> K[\"Grounded reply or honest 'I don't know'\"]\n    B --> L[\"appendPriorDialogueEvents\"]\n    L --> M{\"priorDialogueSpeakerName\\nfound in metadata?\"}\n    M -- Yes --> N[\"prior_message:user:\\nspeaker: text\"]\n    M -- No --> O[\"prior_message:user:\\ntext only (unchanged)\"]\n```\n\n<sub>Reviews (1): Last reviewed commit: [\"test(prompts): pin phantom-action-claim ...\"](https://github.com/elizaos/eliza/commit/456674e5d46c9a9cd8b9b9225f2ace03160ab8c8) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=33622743)</sub>\n\n> Greptile also left **2 inline comments** on this PR.\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-24T00:46:22Z",
+      "mergedAt": "2026-05-24T02:02:35Z",
+      "additions": 487,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 16578,
+    "deletions": 30558,
+    "files": 204,
+    "commitCount": 102
+  },
+  "completedItems": [
+    {
+      "title": "fix(cloud-frontend): rename landing button to Dashboard",
+      "prNumber": 7885,
+      "type": "bugfix",
+      "body": "Shaw flagged that the front-page button labeled \"Developer Dashboard\" on https://elizacloud.ai should just read \"Dashboard\".\n\n## Changes\n- Renames i18n key `cloud.landing.developerDashboard` → `cloud.landing.dashboard` across all 8 locales ",
+      "files": [
+        "packages/cloud-frontend/src/components/layout/landing-header.tsx",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ja.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json",
+        "packages/ui/src/i18n/locales/vi.json",
+        "packages/ui/src/i18n/locales/zh-CN.json"
+      ]
+    },
+    {
+      "title": "feat: add NEAR AI inference provider",
+      "prNumber": 7883,
+      "type": "feature",
+      "body": "# Relates to\n\nNo linked issue.\n\n# Risks\n\nLow. This adds a new OpenAI-compatible inference provider plugin and wires it into existing provider discovery/configuration surfaces.\n\n# Background\n\n## What does this PR do?\n\nAdds `@elizaos/plugin-n",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/agent/src/api/agent-model.ts",
+        "packages/agent/src/api/config-routes.ts",
+        "packages/agent/src/api/model-provider-helpers.ts",
+        "packages/agent/src/api/plugin-discovery-helpers.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/runtime/__tests__/plugin-collector-nearai.test.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/app-core/platforms/electrobun/src/native/credentials.ts",
+        "packages/app-core/scripts/generate-plugin-index.js",
+        "packages/app-core/src/api/credential-resolver.ts",
+        "packages/app-core/src/registry/entries/plugins/nearai.json",
+        "packages/core/src/contracts/onboarding.ts",
+        "packages/docs/model-providers.mdx",
+        "packages/docs/user/provider-setup.mdx",
+        "packages/shared/src/contracts/onboarding.ts",
+        "packages/shared/src/local-inference/providers-types.ts",
+        "packages/ui/src/services/local-inference/routing-policy.ts",
+        "packages/vault/src/inventory.ts",
+        "plugins/plugin-local-inference/src/services/providers.ts",
+        "plugins/plugin-local-inference/src/services/routing-policy.ts",
+        "plugins/plugin-nearai/.gitignore",
+        "plugins/plugin-nearai/.npmignore",
+        "plugins/plugin-nearai/LICENSE",
+        "plugins/plugin-nearai/README.md",
+        "plugins/plugin-nearai/__tests__/auto-enable.test.ts",
+        "plugins/plugin-nearai/__tests__/config.test.ts",
+        "plugins/plugin-nearai/__tests__/openai-compatible-provider.test.ts",
+        "plugins/plugin-nearai/__tests__/text-params.test.ts",
+        "plugins/plugin-nearai/auto-enable.ts",
+        "plugins/plugin-nearai/biome.json",
+        "plugins/plugin-nearai/build.ts",
+        "plugins/plugin-nearai/index.browser.ts",
+        "plugins/plugin-nearai/index.node.ts",
+        "plugins/plugin-nearai/index.ts",
+        "plugins/plugin-nearai/init.ts",
+        "plugins/plugin-nearai/models/index.ts",
+        "plugins/plugin-nearai/models/text.ts",
+        "plugins/plugin-nearai/package.json",
+        "plugins/plugin-nearai/providers/index.ts",
+        "plugins/plugin-nearai/providers/openai-compatible.ts",
+        "plugins/plugin-nearai/tsconfig.build.json",
+        "plugins/plugin-nearai/tsconfig.json",
+        "plugins/plugin-nearai/types/index.ts",
+        "plugins/plugin-nearai/utils/config.ts",
+        "plugins/plugin-nearai/utils/events.ts",
+        "plugins/plugin-nearai/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "docs(os-release): add VERIFY.md + verify-release.sh helper",
+      "prNumber": 7909,
+      "type": "docs",
+      "body": "## Summary\n\nShips a layered release verification helper that complements the\nin-progress signing / attestation / SBOM work:\n\n- `packages/os/release/VERIFY.md` — user-facing verification doc\n- `packages/os/scripts/verify-release.sh` — one-co",
+      "files": [
+        "packages/os/release/VERIFY.md",
+        "packages/os/scripts/verify-release.sh"
+      ]
+    },
+    {
+      "title": "chore(os): attest SLSA build provenance over SHA256SUMS",
+      "prNumber": 7908,
+      "type": "tests",
+      "body": "## Summary\n\nAdds `actions/attest-build-provenance@v2` in the\n`populate-and-validate-manifest` job to mint a single Sigstore-signed\nin-toto/SLSA provenance attestation over the canonical `SHA256SUMS`\nmanifest.\n\nThis is the **umbrella attesta",
+      "files": [
+        ".github/workflows/elizaos-os-full-release.yml"
+      ]
+    },
+    {
+      "title": "chore(vm): mint SLSA build provenance attestation for VM image",
+      "prNumber": 7907,
+      "type": "tests",
+      "body": "## Summary\n\nSame pattern as the ISO and .deb provenance PRs, applied to the VM\nimage build. Adds `actions/attest-build-provenance@v2` after the OVA\nconversion step so every produced `.ova` carries a Sigstore-signed\nSLSA provenance attestati",
+      "files": [
+        ".github/workflows/build-vm-image.yml"
+      ]
+    },
+    {
+      "title": "chore(deb): mint SLSA build provenance attestation for .deb",
+      "prNumber": 7906,
+      "type": "tests",
+      "body": "## Summary\n\nSame pattern as the ISO provenance PR, applied to the Debian package\nbuild. Adds `actions/attest-build-provenance@v2` after find-and-checksum\nso every produced `.deb` carries a Sigstore-signed SLSA provenance\nattestation via Git",
+      "files": [
+        ".github/workflows/build-debian-package.yml"
+      ]
+    },
+    {
+      "title": "chore(deb): actually invoke lintian on the produced .deb",
+      "prNumber": 7904,
+      "type": "other",
+      "body": "## Summary\n\nThe package step installs `lintian` alongside `dpkg-dev` / `debhelper`\nbut never runs it. Add a step right after find-and-checksum that runs:\n\n  lintian -i -I --pedantic <deb>\n\nand forwards each finding into a GitHub annotation:",
+      "files": [
+        ".github/workflows/build-debian-package.yml"
+      ]
+    },
+    {
+      "title": "chore(os): tier the ISO boot smoke against real elizaOS service markers",
+      "prNumber": 7903,
+      "type": "other",
+      "body": "## Summary\n\nThe current smoke grep matches `elizaOS|eliza|login:` which would pass\non any Debian boot that prints a login prompt. A plain debootstrap with\na hostname containing \"eliza\" would satisfy it. That's a false-positive\nrisk for a re",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "chore(os): attach SPDX SBOM to Linux ISO releases",
+      "prNumber": 7902,
+      "type": "other",
+      "body": "## Summary\n\n`supply-chain.yaml` already runs `anchore/sbom-action` weekly against\nthe workspace, but that SBOM is never attached to a release. This adds\na per-build SBOM for the ISO artifact itself, generated alongside the\nexisting `.sha256",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "chore(os): enforce 3 GiB ISO size budget in build-linux-iso",
+      "prNumber": 7901,
+      "type": "other",
+      "body": "## Summary\n\nThe Linux ISO build prints the artifact size into the step summary but\nnever asserts a bound, so a silent regression that doubles the image\nwould still ship. Adds a fail-closed check inside the existing \"Locate\nand rename ISO\" s",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "chore(os): aggregate SHA256SUMS across full-release artifacts",
+      "prNumber": 7900,
+      "type": "other",
+      "body": "## Summary\n\nWires the existing `packages/os/scripts/generate-release-checksums.mjs`\n(which already has unit tests under `__tests__/` and is the repo's\ncanonical checksum tool) into the `populate-and-validate-manifest`\njob so every release s",
+      "files": [
+        ".github/workflows/elizaos-os-full-release.yml"
+      ]
+    },
+    {
+      "title": "feat(cloud): replace HTTP control-plane health probe with Redis heartbeat",
+      "prNumber": 7899,
+      "type": "feature",
+      "body": "## Summary\n\nThe cloud-api Worker guarded 5 agent routes with a synchronous HTTP probe to a `container-control-plane` sidecar that no longer exists post-cutover. The probe was failing in production with `PROVISIONING_WORKER_NOT_CONFIGURED` /",
+      "files": [
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "test(chip): align test_software_bsp_evidence with current check_software_bsp",
+      "prNumber": 7898,
+      "type": "tests",
+      "body": "## What\n\n`packages/chip/scripts/test_software_bsp_evidence.py` was vendored in `603fab85b feat(chip): vendor eliza e1 source` with 4 subtest assertions that have never matched the actual behavior of `packages/chip/scripts/check_software_bsp",
+      "files": [
+        "packages/chip/scripts/test_software_bsp_evidence.py"
+      ]
+    },
+    {
+      "title": "fix(core): restore evaluator messageToUser precedence, opt-in canonical tool text",
+      "prNumber": 7897,
+      "type": "bugfix",
+      "body": "## What\n\nThe `planner-loop-user-facing-text → \"does not regress evaluator's explicit messageToUser path\"` test fails on `develop` because `preferredFinalMessageFromToolOrModel` prefers a single successful tool's `userFacingText` over the ev",
+      "files": [
+        "packages/core/src/__tests__/planner-happy-path.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-user-facing-text.test.ts",
+        "packages/core/src/runtime/execute-planned-tool-call.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "packages/core/src/types/components.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-shared): rebrand-ready agent base domain config (waifu.fun → elizacloud.ai prep)",
+      "prNumber": 7896,
+      "type": "feature",
+      "body": "## Summary\n\nPrepare the cloud-shared layer for the rebrand from `waifu.fun` / `milady.ai` / `shad0w.xyz` to `elizacloud.ai`. **Runtime impact: zero** until `ELIZA_CLOUD_AGENT_BASE_DOMAIN` flips in deployment env. This PR is one of several c",
+      "files": [
+        "packages/cloud-shared/src/lib/eliza-agent-web-ui.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/pairing-token-domains.ts",
+        "packages/cloud-shared/src/lib/services/pairing-token.test.ts",
+        "packages/cloud-shared/src/lib/services/pairing-token.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core/ensure-vision-deps): skip apt-get install when sudo would prompt and stdin is not a TTY",
+      "prNumber": 7941,
+      "type": "bugfix",
+      "body": "## Summary\n\n`installLinux()` in `packages/app-core/scripts/ensure-vision-deps.mjs` unconditionally runs:\n\n```js\nexecSync(\"sudo apt-get install -y fswebcam\", { stdio: \"inherit\" });\n```\n\nWhen the dev orchestrator runs outside a TTY (Docker `d",
+      "files": [
+        "packages/app-core/scripts/ensure-vision-deps.mjs"
+      ]
+    },
+    {
+      "title": "feat(cloud-api): ERC-8004 register-identity endpoint + TS client",
+      "prNumber": 7937,
+      "type": "feature",
+      "body": "## Summary\n\n- Add a viem-based ERC-8004 IdentityRegistry client and copy BNBAgent IdentityRegistry ABI.\n- Add Eliza Cloud agent identity endpoints for register, current identity, URI update, and on-chain state lookup.\n- Add `agent_identitie",
+      "files": [
+        "packages/cloud-api/__tests__/erc8004-identity-policy.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/common.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/onchain/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/policy.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/register/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/uri/route.ts",
+        "packages/cloud-shared/src/db/schemas/agent-identities.ts",
+        "packages/cloud-shared/src/db/schemas/index.ts",
+        "packages/cloud-shared/src/lib/services/erc8004/abis/IdentityRegistry.json",
+        "packages/cloud-shared/src/lib/services/erc8004/identity-client.test.ts",
+        "packages/cloud-shared/src/lib/services/erc8004/identity-client.ts"
+      ]
+    },
+    {
+      "title": "Restore packages/os/linux/variants/milady-tails — per Shaw'\\''s go-ahead",
+      "prNumber": 7936,
+      "type": "other",
+      "body": "## Authorization\n\nDirect DM with @shawmakesmagic on 2026-05-24 ~05:57 PT:\n\n> **shaw:** nah i think we should go with your thing\n> **shaw:** that is what i was worried about\n> **shaw:** we just need to have one version one build, the key thi",
+      "files": [
+        "packages/os/linux/variants/milady-tails/.dockerignore",
+        "packages/os/linux/variants/milady-tails/.gitignore",
+        "packages/os/linux/variants/milady-tails/Dockerfile",
+        "packages/os/linux/variants/milady-tails/Justfile",
+        "packages/os/linux/variants/milady-tails/PLAN.md",
+        "packages/os/linux/variants/milady-tails/README.md",
+        "packages/os/linux/variants/milady-tails/ROADMAP.md",
+        "packages/os/linux/variants/milady-tails/acng.conf",
+        "packages/os/linux/variants/milady-tails/assets/elizaOS_text_black.svg",
+        "packages/os/linux/variants/milady-tails/assets/elizaOS_text_white.svg",
+        "packages/os/linux/variants/milady-tails/assets/elizaos_logotext.svg",
+        "packages/os/linux/variants/milady-tails/assets/elizaos_logotext_black.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_blue_blackbg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_blue_nobg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_white_blackbg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_white_bluebg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_white_nobg.svg",
+        "packages/os/linux/variants/milady-tails/build-iso.sh",
+        "packages/os/linux/variants/milady-tails/build.sh",
+        "packages/os/linux/variants/milady-tails/docs/build-infrastructure.md",
+        "packages/os/linux/variants/milady-tails/docs/current-status.md",
+        "packages/os/linux/variants/milady-tails/docs/distribution-and-updates.md",
+        "packages/os/linux/variants/milady-tails/docs/inherited-tails-sudoers-review.md",
+        "packages/os/linux/variants/milady-tails/docs/mode-parity.md",
+        "packages/os/linux/variants/milady-tails/docs/privacy-mode-v1-gap.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/docs/runtime-packaging.md",
+        "packages/os/linux/variants/milady-tails/docs/security-model.md",
+        "packages/os/linux/variants/milady-tails/docs/session-memory.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/README.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-2-rebrand.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-3-privacy-mode.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-4-bake-milady-app.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-5-6-autolaunch-and-agent.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-7-persistence.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-8-mode-parity-harness.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-9-customization-actions.md",
+        "packages/os/linux/variants/milady-tails/docs/update-architecture.md",
+        "packages/os/linux/variants/milady-tails/docs/user-experience.md",
+        "packages/os/linux/variants/milady-tails/schemas/model-catalog.schema.json",
+        "packages/os/linux/variants/milady-tails/schemas/update-manifest.schema.json",
+        "packages/os/linux/variants/milady-tails/scripts/boot-qemu.sh",
+        "packages/os/linux/variants/milady-tails/scripts/dev-sign-update-manifest.sh",
+        "packages/os/linux/variants/milady-tails/scripts/generate-elizaos-brand-assets.sh",
+        "packages/os/linux/variants/milady-tails/scripts/generate-release-evidence.mjs",
+        "packages/os/linux/variants/milady-tails/scripts/prepare-milady-app-overlay.mjs",
+        "packages/os/linux/variants/milady-tails/scripts/runtime-api-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/security-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/sync-runtime-to-chroot.sh"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): fallback to single org wallet for unmapped wallet proxy",
+      "prNumber": 7934,
+      "type": "bugfix",
+      "body": "## Summary\n\nFollow-up to #7933. Production revealed that some existing deployments/rows do not yet have a usable `agent_server_wallets.sandbox_agent_id` mapping for wallets created by `/user/wallets/provision`.\n\n## Fix\n\nIf the sandbox mappi",
+      "files": [
+        "packages/cloud-api/__tests__/wallet-proxy-steward-agent-id.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/wallet/[...path]/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): wallet proxy resolves steward_agent_id from agent_server_wallets",
+      "prNumber": 7933,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis fixes the cloud-api wallet proxy bug where agent-scoped wallet endpoints forwarded the sandbox UUID to Steward even though `/api/v1/user/wallets/provision` creates Steward agents as `cloud-{characterId || clientAddress}`.\n\n",
+      "files": [
+        "bun.lock",
+        "packages/cloud-api/__tests__/wallet-proxy-steward-agent-id.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/wallet/[...path]/route.ts",
+        "packages/cloud-shared/src/db/migrations/0133_add_agent_server_wallets_sandbox_agent_id.sql",
+        "packages/cloud-shared/src/db/schemas/agent-server-wallets.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.test.ts"
+      ]
+    },
+    {
+      "title": "refactor(core): drop regex-list response-handler evaluators in favor of prompt-rule contracts",
+      "prNumber": 7931,
+      "type": "refactor",
+      "body": "## Summary\n\nRemoves the narrow regex-list-based `core.contextual_identity_lookup_requires_recall` evaluator (added in #7923) and relies on the broader prompt-rule contract from the same PR. Net `+38 / -253` lines (215 lines of regex-list ma",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js"
+      ]
+    },
+    {
+      "title": "revert: drop DM scopes from OAuth flow (#7929)",
+      "prNumber": 7930,
+      "type": "other",
+      "body": "Reverts #7929. The 'Something went wrong' X error was NOT caused by DM scopes — verified by re-testing with the trimmed scope set and getting the same error. Real cause is callback URL mismatch on the X dev app side. Restoring original scop",
+      "files": [
+        "packages/cloud-shared/src/lib/services/twitter-automation/index.ts"
+      ]
+    },
+    {
+      "title": "fix(twitter): drop DM scopes from OAuth flow by default",
+      "prNumber": 7929,
+      "type": "bugfix",
+      "body": "## Why\nX's OAuth2 flow rejects the entire authorization with a generic 'Something went wrong' page when the OAuth app doesn't have entitlements for all requested scopes. `dm.read` + `dm.write` require Twitter API Pro tier (\\$5k/mo) on the X",
+      "files": [
+        "packages/cloud-shared/src/lib/services/twitter-automation/index.ts"
+      ]
+    },
+    {
+      "title": "fix(chip): address greptile P1+P2 findings from PR #7893 review",
+      "prNumber": 7928,
+      "type": "bugfix",
+      "body": "## What\n\nTwo real bugs greptile flagged on PR #7893 that landed in `develop` via the merge integration commit `8114d5ad08`:\n\n### `check_cva6_boot_substrate.py` — P2 unreachable null guard\n\n```py\nif failure is not None or error is not None:\n",
+      "files": [
+        "packages/chip/scripts/check_cva6_boot_substrate.py",
+        "packages/chip/scripts/check_e1_soc_pd_input_contract.py"
+      ]
+    },
+    {
+      "title": "chore(os): remove stale milady-tails fragment per 4c96fee98e",
+      "prNumber": 7926,
+      "type": "other",
+      "body": "## What\n\nRemoves the 113-file leftover under `packages/os/linux/variants/milady-tails/tails/` that survived `4c96fee98e os/linux: consolidate to single elizaOS multi-arch build, remove Tails fork`.\n\n## Why\n\nShaw's consolidation commit (`4c9",
+      "files": [
+        "packages/os/linux/variants/milady-tails/tails/.stage/config",
+        "packages/os/linux/variants/milady-tails/tails/config/binary",
+        "packages/os/linux/variants/milady-tails/tails/config/bootstrap",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.AdditionalSoftware.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.PersistentStorage.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.TorBrowser.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-about.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-backup.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-documentation.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-installer.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tca.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/unlock-veracrypt-volumes.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/unsafe-browser.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/whisperback.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/desktop-directories/Tails.directory",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/doc/tails/Changelog",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/doc/tails/website/index.html",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/doc/tails/website/local.css",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ar/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/be/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/bg/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/bn/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/bs/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ca/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/cs/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/da/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/de/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/el/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/en_US/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/es/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/et/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/eu/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/fa/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/fi/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/fr/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ga/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/gl/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/he/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/hr/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/hu/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/hy/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/id/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/is/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/it/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ja/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ka/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/kab/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/kk/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ko/LC_MESSAGES/tails.mo"
+      ]
+    },
+    {
+      "title": "fix(core): bound runaway tool-arg validation loops via canonical failure signature",
+      "prNumber": 7924,
+      "type": "bugfix",
+      "body": "## Summary\n\nPrevent the framework's `maxRepeatedFailures` guard from being silently defeated when a model retries the same tool with shifting argument shapes that each fail `validateToolArgs`.\n\n## Background\n\nThe per-call repeatKey (`toolNa",
+      "files": [
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts"
+      ]
+    },
+    {
+      "title": "fix(core): preserve speaker context + prevent Stage 1 phantom action claims",
+      "prNumber": 7923,
+      "type": "bugfix",
+      "body": "## Summary\n\nFour commits addressing a class of Stage 1 failures observed on a downstream Discord deployment where the agent answered questions about chat-local entities (names, nicknames, references) by either fabricating identities, claimi",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 314.7723303722391,
+      "prScore": 310.0343303722391,
+      "issueScore": 4.3,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 210.90484714048074,
+      "prScore": 210.90484714048074,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 76.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 76.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
+      "totalScore": 31.697866136776994,
+      "prScore": 31.497866136776995,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "RemilioNubilio",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
+      "totalScore": 30.533158641168097,
+      "prScore": 25.9951586411681,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 16.63905732961526,
+      "prScore": 16.63905732961526,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "gblinproject",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/268705399?u=6590794ee888f90bcb195cf54142dd34fa31bff0&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "4oko4ow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113161018?u=5e7648af3d43a84aeb868210f0506a3c13a19120&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 20,
+  "mergedPRs": 27,
+  "newIssues": 5,
+  "closedIssues": 1,
+  "activeContributors": 12
+}

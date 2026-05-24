@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-05-01 to 2026-06-01, elizaos/eliza had 294 new PRs (205 merged), 25 new issues, and 27 active contributors.",
+  "overview": "From 2026-05-01 to 2026-06-01, elizaos/eliza had 314 new PRs (232 merged), 30 new issues, and 29 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABCFsSVw",
@@ -56,19 +56,31 @@
       "commentCount": 6
     },
     {
-      "id": "I_kwDOMT5cIs8AAAABA4Rdow",
-      "title": "build: dev-ui.mjs references `./claude-code-stealth.mjs` preload that doesn't exist on fresh clone",
-      "author": "Sw4pIO",
-      "number": 7210,
+      "id": "I_kwDOMT5cIs8AAAABDNtBwA",
+      "title": "Planner quality: explicit chat-recall requests pick SHELL over SEARCH_MESSAGES, leak sub-agent control metadata, time out on grep",
+      "author": "NubsCarson",
+      "number": 7935,
       "repository": "elizaos/eliza",
-      "body": "## Summary\n\n`packages/app-core/scripts/dev-ui.mjs` declares `./claude-code-stealth.mjs` as a Bun `--preload` entry when the user has an Anthropic subscription, but **no build step generates that file** and **it isn't checked in**. The script's existence check (`existsSync(path.join(cwd, filePath))`) silently filters the missing file out of the preload list, so the stealth fetch interceptor never installs.\n\nThe interceptor is what prepends the Claude Code system prefix and identity headers (`anthropic-beta`, `user-agent: claude-cli/...`, `x-app: cli`) that Anthropic's API requires for OAuth subscription tokens. Without it, every `api.anthropic.com` request from a subscription user gets `401 Invalid authentication credentials` even though the token is valid and registered correctly.\n\nThe TypeScript source is at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`, but the dev preload expects a different file at the **repo root**, named `.mjs`, that auto-runs on import.\n\n## Reproduction\n\nOn a fresh clone of any consumer repo (e.g. milady on `develop`):\n\n1. Sign in to an Anthropic subscription via `POST /api/subscription/anthropic/start` + `/exchange` so `~/.eliza/auth/anthropic-subscription.json` is written.\n2. Manually enable `@elizaos/plugin-anthropic` in `~/.<branding>/<branding>.json` (auto-enable refuses for subscription-only).\n3. Set `ANTHROPIC_AUTH_MODE=oauth` and `CLAUDE_CODE_OAUTH_TOKEN=<token>` in the runtime env.\n4. `bun run dev`\n5. Boot log shows:\n   ```\n   [milady] Stealth imports enabled: \n   ```\n   (notice — empty list because the file doesn't exist; it was silently filtered)\n6. Send any chat message → backend retries 3× with `AI_APICallError: Invalid authentication credentials` and surfaces the parse error to the user.\n\n## Diagnostic trail\n\n- `packages/app-core/scripts/dev-ui.mjs:785` declares the preload:\n  ```js\n  if (stealth.claude) nodeStealthImports.push(\"./claude-code-stealth.mjs\");\n  ```\n- Then filters by existence:\n  ```js\n  const resolvedStealthImports = nodeStealthImports.filter((filePath) =>\n    existsSync(path.join(cwd, filePath)),\n  );\n  ```\n- `find . -name claude-code-stealth.mjs -not -path '*/node_modules/*'` returns nothing on a fresh clone.\n- The TS source exists at `packages/agent/src/auth/claude-code-stealth.ts` and exports `installClaudeCodeStealthFetchInterceptor()`. Nothing builds it into the expected location.\n\n## Suggested fix\n\nEither of:\n\n1. **Check in / generate the `.mjs`** at the repo root (or wherever `cwd` resolves to in `dev-ui.mjs`), with a self-installing call at the bottom. I verified locally that creating this file unblocks the Anthropic subscription auth path end-to-end (successful chat turns, zero 401s, model calls confirmed via `[stealth] →anthropic` debug logs with `ELIZA_STEALTH_DEBUG=1`).\n\n2. **Fail loud instead of silent**: in `dev-ui.mjs`, when `stealth.claude === true` but the resolved preload file is missing, log a clear warning so users know what's wrong instead of chasing parse errors.\n\nBoth would help; (1) makes the feature work out of the box, (2) prevents the same multi-hour debug hunt for the next person.\n\n## Why this matters\n\nWithout the stealth interceptor, subscription auth is **completely non-functional** on the runtime side, which:\n- Makes the `/api/subscription/anthropic/*` flow look broken (it works correctly, but the runtime that consumes its credentials can't actually use them).\n- Forces users to either get a paid API key or sign up for Eliza Cloud — even though the codebase clearly intends to support direct subscription OAuth via the stealth path.\n\n## Environment\n- bun 1.3.13\n- eliza submodule HEAD: `4e650ca0ad`\n- Discovered while booting milady on `develop`",
-      "createdAt": "2026-04-29T22:09:53Z",
-      "closedAt": "2026-05-01T20:04:54Z",
-      "state": "CLOSED",
-      "commentCount": 1
+      "body": "## Summary\n\nWhen a user asks the bot to search chat history (e.g. *\"look in chat for any mention of X\"*, *\"find any messages talking about X\"*, *\"search the chat for X\"*), Stage 1 correctly classifies the request and hints the right action — but the planner+sub-agent pipeline often picks the wrong tool, runs expensive timing-out shell commands, or leaks sub-agent control metadata back to the user channel.\n\nThis is upstream of any response-handler evaluator concern — Stage 1 is doing the right thing. The quality bug lives in `ACTION_PLANNER` model behavior and the sub-agent spawn → reply pipeline.\n\n## Reproduced behavior (live Discord, `gpt-oss-120b`, current `origin/develop`)\n\n### Reproduction 1 — `\"look in chat for any mention of xeroflame\"` (`tj-892f7072083534`)\n\n```\nmetrics: plannerIterations=4 toolCallsExecuted=4 toolCallFailures=2 cost=$0.1199 size=1.8MB\n\nstage[0] messageHandler:\n  plan: contexts=[\"general\"] simple=false requiresTool=true\n        candidateActions=[\"SEARCH_MESSAGES\"]    ← Stage 1 hinted the right action\n\nstage[2] planner #1:  picked SHELL { command: 'echo \"searching for xeroflame\"' }   ← placeholder\nstage[3] tool:        SHELL success, but produced nothing useful\nstage[4] evaluation:  {\"tool\":\"SEARCH_MESSAGES\",\"query\":\"xeroflame\"}    ← evaluator wanted SEARCH_MESSAGES\nstage[5] planner #2:  picked SHELL { command: 'grep -R \"xeroflame\" -n .', cwd: eliza-monorepo }\nstage[6] tool:        SHELL TIMEOUT after 120s    ← unbounded grep on monorepo\nstage[8] planner #3:  picked SHELL { command: 'grep -R \"xeroflame\" -n /home/milady/iqlabs/milady/eliza' }\nstage[9] tool:        SHELL TIMEOUT after 60s\nstage[10] evaluation: NEXT_RECOMMENDED — \"Need to search Discord chat history using SEARCH_MESSAGES\"\nstage[11] planner #4: picked TASKS { action: \"spawn_agent\" }   ← also wrong action shape\n                                                                  (correct is TASKS_SPAWN_AGENT,\n                                                                   see merged #7897 + #7924)\n\nfinal Discord reply: (empty)\n```\n\n### Reproduction 2 — `\"find any messages talking about prismvault\"`\n\n```\nStage 1 hinted: candidateActions=[\"TASKS_SPAWN_AGENT\"]\nPlanner spawned a sub-agent via TASKS\nSub-agent reply leaked control metadata back to user:\n  \"**Routing Kind:** QUESTION_FOR_TASK_CREATOR\n   To retrieve messages from the Discord #general channel we need a way to\n   access the Discord API (or a local export of the channel). Could you provide...\"\n\nTwo trajectories generated (probably from sub-agent loop), $0.0468 combined, 1031 KB combined.\n```\n\nThe user shouldn't see `**Routing Kind:** QUESTION_FOR_TASK_CREATOR` — that's sub-agent control metadata.\n\n### Comparison — adjacent phrasings that Stage 1 routes correctly\n\nThese all stayed on the simple shortcut at 74 KB / $0.004, no planner, no sub-agent:\n- *\"did anyone mention the bukowski quote earlier?\"*\n- *\"did anyone talk about poetry today?\"*\n- *\"has cyberhaven been mentioned in this channel?\"*\n- *\"search the chat for any mention of frostgate\"* — bot replied: *\"I scanned the recent chat history you provided and didn't find any mention of frostgate.\"*\n\nSo Stage 1's classifier handles \"did anyone mention X\" / \"has X been mentioned\" / \"search the chat for X\" correctly as simple — it has prior_message context and answers from it honestly. The planner trouble only fires for the slightly more imperative phrasings that Stage 1 flags as `simple=false requiresTool=true`.\n\n## Probable root causes (planner-side)\n\n1. **Planner prefers SHELL over the action that Stage 1 hinted.** Stage 1 explicitly listed `candidateActions: [\"SEARCH_MESSAGES\"]` in the plan; the planner picked SHELL instead. This is a planner-instruction or action-catalog ranking issue.\n\n2. **Planner runs unbounded SHELL operations (`grep -R \"X\" -n .`) on the monorepo.** Even when a SHELL invocation is appropriate, the planner doesn't pass a tight scope or output cap, so legitimate filesystem search degenerates into multi-minute timeouts.\n\n3. **Planner still emits `TASKS { action: \"spawn_agent\" }`** (wrong action shape; the canonical action is `TASKS_SPAWN_AGENT`). #7924 collapsed the failure signature so repeated invalid args correctly trip `maxRepeatedFailures`, but the planner is still producing the wrong shape on first try; that's a separate planner-prompt clarity issue.\n\n4. **Sub-agent control metadata leaks to the user.** A sub-agent's *\"Routing Kind: QUESTION_FOR_TASK_CREATOR\"* preamble was shown as the user-facing reply. Sub-agent control text should be stripped before surfacing to the connector — or the sub-agent should be instructed to emit a clean clarifying question for the user without the routing-kind framing.\n\n## What I'm explicitly NOT proposing\n\n- A regex evaluator to clean up planner output (would be the same shape of slop that #7923-introduced-then-#7931-removed). The fix belongs at the planner prompt layer + sub-agent output contract.\n- Adding `SEARCH_MESSAGES` to a forced-routing list. The right structural answer is the planner honoring Stage 1's hint when present.\n\n## Suggested next steps for maintainers\n\n1. Confirm whether the planner template should treat Stage 1's `candidateActions` hint as a strong preference vs an advisory. If \"strong preference,\" the planner template can be tightened to acknowledge and honor it before picking a fallback like SHELL.\n2. Decide whether sub-agent control-metadata-shaped replies (e.g. lines starting with `**Routing Kind:**`, `QUESTION_FOR_TASK_CREATOR`) should be stripped at the framework layer or fixed in the sub-agent reply contract.\n3. Optionally cap SHELL grep timeout/scope in the planner template (or have it default to a narrower path than the monorepo root).\n\nHappy to write the planner-prompt patch + tests for any of the above if there's preferred direction.\n\n## Related\n\n- #7923 (merged) — preserve speaker context + prevent Stage 1 phantom action claims\n- #7924 (merged) — bound runaway tool-arg validation loops\n- #7897 (merged) — restore evaluator messageToUser precedence\n- #7931 (open) — drop regex-list response-handler evaluators (Stage 1 / response-handler layer; orthogonal to this issue)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-05-24T05:59:26Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7evGWS",
+      "title": "Restore packages/os/linux/variants/milady-tails — per Shaw'\\''s go-ahead",
+      "author": "NubsCarson",
+      "number": 7936,
+      "body": "## Authorization\n\nDirect DM with @shawmakesmagic on 2026-05-24 ~05:57 PT:\n\n> **shaw:** nah i think we should go with your thing\n> **shaw:** that is what i was worried about\n> **shaw:** we just need to have one version one build, the key thing is that both also support risc-v\n> **shaw:** i think you were much farther along\n> **shaw:** i am not attached to what my agents have done\n\nThis PR reverts `4c96fee98e` (\"os/linux: consolidate to single elizaOS multi-arch build, remove Tails fork\") and `58505f0cdd` (\"chore(os/linux): remove stale milady-tails fragment per 4c96fee98e\" — PR #7926, my mistake) by restoring the **byte-equivalent state** of `packages/os/linux/variants/milady-tails/` at 2026-05-21 02:59 PT (commit `4039bc612a`).\n\n## What this restores\n\n| | |\n|---|---|\n| Files | **6,157** total (6,105 vendored Tails + 52 nubs-authored customizations) |\n| Vendored Tails | `variants/milady-tails/tails/` — exact snapshot of `gitlab.tails.boum.org/tails/tails` as it was the day before deletion |\n| nubs customizations | Dockerfile, Justfile, PLAN.md, ROADMAP.md, README, 9 phase specs (rebrand → privacy-mode → bake-milady-app → autolaunch+agent → persistence → mode-parity-harness → customization-actions), brand assets (elizaOS_text_*, elizaos_logotext_*, logo_*), schemas (`model-catalog`, `update-manifest`), 13 scripts (`build-iso.sh`, `usb-write.sh`, `boot-qemu.sh`, `prepare-milady-app-overlay.mjs`, `generate-release-evidence.mjs`, `security-smoke.sh`, `sync-runtime-to-chroot.sh`, `validate-model-catalog.mjs`, `validate-runtime-overlay.mjs`, etc.) |\n\n## What this gets back functionally\n\n- **Tails greeter** — first-boot language / keyboard / passphrase UX (the wizard that wasn't reimplementable as a popup)\n- **Tails `tps` Persistent Storage** — real LUKS-encrypted USB persistence\n- **`persistence.conf` machinery** — live-boot kernel persistence activation\n- Architecture per `docs/specs/phase-7-persistence.md`: *\"no Tails persistence code is modified, only added configuration\"* — i.e. **one `MiladyData` `Feature` subclass** added to Tails' `tps/configuration/features.py`, picked up automatically by `get_classes()`\n- Full Tails security hardening (Tor, AppArmor enforcement, MAC randomization, amnesic tmpfs, hardening sysctls) without a partial re-implementation\n\n## ⚠ Known gap — RISC-V\n\nTails has historically been amd64-only. **This subtree contains no riscv64 package lists or arch-specific hooks** (grepping the design docs for `riscv` returns zero hits). Shaw's stated key requirement is *\"both also support risc-v\"* — that gap is not addressed in this PR.\n\nTwo paths to consider (NOT in this PR — Shaw's call):\n\n1. **Keep `packages/os/linux/elizaos/` as the riscv64-only path** while this Tails-based variant covers amd64 (and possibly arm64 via Tails ARM port if/when upstream lands). Violates Shaw's \"one version one build\" rule but is realistic short-term.\n2. **Port Tails to riscv64** — touch Tails' `debian/control`, package lists, initramfs hooks, GRUB EFI setup; verify on QEMU `virt`; submit upstream or vendor diff. Real multi-week work, no upstream precedent.\n\n## What this PR does NOT touch\n\n- `packages/os/linux/elizaos/` is untouched. Both trees coexist after this lands. Shaw's \"one version one build\" decision is downstream of this PR.\n- No changes outside `packages/os/linux/variants/milady-tails/`.\n- The `MiladyData` `Feature` class is **design-only in the restored docs** (`phase-7-persistence.md` describes the implementation). If the actual Python landed before deletion and isn't in `4039bc612a`, a follow-up needs to port it from wherever it's now hiding.\n\n## Verified\n\n- 6,157 files restored exactly from `4039bc612a` (single `git checkout` command, no rewrites)\n- `git diff --shortstat`: `6157 files changed, 1390540 insertions(+)`\n- No file outside `packages/os/linux/variants/milady-tails/` modified\n\n## License note\n\nThe vendored Tails tree under `variants/milady-tails/tails/` is **GPL-3.0-or-later**, as it was before. This subtree carrying GPL-3 code does not affect the licensing of `packages/os/linux/elizaos/` or the rest of `elizaOS/eliza`, since the variant is opt-in (built only when you target it). Shaw's prior consolidation cited GPL-3 derivation as the deletion reason; per his DM this is no longer the blocker.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-24T06:03:23Z",
+      "mergedAt": "2026-05-24T08:37:23Z",
+      "additions": 1391613,
+      "deletions": 0
+    },
     {
       "id": "PR_kwDOMT5cIs7dWNcK",
       "title": "chore(release): develop → main (v2.0.2)",
@@ -116,25 +128,13 @@
       "mergedAt": "2026-05-04T10:24:03Z",
       "additions": 28474,
       "deletions": 1876
-    },
-    {
-      "id": "PR_kwDOMT5cIs7WsOJC",
-      "title": "feat(vault): @elizaos/vault — cross-platform secrets vault + Settings UI integration",
-      "author": "Dexploarer",
-      "number": 7197,
-      "body": "# Relates to\n\nThis is the upstream-targeting twin of milady-ai/eliza#6. The vault feature originated in the Milady fork; this PR lands the upstream-relevant slice on `elizaOS/eliza:develop`.\n\n# Risks\n\n**Low.** The vault is an additive workspace package; the runtime + Settings UI integration is a write-through mirror over the existing `config.env.X` storage path, so disabling it is a one-line change in `plugins-compat-routes.ts` (`mirrorPluginSensitiveToVault` → no-op). Cross-platform secret-service behaviour is exercised by a new dedicated CI workflow (macOS Keychain / Windows Credential Manager / Linux libsecret) so the headline portability claim is verifiable on every PR. The legacy `config.env.X` write path is unchanged — even if every vault call failed, plugin saves would still persist.\n\n# Background\n\n## What does this PR do?\n\nAdds **`@elizaos/vault`** — a cross-platform secrets/config vault — and wires it into the agent runtime + Settings UI so the existing \"save my OpenAI key\" flow stops storing plaintext in `config.env` and starts encrypting at rest with a key from the OS keychain.\n\n### `@elizaos/vault` (new package, `packages/vault/`)\n\n- **Encryption-at-rest** with AES-256-GCM, secret-id-as-AAD (so a leaked ciphertext can't be replayed against a different key).\n- **Master key in the OS keychain by default** — macOS Keychain, Windows Credential Manager, Linux Secret Service via `@napi-rs/keyring`.\n- **Headless fallback**: `passphraseMasterKey()` / `passphraseMasterKeyFromEnv(\"MILADY_VAULT_PASSPHRASE\")` derives the master key with `scrypt` for Linux servers and CI without a Secret Service agent.\n- `defaultMasterKey()` chains keychain → passphrase → throws `MasterKeyUnavailableError` whose message names every remediation path.\n- **One API for sensitive and non-sensitive config** — `vault.set(key, value, { sensitive: true })` vs `vault.set(key, value)`.\n- **Password-manager references are first-class** — values can live in 1Password / Proton Pass / Bitwarden, the vault stores only the resolver reference.\n- **`SecretsManager`** layer routes per-key writes/reads to the user-selected backend (`in-house`, `1password`, `bitwarden`, `protonpass`), with detection + preferences API at `/api/secrets/manager/{backends,preferences}`.\n- **Audit log** at `audit/vault.jsonl` per write.\n- **Testing harness** (`@elizaos/vault/testing#createTestVault`) that produces a vault wired to an in-memory master key for downstream tests.\n\n### Runtime + Settings UI integration\n\n- **Write-through mirror in `/api/plugins/:id` PUT**: when a sensitive plugin field is saved, the value is mirrored into the vault (encrypted at rest) on top of the existing `config.env.X` write. Mirror failures are surfaced to the UI under `vaultMirrorFailures` rather than silently swallowed.\n- **Vault-first reveal**: `POST /api/plugins/:id/reveal` consults `sharedVault().get(key)` before falling back to `process.env` / `config.env`, so a freshly-saved key is the value the user sees.\n- **Per-process cached `sharedVault()`** so concurrent saves share `VaultImpl.mutate()`'s mutex; a per-request `createVault()` would race and silently lose entries.\n- **Broader credential heuristic** — `pickPrimaryCredentialParam()` walks a priority-ordered regex list (`API_KEY` → `API_TOKEN` → `BOT_TOKEN` → `ACCESS_TOKEN` → `SECRET_KEY` → `PRIVATE_KEY` → `CLIENT_SECRET`) instead of only matching `*_API_KEY$`, with an explicit fallback to the first sensitive parameter. Closes the bug where typing a model field before the API-key field caused `Object.values(config).find()` to pick up the model slug; also fixes connectors whose primary credential is a bot token / private key / client secret.\n- **Settings UI** — `SecretsManagerSection` + `ApiKeyConfig` with inline prefix validation and validation warnings, keyboard shortcut `⌘⌥⌃V` (Mac) / `Ctrl+Alt+Shift+V` (Win/Linux), global modal mount, application menu accelerator.\n- **Cloud disconnect orphan-route patch**: `/api/cloud/disconnect` now nulls every routed service (`llmText`, `tts`, `media`, `embeddings`, `rpc`) instead of just `llmText`, so disconnect doesn't leave silently-401'ing voice/image/embedding features routed at the dead `cloud-proxy → elizacloud`. Plus `linkedAccounts.elizacloud.status=\"unlinked\"` to prevent the in-memory state from overwriting the canonical unlinked state on next `saveElizaConfig`.\n\n### Runtime-ops × vault\n\n- `ProviderSwitchIntent.apiKeyRef` replaces plaintext `apiKey` end-to-end. The provider-switch route writes the vault entry, persists only the reference, and resolves through the vault when the runtime reload-hot needs the key.\n- Legacy ops with plaintext `apiKey` are auto-migrated to `apiKeyRef` on hydrate.\n- Repository pruning suite (retention, cap, idempotency, hydrate; 6 tests).\n- A `simplify` pass that dedupes utility code, removes ghost phases, and consolidates state.\n\n## What kind of change is this?\n\n**Features** — non-breaking. `@elizaos/vault` is new. The runtime/Settings wiring is additive on top of the existing config-write path, controlled by feature presence rather than a flag. The provider-switch `apiKeyRef` replaces `apiKey` but a hydrate-time migration upgrades legacy ops in place.\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation. New package documentation lives inline in `packages/vault/README.md` and the public API surface is documented via TSDoc. The Settings UI changes are user-facing but match the existing settings pattern.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. **`packages/vault/`** — start with `src/vault.ts` (the public API), then `src/master-key.ts` (the keychain/passphrase chain), then `src/manager.ts` (the multi-backend router). Tests in `test/{vault,master-key,manager,store,envelope,references,keyring}.test.ts` exercise every public path; `test/master-key.test.ts` covers the headless-fallback chain explicitly.\n2. **`packages/app-core/src/services/vault-mirror.ts`** + `packages/app-core/src/services/vault-mirror.test.ts` — the write-through mirror is small, isolated, and has a focused test that includes failure-collection and a source-text guard for the vault-first reveal ordering.\n3. **`packages/app-core/src/api/plugins-compat-routes.ts`** — the `PUT /api/plugins/:id` handler and `/reveal` route, where the vault wiring sits next to the existing legacy code path.\n4. **`packages/agent/src/runtime/operations/`** — `vault-bridge.ts`, `vault-integration.test.ts`, and `health.test.ts` show the `apiKeyRef` migration. The 22-case integration suite is the strongest evidence that the runtime path keeps working.\n\n## Detailed testing steps\n\nAutomated tests are acceptable.\n\n- **Vault unit suite (cross-platform)**: `bun run --cwd packages/vault test` — 64 tests covering vault, master-key (incl. passphrase fallback), manager, store, envelope, references, keyring round-trips. The new `vault-ci` workflow runs this matrix on `ubuntu-latest`, `macos-latest`, `windows-latest` so the OS-keychain claim is checked on every PR.\n- **App-core wiring suite**: `bun run --cwd packages/app-core test` — 37 wiring tests (vault-mirror unit + source-text guards, secrets-manager-routes integration via real `http.Server`, usePluginsSkillsState heuristic priority list, useSecretsManagerShortcut Mac/Win/Linux chord matching, server.cloud-disconnect orphan-route guard).\n- **Runtime-ops vault integration**: 22 cases in `packages/agent/src/runtime/operations/vault-integration.test.ts` proving the `apiKeyRef` path works end-to-end.\n- **End-to-end save-flow**: `provider-switch-routes.e2e.test.ts` stands up a real `http.Server` and exercises Settings PUT → mirror → reveal → provider switch against an in-memory vault.\n- **Cross-platform CI**: the new `vault-ci` workflow (`.github/workflows/vault-ci.yaml`) runs the vault suite on macOS / Linux / Windows runners; an `app-core-wiring` job runs the wiring tests on `ubuntu-latest` with proto generation as a prerequisite.\n\n### Manual smoke (UI)\n\n1. Open the desktop app → **Settings → Plugins → OpenAI** (or any AI provider).\n2. Enter an API key, save.\n3. The plugin row should turn green and reload the agent. Open `~/.milady/vault.json` — the value is encrypted; the OS keychain holds the master key under `service: \"milady\"`, `account: \"vault.masterKey\"`.\n4. Open the **Secrets Vault** modal via `⌘⌥⌃V` (or **Edit → Secrets Vault** menu). Switch the routing for `OPENAI_API_KEY` to a different backend, save. Subsequent reveals fetch from the new backend.\n\n## Deploy notes\n\n- **`@elizaos/vault` is a new workspace package** — `bun install` at the repo root picks it up; nothing extra to do.\n- **No database changes.**\n- **No breaking changes** to existing config files. Legacy `config.env.X` writes still happen alongside the vault mirror; vault values shadow `process.env` only in the reveal path. The `apiKeyRef` migration on the runtime-ops side is in-place on hydrate (no operator action required).\n\n---\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-04-29T11:25:51Z",
-      "mergedAt": "2026-05-01T03:12:42Z",
-      "additions": 22472,
-      "deletions": 677
     }
   ],
   "codeChanges": {
-    "additions": 131618,
-    "deletions": 325249,
-    "files": 1669,
-    "commitCount": 2963
+    "additions": 148196,
+    "deletions": 355807,
+    "files": 1831,
+    "commitCount": 3065
   },
   "completedItems": [
     {
@@ -3554,6 +3554,80 @@
       ]
     },
     {
+      "title": "fix(cloud-frontend): rename landing button to Dashboard",
+      "prNumber": 7885,
+      "type": "bugfix",
+      "body": "Shaw flagged that the front-page button labeled \"Developer Dashboard\" on https://elizacloud.ai should just read \"Dashboard\".\n\n## Changes\n- Renames i18n key `cloud.landing.developerDashboard` → `cloud.landing.dashboard` across all 8 locales ",
+      "files": [
+        "packages/cloud-frontend/src/components/layout/landing-header.tsx",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ja.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json",
+        "packages/ui/src/i18n/locales/vi.json",
+        "packages/ui/src/i18n/locales/zh-CN.json"
+      ]
+    },
+    {
+      "title": "feat: add NEAR AI inference provider",
+      "prNumber": 7883,
+      "type": "feature",
+      "body": "# Relates to\n\nNo linked issue.\n\n# Risks\n\nLow. This adds a new OpenAI-compatible inference provider plugin and wires it into existing provider discovery/configuration surfaces.\n\n# Background\n\n## What does this PR do?\n\nAdds `@elizaos/plugin-n",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/agent/src/api/agent-model.ts",
+        "packages/agent/src/api/config-routes.ts",
+        "packages/agent/src/api/model-provider-helpers.ts",
+        "packages/agent/src/api/plugin-discovery-helpers.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/runtime/__tests__/plugin-collector-nearai.test.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/app-core/platforms/electrobun/src/native/credentials.ts",
+        "packages/app-core/scripts/generate-plugin-index.js",
+        "packages/app-core/src/api/credential-resolver.ts",
+        "packages/app-core/src/registry/entries/plugins/nearai.json",
+        "packages/core/src/contracts/onboarding.ts",
+        "packages/docs/model-providers.mdx",
+        "packages/docs/user/provider-setup.mdx",
+        "packages/shared/src/contracts/onboarding.ts",
+        "packages/shared/src/local-inference/providers-types.ts",
+        "packages/ui/src/services/local-inference/routing-policy.ts",
+        "packages/vault/src/inventory.ts",
+        "plugins/plugin-local-inference/src/services/providers.ts",
+        "plugins/plugin-local-inference/src/services/routing-policy.ts",
+        "plugins/plugin-nearai/.gitignore",
+        "plugins/plugin-nearai/.npmignore",
+        "plugins/plugin-nearai/LICENSE",
+        "plugins/plugin-nearai/README.md",
+        "plugins/plugin-nearai/__tests__/auto-enable.test.ts",
+        "plugins/plugin-nearai/__tests__/config.test.ts",
+        "plugins/plugin-nearai/__tests__/openai-compatible-provider.test.ts",
+        "plugins/plugin-nearai/__tests__/text-params.test.ts",
+        "plugins/plugin-nearai/auto-enable.ts",
+        "plugins/plugin-nearai/biome.json",
+        "plugins/plugin-nearai/build.ts",
+        "plugins/plugin-nearai/index.browser.ts",
+        "plugins/plugin-nearai/index.node.ts",
+        "plugins/plugin-nearai/index.ts",
+        "plugins/plugin-nearai/init.ts",
+        "plugins/plugin-nearai/models/index.ts",
+        "plugins/plugin-nearai/models/text.ts",
+        "plugins/plugin-nearai/package.json",
+        "plugins/plugin-nearai/providers/index.ts",
+        "plugins/plugin-nearai/providers/openai-compatible.ts",
+        "plugins/plugin-nearai/tsconfig.build.json",
+        "plugins/plugin-nearai/tsconfig.json",
+        "plugins/plugin-nearai/types/index.ts",
+        "plugins/plugin-nearai/utils/config.ts",
+        "plugins/plugin-nearai/utils/events.ts",
+        "plugins/plugin-nearai/vitest.config.ts"
+      ]
+    },
+    {
       "title": "fix(plugin-slack): drop unnecessary as-unknown cast on user WebClient — Greptile P2 (post-merge)",
       "prNumber": 7882,
       "type": "bugfix",
@@ -3885,6 +3959,135 @@
       ]
     },
     {
+      "title": "docs(os-release): add VERIFY.md + verify-release.sh helper",
+      "prNumber": 7909,
+      "type": "docs",
+      "body": "## Summary\n\nShips a layered release verification helper that complements the\nin-progress signing / attestation / SBOM work:\n\n- `packages/os/release/VERIFY.md` — user-facing verification doc\n- `packages/os/scripts/verify-release.sh` — one-co",
+      "files": [
+        "packages/os/release/VERIFY.md",
+        "packages/os/scripts/verify-release.sh"
+      ]
+    },
+    {
+      "title": "chore(os): attest SLSA build provenance over SHA256SUMS",
+      "prNumber": 7908,
+      "type": "tests",
+      "body": "## Summary\n\nAdds `actions/attest-build-provenance@v2` in the\n`populate-and-validate-manifest` job to mint a single Sigstore-signed\nin-toto/SLSA provenance attestation over the canonical `SHA256SUMS`\nmanifest.\n\nThis is the **umbrella attesta",
+      "files": [
+        ".github/workflows/elizaos-os-full-release.yml"
+      ]
+    },
+    {
+      "title": "chore(vm): mint SLSA build provenance attestation for VM image",
+      "prNumber": 7907,
+      "type": "tests",
+      "body": "## Summary\n\nSame pattern as the ISO and .deb provenance PRs, applied to the VM\nimage build. Adds `actions/attest-build-provenance@v2` after the OVA\nconversion step so every produced `.ova` carries a Sigstore-signed\nSLSA provenance attestati",
+      "files": [
+        ".github/workflows/build-vm-image.yml"
+      ]
+    },
+    {
+      "title": "chore(deb): mint SLSA build provenance attestation for .deb",
+      "prNumber": 7906,
+      "type": "tests",
+      "body": "## Summary\n\nSame pattern as the ISO provenance PR, applied to the Debian package\nbuild. Adds `actions/attest-build-provenance@v2` after find-and-checksum\nso every produced `.deb` carries a Sigstore-signed SLSA provenance\nattestation via Git",
+      "files": [
+        ".github/workflows/build-debian-package.yml"
+      ]
+    },
+    {
+      "title": "chore(deb): actually invoke lintian on the produced .deb",
+      "prNumber": 7904,
+      "type": "other",
+      "body": "## Summary\n\nThe package step installs `lintian` alongside `dpkg-dev` / `debhelper`\nbut never runs it. Add a step right after find-and-checksum that runs:\n\n  lintian -i -I --pedantic <deb>\n\nand forwards each finding into a GitHub annotation:",
+      "files": [
+        ".github/workflows/build-debian-package.yml"
+      ]
+    },
+    {
+      "title": "chore(os): tier the ISO boot smoke against real elizaOS service markers",
+      "prNumber": 7903,
+      "type": "other",
+      "body": "## Summary\n\nThe current smoke grep matches `elizaOS|eliza|login:` which would pass\non any Debian boot that prints a login prompt. A plain debootstrap with\na hostname containing \"eliza\" would satisfy it. That's a false-positive\nrisk for a re",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "chore(os): attach SPDX SBOM to Linux ISO releases",
+      "prNumber": 7902,
+      "type": "other",
+      "body": "## Summary\n\n`supply-chain.yaml` already runs `anchore/sbom-action` weekly against\nthe workspace, but that SBOM is never attached to a release. This adds\na per-build SBOM for the ISO artifact itself, generated alongside the\nexisting `.sha256",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "chore(os): enforce 3 GiB ISO size budget in build-linux-iso",
+      "prNumber": 7901,
+      "type": "other",
+      "body": "## Summary\n\nThe Linux ISO build prints the artifact size into the step summary but\nnever asserts a bound, so a silent regression that doubles the image\nwould still ship. Adds a fail-closed check inside the existing \"Locate\nand rename ISO\" s",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "chore(os): aggregate SHA256SUMS across full-release artifacts",
+      "prNumber": 7900,
+      "type": "other",
+      "body": "## Summary\n\nWires the existing `packages/os/scripts/generate-release-checksums.mjs`\n(which already has unit tests under `__tests__/` and is the repo's\ncanonical checksum tool) into the `populate-and-validate-manifest`\njob so every release s",
+      "files": [
+        ".github/workflows/elizaos-os-full-release.yml"
+      ]
+    },
+    {
+      "title": "feat(cloud): replace HTTP control-plane health probe with Redis heartbeat",
+      "prNumber": 7899,
+      "type": "feature",
+      "body": "## Summary\n\nThe cloud-api Worker guarded 5 agent routes with a synchronous HTTP probe to a `container-control-plane` sidecar that no longer exists post-cutover. The probe was failing in production with `PROVISIONING_WORKER_NOT_CONFIGURED` /",
+      "files": [
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "test(chip): align test_software_bsp_evidence with current check_software_bsp",
+      "prNumber": 7898,
+      "type": "tests",
+      "body": "## What\n\n`packages/chip/scripts/test_software_bsp_evidence.py` was vendored in `603fab85b feat(chip): vendor eliza e1 source` with 4 subtest assertions that have never matched the actual behavior of `packages/chip/scripts/check_software_bsp",
+      "files": [
+        "packages/chip/scripts/test_software_bsp_evidence.py"
+      ]
+    },
+    {
+      "title": "fix(core): restore evaluator messageToUser precedence, opt-in canonical tool text",
+      "prNumber": 7897,
+      "type": "bugfix",
+      "body": "## What\n\nThe `planner-loop-user-facing-text → \"does not regress evaluator's explicit messageToUser path\"` test fails on `develop` because `preferredFinalMessageFromToolOrModel` prefers a single successful tool's `userFacingText` over the ev",
+      "files": [
+        "packages/core/src/__tests__/planner-happy-path.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-user-facing-text.test.ts",
+        "packages/core/src/runtime/execute-planned-tool-call.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "packages/core/src/types/components.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-shared): rebrand-ready agent base domain config (waifu.fun → elizacloud.ai prep)",
+      "prNumber": 7896,
+      "type": "feature",
+      "body": "## Summary\n\nPrepare the cloud-shared layer for the rebrand from `waifu.fun` / `milady.ai` / `shad0w.xyz` to `elizacloud.ai`. **Runtime impact: zero** until `ELIZA_CLOUD_AGENT_BASE_DOMAIN` flips in deployment env. This PR is one of several c",
+      "files": [
+        "packages/cloud-shared/src/lib/eliza-agent-web-ui.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/pairing-token-domains.ts",
+        "packages/cloud-shared/src/lib/services/pairing-token.test.ts",
+        "packages/cloud-shared/src/lib/services/pairing-token.ts"
+      ]
+    },
+    {
       "title": "feat(cloud): JWT mint route + Steward plugin install (for Sol)",
       "prNumber": 7894,
       "type": "feature",
@@ -3900,44 +4103,275 @@
         "packages/cloud-shared/src/lib/auth/agent-token.ts",
         "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
       ]
+    },
+    {
+      "title": "fix(app-core/ensure-vision-deps): skip apt-get install when sudo would prompt and stdin is not a TTY",
+      "prNumber": 7941,
+      "type": "bugfix",
+      "body": "## Summary\n\n`installLinux()` in `packages/app-core/scripts/ensure-vision-deps.mjs` unconditionally runs:\n\n```js\nexecSync(\"sudo apt-get install -y fswebcam\", { stdio: \"inherit\" });\n```\n\nWhen the dev orchestrator runs outside a TTY (Docker `d",
+      "files": [
+        "packages/app-core/scripts/ensure-vision-deps.mjs"
+      ]
+    },
+    {
+      "title": "feat(cloud-api): ERC-8004 register-identity endpoint + TS client",
+      "prNumber": 7937,
+      "type": "feature",
+      "body": "## Summary\n\n- Add a viem-based ERC-8004 IdentityRegistry client and copy BNBAgent IdentityRegistry ABI.\n- Add Eliza Cloud agent identity endpoints for register, current identity, URI update, and on-chain state lookup.\n- Add `agent_identitie",
+      "files": [
+        "packages/cloud-api/__tests__/erc8004-identity-policy.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/common.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/onchain/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/policy.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/register/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/identity/uri/route.ts",
+        "packages/cloud-shared/src/db/schemas/agent-identities.ts",
+        "packages/cloud-shared/src/db/schemas/index.ts",
+        "packages/cloud-shared/src/lib/services/erc8004/abis/IdentityRegistry.json",
+        "packages/cloud-shared/src/lib/services/erc8004/identity-client.test.ts",
+        "packages/cloud-shared/src/lib/services/erc8004/identity-client.ts"
+      ]
+    },
+    {
+      "title": "Restore packages/os/linux/variants/milady-tails — per Shaw'\\''s go-ahead",
+      "prNumber": 7936,
+      "type": "other",
+      "body": "## Authorization\n\nDirect DM with @shawmakesmagic on 2026-05-24 ~05:57 PT:\n\n> **shaw:** nah i think we should go with your thing\n> **shaw:** that is what i was worried about\n> **shaw:** we just need to have one version one build, the key thi",
+      "files": [
+        "packages/os/linux/variants/milady-tails/.dockerignore",
+        "packages/os/linux/variants/milady-tails/.gitignore",
+        "packages/os/linux/variants/milady-tails/Dockerfile",
+        "packages/os/linux/variants/milady-tails/Justfile",
+        "packages/os/linux/variants/milady-tails/PLAN.md",
+        "packages/os/linux/variants/milady-tails/README.md",
+        "packages/os/linux/variants/milady-tails/ROADMAP.md",
+        "packages/os/linux/variants/milady-tails/acng.conf",
+        "packages/os/linux/variants/milady-tails/assets/elizaOS_text_black.svg",
+        "packages/os/linux/variants/milady-tails/assets/elizaOS_text_white.svg",
+        "packages/os/linux/variants/milady-tails/assets/elizaos_logotext.svg",
+        "packages/os/linux/variants/milady-tails/assets/elizaos_logotext_black.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_blue_blackbg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_blue_nobg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_white_blackbg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_white_bluebg.svg",
+        "packages/os/linux/variants/milady-tails/assets/logo_white_nobg.svg",
+        "packages/os/linux/variants/milady-tails/build-iso.sh",
+        "packages/os/linux/variants/milady-tails/build.sh",
+        "packages/os/linux/variants/milady-tails/docs/build-infrastructure.md",
+        "packages/os/linux/variants/milady-tails/docs/current-status.md",
+        "packages/os/linux/variants/milady-tails/docs/distribution-and-updates.md",
+        "packages/os/linux/variants/milady-tails/docs/inherited-tails-sudoers-review.md",
+        "packages/os/linux/variants/milady-tails/docs/mode-parity.md",
+        "packages/os/linux/variants/milady-tails/docs/privacy-mode-v1-gap.md",
+        "packages/os/linux/variants/milady-tails/docs/production-readiness.md",
+        "packages/os/linux/variants/milady-tails/docs/runtime-packaging.md",
+        "packages/os/linux/variants/milady-tails/docs/security-model.md",
+        "packages/os/linux/variants/milady-tails/docs/session-memory.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/README.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-2-rebrand.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-3-privacy-mode.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-4-bake-milady-app.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-5-6-autolaunch-and-agent.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-7-persistence.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-8-mode-parity-harness.md",
+        "packages/os/linux/variants/milady-tails/docs/specs/phase-9-customization-actions.md",
+        "packages/os/linux/variants/milady-tails/docs/update-architecture.md",
+        "packages/os/linux/variants/milady-tails/docs/user-experience.md",
+        "packages/os/linux/variants/milady-tails/schemas/model-catalog.schema.json",
+        "packages/os/linux/variants/milady-tails/schemas/update-manifest.schema.json",
+        "packages/os/linux/variants/milady-tails/scripts/boot-qemu.sh",
+        "packages/os/linux/variants/milady-tails/scripts/dev-sign-update-manifest.sh",
+        "packages/os/linux/variants/milady-tails/scripts/generate-elizaos-brand-assets.sh",
+        "packages/os/linux/variants/milady-tails/scripts/generate-release-evidence.mjs",
+        "packages/os/linux/variants/milady-tails/scripts/prepare-milady-app-overlay.mjs",
+        "packages/os/linux/variants/milady-tails/scripts/runtime-api-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/security-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/static-smoke.sh",
+        "packages/os/linux/variants/milady-tails/scripts/sync-runtime-to-chroot.sh"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): fallback to single org wallet for unmapped wallet proxy",
+      "prNumber": 7934,
+      "type": "bugfix",
+      "body": "## Summary\n\nFollow-up to #7933. Production revealed that some existing deployments/rows do not yet have a usable `agent_server_wallets.sandbox_agent_id` mapping for wallets created by `/user/wallets/provision`.\n\n## Fix\n\nIf the sandbox mappi",
+      "files": [
+        "packages/cloud-api/__tests__/wallet-proxy-steward-agent-id.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/wallet/[...path]/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): wallet proxy resolves steward_agent_id from agent_server_wallets",
+      "prNumber": 7933,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis fixes the cloud-api wallet proxy bug where agent-scoped wallet endpoints forwarded the sandbox UUID to Steward even though `/api/v1/user/wallets/provision` creates Steward agents as `cloud-{characterId || clientAddress}`.\n\n",
+      "files": [
+        "bun.lock",
+        "packages/cloud-api/__tests__/wallet-proxy-steward-agent-id.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/api/wallet/[...path]/route.ts",
+        "packages/cloud-shared/src/db/migrations/0133_add_agent_server_wallets_sandbox_agent_id.sql",
+        "packages/cloud-shared/src/db/schemas/agent-server-wallets.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.test.ts"
+      ]
+    },
+    {
+      "title": "refactor(core): drop regex-list response-handler evaluators in favor of prompt-rule contracts",
+      "prNumber": 7931,
+      "type": "refactor",
+      "body": "## Summary\n\nRemoves the narrow regex-list-based `core.contextual_identity_lookup_requires_recall` evaluator (added in #7923) and relies on the broader prompt-rule contract from the same PR. Net `+38 / -253` lines (215 lines of regex-list ma",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js"
+      ]
+    },
+    {
+      "title": "revert: drop DM scopes from OAuth flow (#7929)",
+      "prNumber": 7930,
+      "type": "other",
+      "body": "Reverts #7929. The 'Something went wrong' X error was NOT caused by DM scopes — verified by re-testing with the trimmed scope set and getting the same error. Real cause is callback URL mismatch on the X dev app side. Restoring original scop",
+      "files": [
+        "packages/cloud-shared/src/lib/services/twitter-automation/index.ts"
+      ]
+    },
+    {
+      "title": "fix(twitter): drop DM scopes from OAuth flow by default",
+      "prNumber": 7929,
+      "type": "bugfix",
+      "body": "## Why\nX's OAuth2 flow rejects the entire authorization with a generic 'Something went wrong' page when the OAuth app doesn't have entitlements for all requested scopes. `dm.read` + `dm.write` require Twitter API Pro tier (\\$5k/mo) on the X",
+      "files": [
+        "packages/cloud-shared/src/lib/services/twitter-automation/index.ts"
+      ]
+    },
+    {
+      "title": "fix(chip): address greptile P1+P2 findings from PR #7893 review",
+      "prNumber": 7928,
+      "type": "bugfix",
+      "body": "## What\n\nTwo real bugs greptile flagged on PR #7893 that landed in `develop` via the merge integration commit `8114d5ad08`:\n\n### `check_cva6_boot_substrate.py` — P2 unreachable null guard\n\n```py\nif failure is not None or error is not None:\n",
+      "files": [
+        "packages/chip/scripts/check_cva6_boot_substrate.py",
+        "packages/chip/scripts/check_e1_soc_pd_input_contract.py"
+      ]
+    },
+    {
+      "title": "chore(os): remove stale milady-tails fragment per 4c96fee98e",
+      "prNumber": 7926,
+      "type": "other",
+      "body": "## What\n\nRemoves the 113-file leftover under `packages/os/linux/variants/milady-tails/tails/` that survived `4c96fee98e os/linux: consolidate to single elizaOS multi-arch build, remove Tails fork`.\n\n## Why\n\nShaw's consolidation commit (`4c9",
+      "files": [
+        "packages/os/linux/variants/milady-tails/tails/.stage/config",
+        "packages/os/linux/variants/milady-tails/tails/config/binary",
+        "packages/os/linux/variants/milady-tails/tails/config/bootstrap",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.AdditionalSoftware.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.PersistentStorage.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/org.boum.tails.TorBrowser.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-about.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-backup.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-documentation.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tails-installer.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/tca.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/unlock-veracrypt-volumes.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/unsafe-browser.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/applications/whisperback.desktop",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/desktop-directories/Tails.directory",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/doc/tails/Changelog",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/doc/tails/website/index.html",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/doc/tails/website/local.css",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ar/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/be/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/bg/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/bn/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/bs/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ca/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/cs/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/da/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/de/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/el/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/en_US/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/es/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/et/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/eu/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/fa/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/fi/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/fr/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ga/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/gl/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/he/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/hr/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/hu/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/hy/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/id/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/is/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/it/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ja/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ka/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/kab/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/kk/LC_MESSAGES/tails.mo",
+        "packages/os/linux/variants/milady-tails/tails/config/chroot_local-includes/usr/share/locale/ko/LC_MESSAGES/tails.mo"
+      ]
+    },
+    {
+      "title": "fix(core): bound runaway tool-arg validation loops via canonical failure signature",
+      "prNumber": 7924,
+      "type": "bugfix",
+      "body": "## Summary\n\nPrevent the framework's `maxRepeatedFailures` guard from being silently defeated when a model retries the same tool with shifting argument shapes that each fail `validateToolArgs`.\n\n## Background\n\nThe per-call repeatKey (`toolNa",
+      "files": [
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts"
+      ]
+    },
+    {
+      "title": "fix(core): preserve speaker context + prevent Stage 1 phantom action claims",
+      "prNumber": 7923,
+      "type": "bugfix",
+      "body": "## Summary\n\nFour commits addressing a class of Stage 1 failures observed on a downstream Discord deployment where the agent answered questions about chat-local entities (names, nicknames, references) by either fabricating identities, claimi",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 2035.037983178187,
-      "prScore": 2014.047983178187,
-      "issueScore": 18.6,
+      "totalScore": 2349.810313550426,
+      "prScore": 2324.082313550426,
+      "issueScore": 22.900000000000002,
       "reviewScore": 0,
-      "commentScore": 2.3899999999999997,
+      "commentScore": 2.828,
       "summary": "NubsCarson: Focused on enhancing system stability and cross-platform compatibility, successfully merging 6 pull requests that resolved critical runtime and build issues. They addressed a significant crash on headless Linux via elizaos/eliza#7230 and streamlined the build process by removing broken CJS configurations across multiple plugins. Their work was primarily dedicated to bugfixes, which accounted for 75% of their contributions, alongside targeted improvements to test and configuration files."
     },
     {
       "username": "2-A-M",
       "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=b7d92c0e2a91af580d09eeae862eef576955ab8a&v=4",
-      "totalScore": 1268.1056906045408,
-      "prScore": 1249.2296906045408,
+      "totalScore": 1299.8035567413178,
+      "prScore": 1280.7275567413178,
       "issueScore": 0,
       "reviewScore": 18,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.0759999999999998,
       "summary": "2-A-M: Focused on expanding core automation and integration capabilities, merging 4 PRs that introduced a Discord connector-target-catalog service (#7315) and a new n8n clarification roundtrip route (#7316). Their work involved significant architectural contributions, including a total of 4,600 lines added across 28 files to enhance UX and system functionality. They maintained a balanced development approach, with 64% of their effort dedicated to feature implementation and 36% to bug fixes, while continuing to iterate on automation UI and workflow types in open PRs."
     },
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 1003.0795336674929,
+      "totalScore": 1003.4195336674928,
       "prScore": 960.9475336674928,
       "issueScore": 6,
       "reviewScore": 33.5,
-      "commentScore": 2.6319999999999997,
+      "commentScore": 2.9719999999999995,
       "summary": "lalalune: Led a massive architectural restructuring of the elizaos/eliza repository, most notably through PR #7235 which involved significant codebase modifications to integrate cloud and plugin support while removing legacy dependencies. They maintained project momentum by cleaning up core testing mocks in PR #7226 and actively engaged with the community through 16 total comments across issues and PRs. Their work this month was primarily concentrated on configuration management, testing infrastructure, and general codebase maintenance."
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 905.1110383744405,
-      "prScore": 887.5110383744404,
+      "totalScore": 921.7500957040558,
+      "prScore": 904.1500957040557,
       "issueScore": 0,
       "reviewScore": 17,
       "commentScore": 0.6000000000000001,
@@ -3946,18 +4380,18 @@
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 806.4399999999999,
+      "totalScore": 883.378,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 805.5,
-      "commentScore": 0.94,
+      "reviewScore": 882,
+      "commentScore": 1.378,
       "summary": "greptile-apps: No activity this month."
     },
     {
       "username": "0xSolace",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
-      "totalScore": 564.9257018189509,
-      "prScore": 563.6077018189509,
+      "totalScore": 775.8305489594316,
+      "prScore": 774.5125489594316,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 1.3179999999999998,
@@ -3986,11 +4420,11 @@
     {
       "username": "RemilioNubilio",
       "avatarUrl": "https://avatars.githubusercontent.com/u/275382225?u=b1501ee01bb54e5b31ca64895f2a07c69f554a37&v=4",
-      "totalScore": 45.33449451718255,
-      "prScore": 42.89649451718255,
-      "issueScore": 2,
+      "totalScore": 75.86765315835065,
+      "prScore": 68.89165315835065,
+      "issueScore": 6.1,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
       "summary": "RemilioNubilio: Focused on improving configuration management within the Discord plugin, specifically addressing how environment variables are handled. They initiated this effort by opening issue #49 to track the reading of `DISCORD_AUTO_REPLY` and submitted PR #50 to ensure the plugin correctly respects this setting. Their work this month centered exclusively on enhancing the Discord integration's environment configuration."
     },
     {
@@ -4104,6 +4538,16 @@
       "summary": "aUsABuisnessman: Focused on project configuration maintenance, specifically working to improve environment variable handling in elizaos/elizaos.github.io via open PR #248. This contribution involved a single-file modification to the project's configuration settings. Their activity this month was centered entirely on configuration management."
     },
     {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": "odilitime: Focused exclusively on bugfix work this month, executing 3 commits that modified 13 files with a net increase of 565 lines of code. This effort was dedicated entirely to resolving stability issues across various file types. Their work reflects a concentrated effort on codebase maintenance and defect remediation."
+    },
+    {
       "username": "lucascordone-spec",
       "avatarUrl": "https://avatars.githubusercontent.com/u/248399312?u=2e30f388da9163b05fc22f64815434f2e8eef7a1&v=4",
       "totalScore": 4.1,
@@ -4144,6 +4588,16 @@
       "summary": "Agnuxo1: Focused on project planning and ecosystem expansion, initiating a proposal for the integration of the CAJAL scientific paper character into the elizaos/eliza repository via issue #7366. This contribution involved the successful creation and closure of the proposal, marking their primary activity for the month."
     },
     {
+      "username": "gblinproject",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/268705399?u=6590794ee888f90bcb195cf54142dd34fa31bff0&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "andex23",
       "avatarUrl": "https://avatars.githubusercontent.com/u/49397867?u=760e6ec36b34f3511f24928686d87f912c3eb7ba&v=4",
       "totalScore": 2,
@@ -4156,6 +4610,16 @@
     {
       "username": "AtlasNexusTech",
       "avatarUrl": "https://avatars.githubusercontent.com/u/263571615?u=ff39814bcb08d669fb07751570a325a2a5335cda&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "4oko4ow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113161018?u=5e7648af3d43a84aeb868210f0506a3c13a19120&v=4",
       "totalScore": 2,
       "prScore": 0,
       "issueScore": 2,
@@ -4194,9 +4658,9 @@
       "summary": null
     }
   ],
-  "newPRs": 294,
-  "mergedPRs": 205,
-  "newIssues": 25,
-  "closedIssues": 20,
-  "activeContributors": 27
+  "newPRs": 314,
+  "mergedPRs": 232,
+  "newIssues": 30,
+  "closedIssues": 21,
+  "activeContributors": 29
 }
