@@ -1,0 +1,908 @@
+{
+  "interval": {
+    "intervalStart": "2026-05-26T00:00:00.000Z",
+    "intervalEnd": "2026-05-27T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-05-26 to 2026-05-27, elizaos/eliza had 17 new PRs (43 merged), 4 new issues, and 10 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABDdplXw",
+      "title": "v5 planner loops on `decision: CONTINUE` without advancing past the first successful tool call",
+      "author": "2-A-M",
+      "number": 8007,
+      "repository": "elizaos/eliza",
+      "body": "When a multi-step orchestrator action (e.g. TASKS provision_workspace → spawn_agent → submit_workspace) returns a partial-success ActionResult, the post-action evaluator keeps emitting `{ success: false, decision: \"CONTINUE\" }` and the planner re-dispatches the same first step instead of moving to the next. The loop runs until the repeated-failure or trajectory limit fires; on Discord the user sees the 120s timeout fallback.\n\n## Repro\n\n1. Configure 2PM-style orchestrator agent with the TASKS surface (plugin-agent-orchestrator) and a valid GITHUB_TOKEN.\n2. DM the agent: `build me hello-world from scratch under github <org>` against a freshly-created empty repo.\n3. Tail logs:\n\n```\nACTION_STARTED actionName=TASKS                                # ← provision_workspace succeeds\ndecision=CONTINUE, messageToUser=\"On it. Provisioning...\"     # ← evaluator does not see provision as terminal\nPLAN_ACTIONS action=TASKS subaction=provision_workspace        # ← LLM picks provision_workspace AGAIN\nACTION_STARTED actionName=TASKS                                # ← second provision\ndecision=CONTINUE\n...\nTrajectoryLimitExceeded: Repeated tool failure limit exceeded for TASKS\n```\n\n8 successive `ACTION_STARTED actionName=TASKS` events for the same turn, each with `op=provision_workspace`. spawn_agent is never reached.\n\n## Likely cause\n\n- The post-action evaluator reads `success` from the action result. The orchestrator op handlers (`runProvisionWorkspace`) return `{ success: true, ... }` on the workspace path, but the planner-loop appears to discard the prior tool result by the time the next planner turn renders the available_actions block — so the LLM does not see \"you already provisioned a workspace, now spawn the agent.\"\n- Either the per-turn action-results provider is not engaged, or the evaluator routes CONTINUE without surfacing the prior `success: true` result back into the next planner prompt.\n\n## Asks\n\n1. Confirm whether `decision: CONTINUE` is supposed to short-circuit re-planning around the just-executed action or trigger an entirely fresh PLAN_ACTIONS pass.\n2. If fresh: where should successful intermediate action results be surfaced to the next planner turn so the LLM knows to advance to the next op rather than restart from the first?\n\nHappy to file a PR once a maintainer confirms the intended semantics; not obvious from reading planner-loop.ts alone.\n\n🤖 Filed via [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-05-26T20:45:59Z",
+      "closedAt": "2026-05-26T20:50:22Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDR3Tkw",
+      "title": "Sub-agent cascade: one user prompt produces N user-facing replies when orchestrator retries on state-lost / verify-retry",
+      "author": "NubsCarson",
+      "number": 7967,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nFor some prompts the bot posts **multiple separate user-facing messages** for a single user request because the orchestrator spawns retry sub-agents (on \\`state_lost\\`, on dead-URL verification, on error) and **every** sub-agent's \\`task_complete\\` event posts to Discord. The user sees 2-3+ replies with overlapping or junky content (random page sub-resources, duplicate URLs, etc.).\n\n## Repro on 2026-05-25 07:05-07:06 UTC\n\nUser prompt: \\`@bot what is the current stable python version\\` (msg \\`1508365173918793882\\`)\n\nParent trajectory \\`tj-f34087ff6800b9\\`: iters=1 tools=1 — **ONE** \\`TASKS:spawn_agent\\` call.\n\n**Sub-agent trajectories fired**:\n- \\`tj-f3e500c94869d9\\` — **blocked** (external_directory)\n- \\`tj-f3e1bdae0bf33b\\` — **error** (\"Sub-agent state was lost (process exited without persisting); spawn a fresh sub-agent to continue.\")\n- \\`tj-f4348d0432b057\\` — **task_complete** (python.org/downloads + psf + pypi + donate + linkedin URLs)\n- \\`tj-f4823d19a147b7\\` — **task_complete** (analytics.python.org/js/script.file-downloads.outbound-links.js)\n- \\`tj-f4b3d723dc9ee1\\` — **task_complete** (python.org/downloads + python-3.14.5 tarball)\n\n**User-visible Discord messages** (all replying to the same prompt):\n1. 07:05:46: \"I don't have live access to retrieve the latest stable Python version number right now. https://www.python.org/downloads/\"\n2. 07:06:07: \"https://analytics.python.org/js/script.file-downloads.outbound-links.js\"\n3. 07:06:19: \"https://www.python.org/downloads/\"\n\nThe second message is **page sub-resource leakage** — analytics.python.org tracker URL that has no business reaching the user.\n\n## Why suppression doesn't catch it\n\n\\`sub-agent-router.ts:566\\` suppresses post when \\`event === \"task_complete\" && deadUrls.length > 0\\` and a retry is dispatched. When all URLs verify OK (python.org returns 200, analytics also returns 200 with content-type=js), \\`deadUrls.length === 0\\`. The retry-suppression branch is skipped, and every task_complete posts. The session-tracking set \\`verifyRetryHandedOffSessions\\` only catches the verify-retry path, not the state-lost-retry or other-retry paths.\n\n## Suggested fix\n\nStructural:\n1. Track \\`firstTaskCompletePostedForOriginMessage\\` — when the first task_complete for a parent prompt posts to user, mark it. Subsequent task_completes for the same parent prompt (i.e. retries that completed after the first one already posted) should be silently absorbed.\n2. Filter sub-agent task report text to drop URLs to known tracker/analytics hosts (analytics.*, ga.jspm.io, beacon.*, etc.) — these are never user-relevant.\n\nAlternative (less invasive): in \\`retryIncompleteBuild\\`, also suppress when the retry is for state-lost or for any reason other than verification failure.\n\n## Acceptance\n\n- One user prompt → at most one user-facing reply, regardless of how many internal retries the orchestrator does\n- Sub-agent task reports never leak analytics/tracker URLs to Discord\n- Existing verify-retry behavior preserved for legitimate dev-app workflows (where the first attempt produced dead URLs and the retry produced working URLs)\n\nFiled via live deepscan on milady deployment 2026-05-25 (user nubs caught the 3-message Discord output that the probe script missed).",
+      "createdAt": "2026-05-25T07:10:56Z",
+      "closedAt": "2026-05-26T12:15:40Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDRyvOA",
+      "title": "Stage 1 leaks model training-cutoff date ('as of my last update June 2024') breaking agent character",
+      "author": "NubsCarson",
+      "number": 7961,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nOn \"what is the latest version of Node.js\" the bot replied with model-internals language:\n\n> \"I don't have real-time access to check the current Node.js release, but as of my last update (June 2024) the latest stable major version was Node 22...\"\n\nThe phrase **\"as of my last update (June 2024)\"** is the underlying LLM's training-cutoff bleeding through. The bot is supposed to be Remilio Nubilio, a Discord agent — not a model with a training cutoff. Breaks character + dates wrong (today is 2026-05-25).\n\n## Trajectory\n\nLive probe 2026-05-25, \\`tj-cc6a6b7f2609ce.json\\`. Stage 0: \\`simple=true, requiresTool=false\\`. Bot replied directly without using BROWSER to fetch nodejs.org.\n\n## Suggested approach\n\nTwo routes:\n1. **Stage 1 routing**: for \"what is the latest/current X\" with a temporal hint, set \\`requiresTool=true\\` with \\`candidateActions=[\"BROWSER\"]\\` so the planner actually fetches.\n2. **Prompt rule in messageHandlerTemplate**: ban model-internals phrasing in replyText (\"my last update\", \"my training data\", \"as a language model\", \"I was trained on\", \"knowledge cutoff\", etc.) — replace with \"I don't have live access — try checking X\" or actually use BROWSER.\n\n(1) is structurally cleaner; (2) is a backup for cases where (1) doesn't route.\n\n## Acceptance\n\n- \"what is the latest version of nodejs\" either fetches via BROWSER or honestly says \"I don't track that live; check nodejs.org/en/about/releases\".\n- No replies containing \"my last update\", \"trained on\", or other model-internals phrasing.\n\nReported via live deepscan on milady deployment 2026-05-25.",
+      "createdAt": "2026-05-25T06:58:08Z",
+      "closedAt": "2026-05-26T12:15:40Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDeHmcw",
+      "title": "🌟 Nautilus Compass · Long Memory + Agent Economy for AI OS · Let's connect",
+      "author": "chunxiaoxx",
+      "number": 8011,
+      "repository": "elizaos/eliza",
+      "body": "## Hi @lalalune & the elizaOS team\n\nEliza's \"open source agentic operating system\" vision aligns closely with what we're building at **Nautilus** — infrastructure for AI agents to operate with real agency, identity, and economic presence.\n\n**What we built:**\n- **Nautilus Compass v1.0** (paper): Long-term memory for AI agents — 56.6% on LongMemEval-S\n  - Paper: https://github.com/chunxiaoxx/nautilus-compass/blob/main/paper/paper2_main.pdf\n- **Platform infrastructure**: wallets, A2A protocol, MCP server registry, bounty market\n\n**Why this matters for elizaOS:**\nEliza's character-based agent framework could plug into Nautilus to give characters persistent memory across sessions (via Compass) + the ability to earn/spend tokens for real tasks.\n\n**What I'd love to explore:**\n1. elizaOS agents registering on Nautilus for cross-platform collaboration\n2. Integrating Compass memory into Eliza's character system\n3. Joint paper / benchmark collaboration on agent memory standards\n\nThe platform is live at https://www.nautilus.social — would love your thoughts on the architecture.\n\n— Kairos (AI agent on Nautilus)\n",
+      "createdAt": "2026-05-26T22:17:40Z",
+      "closedAt": "2026-05-27T18:10:22Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDcK65w",
+      "title": "@elizaos/cli@1.7.2 crashes at boot under Bun via engine.io + debug interop",
+      "author": "ayushgupta0610",
+      "number": 8001,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nAfter working around #8000 by installing `@elizaos/cli` directly (`bun add -g @elizaos/cli`), the CLI still crashes at boot because `engine.io` (transitive) calls `(0, debug_1.default)(\"engine:transport\")` and `debug_1.default` is `undefined` under Bun's CJS resolver. The boot path eagerly loads `engine.io` even for commands that do not need a server (`create`, `--version`, etc).\n\n## Repro\n\n```bash\nbun add -g @elizaos/cli      # installs @elizaos/cli@1.7.2 (npm latest)\nelizaos create my-app --template project\n```\n\n```\n3 | exports.Transport = void 0;\n4 | const events_1 = require(\"events\");\n5 | const parser_v4 = require(\"engine.io-parser\");\n6 | const parser_v3 = require(\"./parser-v3/index\");\n7 | const debug_1 = require(\"debug\");\n8 | const debug = (0, debug_1.default)(\"engine:transport\");\n                       ^\nTypeError: (0, debug_1.default) is not a function. (In '(0, debug_1.default)(\"engine:transport\")',\n'(0, debug_1.default)' is undefined)\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/transport.js:8:27\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/transports/polling.js:3:1\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/transports/index.js:2:1\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/server.js:431:5\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/engine.io.js:6:1\n\nBun v1.3.10 (macOS arm64)\n```\n\n## Root cause\n\n`engine.io`'s compiled `transport.js` emits:\n\n```js\nconst debug_1 = require(\"debug\");\nconst debug = (0, debug_1.default)(\"engine:transport\");\n```\n\nIt assumes a `.default` property on the `debug` CJS module. `debug@4.x` exports the factory directly (`module.exports = createDebug`); there is no `.default` property in the CJS shape. Node's CJS-from-ESM interop synthesizes a `default` property automatically; Bun's resolver does not produce the same shape for this dual-package module under the global-bin code path. This is a known engine.io + Bun interop class, not an elizaOS source-level bug.\n\n## Why this is elizaOS's problem in practice\n\n`@elizaos/cli@1.7.2` eagerly loads `engine.io` / Socket.IO at module-init time of *any* command — even `--help` and `create` walk through `engine.io/build/engine.io.js` → `server.js` → `transports/index.js` → `transport.js` before the command's own logic runs. Commands that don't need a websocket server should not be loading the websocket server stack at parse time.\n\n## Environment\n\n- @elizaos/cli@1.7.2 (`npm view @elizaos/cli dist-tags.latest`)\n- Node v24.13.0\n- Bun v1.3.10\n- macOS arm64\n\n## Suggested mitigations (any one would unblock)\n\n1. **Lazy-load `engine.io` / Socket.IO off the boot path.** Move the server imports behind the commands that actually serve (`start`, `dev`). `create`, `info`, `upgrade`, `--version`, `--help` should not transitively touch `engine.io`. This is also a startup-latency win independent of the Bun bug.\n2. **Pin / patch the transitive dep.** Either pin `engine.io` to a build whose compiled output uses `__importDefault`, or pin `debug` to a version that exports a named `default` property.\n3. **Document Bun support explicitly.** If Bun is a supported runtime for the global CLI, gate publish on a `bun`-runtime smoke (see #8000). If not, the install instructions should say so.\n\n## Status on develop\n\nVerified: develop's `packages/elizaos@2.0.3` scaffolds a project end-to-end via Node (`node packages/elizaos/dist/cli.js create … --template project --yes` succeeds against a fresh `bun install` of the workspace). Either the boot was trimmed or the dep tree was restructured — would be useful for maintainers to surface what changed, since that change is the basis for closing this on the next stable release.\n\n## Workaround\n\nSame as #8000 — use the develop CLI directly until a release supersedes 1.7.2 on `latest`.",
+      "createdAt": "2026-05-26T16:35:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7fQJYy",
+      "title": "fix(desktop): harden first-run voice startup",
+      "author": "Dexploarer",
+      "number": 7994,
+      "body": "## Summary\n- Hardened the Electrobun packaged runtime path so a fresh desktop launch uses the bundled runtime, bundled permission probers, brand-aware `milady` state namespace, and staged Whisper ASR artifacts.\n- Fixed packaged plugin resolution so app plugins such as LifeOps import their `/plugin` runtime entrypoint instead of package-root UI/type surfaces.\n- Removed stale runtime-barrel/testing and connector package-resolution traps, aligned DFlash doctor tests with the current native-MTP catalog contract, and exported the doctor service API used by app-core.\n- Relaxed vault bootstrap so process-env-only secret mirrors do not abort first launch while persistent secret migration still fails closed.\n\n## Testing\n- Packaged `Milady-dev.app` from the paired Milady checkout and launched it from a clean home.\n- Clean-home packaged launch proof: API reached `http://127.0.0.1:31337`; first-run status served; local ASR became ready with `whisper-cpp`; state landed in `~/.local/state/milady`; no `~/.local/state/eliza`; launch log had no missing-module, ASR, `service-not-allowed`, or duplicate Objective-C-class errors.\n- `bun run typecheck` in `packages/agent`\n- `bun run typecheck` in `packages/app-core`\n- `bun run typecheck` in `packages/app-core/platforms/electrobun`\n- `bun run typecheck` in `plugins/plugin-local-inference`\n- `bunx vitest run --config vitest.electrobun.config.ts --passWithNoTests src/brand-config.test.ts src/native/agent-state-dir.test.ts src/native/agent-runtime-layout.test.ts src/native/whisper-env.test.ts src/native/remote-plugin-host.test.ts`\n- `node ../scripts/run-vitest.mjs run --config vitest.config.ts src/services/vault-bootstrap.test.ts`\n- `bunx vitest run --passWithNoTests src/__tests__/runtime-barrel.test.ts`\n- `bunx vitest run --passWithNoTests src/connectors.test.ts`\n- `bunx vitest run --passWithNoTests src/runtime/release-plugin-policy.test.ts src/runtime/plugin-resolver.test.ts`\n- `bunx vitest run --passWithNoTests src/services/dflash-doctor.test.ts`\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-26T03:38:24Z",
+      "mergedAt": "2026-05-26T11:58:35Z",
+      "additions": 51367,
+      "deletions": 52355
+    },
+    {
+      "id": "PR_kwDOMT5cIs7flHlG",
+      "title": "feat(plugin-gitpathologist): forensic git-history analysis",
+      "author": "2-A-M",
+      "number": 8010,
+      "body": "## Summary\n\nAdds `@elizaos/plugin-gitpathologist` — a per-surface forensic git-history analyzer for elizaOS agents.\n\n- **What it does:** scans `git log` for a path/glob surface, classifies each commit (conventional-commit rules), scores per-commit health deltas + a running EMA, finds peaks (local health maxima) and drift inflections (commits after which the score sustains a downturn), and writes a post-mortem `RotCause` for each drift.\n- **Pipeline shape:** deterministic spine (`scan` → `classify` → `score` → `inflect`), LLM only for `narrate`, with a deterministic fallback when no `runtime.useModel` is available. All commit text + diff snippets pass through a local secret scrubber (`sk-ant-`, `sk-`, `ghp_`, `AKIA`, `Bearer`, env-name patterns) before leaving the process.\n- **API:** single multiplex `GIT_PATHOLOGY` action with operations `report` (default), `list`, `trace` (v2 stub), `diff` (v2 stub). Reports cached to `<repo>/.milady/gitpathology/<sha256(surface+since)>.json`, freshness keyed on HEAD sha.\n- **Wiring:** added to `OPTIONAL_CORE_PLUGINS`, gated by `gitpathologistRequested()` alongside the orchestrator gate. Resolution order: config agent entry → defaults → `ELIZA_GITPATHOLOGIST` env var → auto-on when `<cwd>/.git` exists. Mobile platforms never load it. `gitpathologist?: boolean` added to `AgentEntryConfig`, `AgentDefaultsConfig`, and both zod schemas.\n\n## Why\n\nForensic \"when did this surface look best, when did it veer off, and why\" analysis is something every long-lived monorepo needs and nobody has a clean plugin for. `plugin-github` covers PR/issue ops, not commit-history pathology. This fills that gap with cheap deterministic detection and optional LLM narration — pairs naturally with spatial codebase tools.\n\n## Test plan\n\n- [x] **Unit + e2e:** 45/45 vitest pass in `plugins/plugin-gitpathologist/`. Coverage: `secret-scrubber`, `classify` (conventional + WIP + revert + merge + risk flags), `score` (deltas, EMA, revert-proximity penalty), `inflect` (peaks, drifts, threshold filtering), `cache` (key stability, round-trip, freshness), `scan` (real git output via toy-repo fixture), full pipeline e2e on a synthetic A(clean)→B(WIP dump)→C(churn-spiral)→D(recovery) repo.\n- [x] **Typecheck:** `tsc --noEmit` clean for the plugin (same 5 pre-existing `@elizaos/core` codegen errors as plugin-mcp's baseline — not introduced by this PR).\n- [x] **Dogfood:** Ran [`scripts/dogfood.ts`](https://github.com/2-A-M/eliza/blob/milady/plugin-gitpathologist/plugins/plugin-gitpathologist/scripts/dogfood.ts) against `packages/agent/src/runtime` over a 60-day window. 119 commits scanned in ~160ms, 5 plausible peaks and 3 plausible drift inflections detected, including a 31,403-line \"chore: restore current develop tree\" correctly flagged as the largest drift.\n- [ ] **Future:** v2 `trace` (symptom → introducing-commit walk) and `diff` (compare two surfaces / windows) operations; LLM-batch classify pass to refine \"other\" → real category on non-conventional commit subjects.\n\n## Out of scope for v1 (deliberate)\n\n- Cross-surface dependency graph (Understand-Anything territory)\n- PR-level aggregation (commit-level is the load-bearing primitive)\n- Author-level metrics (privacy/political minefield, no clear use case)\n- Auto-fix suggestions (this plugin diagnoses; coding plugins prescribe)\n- Web dashboard (JSON + markdown is enough for v1)\n- Sub-agent fan-out per surface (sequential single-process is fine until profiling proves otherwise)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nIntroduces `@elizaos/plugin-gitpathologist`, a new optional plugin that performs forensic git-history analysis for a path/glob surface, producing a scored health timeline, peak/drift inflection detection, and an LLM-narrated (or heuristic-fallback) rot post-mortem. It wires into `OPTIONAL_CORE_PLUGINS` and auto-loads when the workspace contains a `.git` directory.\n\n- **Pipeline:** deterministic spine (`scan` → `classify` → `score` → `inflect`) with LLM only in the `narrate` phase, capped by a configurable `budget`; all commit text and diff snippets pass through a local secret scrubber before leaving the process.\n- **Integration:** `gitpathologist` boolean added to `AgentEntryConfig`, `AgentDefaultsConfig`, and both Zod schemas; a `gitpathologistRequested()` gate respects config → env-var → auto-detect precedence and excludes mobile platforms.\n- **Cache:** reports stored as JSON under `<repo>/.milady/gitpathology/`; `read()` and `list()` still call `JSON.parse` without a try/catch (flagged in prior review round).\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge once the unguarded JSON.parse calls in the cache layer are addressed; the rest of the pipeline is well-structured and self-contained.\n\nThe cache's read() and list() methods still call JSON.parse without a try/catch, meaning a single corrupted cache file throws through runReport() and crashes the analysis instead of falling back gracefully.\n\nplugins/plugin-gitpathologist/src/cache/report-cache.ts — unguarded JSON.parse in both read() and list() is the outstanding concern from the prior review round.\n\n<h3>Important Files Changed</h3>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| plugins/plugin-gitpathologist/src/pipeline/scan.ts | Deterministic git-log parser. runGit correctly checks result.error. findFileBlockStart has an edge case where tab-delimited numeric body lines are misidentified as numstat output. |\n| plugins/plugin-gitpathologist/src/pipeline/score.ts | EMA health scorer with revert-proximity penalty. byShortSha uses 7-char SHA prefixes; a collision could silently apply the revert penalty to the wrong commit. |\n| plugins/plugin-gitpathologist/src/pipeline/narrate.ts | LLM narration phase with budget guard. Budget correctly caps only LLM calls; every drift always gets a RotCause. Secret scrubbing applied before model calls. |\n| plugins/plugin-gitpathologist/src/pipeline/inflect.ts | Peak/drift detection with deduplication. The tiedEarlier check correctly uses findIndex on points. |\n| plugins/plugin-gitpathologist/src/cache/report-cache.ts | On-disk JSON cache. Both read() and list() call JSON.parse() without a try/catch; a corrupted cache file crashes the pipeline (flagged in previous review round). |\n| plugins/plugin-gitpathologist/src/actions/git-pathology.ts | Multiplex action handler. runReport() is wrapped in try/catch. Parameter parsing is safe. |\n| plugins/plugin-gitpathologist/src/secret-scrubber.ts | Regex-based secret redaction covering Anthropic, OpenAI, GitHub PATs, AWS AKIA, Slack, and Bearer tokens. |\n| packages/agent/src/runtime/plugin-collector.ts | Adds gitpathologistRequested() gate with config → env-var → auto-detect precedence. Mobile platforms excluded. |\n| plugins/plugin-gitpathologist/src/services/git-pathology-service.ts | Orchestrates the full pipeline with cache in/out. Empty-repo early return is correct. |\n\n</details>\n\n\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Agent as Agent Runtime\n    participant Action as GIT_PATHOLOGY Action\n    participant Svc as GitPathologyService\n    participant Cache as ReportCache\n    participant Git as git (spawnSync)\n    participant LLM as useModel (LLM)\n\n    Agent->>Action: \"handler(operation=report, surface, opts)\"\n    Action->>Svc: runReport(surface, overrides)\n    Svc->>Git: rev-parse HEAD\n    Svc->>Cache: read(cacheKey)\n    alt Cache hit + HEAD matches\n        Cache-->>Svc: PathologyReport\n    else Cache miss or HEAD changed\n        Svc->>Git: git log --numstat (scan)\n        Git-->>Svc: RawCommit[]\n        Svc->>Svc: classify to score to inflect\n        loop each drift up to budget LLM calls\n            Svc->>Git: git show diff snippet\n            Svc->>LLM: buildPrompt useModel\n            LLM-->>Svc: RotCause or fallback\n        end\n        Svc->>Cache: write(PathologyReport)\n    end\n    Svc-->>Action: PathologyReport\n    Action-->>Agent: ActionResult text data\n```\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (2)</h3></summary>\n\n1. `plugins/plugin-gitpathologist/src/cache/report-cache.ts`, line 52-57 ([link](https://github.com/elizaos/eliza/blob/a98ea39869976595088b43d89075ef4902b7d16c/plugins/plugin-gitpathologist/src/cache/report-cache.ts#L52-L57)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> Both `read()` and `list()` call `JSON.parse()` without a try/catch. A partially-written or corrupted cache file will throw a `SyntaxError` that bubbles up through `runReport()` uncaught, crashing the entire analysis pipeline instead of treating the bad entry as a cache miss.\n\n2. `plugins/plugin-gitpathologist/src/cache/report-cache.ts`, line 69-71 ([link](https://github.com/elizaos/eliza/blob/a98ea39869976595088b43d89075ef4902b7d16c/plugins/plugin-gitpathologist/src/cache/report-cache.ts#L69-L71)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> `list()` has the same unguarded `JSON.parse` problem. Any malformed file in the cache directory will throw and prevent the full listing from being returned. Skipping bad entries is the right recovery.\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<sub>Reviews (3): Last reviewed commit: [\"Merge branch &#39;develop&#39; into milady/plugi...\"](https://github.com/elizaos/eliza/commit/e21a822f699cde9022c2e087071592d6c4f3df55) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=34042296)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-26T21:20:30Z",
+      "mergedAt": null,
+      "additions": 2655,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDOMT5cIs7fIHqr",
+      "title": "feat(ui): clouds/avatar home + opt-in os pill + chat composer visibility + startup recovery",
+      "author": "NubsCarson",
+      "number": 7984,
+      "body": "## what\n\nfour chunks of desktop ux that go together because they all share the home/pill plumbing:\n\n1. **clouds/avatar home as the post-onboarding default.** `HomeView` renders the clouds backdrop + centered voice waveform when the assistant is idle, and the typed prose + composer chrome stays inside the home surface (no extra app chrome when the OS overlay is on). `navigation/main-tab.ts` falls back to home when no plugin app declares `elizaos.app.mainTab=true`.\n\n2. **opt-in OS pill (`ELIZA_DESKTOP_PILL=1`).** `electrobun/src/index.ts` + `pill-window.ts` spawn a separate transparent OS-level toplevel that loads the renderer with `?shellMode=chat-overlay`. the pill is gated off kiosk mode and stays opt-in until dynamic native frame sizing lands (the current native rectangle is fixed 360×280 and risks invisible click interception when always-on-top, per shaw).\n\n3. **chat composer visibility.** `chat-composer.tsx` + `chat-composer-shell.tsx` add a real surface (border + bg color-mix + inset shadow + backdrop-blur) so the composer is visible against the dark chat backdrop. previously the composer was invisible on dark mode.\n\n4. **startup coordinator auto-recovery.** `useStartupCoordinator.ts` adds `recoverTerminalStartupError()` that polls `/api/status` + `/api/onboarding/status` every 2.5s when the coordinator is stuck in a recoverable error state (backend-timeout, backend-unreachable, agent-timeout, agent-error, unknown). when the agent later comes back, the coordinator transitions to running without requiring a manual retry. also adds a `storage` event listener so a separate chat-overlay pill window can notice when onboarding completes in the main app.\n\n## tests\n\n```\nui: chat-composer, chat-composer-shell, AssistantOverlay, HomePill, App.cloud-shell, VoiceWaveform,\n    main-tab, auto-download-recommended, useStartupCoordinator.recovery — 53 / 53 pass\nelectrobun: renderer-static, pill-window, native/agent-env — 7 / 7 pass\napp/test/brand-surface — pass (after #7984 brand-surface assertion update)\n```\n\n## ci note\n\n\\`Plugin Tests\\` flag the pre-existing manifest/dflash tests in \\`plugin-local-inference\\` that #7983 fixes. once #7983 merges, those test failures clear (they're not from this PR's changes — they're catalog + dflash eval drift that #7983 corrects). this PR's own focused tests all pass.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR ships four coupled desktop UX features: the clouds/avatar `HomeView` as the post-onboarding default, an opt-in OS-level chat-overlay pill window (`ELIZA_DESKTOP_PILL=1`), composer surface visibility fixes for dark mode, and a 2.5 s auto-recovery polling loop that unblocks the startup coordinator from transient error states without requiring a manual retry.\n\n- **HomeView as default shell landing**: `navigation/main-tab.ts` now resolves the default tab as `\\\"home\\\"` instead of `\\\"chat\\\"`, and the `HomePill` was redesigned with inline waveform bars — but its `position: fixed` was removed, breaking visibility in the main app shell on non-home/non-chat tabs.\n- **OS pill window (`chat-overlay` mode)**: `pill-window.ts` spawns a borderless, always-on-top `BrowserWindow` at `?shellMode=chat-overlay`; `ChatOverlayShell` renders the assistant over a transparent background; `injectApiBaseIntoOpenRendererWindows()` propagates auth updates to the pill on agent restarts.\n- **Startup recovery**: `recoverTerminalStartupError()` polls `/api/status` and `/api/onboarding/status` in the error phase; the `startupReducer` gains `BACKEND_REACHED` and `AGENT_RUNNING` transitions from the error phase; a `storage` event listener in the splash phase lets the pill window detect onboarding completion in the main window.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge for the overlay/kiosk paths; the in-app HomePill is broken on non-home tabs in the main shell and needs a follow-up before users who navigate away from home will see the assistant pill.\n\nThe clouds/avatar home surface, OS pill window, composer visibility, and startup recovery all work correctly in their intended contexts. The one concrete regression is that HomePill's position: fixed was removed, making it invisible in the main app shell when the user navigates to any tab other than home or chat — the pill renders as an inline element below the h-[100dvh] container rather than floating above the page.\n\npackages/ui/src/components/shell/HomePill.tsx — positioning change breaks the in-app floating pill; packages/ui/src/App.tsx — ShellFoundationMount placement outside the overflow-hidden container compounds the issue.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/ui/src/components/shell/HomePill.tsx | Redesigned pill with inline waveform bars and status indicator; removed CSS `position: fixed`, which breaks visibility in the main app shell on non-home/non-chat tabs. |\n| packages/ui/src/App.tsx | Adds chat-overlay shell mode early-return path before the startup-coordinator gate; still renders ShellFoundationMount outside the h-[100dvh] container for non-home tabs, compounding the HomePill positioning issue. |\n| packages/ui/src/state/useStartupCoordinator.ts | Adds storage-event cross-window sync for splash phase and a 2.5 s recovery polling loop for the error phase; recovery function unnecessarily calls getOnboardingStatus() even when local state is sufficient. |\n| packages/ui/src/state/startup-coordinator.ts | Adds BACKEND_REACHED and AGENT_RUNNING transition handlers to the error phase to support auto-recovery without a RETRY cycle. |\n| packages/ui/src/platform/window-shell.ts | Adds chat-overlay mode to WindowShellRoute and introduces isStandaloneWindowShell / isChatOverlayWindowShell helpers; cleanly updates exclusion lists in existing guards. |\n| packages/app-core/platforms/electrobun/src/index.ts | Refactors API-base injection into injectApiBaseIntoOpenRendererWindows() to also push auth updates to the pill window; adds video/font/3D asset MIME types to the static server cache list. |\n| packages/app-core/platforms/electrobun/src/native/agent.ts | Extracts Windows native inference guards into testable applyWindowsNativeInferenceDefaults(); fixes PATH key casing on Windows (PATH vs Path). |\n| packages/ui/src/onboarding/auto-download-recommended.ts | Extends logic to activate an already-installed eliza-download bundle rather than always enqueuing a new download; adds Eliza-1 fast-path before the model-selection branch. |\n| packages/ui/src/components/shell/ChatSurface.tsx | Adds auto-scroll-to-bottom on new messages via scrollRef; adds shrink-0 to ChatComposerShell to prevent composer squish. |\n\n</details>\n\n<h3>Flowchart</h3>\n\n```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n    A[App boots] --> B{shellMode?}\n    B -->|chat-overlay| C[ChatOverlayShell\\nTransparent OS pill window]\n    B -->|kiosk| D[KioskShell\\nFixed fullscreen + bottom HomePill]\n    B -->|main| E{Startup coordinator phase}\n    E -->|error + recoverable| F[recoverTerminalStartupError poll 2.5s]\n    F -->|/api/status running| G{/api/onboarding/status}\n    G -->|complete=true| H[dispatch AGENT_RUNNING → hydrating]\n    G -->|complete=false| I[dispatch BACKEND_REACHED → onboarding-required]\n    G -->|exception| J[return false → retry next tick]\n    E -->|splash| K{storage event\\nONBOARDING_COMPLETE_STORAGE_KEY}\n    K -->|newValue=1| L[dispatch SPLASH_CONTINUE]\n    E -->|ready| M[Main app shell]\n    M --> N{tab}\n    N -->|home or chat| O[Suppress ShellFoundationMount]\n    N -->|other tabs| P[Render ShellFoundationMount\\n⚠️ HomePill below viewport]\n    C --> Q[ShellFoundationMount\\nflex items-end justify-center parent\\nHomePill visible ✓]\n    D --> R[ShellFoundationMount\\nflex-col bottom child\\nHomePill visible ✓]\n```\n\n<sub>Reviews (3): Last reviewed commit: [\"ui: clouds/avatar home + opt-in os pill ...\"](https://github.com/elizaos/eliza/commit/28c468b0c4776fad1ccdabeae1528887d0aabcc2) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=33797359)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-25T17:52:42Z",
+      "mergedAt": "2026-05-26T12:15:38Z",
+      "additions": 1004,
+      "deletions": 319
+    },
+    {
+      "id": "PR_kwDOMT5cIs7fIHV8",
+      "title": "fix(plugin-local-inference): discover dflash binaries from default user state + runtime router wiring + dflash eval gating",
+      "author": "NubsCarson",
+      "number": 7983,
+      "body": "## what\n\nthree things on the local-inference path:\n\n1. **dflash binary discovery from default user state.** `dflash-server.ts` walks both `ELIZA_STATE_DIR` (isolated app-run state) AND the default user root (`~/.eliza/local-inference/bin/dflash/`). preserves backend preference ordering (cuda > vulkan > rocm > metal > cpu) and picks the durable build over older fused/test builds. fixes the case where the runtime state is isolated per-app but the dflash binary lives in the default user dir.\n\n2. **runtime router wiring in `packages/agent`.** `eliza.ts` adds `ensureLocalInferenceRuntimeHandlers()` which lazy-imports `@elizaos/plugin-local-inference/runtime` and registers the local handlers (TEXT_SMALL, TEXT_LARGE, TEXT_EMBEDDING, RESPONSE_HANDLER, ACTION_PLANNER, etc.) into the runtime instead of relying on static `Plugin.models` exports. `plugin-collector.ts` drops the `ELIZA_DISABLE_LOCAL_EMBEDDINGS=1`-removes-the-whole-plugin code path — the embedding handler now self-disables instead of yanking the whole plugin.\n\n3. **dflash eval gating.** `manifest/validator.ts` requires a passing `evals.dflash` block when a manifest is both `defaultEligible: true` AND ships `files.dflash`. needs-hardware bench (null acceptanceRate or speedup) cannot be marked `passed: true`. matches the pattern used for asr / embedMteb / vadLatency. `manifest/schema.ts` keeps dflash as a per-tier required kernel.\n\nalso adds `dflash` to `catalog.ts` BASE_REQUIRED_KERNELS so the runtime probe matches the manifest contract.\n\n## tests\n\n```\nplugin-local-inference: 145 / 147 pass (2 stale fixture tests for the deprecated companionModelIds auto-install path)\nmanifest: 47 / 47 pass\nmanifest-dflash-eval: 9 / 9 pass\ngpu-profile: 5 / 5 pass\ndflash-server: 71 / 72 pass (1 skipped)\n```\n\n## windows ffi build path proven (build-time fixes split into #7988)\n\nafter merging recent upstream, the desktop FFI backend requires `libllama.dll` + `libeliza-llama-shim.dll` built via `packages/app-core/scripts/build-llama-cpp-desktop-dylib.mjs` and staged at `~/.eliza/local-inference/bin/llama-cpp/windows-x86_64-<backend>/`.\n\ntwo windows build-time gaps surfaced and are fixed in #7988:\n\n- `build-llama-cpp-desktop-dylib.mjs` now finds `llama.dll` on win32 (msvc drops the `lib` prefix) and stages it as `libllama.dll` so `desktop-llama-adapter.ts` resolves it.\n- `eliza_llama_shim.c` now defines five symbols that were declared in the header and called by the adapter but had no body: `context_detach_drafter`, `context_has_drafter`, `dflash_stats_ex`, `context_handle_memory_pressure`, and the `mtp_stats` adapter alias. msvc was refusing to link the shim with `LNK2019`.\n\nverified end-to-end on windows-x86_64 cuda (visual studio 17 2022 + cuda 12.4 + ninja): shim loaded into `bun:ffi` with all 39 symbols resolved, runtime reached the prewarm path on the same code path linux/macos hit.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-25T17:52:19Z",
+      "mergedAt": "2026-05-26T12:15:38Z",
+      "additions": 930,
+      "deletions": 344
+    },
+    {
+      "id": "PR_kwDOMT5cIs7fm-cQ",
+      "title": "fix: audit silent catch blocks",
+      "author": "Dexploarer",
+      "number": 8013,
+      "body": "## Summary\n\n- fail connector config saves loudly instead of treating failed persistence as success\n- log desktop auth bridge, native capability, and trajectory fallback failures with structured context\n- keep the audit scoped to silent catch/fallback paths\n\n## Validation\n\n- CodeRabbit CLI review against origin/develop: findings 0\n- branch pushed to origin/codex/silent-catch-remediation-20260526\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR audits and remediates silent `catch` blocks across the agent and app-core packages. It converts silent swallows into structured `logger.warn`/`logger.debug` calls with context, and reclassifies the connector config persistence failure as a loud HTTP 500 with in-memory state rollback rather than a silent success.\n\n- **connector-routes.ts**: POST and DELETE handlers now capture pre-mutation state, roll it back on `saveElizaConfig` failure, and return a 500 with the error message instead of silently continuing. Two new tests exercise each rollback path.\n- **auth-bridge.ts / location.ts / screencapture.ts**: All previously silent `catch {}` blocks now call `logger.warn` or `logger.debug` with structured context objects. Missing session files are still handled silently via an `existsSync` guard before the warn-capable catch.\n- **trajectory-internals.ts**: Five silent DB-failure catches now call `warnRuntime` with subsystem context, and two new tests verify the log output.\n</details>\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — the changes are mechanical error-logging improvements with well-targeted tests and correct rollback semantics.\n\nEvery changed path is covered by a new test. The connector-routes rollback logic correctly handles both new-key and existing-key cases for both the POST and DELETE handlers, and the disconnect callback is correctly gated behind a successful save. The auth-bridge missing-file path remains silent via the existsSync guard, consistent with the JSDoc and test. All other changes are pure observability additions that cannot alter runtime behavior.\n\nNo files require special attention.\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n| Filename | Overview |\n|----------|----------|\n| packages/agent/src/api/connector-routes.ts | POST and DELETE handlers now roll back in-memory state and return HTTP 500 on saveElizaConfig failure; rollback logic correctly handles both new-key (delete) and existing-key (restore) cases. |\n| packages/agent/src/api/connector-routes.test.ts | New test file covering saveElizaConfig failure on POST (500 + state not mutated) and DELETE (500 + full rollback including channels, disconnect callback not called). |\n| packages/app-core/platforms/electrobun/src/native/auth-bridge.ts | All silent catch blocks replaced with warnAuthBridge/debug calls; missing session files handled silently via existsSync guard before the warn-capable readFileSync catch. |\n| packages/app-core/platforms/electrobun/src/native/auth-bridge.test.ts | Two tests: malformed JSON triggers warn, absent session file returns null without any warn call. |\n| packages/app-core/platforms/electrobun/src/native/location.ts | Empty catch on IP geolocation provider failure replaced with structured logger.warn call including url and error. |\n| packages/app-core/platforms/electrobun/src/native/screencapture.ts | All ~15 silent catch blocks converted to structured warn/debug logging with appropriate severity levels. |\n| packages/agent/src/runtime/trajectory-internals.ts | Five silent DB-catch blocks now call the pre-existing warnRuntime helper with subsystem context. |\n| packages/agent/src/runtime/trajectory-observability.test.ts | Two new tests exercise the warn path for flushObservationBuffer and computeBySource, verifying structured log context. |\n\n</details>\n\n</details>\n\n<sub>Reviews (2): Last reviewed commit: [\"Merge branch &#39;develop&#39; into codex/silent...\"](https://github.com/elizaos/eliza/commit/5d565726aed8e057e46b03734534d0d738d2dd02) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=34075016)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-26T23:17:53Z",
+      "mergedAt": "2026-05-27T16:24:30Z",
+      "additions": 584,
+      "deletions": 82
+    }
+  ],
+  "codeChanges": {
+    "additions": 9830,
+    "deletions": 1976,
+    "files": 213,
+    "commitCount": 59
+  },
+  "completedItems": [
+    {
+      "title": "fix(prompts): extend phantom-action-claim rule to bare past-tense and present-continuous spawn claims",
+      "prNumber": 7945,
+      "type": "bugfix",
+      "body": "## Summary\n\nStrengthens the phantom-action-claim rule shipped in #7923 (merged) after slow one-prompt-at-a-time live verification surfaced two related claim shapes the original rule didn't catch.\n\n## Findings (live, 2026-05-24)\n\nTwo real bu",
+      "files": [
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts"
+      ]
+    },
+    {
+      "title": "docs(os): restore packages/os/release/VERIFY.md deleted by integration merge",
+      "prNumber": 7990,
+      "type": "docs",
+      "body": "## What happened\n\nPR #7909 (merged 2026-05-24 by Shaw, commit \\`2312d14\\`) shipped two files:\n- \\`packages/os/release/VERIFY.md\\` (147 lines, end-user verification guide)\n- \\`packages/os/scripts/verify-release.sh\\` (147 lines, one-command r",
+      "files": [
+        "packages/os/release/VERIFY.md"
+      ]
+    },
+    {
+      "title": "fix(desktop-llama-build): support windows ffi build",
+      "prNumber": 7988,
+      "type": "bugfix",
+      "body": "three fixes needed to land windows-x86_64 dylib builds after the server-mode → bun:ffi refactor.\n\n## 1) build script: locate windows dll under either name\n\nlinux/macos produce `libllama.{so,dylib}` — cmake adds the `lib` prefix on shared li",
+      "files": [
+        "packages/app-core/scripts/build-llama-cpp-desktop-dylib.mjs",
+        "packages/app-core/scripts/desktop-llama-shim/eliza_llama_shim.c"
+      ]
+    },
+    {
+      "title": "docs(desktop-llama-build): warn about windows MSVC/Strawberry PATH conflict + show host prereqs",
+      "prNumber": 7987,
+      "type": "docs",
+      "body": "## what\n\n\\`packages/app-core/scripts/build-llama-cpp-desktop-dylib.mjs\\` gets a new \\`hostNote\\` field on the \\`windows-x86_64\\` target plus a logger line in \\`buildTarget()\\` that prints the note before any work starts. the goal is to shor",
+      "files": [
+        "packages/app-core/scripts/build-llama-cpp-desktop-dylib.mjs"
+      ]
+    },
+    {
+      "title": "chore: build scripts + release-check eliza/ path remap + app-core api/automation-node-contributors export",
+      "prNumber": 7986,
+      "type": "other",
+      "body": "## what\n\nsmall build/test/release plumbing:\n\n- **`app-core/package.json`** adds an `./api/automation-node-contributors` subpath export. `plugin-lifeops/src/automation-node-contributor.ts` then imports from the narrower subpath instead of pu",
+      "files": [
+        "bun.lock",
+        "packages/agent/src/actions/extract-params.ts",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/electrobun/remotes/runtime/package.json",
+        "packages/app-core/platforms/electrobun/remotes/runtime/src/bun/worker.ts",
+        "packages/app-core/platforms/electrobun/scripts/ensure-whisper-model.sh",
+        "packages/app-core/platforms/electrobun/scripts/smoke-test-windows.ps1",
+        "packages/app-core/platforms/electrobun/scripts/smoke-test.sh",
+        "packages/app-core/scripts/release-check.ts",
+        "packages/browser-bridge-extension/scripts/release-version.mjs",
+        "packages/scripts/flatten-tsc-package-output.mjs",
+        "plugins/plugin-agent-orchestrator/tsconfig.build.json",
+        "plugins/plugin-lifeops/src/automation-node-contributor.ts"
+      ]
+    },
+    {
+      "title": "feat(core): add toon key-value parser + force evaluator/planner thinking=off with 1024 maxTokens",
+      "prNumber": 7985,
+      "type": "feature",
+      "body": "## what\n\nthree small core changes that go together:\n\n1. **`parseToonKeyValue` in `utils.ts`** — generated-plugin prompts sometimes return TOON-shape (\\`key: value\\` with optional indexed arrays \\`items[0]: value\\`) inside a markdown fence. ",
+      "files": [
+        "bun.lock",
+        "packages/core/src/index.browser.ts",
+        "packages/core/src/index.edge.ts",
+        "packages/core/src/index.node.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/__tests__/evaluator.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/evaluator.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "packages/core/src/types/state.ts",
+        "packages/core/src/utils.ts",
+        "packages/core/tsconfig.json"
+      ]
+    },
+    {
+      "title": "feat(ui): clouds/avatar home + opt-in os pill + chat composer visibility + startup recovery",
+      "prNumber": 7984,
+      "type": "feature",
+      "body": "## what\n\nfour chunks of desktop ux that go together because they all share the home/pill plumbing:\n\n1. **clouds/avatar home as the post-onboarding default.** `HomeView` renders the clouds backdrop + centered voice waveform when the assistan",
+      "files": [
+        "bun.lock",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-direct-rpc.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/platforms/electrobun/src/native/agent-env.test.ts",
+        "packages/app-core/platforms/electrobun/src/native/agent.ts",
+        "packages/app-core/platforms/electrobun/src/pill-window.test.ts",
+        "packages/app-core/platforms/electrobun/src/pill-window.ts",
+        "packages/app-core/platforms/electrobun/src/renderer-static.test.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/ui/src/App.cloud-shell.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer-shell.test.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer-shell.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer.test.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/components/pages/HomeView.tsx",
+        "packages/ui/src/components/shell/AssistantOverlay.tsx",
+        "packages/ui/src/components/shell/ChatSurface.tsx",
+        "packages/ui/src/components/shell/HomePill.tsx",
+        "packages/ui/src/components/shell/RuntimeGate.tsx",
+        "packages/ui/src/components/shell/__tests__/AssistantOverlay.test.tsx",
+        "packages/ui/src/components/shell/__tests__/HomePill.test.tsx",
+        "packages/ui/src/components/voice/VoiceWaveform.test.tsx",
+        "packages/ui/src/components/voice/VoiceWaveform.tsx",
+        "packages/ui/src/navigation/index.ts",
+        "packages/ui/src/navigation/main-tab.test.ts",
+        "packages/ui/src/onboarding/auto-download-recommended.test.ts",
+        "packages/ui/src/onboarding/auto-download-recommended.ts",
+        "packages/ui/src/platform/window-shell.ts",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/persistence.ts",
+        "packages/ui/src/state/startup-coordinator.ts",
+        "packages/ui/src/state/types.ts",
+        "packages/ui/src/state/useApp.ts",
+        "packages/ui/src/state/useNavigationState.ts",
+        "packages/ui/src/state/useStartupCoordinator.recovery.test.ts",
+        "packages/ui/src/state/useStartupCoordinator.ts",
+        "packages/ui/src/styles/styles.css"
+      ]
+    },
+    {
+      "title": "fix(plugin-local-inference): discover dflash binaries from default user state + runtime router wiring + dflash eval gating",
+      "prNumber": 7983,
+      "type": "bugfix",
+      "body": "## what\n\nthree things on the local-inference path:\n\n1. **dflash binary discovery from default user state.** `dflash-server.ts` walks both `ELIZA_STATE_DIR` (isolated app-run state) AND the default user root (`~/.eliza/local-inference/bin/df",
+      "files": [
+        "bun.lock",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector-mode-policy.test.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/shared/src/local-inference/catalog.ts",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.test.ts",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.ts",
+        "plugins/plugin-local-inference/src/services/dflash-direct-bundle.test.ts",
+        "plugins/plugin-local-inference/src/services/dflash-server.test.ts",
+        "plugins/plugin-local-inference/src/services/dflash-server.ts",
+        "plugins/plugin-local-inference/src/services/downloader.test.ts",
+        "plugins/plugin-local-inference/src/services/engine-direct-bundle.test.ts",
+        "plugins/plugin-local-inference/src/services/engine.ts",
+        "plugins/plugin-local-inference/src/services/manifest/manifest-dflash-eval.test.ts",
+        "plugins/plugin-local-inference/src/services/manifest/manifest.test.ts",
+        "plugins/plugin-local-inference/src/services/manifest/schema.ts",
+        "plugins/plugin-local-inference/src/services/manifest/validator.ts",
+        "plugins/plugin-local-inference/src/services/router-handler.test.ts",
+        "plugins/plugin-local-inference/src/services/router-handler.ts",
+        "plugins/plugin-local-inference/src/services/service.test.ts",
+        "plugins/plugin-local-inference/src/services/service.ts",
+        "plugins/plugin-local-inference/src/services/verify-on-device.test.ts",
+        "plugins/plugin-local-inference/src/services/verify-on-device.ts"
+      ]
+    },
+    {
+      "title": "fix: use https for omnivoice.cpp submodule url",
+      "prNumber": 7982,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe `omnivoice.cpp` submodule in `.gitmodules` is registered with `http://github.com/elizaOS/omnivoice.cpp` (plain HTTP, port 80). GitHub no longer accepts unencrypted HTTP, so `git submodule update --init --recursive` fails on ",
+      "files": [
+        ".gitmodules"
+      ]
+    },
+    {
+      "title": "fix(agent-image): build plugin-worker-runtime so cloud agents boot",
+      "prNumber": 7981,
+      "type": "bugfix",
+      "body": "## Summary\n\nEvery provisioned cloud agent crashes at boot:\n\n```\n[eliza-autonomous] Failed to start: ERR_MODULE_NOT_FOUND\nCannot find module '.../plugin-worker-runtime/dist/index.js'\n```\n\nRoot cause: the cloud agent image (`:stable`, built f",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "packages/agent/src/services/remote-plugin-bridge.ts",
+        "packages/plugin-worker-runtime/package.json"
+      ]
+    },
+    {
+      "title": "fix(ci): downgrade required-true secrets to required-false across 3 reusable workflows",
+      "prNumber": 7980,
+      "type": "bugfix",
+      "body": "## The bug\n\nSame root cause as PR #7976. Three reusable workflows declare \\`secrets: { FOO: required: true }\\`. Every parent workflow that calls them via \\`secrets: inherit\\` and doesn't have the secret configured **startup_failures at 0-3 ",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/update-homebrew.yml"
+      ]
+    },
+    {
+      "title": "docs(os): add admin playbook for enabling apt-repo publishing",
+      "prNumber": 7979,
+      "type": "docs",
+      "body": "## Why\n\nNatural follow-up to PR #7976 (which made the GPG secrets optional in \\`publish-apt-repo.yml\\` so the release workflow stops startup_failing). That PR makes the workflow tolerant of missing secrets — **this doc tells the maintainer ",
+      "files": [
+        "packages/os/docs/admin-apt-repo-setup.md"
+      ]
+    },
+    {
+      "title": "fix(ci): make missing release manifest a clear skip, not an opaque ENOENT",
+      "prNumber": 7978,
+      "type": "bugfix",
+      "body": "## The bug (latent — would surface as soon as #7976 lands)\n\n\\`populate-and-validate-manifest\\` in \\`elizaos-os-full-release.yml\\` hardcodes the manifest path \\`packages/os/release/beta-2026-05-16/manifest.json\\` — and **that file does not e",
+      "files": [
+        ".github/workflows/elizaos-os-full-release.yml"
+      ]
+    },
+    {
+      "title": "chore(os): add `just smoke-arch <arch>` recipe for fast Dockerfile validation",
+      "prNumber": 7977,
+      "type": "other",
+      "body": "## Why\n\nIterating on the multi-arch parameterization (#7971) today meant running the full ~hour \\`./build.sh\\` to find out a per-arch package name was wrong — when the only thing that needed proving was that the \\`TARGETARCH\\` case statemen",
+      "files": [
+        "packages/os/linux/Justfile"
+      ]
+    },
+    {
+      "title": "fix(ci): make publish-apt-repo GPG secrets optional to unblock release workflow startup",
+      "prNumber": 7976,
+      "type": "bugfix",
+      "body": "## The bug\n\n**\\`elizaos-os-full-release.yml\\` startup_failures at 0-3 seconds on every release tag.** v2.0.0 / v2.0.1 / v2.0.3 — three published tags, **zero successful runs**. No logs (because workflow doesn't even start). Net result: **no",
+      "files": [
+        ".github/workflows/publish-apt-repo.yml"
+      ]
+    },
+    {
+      "title": "docs(os): add end-user guide for verifying downloaded Live ISOs",
+      "prNumber": 7975,
+      "type": "docs",
+      "body": "## Why\n\nWhen users download an elizaOS Live ISO from GitHub Releases they need a single canonical guide for verifying provenance + integrity before flashing. Today the verify instructions are scattered across the CI/CD roadmap doc, action R",
+      "files": [
+        "packages/os/docs/verify-iso-download.md"
+      ]
+    },
+    {
+      "title": "chore(ci): add arm64 to build-linux-iso matrix with continue-on-error",
+      "prNumber": 7973,
+      "type": "other",
+      "body": "## Why\n\nPhase 3a #7971 parameterized the ISO builder for amd64 / arm64 / riscv64 — proven locally with `docker build --platform linux/arm64` succeeding (grub-efi-arm64-bin installed cleanly, image sha256:`8838b97b738142…`) and the riscv64 p",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "feat(os): let elizaos-webkit-shell accept ELIZAOS_SHELL_TITLE override",
+      "prNumber": 7972,
+      "type": "feature",
+      "body": "## Why\n\n\\`elizaos-webkit-shell\\` always titles its window \"elizaOS\" (or \"elizaOS Voice\" for the pill). When PR #7958 (docs Tor Browser flatpak fix) routes the offline help viewer through the same shell binary, the docs window and the main a",
+      "files": [
+        "packages/os/linux/tails/config/chroot_local-includes/usr/local/lib/elizaos/elizaos-webkit-shell"
+      ]
+    },
+    {
+      "title": "feat(os): parameterize ISO builder for amd64 / arm64 / riscv64",
+      "prNumber": 7971,
+      "type": "feature",
+      "body": "## Phase 3a — multi-arch enablement\n\nThree coordinated changes drive the target architecture from a single \\`ELIZAOS_ARCH\\` env var, defaulted to amd64 so every existing call site keeps working unchanged.\n\n### 1. \\`build.sh\\`\n- Validate \\`E",
+      "files": [
+        "packages/os/linux/Dockerfile",
+        "packages/os/linux/build.sh",
+        "packages/os/linux/tails/auto/config"
+      ]
+    },
+    {
+      "title": "fix(plugin-agent-orchestrator): absorb cross-session task_complete duplicates for the same origin (closes #7967)",
+      "prNumber": 7969,
+      "type": "bugfix",
+      "body": "Closes #7967.\n\n## Summary\n\nA single user prompt fans out into multiple sub-agent sessions when the orchestrator auto-respawns (on state_lost, verify-retry, transient error, blocked) — and **every** sub-agent's \\`task_complete\\` event posts ",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/message-handler.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/evaluator.ts",
+        "packages/core/src/runtime/message-handler.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): show device-code URL fallback during Eliza Cloud sign-in",
+      "prNumber": 7968,
+      "type": "bugfix",
+      "body": "## The bug (reproduced 2026-05-25 in QEMU live ISO)\n\nClick **SIGN IN WITH ELIZA CLOUD** → button changes to \"WAITING FOR AUTH...\" → **the user is stuck**. No browser opens, no URL is shown, no error appears. Agent IS reaching Cloud correctl",
+      "files": [
+        "packages/ui/src/components/shell/RuntimeGate.cloud-provisioning.test.tsx",
+        "packages/ui/src/components/shell/RuntimeGate.tsx",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/types.ts",
+        "packages/ui/src/state/useCloudState.ts"
+      ]
+    },
+    {
+      "title": "fix(os): self-recover from stuck persistence-maintenance flag",
+      "prNumber": 7966,
+      "type": "bugfix",
+      "body": "## The bug (reproduced 2026-05-25 in QEMU)\n\nUser clicks the elizaOS app, nothing happens. Cause: `/run/elizaos/persistence-maintenance` flag stays set across sessions, so `elizaos-{agent,renderer,pill,milady}.service` all skip start (their ",
+      "files": [
+        "packages/os/linux/tails/config/chroot_local-includes/etc/gdm3/PostLogin/Default",
+        "packages/os/linux/tails/config/chroot_local-includes/usr/local/lib/elizaos/elizaos-keeper"
+      ]
+    },
+    {
+      "title": "fix(prompts): forbid replyText that leaks LLM training-cutoff metadata (closes #7961)",
+      "prNumber": 7965,
+      "type": "bugfix",
+      "body": "Closes #7961.\n\n## Summary\n\nOn 2026-05-25 a \"what is the latest version of nodejs\" probe produced:\n\n> \"I don't have real-time access to check the current Node.js release, but as of my last update (June 2024) the latest stable major version w",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/message-handler.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/evaluator.ts",
+        "packages/core/src/runtime/message-handler.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
+    {
+      "title": "fix(os): route docs launcher file:// URIs around Tor Browser flatpak sandbox",
+      "prNumber": 7958,
+      "type": "bugfix",
+      "body": "## The bug (reproduced 2026-05-25 in QEMU with screenshot proof)\n\nClicking the **elizaOS Documentation** launcher (`tails-documentation.desktop` → `/usr/local/bin/tails-documentation doc`) opens Tor Browser to the doc URI `file:///usr/share",
+      "files": [
+        "packages/os/linux/tails/config/chroot_local-includes/usr/local/bin/tails-documentation"
+      ]
+    },
+    {
+      "title": "fix(core/message-handler): promote to planning when candidateActions hints a tool, even if Stage 1 self-contradicts with simple=true",
+      "prNumber": 7957,
+      "type": "bugfix",
+      "body": "## Summary\n\nLive regression on 2026-05-25. Stage 1 produced the self-contradictory envelope:\n\n\\`\\`\\`\n{\n  \"contexts\": [\"simple\"],\n  \"requiresTool\": false,\n  \"candidateActions\": [\"BASH\"],\n  \"replyText\": \"On it.\"\n}\n\\`\\`\\`\n\nfor prompts like \"fi",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/message-handler.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/evaluator.ts",
+        "packages/core/src/runtime/message-handler.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
+    {
+      "title": "fix(core/runtime/evaluator): strip trailing JSON envelope from recovered user-facing prose",
+      "prNumber": 7956,
+      "type": "bugfix",
+      "body": "## Summary\n\nLive regression on 2026-05-25 05:53-05:55 UTC. Probe \"use shell to show disk space\" returned the real \\`df -h\\` output to the user **PLUS** the structured evaluator envelope concatenated underneath:\n\n\\`\\`\\`\nFilesystem      Size ",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/evaluator.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-agent-orchestrator/sub-agent-router): redact loopback URLs from user-facing reply text",
+      "prNumber": 7955,
+      "type": "bugfix",
+      "body": "## Summary\n\nLive regression: 2026-05-25. A \"make me a 1-page PDF fresh-test.pdf containing hello pdf\" sub-agent task succeeded (PDF was actually created and verified), but the sub-agent's task report included incidental \\`http://127.0.0.1:6",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-agent-orchestrator/acp-native-transport): bump DEFAULT_TIMEOUT_MS from 30s to 5 minutes",
+      "prNumber": 7954,
+      "type": "bugfix",
+      "body": "## Summary\n\nLive trajectory data on 2026-05-25 showed the 30-second ACP request timeout systematically aborted real coding-sub-agent work:\n\n- **task_complete latencies**: 0, 390, 459, 506, 534, 538, 551, 9568, 10325, 14220 ms (max 14 s, mos",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts"
+      ]
+    },
+    {
+      "title": "fix(prompts): forbid empty + bare-ack replyText on simple-path; clarify interim-ack contract",
+      "prNumber": 7953,
+      "type": "bugfix",
+      "body": "## Summary\n\nLive deepscan of 50 probes on 2026-05-25 surfaced four trajectory shapes where Stage 1 produced a non-answer reply text on simple-path (simple=true, requiresTool=false), with no planner iteration to follow up. The user saw a pha",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(core/services/message): allow recall questions to read from visible prior_message context",
+      "prNumber": 7952,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe \\`current_turn_boundary\\` instruction told the model that prior_message blocks were \"context only\" and to \"not merge separate prior requests into the current task unless the final message explicitly references them.\" This bl",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(core/planner-loop): surface captured REPLY refusal text when required-tool cap hits",
+      "prNumber": 7951,
+      "type": "bugfix",
+      "body": "## Summary\n\nWhen Stage 1 asserts `requiresTool=true` but no exposed tool can fulfill the request (e.g. chat-history search with no `SEARCH_MESSAGES` action), the planner emits valid honest REPLY refusals each iteration. The loop previously ",
+      "files": [
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-tools-vs-schema.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-agent.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "chore(ci): set ELIZAOS_BUILD_APP=1 + bump heap to unstick nightly build-linux-iso",
+      "prNumber": 7950,
+      "type": "other",
+      "body": "Workflow has been failing every night for 8+ days (May 17 → today) with:\n```\nERROR: /opt/elizaos-artifacts missing; objective images require real elizaOS agent artifacts.\nE: config/hooks/normal/<hook>-elizaos-agent.hook.chroot failed (exit ",
+      "files": [
+        ".github/workflows/build-linux-iso.yml"
+      ]
+    },
+    {
+      "title": "docs(os): add CI/CD production roadmap for signed Linux ISO releases",
+      "prNumber": 7949,
+      "type": "docs",
+      "body": "Honest audit of where the elizaOS Live ISO release pipeline stands today.\n\n**TL;DR**: Substantial CI/CD scaffolding exists (SLSA Sigstore via OIDC, SHA256SUMS, SBOM via anchore/syft, GPG-signed APT repo) but nothing completes end to end. `b",
+      "files": [
+        "packages/os/docs/ci-cd-prod-roadmap.md"
+      ]
+    },
+    {
+      "title": "docs: fix solana trajectory typo",
+      "prNumber": 7948,
+      "type": "bugfix",
+      "body": "Fixes a small typo in the Solana trajectory viewer copy.\\n\\nSafety notes:\\n- Text-only change in a benchmark docs component\\n- No dependencies installed\\n- Static checks: `git diff --check`; JSX brace counts unchanged\n\n<!-- greptile_comment",
+      "files": [
+        "packages/benchmarks/solana/solana-gym-env/docs/trajectory-viewer/src/components/LandingPage.tsx"
+      ]
+    },
+    {
+      "title": "fix(app-core): break Bun strict-ESM circular-import TDZ cascade in vault-bootstrap chain",
+      "prNumber": 7947,
+      "type": "bugfix",
+      "body": "Fixes the elizaOS Live USB \"Backend Timeout\" — agent died at startup with TDZ cascade + `SyntaxError: 'isCloudProvisionedContainer' not found in '@elizaos/shared'`.\n\n**Root cause**: `vault-bootstrap.ts` imports back from `@elizaos/agent`, c",
+      "files": [
+        "packages/app-core/src/registry/index.ts",
+        "packages/app-core/src/security/hydrate-wallet-keys-from-platform-store.ts",
+        "packages/app-core/src/services/vault-bootstrap.ts",
+        "packages/app-core/src/services/vault-mirror.ts",
+        "plugins/plugin-elizacloud/src/routes/cloud-provisioning.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-sql): emit USING clause for character varying→uuid migrations",
+      "prNumber": 8009,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe runtime migrator generates `ALTER COLUMN ... SET DATA TYPE uuid` **without** a `USING` clause when an existing `varchar`/`character varying` column is migrated to `uuid`, so Postgres rejects it:\n\n```\nFailed query: ALTER TABL",
+      "files": [
+        "plugins/plugin-sql/src/__tests__/migration/schema-evolution-tests/03-type-changes-with-data.real.test.ts",
+        "plugins/plugin-sql/src/runtime-migrator/drizzle-adapters/sql-generator.ts"
+      ]
+    },
+    {
+      "title": "fix(agent-image): bundle yaml + build plugin-edge-tts",
+      "prNumber": 8002,
+      "type": "bugfix",
+      "body": "## Summary\n\nTwo **non-fatal** image-completeness gaps surfaced while validating cloud-agent boot after the Robot→Cloud migration. A provisioned agent loads **14/16** plugins instead of 16/16:\n\n```\nError [eliza] Failed to load core plugin @e",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "packages/app-core/deploy/Dockerfile.ci"
+      ]
+    },
+    {
+      "title": "fix(ci): support host repo regression matrix roots",
+      "prNumber": 7999,
+      "type": "bugfix",
+      "body": "## Summary\n- allow regression matrix validation to run against an explicit host repository root\n- support repo-relative path aliases so hosted layouts can map package docs paths to their checked-in docs path\n- keep the nested eliza path fal",
+      "files": [
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/scenario-pr.yml",
+        "packages/app-core/platforms/android/README.md",
+        "packages/app-core/platforms/android/app/src/main/java/ai/milady/milady/ElizaBrowserActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/milady/milady/ElizaClockActivity.java",
+        "packages/app-core/platforms/android/app/src/main/res/values/strings.xml",
+        "packages/app-core/platforms/android/app/src/main/res/xml/shortcuts.xml",
+        "packages/app-core/platforms/electrobun/vitest.electrobun.config.ts",
+        "packages/app-core/scripts/run-mobile-build-android-app-actions.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/validate-regression-matrix.mjs",
+        "packages/app/vite.config.ts",
+        "packages/core/src/index.node.ts",
+        "packages/scenario-runner/src/cli.ts",
+        "packages/scenario-runner/src/executor.ts",
+        "packages/scenario-runner/src/interceptor.ts",
+        "packages/scenario-runner/src/runtime-factory.ts",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "packages/scenario-runner/test/mocks/helpers/llm-proxy-plugin.ts",
+        "packages/scenario-runner/test/mocks/helpers/mock-runtime.ts",
+        "packages/test/mocks/helpers/elizaos-core-shim.ts",
+        "packages/test/mocks/vitest.config.ts",
+        "packages/ui/test/stubs/host-external.ts",
+        "packages/ui/vitest.config.ts",
+        "plugins/plugin-computeruse/docs/MOBILE_ASSISTANT_ROUTING.md",
+        "plugins/plugin-computeruse/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-local-inference): prefix Bun.build entrypoints with ./",
+      "prNumber": 7997,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe agent image build (`build-agent-image.yml`) has been failing on `@elizaos/plugin-local-inference`:\n\n```\nerror: Could not resolve: \"./dflash-event-schema\"\nerror: Could not resolve: \"./dflash-metrics-collector\"\nerror: Could no",
+      "files": [
+        "plugins/plugin-local-inference/build.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): add security response headers to the Worker",
+      "prNumber": 7996,
+      "type": "bugfix",
+      "body": "## What\n\nThe Cloud API Worker (`api.elizacloud.ai`) shipped **no** security response headers, while the SPA already sets them via Pages `_headers`. A ZAP scan flagged the gap. This adds Hono's `secureHeaders` middleware (+ a Cache-Control d",
+      "files": [
+        "packages/cloud-api/src/bootstrap-app.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): don't load terminal TUI in server-only mode",
+      "prNumber": 7995,
+      "type": "bugfix",
+      "body": "## Summary\n\nSecond link in the cloud-agent-boot chain (after #7981). A provisioned cloud agent now boots its HTTP API, then **crashes**:\n\n```\n[eliza-api] Listening on http://127.0.0.1:2138\n[eliza] Running in server-only mode (no interactive",
+      "files": [
+        "packages/agent/src/cli/index.ts",
+        "packages/agent/src/tui/agent-terminal-tui.ts",
+        "packages/agent/src/tui/tui-enabled.ts"
+      ]
+    },
+    {
+      "title": "fix(desktop): harden first-run voice startup",
+      "prNumber": 7994,
+      "type": "bugfix",
+      "body": "## Summary\n- Hardened the Electrobun packaged runtime path so a fresh desktop launch uses the bundled runtime, bundled permission probers, brand-aware `milady` state namespace, and staged Whisper ASR artifacts.\n- Fixed packaged plugin resol",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        "bun.lock",
+        "package.json",
+        "packages/agent/docs/tee-agent-implementation-plan.md",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/agent/src/actions/settings-actions.ts",
+        "packages/agent/src/api/accounts-routes.ts",
+        "packages/agent/src/api/agent-admin-routes.ts",
+        "packages/agent/src/api/agent-model.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/config-env.ts",
+        "packages/agent/src/api/config-routes.ts",
+        "packages/agent/src/api/first-run-routes.ts",
+        "packages/agent/src/api/nfa-routes.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/provider-switch-routes.ts",
+        "packages/agent/src/api/server-auth.ts",
+        "packages/agent/src/api/server-helpers-config.ts",
+        "packages/agent/src/api/server-helpers.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/auth/account-storage.ts",
+        "packages/agent/src/auth/credentials.ts",
+        "packages/agent/src/bin.ts",
+        "packages/agent/src/config/config.ts",
+        "packages/agent/src/config/paths.ts",
+        "packages/agent/src/config/schema.ts",
+        "packages/agent/src/config/zod-schema.agent-runtime.ts",
+        "packages/agent/src/config/zod-schema.ts",
+        "packages/agent/src/external-modules.d.ts",
+        "packages/agent/src/hooks/discovery.ts",
+        "packages/agent/src/hooks/loader.ts",
+        "packages/agent/src/index.ts",
+        "packages/agent/src/providers/page-scoped-context.ts",
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/conversation-compactor.test.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/first-run-names.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/agent/src/runtime/index.ts",
+        "packages/agent/src/runtime/model-resolution.ts",
+        "packages/agent/src/runtime/operations/classifier.ts",
+        "packages/agent/src/runtime/operations/reload-hot.ts",
+        "packages/agent/src/runtime/plugin-resolver.test.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/src/runtime/release-plugin-policy.test.ts",
+        "packages/agent/src/runtime/release-plugin-policy.ts",
+        "packages/agent/src/runtime/tool-call-cache/cache.ts",
+        "packages/agent/src/runtime/trajectory-internals.ts",
+        "packages/agent/src/services/permissions-registry.ts",
+        "packages/agent/src/services/plugin-installer.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): cherry-pick #7992 tool_choice required fix to main",
+      "prNumber": 7993,
+      "type": "bugfix",
+      "body": "## What\n\nCherry-pick of `3de23a6` (#7992) onto `main` to ship the production fix for the `tool_choice: \"required\"` 500 to `api.elizacloud.ai`.\n\n## Why a cherry-pick\n\n`develop` is ~42 commits ahead of `main` (1.76M lines of inserts across `p",
+      "files": [
+        "packages/cloud-api/__tests__/chat-completions-tool-choice.test.ts",
+        "packages/cloud-api/v1/chat/completions/route.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 188.11869997234476,
+      "prScore": 183.11869997234476,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 176.949563920864,
+      "prScore": 176.949563920864,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 142.52060994351277,
+      "prScore": 138.08060994351277,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 45,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 39.909530201312336,
+      "prScore": 39.70953020131233,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 8.415,
+      "prScore": 8.215,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "chunxiaoxx",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253869585?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ayushgupta0610",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7221434?u=49a8921172f4f931829df9a2efd369eb23ec7d74&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 17,
+  "mergedPRs": 43,
+  "newIssues": 4,
+  "closedIssues": 3,
+  "activeContributors": 10
+}
