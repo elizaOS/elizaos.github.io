@@ -1,0 +1,592 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-01T00:00:00.000Z",
+    "intervalEnd": "2026-06-02T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-01 to 2026-06-02, elizaos/eliza had 31 new PRs (21 merged), 5 new issues, and 13 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABEDfjVQ",
+      "title": "Orchestrator workbench: Codex-parity conversation UI + reasoning + prose-assembly bug",
+      "author": "NubsCarson",
+      "number": 8136,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe `/orchestrator` workbench (`@elizaos/plugin-task-coordinator`) conversation surface has several UI-parity gaps versus the design target (Codex/Claude-style coding-agent UIs), plus one backend prose-assembly bug. This issue tracks bringing the conversation view to a clean, premium, conversation-centric parity bar.\n\n## Problems\n\n**Conversation surface (`plugin-task-coordinator`)**\n- The workbench inherits a blue tint: `base.css` routes `--bg-accent` / `--ring` / `--info` / `--link` through `--brand-blue`, so the room reads cold-blue (design rule is no blue).\n- Tool-call cards are over-chromed: the shell command is echoed twice (header + a `$`-bar), a wall-clock timestamp is stamped on every row (5+ identical stamps per viewport), and cards print the raw tool name (`bash`) instead of an action verb.\n- Output is truncated head-only, dropping the meaningful tail (errors/exit summary live at the end).\n- The primary CTA is a loud full-saturation orange fill; loading states pop in with bare centered text (no skeleton).\n- No collapsible \"thinking\" cell for reasoning.\n\n**Backend (`plugin-agent-orchestrator`)**\n- Assistant prose loses word-boundary spaces (`\"is\"+\"proven\" -> \"isproven\"`): `extractAssistantText()` joins a codex-acp word-split content-block array with `join(\"\")`.\n- `agent_thought_chunk` (reasoning) is silently dropped in the `session/update` handler — only token counts are captured, so reasoning text never reaches the UI.\n\n**Dev experience**\n- `node --watch` re-evaluates the whole `eliza-source` module graph, so unrelated edits reboot the agent (and reopen the PGlite vault).\n\n## Proposed\n\nA focused conversation-UI parity pass: de-blue (scoped token override), real interleaved diff, slim cards with status-aware verb labels + exit/duration meta, markdown via the `marked` token AST, two-tier turn rhythm, head+tail truncation, de-loud CTA + skeletons + streaming cue, a collapsible reasoning cell; the backend prose re-spacing + reasoning forwarding; and scoping `--watch` to source roots. Verified with the existing unit suite + a new live Playwright e2e.",
+      "createdAt": "2026-06-01T23:18:34Z",
+      "closedAt": "2026-06-01T23:21:19Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABD8z1hQ",
+      "title": "live-info: keyless WEB_FETCH filtered out of the v5 planner action surface",
+      "author": "NubsCarson",
+      "number": 8108,
+      "repository": "elizaos/eliza",
+      "body": "Follow-up to #8097. Even with the keyless WEB_FETCH action registered, live-info queries still spawn a coding sub-agent instead of answering inline, because WEB_FETCH never reaches the planner's exposed tool surface. Two causes: (1) WEB_FETCH declares no `contexts`, so `resolveActionContexts` stamps it `[\"general\"]`; on a non-general turn the v5 action-surface context gate filters it out before ranking. (2) The live-info backstop resolved the web-lookup action via `findWebLookupActionName`, which matches by name OR simile, so `CONTACT_SEARCH` (carrying a `SEARCH` simile) won over WEB_FETCH. Fix: a canonical-name resolver (WEB_FETCH-first, no simile collision) + force-include the web-lookup action with its own contexts in the v5 surface when `looksLikeWebSearchRequest`. Structural, no intent-regex; spawn/build scenarios unaffected.",
+      "createdAt": "2026-06-01T03:20:33Z",
+      "closedAt": "2026-06-01T22:32:04Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDRyu6A",
+      "title": "Planner's REPLY action sometimes meta-narrates ('Listed files as returned by grep') instead of including the tool's actual output",
+      "author": "NubsCarson",
+      "number": 7960,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen the planner runs a SHELL/USE_SKILL/etc tool and then emits a REPLY in a follow-up iteration, the REPLY text occasionally summarizes that the result was provided rather than including the actual data. The user sees a meta-statement and no answer.\n\n## Repro\n\nProbes on 2026-05-25:\n- **Prompt**: \"list the names of files in /etc that have 'hostname' in them — actually run it\"\n- **Trajectory**: \\`tj-c608892af9b5d3.json\\`. Stage 0: \\`simple=false, requiresTool=true, candidates=[\"BASH\"]\\`. Iter 1: SHELL \\`grep -rl \"hostname\" /etc 2>/dev/null\\` (real output). Iter 2: not shown; the bot's REPLY was:\n- **Reply**: \\`\"Listed files from grep output; provided concise list as requested.\"\\` — no actual filenames\n\nSame pattern observed at \\`tj-dc46d718c97add.json\\` on retest:\n- Reply: \\`\"Provided the list of /etc files that contain the word 'hostname' as returned by grep.\"\\` — again, no list.\n\nOther probes (df -h, uname -a, wc -l /etc/passwd, curl coingecko, etc.) included the tool's actual output verbatim — the bug is intermittent.\n\n## Root cause hypothesis\n\nThe model in iter 2 (REPLY iteration) is reading the prior tool result, producing a textual summary of the act of returning the data, and skipping the data itself. May be related to specific prompt wordings (\"list the names of files\", \"actually run it\") that the model interprets as \"describe what you did\" rather than \"include the output\".\n\n## Suggested approach\n\nTwo routes:\n1. **Tool opt-in for \\`verifiedUserFacing\\`**: when SHELL produces a clean stdout, set \\`verifiedUserFacing=true\\` so \\`preferredFinalMessageFromToolOrModel\\` prefers the tool's text over the model's REPLY paraphrase. Currently SHELL doesn't opt in.\n2. **Planner-prompt rule**: explicitly forbid meta-narration (\"Listed/Provided/Returned X as requested\") when the REPLY follows a tool that produced stdout.\n\n(1) is preferred — structural, no regex on output.\n\n## Acceptance\n\n- \"list files in /etc with hostname\" reliably returns the grep output, not the summary.\n- No regression on probes that already work (df -h, wc -l, uname -a, etc).\n\nReported via live deepscan on milady deployment 2026-05-25.",
+      "createdAt": "2026-05-25T06:58:07Z",
+      "closedAt": "2026-06-01T22:13:33Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABD7k2cA",
+      "title": "ACP -32602 'Invalid params' failures are undiagnosable (JSON-RPC error.data discarded)",
+      "author": "NubsCarson",
+      "number": 8101,
+      "repository": "elizaos/eliza",
+      "body": "When a spawned ACP sub-agent returns JSON-RPC -32602 'Invalid params', the failing-field detail lives in the error.data payload (e.g. a ZodError.format()). The native ACP transport's jsonRpcError() keeps only error.message and drops error.data, so failures surface as a bare 'Invalid params' with no way to identify the offending field. error.data should be preserved and surfaced.",
+      "createdAt": "2026-05-31T19:41:23Z",
+      "closedAt": "2026-06-01T00:42:16Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABD7k2KQ",
+      "title": "non-Anthropic models (gpt-oss/Cerebras) have no inline live-info capability",
+      "author": "NubsCarson",
+      "number": 8100,
+      "repository": "elizaos/eliza",
+      "body": "On a non-Anthropic provider (e.g. gpt-oss/Cerebras), the keyless Anthropic web-search monkey-patch is skipped (isAnthropicRuntime() is false) and the cloud webSearch action requires a GOOGLE/GEMINI key. With neither, the main agent has no inline action to answer 'what is the current price of X / weather' and degrades to a 'no live access' decline, forcing delegation to a coding sub-agent that writes scripts instead of fetching. The agent needs a keyless, SSRF-guarded inline fetch capability so live-info works on any provider in local-only mode.",
+      "createdAt": "2026-05-31T19:41:22Z",
+      "closedAt": "2026-06-01T00:41:26Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7hYK4z",
+      "title": "release: promote develop → main (Cloud V2 sync)",
+      "author": "standujar",
+      "number": 8116,
+      "body": "## What this does\n\nStandard develop → main promotion to sync prod with the recent Cloud V2 stack changes.\n\nOnce merged, the following auto-deploys will fire (per workflow path filters + env routing):\n\n- **cloud-deploy-backend.yml** (env: production) → migrates prod Neon (no-op, already at 0135 per manual workflow_dispatch run today) + deploys cloud-api + Pages frontend\n- **cloud-cf-deploy.yml** (env: production) → same\n- **deploy-eliza-provisioning-worker.yml** (env: production) → SSHes eliza-1 (88.99.82.102), pulls main, restarts daemon\n- **build-agent-image.yml** → builds + pushes ghcr.io/elizaos/eliza:stable + :latest\n\n## Sanity already verified\n\n- Prod Neon schema is already at the latest (0135) — manually migrated via workflow_dispatch earlier\n- Staging stack is healthy on the same code (eliza-staging-1, cpx32 fsn1, Neon eliza-cloud-neon-dev)\n- prod daemon heartbeats green for the past 1h+ (fleet-upgrade reconciler clean)\n\n## Open items NOT blocking merge\n\n- res.map warning in heartbeat publish on both envs (Upstash REST client quirk, non-blocking)\n- Staging VM cloud-init template doesn't pre-install node 24 + cloud-shared symlink yet — fixed manually for current staging VM; needs follow-up to make next staging VM bootstrap clean\n\n## DRAFT until\n\nYou give explicit go.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-01T13:21:29Z",
+      "mergedAt": "2026-06-01T22:47:43Z",
+      "additions": 5428985,
+      "deletions": 2520270
+    },
+    {
+      "id": "PR_kwDOMT5cIs7hDuk6",
+      "title": "Claude/agentic views surface",
+      "author": "lalalune",
+      "number": 8080,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR introduces an **agent-surface framework** that makes every plugin view agent-controllable (registry, overlay, `useAgentElement` hook, and capability dispatch), plus a **view-action affinity layer** that upweights view-scoped runtime actions in the planner's prompt while the user is looking at that view. It also ships **sleep/wake lifecycle endpoints** for deep cold-storage of agent compute, **incremental diff backups** for agent sandboxes, and a **scheduled-backup cron** to keep agents continuously snapshotted.\n\n- Agent-surface: `ViewAgentRegistry`, `AgentSurfaceProvider`, `useAgentElement`, `AgentElementOverlay`, and capability handlers wired into both `DynamicViewLoader` and the new `ShellViewAgentSurface` wrapper.\n- Incremental backups: `agent-backup-diff.ts` computes field-level deltas; migration 0136 adds `backup_kind`/`parent_backup_id`/`content_hash` safely.\n- Sleep/wake: `executeSleep` backs up then frees compute; `executeWake` re-provisions and restores.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge; the most consequential new paths are well-tested and the DB change is backwards-compatible.\n\nThe three main feature areas all land with test coverage and the migration is safe. The pre-shutdown backup inconsistency leaves content_hash null on the most important backup rows, but is functionally safe since the column is nullable.\n\npackages/cloud-shared/src/lib/services/eliza-sandbox.ts — the executeSleep pre-shutdown backup path\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/agent/src/runtime/view-action-affinity.ts | New module mapping active plugin views to preferred runtime actions. |\n| packages/ui/src/agent-surface/registry.ts | New ViewAgentRegistry; AgentSurfaceProvider properly calls removeViewRegistry on unmount. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/sleep/route.ts | New sleep endpoint; returns 202 for both new and already-in-progress jobs. |\n| packages/cloud-shared/src/lib/services/eliza-sandbox.ts | Adds executeSleep/executeWake. Pre-shutdown backup bypasses buildBackupInput, omitting content_hash. |\n| packages/cloud-shared/src/lib/services/agent-backup-diff.ts | New incremental backup diffing/patching library; logic is correct and well-tested. |\n| packages/cloud-shared/src/db/migrations/0136_agent_backup_incremental.sql | Adds backup_kind/parent_backup_id/content_hash columns safely with IF NOT EXISTS and DEFAULT 'full'. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Shell as Shell\n    participant Registry as ViewAgentRegistry\n    participant Affinity as view-action-affinity\n    participant Optimizer as prompt-optimization\n    participant Agent as Planner\n\n    Shell->>Registry: getOrCreateViewRegistry()\n    Shell->>Affinity: \"setActiveViewContext({viewId})\"\n    Agent->>Shell: \"capability=list-elements\"\n    Shell->>Registry: snapshot()\n    Registry-->>Agent: elements[]\n    Optimizer->>Affinity: getActiveViewContext()\n    Affinity-->>Optimizer: activeView\n    Optimizer->>Agent: prompt with Active View block\n```\n\n<sub>Reviews (3): Last reviewed commit: [\"test(agent): cover character + automatio...\"](https://github.com/elizaos/eliza/commit/0424b6a57cf997545a078bd930228b2795715512) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=34774957)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-31T07:32:14Z",
+      "mergedAt": "2026-06-01T00:49:41Z",
+      "additions": 32025,
+      "deletions": 4147
+    },
+    {
+      "id": "PR_kwDOMT5cIs7hUp5b",
+      "title": "fix(cloud): support custom image provisioning",
+      "author": "Dexploarer",
+      "number": 8112,
+      "body": "## Summary\n- accept and return dockerImage on Eliza agent create/list/detail API responses, then pass it through sandbox creation so API-created agents can full-provision custom images\n- keep dashboard deploys wired to persisted docker images and add a dashboard e2e that creates, provisions, ticks, and observes a custom-image agent reaching running\n- harden the local cloud e2e stack and frontend bundling path used by the provisioning/audit suites\n\n## Validation\n- bun run cloud:e2e — 17 passed\n- bun run test:cloud — 473 passed, 23 skipped\n- bun run --cwd packages/cloud-infra test — 22 passed\n- bun run --cwd packages/cloud-frontend typecheck\n- bun run --cwd packages/cloud-frontend build:client\n- bun run --cwd packages/cloud-frontend audit:cloud — 116 passed\n- bun --bun playwright test tests/dashboard.spec.ts — 2 passed\n- bun --bun playwright test tests/provision.spec.ts — 2 passed\n\n<!-- greptile_comment -->\n\n<details><summary><h3>Greptile Summary</h3></summary>\n\nThis PR adds end-to-end support for custom Docker image provisioning through the Eliza cloud API: the `dockerImage` field is now accepted on agent creation, validated with a regex schema, persisted to the database, and surfaced in list and detail API responses. The dashboard is wired to pass the persisted image through sandbox creation, and new E2E tests cover both the API path and the dashboard UI flow.\n\n- **API layer** (`route.ts` for both agents and `[agentId]`): `dockerImage` is validated via a zod schema with a character-class regex, stored on create, and returned in list/detail DTOs — including the fix in `Page.tsx` that was previously hardcoding `docker_image: null`.\n- **E2E stack hardening** (`stack.ts`): migrations now run as an explicit logged step before the API server starts, `DATABASE_URL` is set earlier in the process, and the stack switches to `cloud-api-e2e-server.mjs`.\n- **Frontend fixes** (`agent-card.tsx`, `glass-composer.tsx`, `sandbox-proxy/page.tsx`, `vite.config.ts`): accessibility improvements (aria-label, aria-pressed), an inlined Vite alias for es-toolkit/compat shims, and a switch from `process.env.NODE_ENV` to `import.meta.env.PROD` for the sandbox proxy guard.\n</details>\n\n\n<h3>Confidence Score: 5/5</h3>\n\nSafe to merge — the core dockerImage feature is properly validated, typed, and covered by new E2E tests for both the API and dashboard paths.\n\nThe change is well-scoped: the new dockerImage field is validated at the API boundary with a zod regex schema, threaded through the service layer, and verified end-to-end in both provision and dashboard tests. No existing auth or billing gates are bypassed. The ancillary changes (stack hardening, frontend shims, accessibility fixes) are self-contained improvements.\n\nNo files require special attention. The telemetry guard mismatch in main.tsx is a minor inconsistency with no observable runtime impact.\n\n<details><summary><h3>Important Files Changed</h3></summary>\n\n\n\n\n| Filename | Overview |\n|----------|----------|\n| packages/cloud-api/v1/eliza/agents/route.ts | Adds dockerImage to agent create/list responses with proper zod validation (regex, trim, min/max); passed through to elizaSandboxService.createAgent correctly. |\n| packages/cloud-api/v1/eliza/agents/[agentId]/route.ts | Adds dockerImage to the agent detail response; straightforward field addition, consistent with list endpoint. |\n| packages/cloud-shared/src/lib/types/cloud-api.ts | Adds dockerImage: string | null to AgentListItemDto; AgentDetailDto inherits it via extension; AgentAdminDetailsDto already had the field. |\n| packages/cloud-frontend/src/dashboard/agents/Page.tsx | Fixes toAgentRow to pass a.dockerImage instead of hardcoded null, wiring the persisted docker image into dashboard deploys. |\n| packages/cloud-frontend/src/main.tsx | Adds telemetry opt-out via VITE_ELIZA_RENDER_TELEMETRY env var and a globalThis flag; the disable check only covers \"false\" while the underlying isRenderTelemetryEnabled() also handles \"0\" and boolean false. |\n| packages/test/cloud-e2e/src/fixtures/stack.ts | Refactors E2E stack setup: runs migrations as a logged step before starting the API server, sets DATABASE_URL earlier in the process, and switches to cloud-api-e2e-server.mjs. |\n| packages/test/cloud-e2e/tests/provision.spec.ts | Adds a full lifecycle test for API-created custom-image agents: creates, verifies persistence, provisions, polls status, and re-verifies the docker_image field. |\n| packages/test/cloud-e2e/tests/dashboard.spec.ts | Adds a dashboard E2E test that fills in the custom-image form, waits for create + provision responses, and polls the sandbox to running state. |\n| packages/ui/src/components/shell/glass-composer.tsx | Adds handleMouseDown to fire onClick immediately on pointer press and deduplicate the subsequent click event via pointerActivatedRef; the disabled guard is absent from handleMouseDown (flagged in previous review). |\n| packages/cloud-frontend/src/components/agents/agent-card.tsx | Replaces outer button wrapper with a div + absolutely-positioned inner button for click capture; improves aria-label and replaces JS hover state with CSS group-hover for remove button visibility. |\n\n</details>\n\n\n</details>\n\n\n<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\nsequenceDiagram\n    participant Client\n    participant CloudAPI as cloud-api (POST /agents)\n    participant SandboxSvc as elizaSandboxService\n    participant DB as agent_sandboxes\n    participant ProvisionAPI as POST /agents/:id/provision\n    participant ControlPlane as Control Plane\n\n    Client->>CloudAPI: \"POST /api/v1/eliza/agents {agentName, dockerImage?}\"\n    CloudAPI->>CloudAPI: dockerImageSchema.safeParse()\n    CloudAPI->>SandboxSvc: \"createAgent({agentName, dockerImage})\"\n    SandboxSvc->>DB: \"INSERT (docker_image = dockerImage)\"\n    DB-->>SandboxSvc: agent row\n    SandboxSvc-->>CloudAPI: agent\n    CloudAPI-->>Client: \"201 {id, dockerImage}\"\n\n    Client->>ProvisionAPI: POST /api/v1/eliza/agents/:id/provision\n    ProvisionAPI->>DB: read docker_image\n    ProvisionAPI->>ControlPlane: schedule provisioning job (image)\n    ControlPlane-->>ProvisionAPI: 202 accepted\n    ProvisionAPI-->>Client: \"202 {agentId}\"\n\n    Note over Client,ControlPlane: poll GET /agents/:id until status=running\n```\n</details>\n\n\n<!-- greptile_failed_comments -->\n<details><summary><h3>Comments Outside Diff (1)</h3></summary>\n\n1. `.github/workflows/coverage-gate.yml`, line 10 ([link](https://github.com/elizaos/eliza/blob/cb8cb4c0614d1f25b9cddf8a24bc2cef9237a3f0/.github/workflows/coverage-gate.yml#L10)) \n\n   <a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> **Lockfile integrity bypassed on failure**\n\n   The `|| bun install --no-frozen-lockfile` fallback means that whenever the lockfile is out of sync with `package.json` — the exact condition `--frozen-lockfile` is supposed to catch — CI silently falls through to an unconstrained install. Packages resolved during that fallback install may differ from what the lockfile records, making the build non-reproducible and removing the supply-chain integrity guarantee the frozen flag provides. If the frozen install is failing in CI today, the correct fix is to regenerate the lockfile and commit it, not to bypass the check on every future run.\n\n   <a href=\"https://app.greptile.com/ide/claude-code?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20.github%2Fworkflows%2Fcoverage-gate.yml%0ALine%3A%2010%0A%0AComment%3A%0A**Lockfile%20integrity%20bypassed%20on%20failure**%0A%0AThe%20%60%7C%7C%20bun%20install%20--no-frozen-lockfile%60%20fallback%20means%20that%20whenever%20the%20lockfile%20is%20out%20of%20sync%20with%20%60package.json%60%20%E2%80%94%20the%20exact%20condition%20%60--frozen-lockfile%60%20is%20supposed%20to%20catch%20%E2%80%94%20CI%20silently%20falls%20through%20to%20an%20unconstrained%20install.%20Packages%20resolved%20during%20that%20fallback%20install%20may%20differ%20from%20what%20the%20lockfile%20records%2C%20making%20the%20build%20non-reproducible%20and%20removing%20the%20supply-chain%20integrity%20guarantee%20the%20frozen%20flag%20provides.%20If%20the%20frozen%20install%20is%20failing%20in%20CI%20today%2C%20the%20correct%20fix%20is%20to%20regenerate%20the%20lockfile%20and%20commit%20it%2C%20not%20to%20bypass%20the%20check%20on%20every%20future%20run.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&repo=elizaos%2Feliza&pr=8112&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaudeDark.svg?v=3\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=3\"><img alt=\"Fix in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=3\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22codex%2Fcloud-provisioning-e2e-custom-images%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22codex%2Fcloud-provisioning-e2e-custom-images%22.%0A%0AThis%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20.github%2Fworkflows%2Fcoverage-gate.yml%0ALine%3A%2010%0A%0AComment%3A%0A**Lockfile%20integrity%20bypassed%20on%20failure**%0A%0AThe%20%60%7C%7C%20bun%20install%20--no-frozen-lockfile%60%20fallback%20means%20that%20whenever%20the%20lockfile%20is%20out%20of%20sync%20with%20%60package.json%60%20%E2%80%94%20the%20exact%20condition%20%60--frozen-lockfile%60%20is%20supposed%20to%20catch%20%E2%80%94%20CI%20silently%20falls%20through%20to%20an%20unconstrained%20install.%20Packages%20resolved%20during%20that%20fallback%20install%20may%20differ%20from%20what%20the%20lockfile%20records%2C%20making%20the%20build%20non-reproducible%20and%20removing%20the%20supply-chain%20integrity%20guarantee%20the%20frozen%20flag%20provides.%20If%20the%20frozen%20install%20is%20failing%20in%20CI%20today%2C%20the%20correct%20fix%20is%20to%20regenerate%20the%20lockfile%20and%20commit%20it%2C%20not%20to%20bypass%20the%20check%20on%20every%20future%20run.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodexDark.svg?v=3\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=3\"><img alt=\"Fix in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=3\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20.github%2Fworkflows%2Fcoverage-gate.yml%0ALine%3A%2010%0A%0AComment%3A%0A**Lockfile%20integrity%20bypassed%20on%20failure**%0A%0AThe%20%60%7C%7C%20bun%20install%20--no-frozen-lockfile%60%20fallback%20means%20that%20whenever%20the%20lockfile%20is%20out%20of%20sync%20with%20%60package.json%60%20%E2%80%94%20the%20exact%20condition%20%60--frozen-lockfile%60%20is%20supposed%20to%20catch%20%E2%80%94%20CI%20silently%20falls%20through%20to%20an%20unconstrained%20install.%20Packages%20resolved%20during%20that%20fallback%20install%20may%20differ%20from%20what%20the%20lockfile%20records%2C%20making%20the%20build%20non-reproducible%20and%20removing%20the%20supply-chain%20integrity%20guarantee%20the%20frozen%20flag%20provides.%20If%20the%20frozen%20install%20is%20failing%20in%20CI%20today%2C%20the%20correct%20fix%20is%20to%20regenerate%20the%20lockfile%20and%20commit%20it%2C%20not%20to%20bypass%20the%20check%20on%20every%20future%20run.%0A%0AHow%20can%20I%20resolve%20this%3F%20If%20you%20propose%20a%20fix%2C%20please%20make%20it%20concise.&pr=8112&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursorDark.svg?v=3\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=3\"><img alt=\"Fix in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCursor.svg?v=3\" height=\"20\"></picture></a>\n</details>\n\n<!-- /greptile_failed_comments -->\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=Fix%20the%20following%201%20code%20review%20issue.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%201%0Apackages%2Fcloud-frontend%2Fsrc%2Fmain.tsx%3A26-27%0AThe%20%60renderTelemetryEnabled%60%20guard%20only%20matches%20the%20string%20%60%22false%22%60%2C%20but%20%60isRenderTelemetryEnabled%28%29%60%20in%20both%20%60render-telemetry.tsx%60%20and%20%60useRenderGuard.ts%60%20also%20disables%20telemetry%20for%20%60%220%22%60%20and%20the%20boolean%20%60false%60.%20When%20%60VITE_ELIZA_RENDER_TELEMETRY%3D0%60%2C%20%60renderTelemetryEnabled%60%20stays%20%60true%60%2C%20so%20the%20%60RenderTelemetryProfiler%60%20wrapper%20is%20still%20mounted%20%28and%20%60__ELIZA_RENDER_TELEMETRY_DISABLED__%60%20is%20never%20set%29%20%E2%80%94%20though%20the%20internal%20check%20still%20disables%20recording%20via%20the%20%60readEnvValue%60%20fallback.%20Aligning%20the%20guard%20to%20the%20same%20condition%20used%20internally%20avoids%20the%20inconsistency.%0A%0A%60%60%60suggestion%0Aconst%20_rte%20%3D%20import.meta.env.VITE_ELIZA_RENDER_TELEMETRY%3B%0Aconst%20renderTelemetryEnabled%20%3D%0A%20%20_rte%20!%3D%3D%20%22false%22%20%26%26%20_rte%20!%3D%3D%20%220%22%20%26%26%20_rte%20!%3D%3D%20false%3B%0A%60%60%60%0A%0A&repo=elizaos%2Feliza&pr=8112&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaudeDark.svg?v=3\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=3\"><img alt=\"Fix All in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInClaude.svg?v=3\" height=\"20\"></picture></a> <a href=\"https://chatgpt.com/codex/deeplink?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22elizaos%2Feliza%22%20on%20the%20existing%20branch%20%22codex%2Fcloud-provisioning-e2e-custom-images%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22codex%2Fcloud-provisioning-e2e-custom-images%22.%0A%0AFix%20the%20following%201%20code%20review%20issue.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%201%0Apackages%2Fcloud-frontend%2Fsrc%2Fmain.tsx%3A26-27%0AThe%20%60renderTelemetryEnabled%60%20guard%20only%20matches%20the%20string%20%60%22false%22%60%2C%20but%20%60isRenderTelemetryEnabled%28%29%60%20in%20both%20%60render-telemetry.tsx%60%20and%20%60useRenderGuard.ts%60%20also%20disables%20telemetry%20for%20%60%220%22%60%20and%20the%20boolean%20%60false%60.%20When%20%60VITE_ELIZA_RENDER_TELEMETRY%3D0%60%2C%20%60renderTelemetryEnabled%60%20stays%20%60true%60%2C%20so%20the%20%60RenderTelemetryProfiler%60%20wrapper%20is%20still%20mounted%20%28and%20%60__ELIZA_RENDER_TELEMETRY_DISABLED__%60%20is%20never%20set%29%20%E2%80%94%20though%20the%20internal%20check%20still%20disables%20recording%20via%20the%20%60readEnvValue%60%20fallback.%20Aligning%20the%20guard%20to%20the%20same%20condition%20used%20internally%20avoids%20the%20inconsistency.%0A%0A%60%60%60suggestion%0Aconst%20_rte%20%3D%20import.meta.env.VITE_ELIZA_RENDER_TELEMETRY%3B%0Aconst%20renderTelemetryEnabled%20%3D%0A%20%20_rte%20!%3D%3D%20%22false%22%20%26%26%20_rte%20!%3D%3D%20%220%22%20%26%26%20_rte%20!%3D%3D%20false%3B%0A%60%60%60%0A%0A\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodexDark.svg?v=3\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=3\"><img alt=\"Fix All in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCodex.svg?v=3\" height=\"20\"></picture></a> <a href=\"https://app.greptile.com/api/ide/cursor?prompt=Fix%20the%20following%201%20code%20review%20issue.%20Work%20through%20them%20one%20at%20a%20time%2C%20proposing%20concise%20fixes.%0A%0A---%0A%0A%23%23%23%20Issue%201%20of%201%0Apackages%2Fcloud-frontend%2Fsrc%2Fmain.tsx%3A26-27%0AThe%20%60renderTelemetryEnabled%60%20guard%20only%20matches%20the%20string%20%60%22false%22%60%2C%20but%20%60isRenderTelemetryEnabled%28%29%60%20in%20both%20%60render-telemetry.tsx%60%20and%20%60useRenderGuard.ts%60%20also%20disables%20telemetry%20for%20%60%220%22%60%20and%20the%20boolean%20%60false%60.%20When%20%60VITE_ELIZA_RENDER_TELEMETRY%3D0%60%2C%20%60renderTelemetryEnabled%60%20stays%20%60true%60%2C%20so%20the%20%60RenderTelemetryProfiler%60%20wrapper%20is%20still%20mounted%20%28and%20%60__ELIZA_RENDER_TELEMETRY_DISABLED__%60%20is%20never%20set%29%20%E2%80%94%20though%20the%20internal%20check%20still%20disables%20recording%20via%20the%20%60readEnvValue%60%20fallback.%20Aligning%20the%20guard%20to%20the%20same%20condition%20used%20internally%20avoids%20the%20inconsistency.%0A%0A%60%60%60suggestion%0Aconst%20_rte%20%3D%20import.meta.env.VITE_ELIZA_RENDER_TELEMETRY%3B%0Aconst%20renderTelemetryEnabled%20%3D%0A%20%20_rte%20!%3D%3D%20%22false%22%20%26%26%20_rte%20!%3D%3D%20%220%22%20%26%26%20_rte%20!%3D%3D%20false%3B%0A%60%60%60%0A%0A&pr=8112&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursorDark.svg?v=3\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=3\"><img alt=\"Fix All in Cursor\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixAllInCursor.svg?v=3\" height=\"20\"></picture></a>\n\n<sub>Reviews (13): Last reviewed commit: [\"fix all pages smoke readiness\"](https://github.com/elizaos/eliza/commit/1e6bcb5621039594897089a29c0336ee7b61dc62) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=34889138)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-01T10:34:24Z",
+      "mergedAt": null,
+      "additions": 2316,
+      "deletions": 446
+    },
+    {
+      "id": "PR_kwDOMT5cIs7hHMrD",
+      "title": "feat(orchestrator): live Claude-Code-style coding workbench (streaming, diffs, stop, SSE)",
+      "author": "NubsCarson",
+      "number": 8095,
+      "body": "## What\nBrings the `/orchestrator` coding workbench to live, Claude-Code/Codex-style parity, end-to-end on the **opencode + Cerebras (gpt-oss-120b)** backend. Each commit is gate-green (tsgo + biome + vitest) and proven in a real headless-Chrome session.\n\n## Commits\n1. **auto-spawn opencode+cerebras on first message** — messaging a task with no live agent now spawns one (was the unimplemented `elizaos` default → `spawn ENOENT`); default framework → vendored opencode; per-task workdir.\n2. **Claude-Code-style streaming workbench view** — coalesces streamed stdout chunks into one markdown turn; renders `tool_running` events as structured tool-call cards; typed status notices; finished-session tools resolve to ✓; fixes cross-task transcript contamination.\n3. **key view-manager cards by viewType+id** — removes 9 duplicate-React-key console errors.\n4. **real interleaved diff viewer** — LCS line-diff with old/new gutters + +/-/context coloring (replaces the flat all-removals-then-all-additions); unit-tested.\n5. **Stop / Esc interrupt** — a prominent \"Agent working… / Stop (Esc)\" bar; global Esc cancels the run (proven: stopped a run in ~0.5s, work halted 5/12 files).\n6. **test fixes** — update two unit tests to the auto-spawn + opencode-default behavior.\n7. **live SSE transport** — per-task change bus + `GET /tasks/:taskId/stream` SSE endpoint + an EventSource client; the room updates live (sub-second) instead of polling, polling kept only as reconnect fallback.\n\n## Proof (headless Chrome, opencode+cerebras)\n- Tool-call cards + coalesced markdown, **0 legacy fragments**, **0 duplicate-key console errors**.\n- Real interleaved diff on a live edit (`- sugar is sweet` / `+ and so are you`).\n- Esc interrupted a run mid-work (5/12 files, ~0.5s).\n- SSE: `ready` + 23 `change` pings over a run; the workbench's EventSource subscribes and the conversation grows sub-second.\n- `tsgo` + `biome` + `vitest` (503 plugin tests) green.\n\n## Backend\nCoding backend stays **opencode + Cerebras** (vendored, gpt-oss-120b). No Claude/Codex backend.\n\n## Follow-ups (next PRs)\nInteractive permission round-trip, live plan/todo checklist, multi-backend normalization (claude/codex), and the P1 set (changed-files nav, slash menu, @-file refs, cost meter, ANSI terminal, keyboard overlay, error/retry cards).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n<!-- greptile_comment -->\n\n<h3>Greptile Summary</h3>\n\nThis PR wires up a Claude-Code/Codex-style live coding workbench on top of the orchestrator plugin: SSE push transport replaces polling, streamed agent chunks are coalesced into coherent turns, tool calls render as structured diff/shell cards, a stop/Esc interrupt bar halts running agents, and the LCS-based `lineDiff` produces real interleaved diffs instead of flat remove-then-add blocks.\n\n- **SSE transport** (`orchestrator-routes.ts`, `client-agent.ts`): per-task pub/sub bus with `subscribeTaskChanges`; heartbeat keeps proxies alive; debounced client-side refetch on each `change` ping; polling retained as reconnect fallback.\n- **Streaming workbench** (`orchestrator-stream.tsx`): `buildConversation` merges same-lane agent chunks, collapses multi-event tool calls by ID, and resolves perpetual spinners for finished sessions; `MarkdownText` renders inline code/bold/links and fenced code blocks.\n- **Auto-spawn** (`orchestrator-task-service.ts`): messaging a task with no live agent now spawns an opencode+Cerebras session automatically; the vendored opencode backend replaces the unimplemented elizaos default.\n\n<h3>Confidence Score: 4/5</h3>\n\nSafe to merge with one fix: the EventSource client needs an onerror handler to prevent infinite reconnect loops when the task is deleted or returns a non-2xx response.\n\nThe SSE client in `streamOrchestratorTask` has no `onerror` handler. When the server returns a 404 (task not found or deleted) or any other error, the browser's EventSource automatically retries every ~3 seconds indefinitely, hammering the endpoint until the component unmounts. The polling fallback is already in place, so simply closing the EventSource on error loses no functionality. Everything else — the conversation builder, diff renderer, stop/Esc bar, cross-task contamination fix, and auto-spawn path — looks correct and well-guarded.\n\npackages/ui/src/api/client-agent.ts — the `streamOrchestratorTask` function needs an `onerror` handler that calls `source.close()`.\n\n<h3>Important Files Changed</h3>\n\n| Filename | Overview |\n|----------|----------|\n| packages/ui/src/api/client-agent.ts | Adds `streamOrchestratorTask` SSE subscription helper; missing `onerror` handler causes infinite reconnect loop on permanent server errors (404/403/5xx). |\n| plugins/plugin-agent-orchestrator/src/api/orchestrator-routes.ts | Adds GET /tasks/:taskId/stream SSE endpoint with heartbeat, per-task pub/sub, and correct cleanup on req close/error; double-cleanup is guarded correctly. |\n| plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts | Adds in-memory per-task change bus, auto-spawn on first message, and opencode default; `emitChange` defensively wraps subscribers; no cleanup of listeners on service stop (minor leak). |\n| plugins/plugin-agent-orchestrator/src/services/workdir-validation.ts | Adds `ensureTaskWorkdir` that creates `~/.eliza/workspaces/<taskId>` for auto-spawning; path is constructed with `path.resolve` before mkdir, staying within the workspace base. |\n| plugins/plugin-task-coordinator/src/orchestrator-stream.tsx | New file: builds the streaming conversation view — coalesces same-lane agent chunks, merges tool events by ID, renders tool-call cards, inline markdown, and structured notices. Logic is sound; FENCE regex lastIndex is reset correctly before each use. |\n| plugins/plugin-task-coordinator/src/orchestrator-diff.tsx | New file: LCS-based interleaved line diff with old/new gutter numbers; falls back to flat remove-then-add above 800 combined lines; unit-tested; keys are unique within each invocation. |\n| plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx | Major workbench refactor: switches to `buildConversation`, adds SSE subscription, debounced refetch, adaptive poll interval, stop/Esc bar, and cross-task contamination fix; stickToBottom scroll guard is correct. |\n| packages/ui/src/components/pages/ViewManagerPage.tsx | Fixes duplicate React key warnings by compositing `viewType` + `id` in both ViewSection and TopViewsSection. |\n| plugins/plugin-agent-orchestrator/__tests__/unit/orchestrator-task-service.test.ts | Updates two tests to match auto-spawn behavior and opencode default provider; assertions are consistent with the new runtime behavior. |\n| plugins/plugin-task-coordinator/__tests__/unit/orchestrator-diff.test.ts | New unit tests for `lineDiff` covering unchanged, single-line change, insertion, deletion, and mixed-edit cases; all edge cases produce correct old/new line numbers. |\n| plugins/plugin-agent-orchestrator/src/setup-routes.ts | Registers the new SSE route path so it receives framework-level auth middleware identical to other orchestrator endpoints. |\n\n</details>\n\n<h3>Sequence Diagram</h3>\n\n```mermaid\nsequenceDiagram\n    participant Browser as Browser (OrchestratorWorkbench)\n    participant API as orchestrator-routes (SSE)\n    participant Service as OrchestratorTaskService\n    participant Agent as opencode Agent\n\n    Browser->>API: GET /tasks/:taskId/stream (EventSource)\n    API->>Service: subscribeTaskChanges(taskId, listener)\n    API-->>Browser: \"data: {type:\"ready\"}\"\n\n    loop Agent working\n        Agent->>Service: session event / tool_running / usage\n        Service->>Service: emitChange(taskId)\n        Service->>API: listener() fires\n        API-->>Browser: \"data: {type:\"change\"}\"\n        Browser->>Browser: scheduleRefetch (debounce 150ms)\n        Browser->>API: GET /tasks/:taskId/messages + events\n        API-->>Browser: updated conversation tail\n        Browser->>Browser: buildConversation → render\n    end\n\n    Browser->>API: Stop (Esc / button)\n    API->>Service: stopOrchestratorAgent(taskId, sessionId)\n    Service->>Agent: terminate\n\n    Browser->>Browser: component unmount / task switch\n    Browser->>API: EventSource.close()\n    API->>API: req close → cleanup (clearInterval + unsubscribe + res.end)\n```\n\n<sub>Reviews (6): Last reviewed commit: [\"feat(orchestrator): premium UI pass — la...\"](https://github.com/elizaos/eliza/commit/63f569ecf8e9e8b7ba0799c6d27fae203a1405e0) | [Re-trigger Greptile](https://app.greptile.com/api/retrigger?id=34800292)</sub>\n\n<!-- /greptile_comment -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-05-31T15:40:09Z",
+      "mergedAt": "2026-06-01T00:42:33Z",
+      "additions": 1546,
+      "deletions": 246
+    },
+    {
+      "id": "PR_kwDOMT5cIs7hQ6c_",
+      "title": "Route LifeOps goals into orchestrator workstreams",
+      "author": "binkyfishai",
+      "number": 8109,
+      "body": "## Summary\n- Add `/goal` chat command support for creating LifeOps goals\n- Route goal-created work into durable orchestrator task threads\n- Spawn a goal worker and ground its initial brief in recent chat context\n- Store workstream task/session metadata back on the LifeOps goal\n\n## Testing\n- `bun run --cwd packages/ui test -- src/state/parsers.test.ts src/state/useChatSend.test.tsx src/api/client-lifeops.test.ts`\n- `bun run --cwd plugins/plugin-lifeops test -- src/lifeops/service-mixin-goals.test.ts`\n- `bun run --cwd plugins/plugin-lifeops build:types`\n- Live local smoke: `/goal` created a LifeOps goal, orchestrator task, Codex worker session, and four-part action brief\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-01T07:30:13Z",
+      "mergedAt": null,
+      "additions": 899,
+      "deletions": 14
+    }
+  ],
+  "codeChanges": {
+    "additions": 7925,
+    "deletions": 817,
+    "files": 157,
+    "commitCount": 168
+  },
+  "completedItems": [
+    {
+      "title": "fix(cloud): bootstrap native agent sandbox routing",
+      "prNumber": 8104,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes native Cloud agent sandbox startup/routing issues found while validating Suki's ElizaCloud agent locally against the current Cloud stack.\n\nThe production failure mode matched two concrete Cloud-side gaps:\n\n- the managed `D",
+      "files": [
+        "packages/app-core/deploy/Dockerfile.cloud-agent",
+        "packages/app-core/deploy/cloud-agent-docker-entrypoint.sh",
+        "packages/app-core/deploy/cloud-agent-shared.ts",
+        "packages/app-core/scripts/docker-entrypoint.test.ts",
+        "packages/cloud-infra/cloud/local/setup.sh",
+        "packages/cloud-infra/cloud/local/smoke-test.sh",
+        "packages/cloud-infra/cloud/tests/09-gateway-e2e/chainsaw-test.yaml",
+        "packages/cloud-services/agent-server/Dockerfile",
+        "packages/cloud-shared/src/lib/services/__tests__/autoscale-defaults.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/eliza-sandbox-local-routing.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/node-autoscaler.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-app/onboarding-chat.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-routing.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/scripts/cloud/admin/dev/build-cloud-agent-image.mjs",
+        "packages/test/cloud-e2e/src/fixtures/stack.ts"
+      ]
+    },
+    {
+      "title": "fix(release): brand-agnostic Windows installer naming (enable whitelabel)",
+      "prNumber": 8103,
+      "type": "bugfix",
+      "body": "## Why\n\n`release-check.ts` (the release-workflow contract) and `release-electrobun.yml`'s Windows steps hard-code the literal installer glob `ElizaOSApp-Setup-*.exe`. `build-inno.ps1` already honors `ELIZA_APP_NAME` (so a whitelabel build p",
+      "files": [
+        ".github/workflows/release-electrobun.yml",
+        "packages/app-core/scripts/release-check.ts"
+      ]
+    },
+    {
+      "title": "ci: guard against dangling electrobun submodule pins",
+      "prNumber": 8102,
+      "type": "other",
+      "body": "## Why\n\nThe `upstreams/electrobun` submodule gitlink has repeatedly been pinned to commits that aren't fetchable from its configured remote, breaking `git submodule update` for every fresh clone / CI run (\"not our ref\"). It recurred several",
+      "files": [
+        ".github/workflows/electrobun-submodule-guard.yml"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): preserve JSON-RPC error.data on ACP request failures",
+      "prNumber": 8098,
+      "type": "bugfix",
+      "body": "Closes #8101\n\nACP -32602 \"Invalid params\" errors carry the failing-field detail in the JSON-RPC `error.data` field (e.g. a `ZodError.format()` from the agent side), but `jsonRpcError()` in `acp-native-transport.ts` only read `error.message`",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts"
+      ]
+    },
+    {
+      "title": "feat(agent): keyless WEB_FETCH action so non-Anthropic models can answer live info inline",
+      "prNumber": 8097,
+      "type": "feature",
+      "body": "Closes #8100\n\n## Root cause\n\nThe bot can run non-Anthropic models (e.g. gpt-oss via Cerebras). The keyless web-search capability today is an Anthropic-only monkey-patch in `packages/agent/src/runtime/web-search-tools.ts` (`installAnthropicW",
+      "files": [
+        "packages/agent/src/runtime/actions/web-fetch.test.ts",
+        "packages/agent/src/runtime/actions/web-fetch.ts",
+        "packages/agent/src/runtime/custom-actions.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/core/src/__tests__/message-routing-live-regression.test.ts",
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "fix: unbreak develop build after the requireConfirmation two-phase rollout",
+      "prNumber": 8096,
+      "type": "bugfix",
+      "body": "Closes #8099\n\n# Relates to\n\nNo tracking issue — this is a build-break fix surfaced by `turbo run build` on `develop`.\n\n# Risks\n\nLow. Single additive change: mirrors an existing export block from `index.node.ts` into `index.browser.ts`. No b",
+      "files": [
+        "packages/core/src/index.browser.ts",
+        "plugins/plugin-github/src/actions/issue-op.ts",
+        "plugins/plugin-github/src/actions/pr-op.ts",
+        "plugins/plugin-github/src/types.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): live Claude-Code-style coding workbench (streaming, diffs, stop, SSE)",
+      "prNumber": 8095,
+      "type": "feature",
+      "body": "## What\nBrings the `/orchestrator` coding workbench to live, Claude-Code/Codex-style parity, end-to-end on the **opencode + Cerebras (gpt-oss-120b)** backend. Each commit is gate-green (tsgo + biome + vitest) and proven in a real headless-C",
+      "files": [
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/components/pages/ViewManagerPage.tsx",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/orchestrator-task-service.test.ts",
+        "plugins/plugin-agent-orchestrator/src/api/orchestrator-routes.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/workdir-validation.ts",
+        "plugins/plugin-agent-orchestrator/src/setup-routes.ts",
+        "plugins/plugin-task-coordinator/__tests__/unit/orchestrator-diff.test.ts",
+        "plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx",
+        "plugins/plugin-task-coordinator/src/orchestrator-diff.tsx",
+        "plugins/plugin-task-coordinator/src/orchestrator-stream.tsx"
+      ]
+    },
+    {
+      "title": "fix(vault): self-heal stale PGlite lock so an unclean shutdown can't brick boot",
+      "prNumber": 8092,
+      "type": "bugfix",
+      "body": "## Problem\n\n`PgliteVaultImpl` opens its **own** PGlite store (`<state>/.vault-pglite`) very early at startup — during wallet-key hydration — yet it had none of the resilience the runtime DB (`plugin-sql`'s `PGliteClientManager`) already has",
+      "files": [
+        "packages/vault/src/pglite-vault.ts",
+        "packages/vault/test/pglite-vault.test.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-wallet): guard undefined token name/symbol in birdeye label sanitizer",
+      "prNumber": 8091,
+      "type": "bugfix",
+      "body": "## Problem\n\n`formatTokenInfo` (birdeye analytics) passes `token.name` and `token.symbol` — both typed `string | undefined` — straight into `sanitizeWalletDisplayLabel(label: string)`, which calls `label.replace(...)`:\n\n```ts\nconst safeName ",
+      "files": [
+        "plugins/plugin-wallet/src/analytics/birdeye/utils.ts"
+      ]
+    },
+    {
+      "title": "fix: workspace connector account gate returns 400 not 500 on invalid partition",
+      "prNumber": 8087,
+      "type": "bugfix",
+      "body": "## Root cause\n\nThe browser-workspace `POST /api/browser-workspace/tabs/:tabId/eval` handler ran the user-script security check (`assertBrowserWorkspaceUserScriptAllowed`) **before** the connector account gate.\n\nThe failing test (`workspace-",
+      "files": [
+        "plugins/plugin-browser/src/routes/workspace.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): self-heal onboarding when pinned to the agent's raw loopback port",
+      "prNumber": 8082,
+      "type": "bugfix",
+      "body": "## Problem\nA client whose saved server points at the agent's **raw loopback port** (e.g. `127.0.0.1:31337`, the dev-in-browser default) gets a **401** on the cross-origin browser request and lands on the **\"Pairing is not enabled on this se",
+      "files": [
+        "packages/ui/src/components/shell/ComputerUseApprovalOverlay.tsx",
+        "packages/ui/src/state/startup-phase-poll.test.ts",
+        "packages/ui/src/state/startup-phase-poll.ts"
+      ]
+    },
+    {
+      "title": "Claude/agentic views surface",
+      "prNumber": 8080,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/api/server-types.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/views-routes.ts",
+        "packages/agent/src/runtime/boot-telemetry.ts",
+        "packages/agent/src/runtime/boot-timer.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/src/runtime/prompt-compaction.ts",
+        "packages/agent/src/runtime/prompt-optimization.ts",
+        "packages/agent/src/runtime/view-action-affinity.test.ts",
+        "packages/agent/src/runtime/view-action-affinity.ts",
+        "packages/app-core/platforms/electrobun/update-channels.json",
+        "packages/app-core/scripts/bun-riscv64/Dockerfile",
+        "packages/app-core/scripts/bun-riscv64/build.sh",
+        "packages/app-core/scripts/bun-riscv64/bun-version.json",
+        "packages/app-core/scripts/bun-riscv64/run-build.sh",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0003-third-wave-riscv64-crash-handler-gaps.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0004-rust-target-cpu-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0005-fifth-wave-riscv64-source-gaps.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0006-cpp-wasm-and-inspector-guards-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0007-bun-alloc-max-align-t-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0008-workspace-lints-warn-not-deny-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0009-zigglobalobject-wasm-streaming-guards-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/0010-tcc-externs-stub-on-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/webkit-patches/0003-disable-dfg-ftl-on-riscv64.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/webkit-patches/0004-riscv64-do-not-force-wasm-in-c-loop.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/webkit-patches/0005-domjit-effect-allow-no-dfg-c-loop.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/webkit-patches/0006-disable-usewasm-when-webassembly-compiled-out.patch",
+        "packages/app-core/scripts/bun-riscv64/rust-core/webkit-patches/0007-restore-dropped-includes-and-llint-fwd-decl.patch",
+        "packages/app/src/main.tsx",
+        "packages/app/test/ui-smoke/lib/loadperf-kpi.ts",
+        "packages/app/test/ui-smoke/multi-client-desync.spec.ts",
+        "packages/app/test/ui-smoke/multi-window-sync.spec.ts",
+        "packages/app/test/ui-smoke/perf-load-kpi.spec.ts",
+        "packages/app/vite.config.ts",
+        "packages/benchmarks/loadperf/BASELINE.md",
+        "packages/benchmarks/loadperf/README.md",
+        "packages/benchmarks/loadperf/boot-kpi.mjs",
+        "packages/benchmarks/loadperf/budgets.json",
+        "packages/benchmarks/loadperf/bundle-kpi.mjs",
+        "packages/benchmarks/loadperf/frontend-kpi.mjs",
+        "packages/benchmarks/loadperf/lib.mjs",
+        "packages/benchmarks/loadperf/results/.gitignore",
+        "packages/benchmarks/loadperf/run-all.mjs",
+        "packages/benchmarks/loadperf/statesync-kpi.mjs",
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/cron/agent-backups/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/backups/route.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/sleep/route.ts"
+      ]
+    },
+    {
+      "title": "feat(app-core): make run-node entry filename configurable via ELIZA_ENTRY_FILE",
+      "prNumber": 8126,
+      "type": "feature",
+      "body": "## Summary\n\n[`packages/app-core/scripts/run-node.mjs:176`](packages/app-core/scripts/run-node.mjs#L176) hardcodes `\"eliza.mjs\"` as the entry filename it spawns:\n\n```js\nconst nodeProcess = spawn(execPath, [\"eliza.mjs\", ...args], { … });\n```\n",
+      "files": [
+        "packages/app-core/scripts/run-node.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): audit:cloud installs Playwright Chromium first",
+      "prNumber": 8125,
+      "type": "bugfix",
+      "body": "## Summary\n\n`bun run --cwd packages/cloud-frontend audit:cloud` fails on first-time runs because Playwright Chromium isn't installed. Every one of the 112 test cases in [tests/e2e/aesthetic-audit.spec.ts](packages/cloud-frontend/tests/e2e/a",
+      "files": [
+        "packages/cloud-frontend/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the npm_and_yarn group across 2 directories with 1 update",
+      "prNumber": 8121,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /plugins/plugin-gitpathologist directory: [vitest](https://github.com/vitest-dev/vitest/tree/HEAD/packages/vitest).\nBumps the npm_and_yarn group with 1 update in the /plugins/plugin-undesira",
+      "files": [
+        "plugins/plugin-gitpathologist/package.json",
+        "plugins/plugin-undesirables/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the npm_and_yarn group across 2 directories with 1 update",
+      "prNumber": 8120,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/benchmarks/qwen-claw-bench/data/qwenclawbench-v1.1-100/assets/task_00026_openclaw_update_skill_creation_and_execution/openclaw directory: [vitest](https://github.com/vitest-dev/vit",
+      "files": [
+        "packages/benchmarks/qwen-claw-bench/data/qwenclawbench-v1.1-100/assets/task_00026_openclaw_update_skill_creation_and_execution/openclaw/package.json",
+        "plugins/plugin-facewear/app-xr/package.json"
+      ]
+    },
+    {
+      "title": "chore(infra): close staging VM bootstrap gaps (node, swap, symlink)",
+      "prNumber": 8117,
+      "type": "other",
+      "body": "## Why\n\nWhen eliza-staging-1 came up for the first time today, the daemon needed 3 manual fixes before it would run. Each is a gap in either the cloud-init template (one-shot at first boot) or the deploy workflow (idempotent each push). Clo",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl"
+      ]
+    },
+    {
+      "title": "release: promote develop → main (Cloud V2 sync)",
+      "prNumber": 8116,
+      "type": "other",
+      "body": "## What this does\n\nStandard develop → main promotion to sync prod with the recent Cloud V2 stack changes.\n\nOnce merged, the following auto-deploys will fire (per workflow path filters + env routing):\n\n- **cloud-deploy-backend.yml** (env: pr",
+      "files": [
+        ".codefactor.yml",
+        ".dockerignore",
+        ".env.test.example",
+        ".gitattributes",
+        ".github/CODEOWNERS",
+        ".github/actions/cloud-setup-test-env/action.yml",
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/README.md",
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/auto-label.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-android.yml",
+        ".github/workflows/build-debian-package.yml",
+        ".github/workflows/build-ios.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/build-llama-ffi-android.yml",
+        ".github/workflows/build-llama-ffi-ios.yml",
+        ".github/workflows/build-llama-ffi-linux.yml",
+        ".github/workflows/build-llama-ffi-macos.yml",
+        ".github/workflows/build-omnivoice.yml",
+        ".github/workflows/build-vm-image.yml",
+        ".github/workflows/cache-key-stability.yml",
+        ".github/workflows/cerebras-nightly.yml",
+        ".github/workflows/ci.yaml",
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude-security-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-e2e.yml",
+        ".github/workflows/cloud-gateway-discord.yml",
+        ".github/workflows/cloud-gateway-webhook.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/convert-omnivoice-singing.yml",
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/deploy-homepage.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/e1-chip.yml",
+        ".github/workflows/electrobun-submodule-guard.yml",
+        ".github/workflows/elizaos-cuttlefish.yml",
+        ".github/workflows/elizaos-openagent-ai-soc.yml",
+        ".github/workflows/elizaos-os-full-release.yml",
+        ".github/workflows/elizaos-os-release.yml"
+      ]
+    },
+    {
+      "title": "chore(ci): add cloud-sdk path triggers + drop dead develop-cf branch",
+      "prNumber": 8115,
+      "type": "other",
+      "body": "Closes 2 gaps surfaced by a fresh CI audit:\n\n## 1. `packages/cloud-sdk/**` missing from 4 deploy workflows\n\nThe cloud-sdk is a typed RPC surface consumed by the cloud-api Worker, the cloud-frontend SPA, the provisioning-worker daemon, and t",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml"
+      ]
+    },
+    {
+      "title": "chore(ci): split deploy-eliza-provisioning-worker by env (staging/prod)",
+      "prNumber": 8114,
+      "type": "other",
+      "body": "Fixes the env mismatch where pushes to `develop` deployed to the `production` GitHub Environment.\n\n## What\n\n- Triggers added: now fires on push to both `develop` AND `main` (was just develop)\n- New `determine-env` job resolves env + branch ",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/.gitignore",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf"
+      ]
+    },
+    {
+      "title": "fix(agent): move plugin-google and plugin-lifeops to optional so the default image boots",
+      "prNumber": 8105,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the agent-image boot regression failing the boot gate (#8081), which was blocking every fresh image build (and hosted-agent provisioning). Confirmed failing on `develop` across multiple commits (`2c8f4e0c`, `b63ad103`, `4e",
+      "files": [
+        "packages/agent/src/runtime/core-plugins.test.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 373.3404620942692,
+      "prScore": 360.7024620942692,
+      "issueScore": 12.2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 158.3800298279042,
+      "prScore": 158.3800298279042,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 112.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 112.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "binkyfishai",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/172897890?u=13dcfbbffef5a3f90ae60741795eaf47cc93a244&v=4",
+      "totalScore": 86.39332985768858,
+      "prScore": 86.39332985768858,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 61.70059869083107,
+      "prScore": 61.70059869083107,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 35.45637923958958,
+      "prScore": 35.45637923958958,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "SYMBaiEX",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192078165?u=d1b3acec81367b9ae298ece7ab1c4bd8ff6975bf&v=4",
+      "totalScore": 27.44401607280842,
+      "prScore": 27.10401607280842,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Vincent1-p",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/288571344?v=4",
+      "totalScore": 27.087823691129586,
+      "prScore": 27.087823691129586,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Oxygen56",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/100782273?v=4",
+      "totalScore": 14.346573590279972,
+      "prScore": 14.346573590279972,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 2.4379999999999997,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 31,
+  "mergedPRs": 21,
+  "newIssues": 5,
+  "closedIssues": 6,
+  "activeContributors": 13
+}
