@@ -1,0 +1,477 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-02T00:00:00.000Z",
+    "intervalEnd": "2026-06-03T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-02 to 2026-06-03, elizaos/eliza had 40 new PRs (16 merged), 5 new issues, and 12 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABEGUTAg",
+      "title": "orchestrator: sub-agent completion narration drops/garbles the deliverable (narration-envelope)",
+      "author": "NubsCarson",
+      "number": 8162,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen the planner narrates a coding sub-agent's `task_complete` back to the user, the **deliverable** (the printed value / command output) is frequently dropped, truncated, or buried under process chatter — while the underlying sub-agent work is correct. This is a *presentation* defect, not a capability one.\n\nEvidence: a live 48-prompt sweep (30-scenario battery + smart/normie/harden suites) across all three backends found **0 capability-broken defects** — every answer was correct, every spawn produced its artifact, every safety probe handled. The **only** remaining defect class is this narration-envelope.\n\n## Manifestations (all observed live)\n\n1. **Deliverable drop on combo / printed-value tasks.** On the no-change-set completion path, `composeNarration` → `stripToolTranscript(response)` (`sub-agent-router.ts`) deletes the entire `[tool output: …] … [/tool output]` block. For a \"print a value / run a command and report the output\" task (no files changed → no diff), that block *is* the deliverable, so it's gone before the user sees it.\n2. **Value truncation by the parent model.** The synthetic `task_complete` memory is re-rendered by the parent `RESPONSE_HANDLER` (a weak planner in some deployments), which truncates the value — e.g. `2026-06-02` → `202`, a BTC price `70234` → `705`. Per-backend signature: opencode truncates, codex emits verbose process narration + `Completed <task>` banners, claude is cleanest.\n3. **Stale retry attempts leak.** When a first attempt errors (e.g. `session_state_lost` / an ACP crash) and a respawn recovers, the user sees *both* `\"the sub-agent was blocked / crashed, let me try again\"` **and** the eventual deliverable.\n4. **Process chatter.** Sub-agents (esp. codex) narrate their steps (`\"I'll load the workspace context first\"`, `\"rg is not installed\"`, `\"reverse.py already exists\"`); the parent relays it.\n\n## Proposed structural fixes\n\n**(a) Carry the printed-value deliverable verbatim (fixes #1, mitigates #2).** A structural carrier that mirrors the existing verified-URL carrier:\n- *Producer* (`sub-agent-router.ts`): on the `task_complete && !changeSet && verifiedUrls.length === 0` path, recover the captured stdout from the **raw** `response` (before `composeNarration` strips it) via the inverse of `stripToolTranscript`, and stamp it as `metadata.subAgentDeliverable` (gated to a short single block, ≤2KB, so multi-KB transcripts stay on the model-rendered path). *(I have a ready, tested producer patch for this.)*\n- *Consumer* (`evaluators/sub-agent-completion.ts`): when `subAgentDeliverable` is present, relay it **verbatim** instead of letting the model re-summarize/truncate it — parallel to how `subAgentVerifiedUrls` is already consumed.\n\n**(b) Terminal-reply filter (fixes #3, #4).** Emit only the *terminal* sub-agent reply; suppress stale `blocked`/`failed`/`state_lost` attempts that a later retry superseded, plus raw tool chatter and `Completed <task>` banners. **Caveat — needs care:** the `session_state_lost` error event is currently *coupled to the respawn trigger* (re-injecting it is what prompts the parent to respawn), so suppressing the user-facing narration requires an internal-only routing path that keeps the respawn signal. This is the part that needs design discussion.\n\n**(c) Already shipped — source-side mitigation.** #8158 adds an output-discipline section to the scaffolded sub-agent operating manual (\"lead with the deliverable, don't narrate process, no `Completed <task>` banner, a bare workspace has no SOUL.md/USER.md — don't hunt for them\"), which measurably reduced #4 at the source (codex re-probes went from a verbose banner to a bare `5050` / `2026-06-02`).\n\n## Coordination note\n\n`sub-agent-router.ts` and `evaluators/sub-agent-completion.ts` were recently rewritten on `develop`; this should be coordinated with that work rather than landed blind. Happy to open the (a)-producer + (a)-consumer as a focused PR if the approach looks right.",
+      "createdAt": "2026-06-02T09:02:59Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDWGTpw",
+      "title": "desktop-ffi: prewarm violates GGML_ASSERT(n_tokens_all <= cparams.n_batch) on eliza-1-0_8b after shim loads",
+      "author": "NubsCarson",
+      "number": 7991,
+      "repository": "elizaos/eliza",
+      "body": "## context\n\nafter #7988 lands the windows-x86_64 ffi build path, `libeliza-llama-shim.dll` loads into `bun:ffi` with all 39 symbols resolved. the very next layer — prewarm — crashes with a ggml batch-sizing assert on `eliza-1-0_8b` text bundle.\n\n## crash\n\n```\nGGML_ASSERT(n_tokens_all <= cparams.n_batch) failed\n```\n\nrepro: `~/.eliza` already has the `eliza-1-0_8b-128k.gguf` bundle staged; on first activation the prewarm batch builder asks the runtime to decode more tokens than the context's `n_batch` slot allows. fatal.\n\n## environment\n\n- platform: windows-x86_64\n- backend: cuda (cuda 12.4, msvc, ninja, llama.cpp pinned to the ref in `build-llama-cpp-desktop-dylib.mjs`)\n- shim: built from `eliza_llama_shim.c` with the stub set added in #7988\n- bundle: `bundles/0_8b/text/eliza-1-0_8b-128k.gguf` from default-user `~/.eliza/local-inference/`\n- runtime: `desktop-llama-adapter.ts` → `eliza_llama_decode_unified` path\n\n## what i think is going on\n\nthe prewarm path appears to construct a batch that targets the manifest's declared context window (128k tokens) without first clamping against the actual `cparams.n_batch` value the ffi context was created with. on linux/macos this might be masked by larger default `n_batch` or different prewarm sizing; on windows-cuda the assert fires.\n\ncandidates (i don't want to put words in anyone's mouth):\n\n1. prewarm should size the batch off `cparams.n_batch`, not `n_ctx`.\n2. context creation on the desktop adapter should set `n_batch >= prewarm_tokens` for the chosen bundle.\n3. the bundle manifest's recommended prewarm token count should be exposed and used as both inputs.\n\n## scope\n\n- not blocked by anything outstanding once #7988 lands.\n- separate from the build-time fixes in #7988 (which are infrastructure) — this is a runtime sizing bug one layer down.\n- related context PR: #7983 (local-inference dflash discovery + runtime router wiring).\n",
+      "createdAt": "2026-05-25T20:51:21Z",
+      "closedAt": "2026-06-02T01:14:46Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDSMMxA",
+      "title": "USE_SKILL output wrapping leaks raw bash invocation JSON to user reply",
+      "author": "NubsCarson",
+      "number": 7970,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen a sub-agent invokes a skill via USE_SKILL (e.g. weather skill running \\`wttr.in\\`), the bot's reply to Discord contains the raw bash command + JSON wrapping AS prose, then the clean output, glued together:\n\n\\`\\`\\`\n{\"cmd\":[\"bash\",\"-lc\",\"curl -s \\\"wttr.in/Paris?format=%l:+%c+%t+%h+%w\\\"\"]}{\"output\":\"Paris: 🌦️ +15°C 68% ↙3km/h\"}Paris: 🌦️ +15°C 68% ↙3 km/h\n\\`\\`\\`\n\nThree layers leaked verbatim:\n1. \\`{\"cmd\":[\"bash\",\"-lc\",...]}\\` — the bash invocation envelope\n2. \\`{\"output\":\"...\"}\\` — the captured-output envelope\n3. The actual user-friendly result (also rendered, fortunately)\n\n## Repro\n\nLive 2026-05-25 07:49 UTC. Probe: \\`@bot use the weather skill for paris\\`. Trajectory \\`tj-1be9e601583b7e.json\\`. Stage 0: \\`simple=true reqTool=false candidates=[\"WEATHER_FETCH\"]\\` reply=\"On it.\" (routing-layer promoted to planning via the candidateActions->planning fix). Iter 1: \\`USE_SKILL slug=weather mode=auto\\`. The skill captured stdout via a wrapper that emits the cmd+output envelopes; the planner's REPLY text concatenated all three.\n\nProbe \\`use the weather skill to get weather for tokyo\\` had the same shape but the wrapping was less visible because the final paraphrase was cleaner.\n\n## Why it matters\n\nUser-facing UX: the bot dumps internal shell invocation details to Discord. Looks broken; reveals \"I am running bash\". Pollutes the channel.\n\n## Suggested fix\n\nUSE_SKILL action's result construction should produce a clean \\`userFacingText\\` (the actual command output) separate from the diagnostic \\`text\\` (which can include cmd + envelopes for trajectory recording). The planner-loop's \\`preferredFinalMessageFromToolOrModel\\` already prefers \\`userFacingText\\` when set with \\`verifiedUserFacing: true\\` — USE_SKILL should opt in for skills whose stdout is the user answer (weather, github, healthcheck, etc.).\n\nOr simpler interim fix: in the skill-invocation wrapper, when producing the REPLY text, parse + strip the \\`{\"cmd\":...}\\` and \\`{\"output\":...}\\` envelopes before they're concatenated into the model's REPLY context.\n\n## Acceptance\n\n- \\`use the weather skill for paris\\` returns just \\`Paris: 🌦️ +15°C 68% ↙3 km/h\\`, no JSON envelopes.\n- No regression on skills that already produce clean output (some did in this same sweep — github, healthcheck honest refusals didn't leak).\n\nReported via 50-probe deep sweep on milady deployment 2026-05-25.",
+      "createdAt": "2026-05-25T08:10:17Z",
+      "closedAt": "2026-06-02T01:14:46Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEDBuaA",
+      "title": "orchestrator: served-200 build false-flagged as stale by mtime freshness gate (GAP-C retry/recall regression)",
+      "author": "NubsCarson",
+      "number": 8127,
+      "repository": "elizaos/eliza",
+      "body": "### Summary\n\n`verifyLocalTarget` in `plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts` false-positives on a healthy, served static app, marking it \"dead\" purely because its local file mtime is older than `session.createdAt - 5s`.\n\n### Root cause\n\nIn the completion-URL verification pass (`annotateUnverifiedUrls`), after a URL probes a healthy HTTP 200 (`probe()` returns `status === null`), the code still consults `verifyMappedLocalUrl` → `verifyLocalTarget`, which applies a wall-clock freshness gate:\n\n```ts\nif (requireFresh && stat.mtimeMs < sessionStartedAtMs - 5000) {\n  return `mapped local target was not updated during this session: ...`;\n}\n```\n\nA static app (e.g. `color-pop/index.html`) that exists, is non-empty, and serves HTTP 200 gets flagged \"dead\" because the deploy step copied the build into place and preserved the source file's mtime (mtime skew vs `session.createdAt`).\n\n### Impact (GAP-C chain)\n\n1. The false-dead triggers a spurious verify-retry.\n2. The retry suppresses the round-1 `task_complete`.\n3. The in-flight retry session trips `newerTaskSince` in `coding-session-changes.ts`.\n4. The REAL diff is withheld — so a follow-up \"what did you change?\" wrongly answers \"no captured file diff\".\n\n### Fix\n\nThe live HTTP 200 probe is authoritative for a served URL. The mtime-freshness comparison must not override a healthy 200; reserve the freshness gate for cases where the URL is NOT serving (where the local file is the only liveness signal). The missing-file and empty-file checks remain unconditional.\n\nTracked by PR with a regression test that pins both the served-200 (not flagged) and unserved (still flagged) cases.",
+      "createdAt": "2026-06-01T21:35:23Z",
+      "closedAt": "2026-06-02T01:14:46Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABECW-Uw",
+      "title": "inline WEB_FETCH planner routing (#8097) regresses live-info on non-Anthropic runtimes",
+      "author": "NubsCarson",
+      "number": 8122,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nPR #8097 added two things:\n1. A **keyless `WEB_FETCH` action** (`packages/agent/...`) so non-Anthropic models can answer live info inline. **This is fine — keep it.**\n2. **Inline WEB_FETCH planner routing** in `packages/core/src/services/message.ts`. **This regresses live-info on non-Anthropic runtimes and should be reverted.**\n\n## The regression\n\nOn a gpt-oss / Cerebras (non-Anthropic) runtime, the inline routing added to `message.ts` breaks live-info queries (BTC price, weather, etc.):\n\n- It **perturbs the working opencode sub-agent webfetch path** that previously answered these queries reliably.\n- `WEB_FETCH` **never reliably surfaces** through the planner action surface on these runtimes, so the planner is left mis-routing — live-info queries stop returning real values.\n\nLive-testing confirmed that reverting `message.ts` to its pre-#8097 state (`git checkout <pre-8097> -- packages/core/src/services/message.ts`) plus a stronger spawn-task prompt restores correct behavior: BTC/weather queries again return real values via the opencode webfetch tool.\n\n## The inline-routing additions to revert (all in `message.ts`)\n\n- the live-info **force-include** block in `collectV5PlannerCandidateActions` that surfaces `WEB_FETCH` past the context gate;\n- the **`webLookupBackstop`** branch in `buildV5PlannerActionSurface` (+ the `V5PlannerActionSurfaceSummary.webLookupBackstop` field);\n- the `WEB_LOOKUP_ACTION_NAMES` / `WEB_LOOKUP_DIRECT_ACTIONS` constants, `findCanonicalWebLookupActionName`, and `findPreferredWebLookupActionName`;\n- the `\"web\"` branch added to `shouldPreferDirectCurrentCandidateActions`;\n- the web/coding reordering + `findPreferredWebLookupActionName` swap in `inferAckIntentCandidateActions` / `inferDirectCurrentRequestCandidateActions` / `findDirectOwnedActionSuggestion`.\n\n## What stays\n\nThe keyless **`WEB_FETCH` action** in `packages/agent/...` is harmless and stays — capable models can still use it. Only the `message.ts` planner *routing* is reverted, so upstream matches the working live state and future syncs don't re-break live-info.\n\nPR follows.",
+      "createdAt": "2026-06-01T19:41:49Z",
+      "closedAt": "2026-06-02T01:15:07Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7h1HP3",
+      "title": "feat(plugin-task-coordinator): odysseus-style orchestrator UI",
+      "author": "NubsCarson",
+      "number": 8180,
+      "body": "## Summary\n\nAdds a full **chat-shell UI for the multi-agent orchestrator**, modeled on the\n[odysseus](https://github.com/pewdiepie-archdaemon/odysseus) frontend (MIT) and\nrebuilt from scratch in **React on `@elizaos/ui`**, wired to the **existing\nelizaOS runtime**. This is **frontend only** — there is no new backend; all\ntask/session state continues to live in `@elizaos/plugin-agent-orchestrator`.\n\nThe new surface renders at **`/odysseus`** (and the existing **`/orchestrator`**\nroute) as a full-window app: a labeled session sidebar, a rich composer, a theme\nengine, the memory/skills/notes/settings panels, and the full set of tool views.\n\n> Credit: the original UI/UX design is from **odysseus** (MIT). This is an\n> independent React reimplementation on elizaOS's own stack — none of the\n> odysseus Python backend is used.\n\n## What's included\n\n**New `plugins/plugin-task-coordinator/src/odysseus/` shell (~40 files):**\n- `OdysseusShell` root + `SessionSidebar` (folders, multi-select, pin, drag,\n  resize) + collapsible 48px `IconRail` (mutually exclusive with the sidebar)\n- `Composer` with slash-command + emoji autocomplete and a bottom action row\n- Theme engine (`ThemeMenu` / `PresetsPanel`): preset recolor + customize\n  (font / density / background), mapped onto elizaOS semantic CSS vars\n- `MemoryPanel` (memories/skills/add/settings), `SkillsPanel`, `NotesPanel`,\n  `SettingsPanel`\n- Tool views: tasks, models, email, calendar, gallery (+ editor), compare,\n  research, voice, group chat, cookbook, document library, admin\n- A cross-view **window manager** (`WindowManager` + `useWindowControls`):\n  drag / resize / edge-snap / minimize-to-dock (`MinimizedDock`)\n- `useKeyboardShortcuts`, `useEscapeClose`, `useTaskRoom`, `useChatSubmit`\n\n**Orchestrator render helpers:**\n- `orchestrator-markdown` (via `marked`), `orchestrator-plan`,\n  `orchestrator-reasoning`\n- `orchestrator-stream` now always renders the user's own `stdin` messages\n  (preserves the existing `senderKind === \"user\"` fix)\n\n**App-shell `fullBleed` capability (`packages/ui`):**\n- Opt-in `fullBleed?: boolean` on `AppShellPageRegistration`\n  (backward-compatible). When set, the host shell mounts the page edge-to-edge\n  via `ViewRouter` — **no header, no tab bar, no routed padding** — so a view\n  that owns its whole window has no surrounding dashboard chrome.\n- This **replaces the prior hardcoded `tab !== \"orchestrator\"` header\n  special-case** in `RoutedShellContent` with a general, declarative flag.\n- `/orchestrator` and the new `/odysseus` route are registered `fullBleed: true`.\n\n**Other:**\n- adds the `marked` dependency to the plugin\n- isolates each `*.live.e2e.test.ts` suite's default chromium profile dir so\n  parallel vitest file execution can't collide on the ProcessSingleton lock\n\n## Verification\n\nBuilt on a fresh branch off current `develop` and verified there:\n\n- biome check — clean across all 53 changed source files\n- `tsgo --noEmit` (plugin) — **0 errors** against current `develop` APIs\n- `tsgo --noEmit` (`@elizaos/ui`) — 0 errors in `App.tsx` / `app-shell-registry.ts`\n- plugin unit tests — **19/19** pass\n- plugin build — `tsup` + views bundle + type declarations all succeed\n- live e2e (`*.live.e2e.test.ts`) — **26/26** pass against a running dev stack,\n  and Playwright render checks confirm the host header is absent on `/odysseus`\n  (full-bleed) and the global chat overlay behaves correctly\n\n## Scope / notes\n\n- **Frontend only.** No actions/providers/services added; state stays in\n  `@elizaos/plugin-agent-orchestrator`.\n- The `fullBleed` flag is opt-in and changes no existing page's behavior.\n- Some per-view actions render honest empty/disabled states where elizaOS has no\n  corresponding client method yet (e.g. email IMAP/SMTP, calendar CalDAV,\n  gallery image backend, voice TTS/STT) — these light up unchanged once the\n  matching runtime routes exist. Happy to file follow-up issues for these.\n\nScreenshots / a short screen recording can be added on request.\n\n## Related\n\n- Closes #8188 (proposal/motivation).\n- Unblocked by #8187 — a develop-side `biome` format fix for `plugin-app-control/src/views/ViewManagerView.tsx` that currently red-fails the repo-wide **Format Check** gate (and every open PR). This PR's Format Check goes green once #8187 lands.\n\n## CI status (for reviewers)\n\nThis PR's own gates are green: Format Check (this PR's files), Server Tests, unit-tests, lint-and-types, integration-tests, coverage on changed files, gitleaks, check-pr-title, route-coverage, iOS Simulator Build, Homepage Build, Electrobun Desktop Contract, Cloud Live E2E.\n\nThe currently-red lanes are **pre-existing on `develop`**, not introduced here — proven by #8187 (a 1-file format-only change) failing the *identical* set:\n\n- Plugin Tests — `@elizaos/plugin-rlm` (`server.test.ts` spawns `/nonexistent/python`)\n- Client Tests — `FineTuningTuiView.test.tsx` (plugin-training)\n- Zero-Key Deterministic E2E, `bun run dev onboarding chat`, `env:audit:check`\n- Android Debug Build — `shortcuts.xml` deep-link audit (`run-mobile-build.mjs`)\n- Format Check (biome) — develop's `ViewManagerView.tsx` (→ #8187)\n\nA short screen recording / screenshots of the live `/odysseus` surfaces can be added on request.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-02T14:23:32Z",
+      "mergedAt": null,
+      "additions": 42479,
+      "deletions": 260
+    },
+    {
+      "id": "PR_kwDOMT5cIs7hvF8f",
+      "title": "feat(orchestrator): add Odysseus workbench and operator inspector",
+      "author": "NubsCarson",
+      "number": 8166,
+      "body": "## Current Status\n\nThis PR is intentionally **draft** and should not merge as one unit. It is the large Conductor/Odysseus operator-inspector stack and currently carries too much unrelated history for review or shipment.\n\nLatest large-branch head: `0892cb7dc504c89c65d0c10f7ba25a5491812689` on `codex/conductor-inspector`.\n\nRecommended ship path is the split PR stack:\n\n- #8183 `chore: sync bun lock workspace entries` — lockfile-only base hygiene; fixes current workspace lock drift on `develop`\n- #8184 `fix(app): restore dev smoke chat mount` — app/Vite dev-smoke fix stacked on #8183\n- #8186 `fix(ci): align zero-key app smoke with startup shell` — CI-smoke drift cleanup stacked on #8184\n- #8181 `test(orchestrator): cover ACP plan events and word-split text` — stacked on #8186\n- #8182 `fix(orchestrator): guard stream identity and task deletion` — stacked on #8186\n- Later: operator inspector drawer and Odysseus view/component port as separate reviewable PRs\n\n## What This Stack Contains\n\n- Odysseus-style orchestrator workbench surfaces and `/odysseus` routing from the local `nubs/orchestrator-view-feature` stack\n- Conductor-inspired operator detail drawer concepts for sessions/timeline blocks with Input, Output, Events, and Usage tabs\n- Stream identity hardening so rendered blocks remain traceable to message/event/session records\n- Non-chat/full-bleed routing fixes so orchestrator/Odysseus controls are not covered by global chat chrome\n- UI safety fixes including destructive-action confirmation and markdown URL sanitization\n- Dev-only Vite/Bun CommonJS interop shims so local app dev smoke can mount the real chat UI again without changing production resolution\n- API CORS support for `ELIZA_UI_PORT` so non-default Vite UI ports are accepted by the local API server\n\n## Current Split-Stack Validation\n\n- #8184: manual Dev Smoke passed, manual Cloud Tests passed, focused app/CORS/local smoke validations passed\n- #8186: local startup/runtime tests, plugin-browser/elizaos tests, full assistant-home browser spec, reset-to-onboarding browser spec, ChatComposer unit coverage, scenario-runner PR coverage, Biome, and `git diff --check` passed\n- #8186 fresh manual runs on head `e78a1b7f5e109771e41485df13d62879ad32d29c` are in progress:\n  - Tests: https://github.com/elizaOS/eliza/actions/runs/26839814087\n  - Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26839815886\n  - Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26839817661\n  - Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26839819151\n- #8181 and #8182 are based on #8186 and are clean under `git diff --check origin/codex/ci-smoke-drift-cleanup...HEAD`; their focused tests passed before the final #8186 base-head advance and their diffs are unchanged\n\n## Local Validation On The Large Branch\n\n- `bunx biome check packages/app/src/shims/*.ts packages/app/vite.config.ts packages/app-core/src/api/server-cors.ts packages/app-core/src/api/server-cors.test.ts`\n- `bunx tsc --noEmit --pretty false --skipLibCheck --ignoreConfig packages/app/src/shims/*.ts`\n- `bunx vitest run packages/app-core/src/api/server-cors.test.ts` passed: 7 tests\n- `bun run --cwd packages/app test -- test/route-coverage.test.ts test/ui-smoke-coverage.test.ts test/view-interaction-coverage.test.ts` passed: 19 tests\n- Isolated UI probe confirmed `/chat` mounts, no page errors, and `chat-composer-textarea` is visible\n\n## Notes\n\nThe Conductor study conclusion still stands: borrow Conductor's operator experience, not its deterministic DAG execution model. For Eliza, the immediate value is rendering and recovering from the DTOs the orchestrator already streams; a DAG editor, polling-worker queue model, retry matrix, and DLQ/compensation machinery should stay out unless product evidence says otherwise.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-02T10:04:38Z",
+      "mergedAt": null,
+      "additions": 40659,
+      "deletions": 1382
+    },
+    {
+      "id": "PR_kwDOMT5cIs7h0U4g",
+      "title": "feat(ui): continuous-chat overlay + restored app shell, and a Storybook catalog",
+      "author": "NubsCarson",
+      "number": 8178,
+      "body": "> **Draft-quality note for reviewers:** part of this PR (the `App.tsx`/`Header.tsx` restoration) reverts the intentional pill-only cleanup on `develop`. That is a maintainer call by design — flagged explicitly, not slipped in. The branch is **synced up to `develop` and `MERGEABLE`** (see \"Sync status\").\n\n## What this is\n\nTwo separable bodies of work on `packages/ui`:\n\n### 1. Her-style continuous-chat overlay + restored full app shell  *(behavioral — reverts part of the pill-only strip)*\n- `ContinuousChatOverlay` — a self-contained, presentational glass \"continuous chat\" overlay (whisper lines that dissolve over any view, expand-to-thread, voice, ChatGPT-style mic↔send swap, full a11y, safe-area + mobile-nav-offset aware). Controller injected via prop (`useShellController`); no bespoke state duplication.\n- Restored the full **3-panel chat workspace** (`ConversationsSidebar | ChatView | TasksEventsPanel`) and the **header navigation**, both unwired by the June pill-only cleanup (the components/nav model were never deleted, just disconnected).\n- The overlay is the single shared chat input: it floats over every view, and on the chat tab `ChatView` hides its in-view composer (`hideComposer`) so there's no duplicate composer — both read the same conversation.\n- `MINIMAL_SHELL` flag (`shell-chrome.ts`) gates a minimal conversational-OS home vs. the full workspace.\n\n### 2. Storybook catalog for `@elizaos/ui`  *(purely additive)*\n- Real `@storybook/react-vite` catalog (`packages/ui/.storybook`), **424 stories** across primitives, composites, shell, and presentational feature surfaces.\n- Harness: Tailwind v4 plugin, `@elizaos/*` source aliases mirroring `vitest.config.ts`, a `mockApp()` decorator (under `src/` so it shares the preview module graph), and a `node:fs` stub.\n- A documented gap (`.storybook/README.md` #3, tracked in #8177): i18n/model-hub stories that transitively import `@elizaos/core` can't render yet (Vite dep-optimizer resolves core via its Node entry → `plugin-manager` → `fs-extra`). Those stories are held back rather than shipped broken.\n\n## Verification (this branch, merged up to develop)\n- `packages/ui` unit tests: **479 pass** (overlay/shell-chrome/cloud-shell suites incl. behavioral window-shell + mic/send-guard cases).\n- `bun run --cwd packages/ui lint` (biome) and `typecheck`: **clean, 0 errors**.\n- Storybook catalog render-verified headless (Playwright) across all surfaces.\n- A multi-dimension review (eliza-conventions / hacky / correctness / react-quality / fits-architecture / test-quality) ran with adversarial verification; all confirmed findings were fixed (notably two mobile-layout bugs: a phantom bottom-nav padding gap under `MINIMAL_SHELL`, and the overlay composer occluding the mobile bottom nav).\n\n## Sync status\n**Merged up to `develop`; `MERGEABLE`.** The only conflict was `App.tsx` (resolved toward the restoration). Drift handled: dropped an orphaned import + stale comment; removed `voice/VoiceWaveform.stories.tsx` because `develop` deleted that component in a perf pass (\"kill VoiceWaveform\"); reconciled `bun.lock` for develop's new workspace packages.\n\n## CI triage — the red checks are NOT introduced by this branch\nThis branch changes **only `packages/ui` + `bun.lock`** (0 server/plugin source files). Green on every lane this code affects: **Client Tests, unit-tests, lint-and-types, integration-tests, coverage, Format(biome) for ui, Electrobun, CodeQL**. The reds are inherited from `develop` (currently red there, maintainers actively repairing) or CI infra:\n- `Format Check (biome)` → `@elizaos/plugin-app-control` (untouched here; develop's own unformatted file).\n- `Server Tests` / `Plugin Tests` → server/plugin packages (untouched here; red on develop).\n- `Dev Smoke (onboarding chat)` / `Zero-Key Deterministic E2E` → red on develop (in-flight \"fix(ci)\" commits).\n- `env:audit:check` → `@discordjs/opus` prebuilt-binary 404 (CI/upstream native-build flake; dep byte-identical to develop).\n- `All Tests Passed` → aggregate gate that fails because of the above.\n\n**One interaction for a maintainer eye:** `dev-smoke/bun-dev-onboarding-chat.spec.ts:198` asserts `getByTestId(\"chat-composer-textarea\")` visible at `/chat`. This branch hides the in-view composer there (overlay is the input). If the restored input model is accepted, that testid/assertion needs reconciling (e.g. the overlay composer exposing the canonical testid). Not edited here — those specs are under active repair on `develop` and this touches the restore-vs-pill direction.\n\n## For reviewers\nIf the shell restoration needs more discussion, the **Storybook catalog (#2) is additive and can be split into its own PR** off `develop` — happy to do that on request. Tracked follow-up: #8177.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-02T13:55:34Z",
+      "mergedAt": null,
+      "additions": 9083,
+      "deletions": 981
+    },
+    {
+      "id": "PR_kwDOMT5cIs7h2d3s",
+      "title": "fix(app): restore dev smoke chat mount",
+      "author": "NubsCarson",
+      "number": 8184,
+      "body": "## Stack\n\nThis PR is stacked on #8183 (`chore: sync bun lock workspace entries`) because current `develop` needs the lockfile-only env-audit fix first.\n\n## Summary\n\nRestores the app dev-smoke chat mount on Bun/Vite canary by adding dev-only CommonJS interop shims for packages that Vite currently fails to resolve correctly during `bun run dev`.\n\nAlso lets the API CORS helper accept `ELIZA_UI_PORT`, which is needed when the Vite UI uses a non-default smoke-test port.\n\n## Why\n\nThe lockfile-only PR #8183 still fails Dev Smoke on current `develop` with:\n\n- `getByTestId('chat-composer-textarea')` not found on `/chat`\n\nThis PR fixes that failure. Manual Dev Smoke on this head passed: https://github.com/elizaOS/eliza/actions/runs/26829349502\n\nThe Vite aliases are scoped with `apply: \"serve\"`, so production builds keep resolving the real packages.\n\n## Validation\n\n- `/home/nubs/Git/iqlabs/eliza-labs/eliza-acp-plan-event-tests/.tmp/bun-install-canary/bin/bun install --no-save`\n- `/home/nubs/Git/iqlabs/eliza-labs/eliza-acp-plan-event-tests/.tmp/bun-install-canary/bin/bun x biome check packages/app/src/shims/*.ts packages/app/vite.config.ts packages/app-core/src/api/server-cors.ts packages/app-core/src/api/server-cors.test.ts`\n- `/home/nubs/Git/iqlabs/eliza-labs/eliza-acp-plan-event-tests/.tmp/bun-install-canary/bin/bun x tsc --noEmit --pretty false --skipLibCheck --ignoreConfig packages/app/src/shims/*.ts`\n- `/home/nubs/Git/iqlabs/eliza-labs/eliza-acp-plan-event-tests/.tmp/bun-install-canary/bin/bun x vitest run packages/app-core/src/api/server-cors.test.ts` passed: 7 tests\n- `/home/nubs/Git/iqlabs/eliza-labs/eliza-acp-plan-event-tests/.tmp/bun-install-canary/bin/bun run --cwd packages/app test -- test/route-coverage.test.ts test/ui-smoke-coverage.test.ts test/view-interaction-coverage.test.ts` passed: 19 tests\n- `git diff --check origin/codex/bun-lock-workspace-sync...HEAD`\n- Manual `Dev Smoke` workflow passed on head `41fe0e55964cdc94e4cd3cc5ad3f99554432dba9`: https://github.com/elizaOS/eliza/actions/runs/26829349502\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-02T15:13:14Z",
+      "mergedAt": null,
+      "additions": 1585,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDOMT5cIs7h34SN",
+      "title": "fix(ci): align zero-key app smoke with startup shell",
+      "author": "NubsCarson",
+      "number": 8186,
+      "body": "## Summary\n- carry the upstream stale-test alignment for the current startup shell and registry/browser-route tests\n- hydrate full `/api/status` once when launch/boot progress reports ready, so ChatView receives the runtime model before unlocking the composer\n- align the assistant-home ui-smoke flow with the current chat workspace, typed send, scripted browser STT, push-to-talk, and desktop pill suppression\n- keep the inline chat composer in its push-to-talk release state after the transcript fills the draft, so release can still submit the held turn\n- update reset smoke coverage to assert the current bootstrap-token first-run form after Reset Everything\n- align the scenario-runner PR coverage contract with the current assistant-home spec\n\n## Root Cause\nThe stacked app-smoke branch fixed the dev chat mount, but broader Zero-Key/Scenario runs still hit stale assertions and then exposed a startup-state gap: ready launch/boot progress mapped `model` to `undefined`, which ChatView interpreted as no configured provider. The assistant-home spec also expected old home-only selectors and embedded-pill behavior that no longer exists in the current chat shell. While replacing those stale selectors, the full browser smoke exposed a real push-to-talk regression: the inline composer swapped from the release mic to the send button once STT text filled the draft, so pointer release could no longer submit the held voice turn.\n\n## Validation\n- `bun x biome check packages/ui/src/state/startup-phase-runtime.ts packages/ui/src/state/startup-phase-runtime.test.ts packages/app/test/ui-smoke/assistant-home-flow.spec.ts packages/app/test/ui-smoke/helpers.ts packages/app/test/ui-smoke/reset-returns-to-onboarding.spec.ts packages/elizaos/src/commands/plugins.test.ts plugins/plugin-browser/src/routes/__tests__/browser-bridge-companion-revoke.test.ts`\n- `bun run --cwd packages/ui test src/state/startup-phase-runtime.test.ts`\n- `bun run --cwd packages/elizaos test src/commands/plugins.test.ts`\n- `bun run --cwd plugins/plugin-browser test src/routes/__tests__/browser-bridge-companion-revoke.test.ts`\n- `node packages/app-core/scripts/ensure-shared-i18n-data.mjs`\n- `bunx playwright install chromium`\n- `bun run --cwd packages/app test:e2e test/ui-smoke/assistant-home-flow.spec.ts --project=chromium -g \"captures first-run, assistant home, chat suppression, and view pill states\"`\n- `bun run --cwd packages/scenario-runner test -- src/executor.test.ts src/runtime-factory.test.ts src/scenario-pr-workflow.test.ts src/__tests__/deterministic-action-coverage.test.ts` passed: 43 tests\n- `bun run --cwd packages/ui test src/components/composites/chat/chat-composer.test.tsx` passed: 3 tests\n- `bun run --cwd packages/scenario-runner test -- src/scenario-pr-workflow.test.ts` passed: 10 tests\n- `bun run --cwd packages/app test:e2e test/ui-smoke/assistant-home-flow.spec.ts --project=chromium` passed: 4 tests\n- `bun run --cwd packages/app test:e2e test/ui-smoke/reset-returns-to-onboarding.spec.ts --project=chromium` passed: 2 tests\n- `bun x biome check packages/ui/src/components/composites/chat/chat-composer.tsx packages/ui/src/components/composites/chat/chat-composer.test.tsx packages/app/test/ui-smoke/assistant-home-flow.spec.ts packages/app/test/ui-smoke/reset-returns-to-onboarding.spec.ts packages/scenario-runner/src/scenario-pr-workflow.test.ts` passed with one existing warning in an unrelated literal-string assertion\n- `git diff --check`\n\n## Manual Workflow Dispatches\nFresh runs on head `e78a1b7f5e109771e41485df13d62879ad32d29c`:\n- Tests: https://github.com/elizaOS/eliza/actions/runs/26839814087\n- Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26839815886\n- Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26839817661\n- Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26839819151\n\n## Follow-up Fix (`c2a4cf8a29`)\n- restore keyless UI-smoke stubs for terminal, screenshare, and task-coordinator contracts so Zero-Key can exercise real route/interaction behavior instead of generic placeholder views\n- lift the embedded shell pill above the active view surface and align orchestrator visual coverage with the current visible assistant pill\n- move the app-control view manager back onto theme tokens so plugin tests no longer fail on hardcoded dark/cyan styles\n- tighten the screenshare smoke locator to the `Host` heading now that the view also has a `Start host session` button\n\n### Additional Validation\n- `bun x biome check packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs packages/app/test/ui-smoke/plugin-view-cases.ts packages/app/test/ui-smoke/screenshare-gui-interactions.spec.ts packages/ui/src/App.tsx plugins/plugin-app-control/src/views/ViewManagerView.tsx`\n- `node --check packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs`\n- `git diff --check`\n- `bun run --cwd plugins/plugin-app-control test src/views/ViewManagerView.test.ts` passed: 2 tests\n- `bun run --cwd packages/ui test src/components/shell/__tests__/HomePill.test.tsx src/components/shell/__tests__/shell-assistant-flow.test.tsx` passed: 16 tests\n- `bun run --cwd packages/app test:e2e test/ui-smoke/screenshare-gui-interactions.spec.ts --project=chromium` passed against a verified stub stack\n- combined zero-key subset passed: 60 tests across plugin visual coverage, orchestrator GUI, screenshare GUI, task-coordinator GUI, game-operator GUI, and terminal command contract\n\n### Remote Rerun Status\n- New head: `c2a4cf8a290e9c722d0aebb8439002e25fa89c0f`\n- Previous Cloud Tests manual run finished success: https://github.com/elizaOS/eliza/actions/runs/26839819151\n- Fresh manual reruns on this head:\\n  - Tests: https://github.com/elizaOS/eliza/actions/runs/26843352716\\n  - Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26843352839\\n  - Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26843352758\\n  - Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26843352732\n\n## Follow-up Fix (`0526cd122d`)\n- add the missing `@elizaos/logger` source alias to the Electrobun Vitest config, matching the existing source aliases for `@elizaos/core` and related workspace packages\n\n### Additional Validation\n- `bun x biome check packages/app-core/platforms/electrobun/vitest.electrobun.config.ts`\n- `bun run --cwd packages/app-core/platforms/electrobun test src/native/desktop-window.test.ts src/rpc-handlers.test.ts src/dynamic-view-rpc-schema.test.ts src/surface-windows.test.ts src/dynamic-views/host.test.ts` passed: 47 tests\n- `git diff --check`\n\n### Remote Rerun Status\n- New head: `0526cd122ddfb7f5cfde83428ddfbb65b12088ea`\n- The previous manual Tests run failed only in `Electrobun window and dynamic-view coverage`; its earlier 60-test keyless UI-smoke subset passed remotely.\n- Fresh manual reruns on this head:\\n  - Tests: https://github.com/elizaOS/eliza/actions/runs/26844050307\\n  - Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26844050270\\n  - Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26844050326\\n  - Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26844050230\n\n## Follow-up Fix (`30b24bf97e`)\n- add `@elizaos/logger` source aliases to plugin Vitest configs that already alias `@elizaos/core` to source, preventing unbuilt workspace package resolution failures in app-control and related plugin suites\n\n### Additional Validation\n- `bun x biome check plugins/plugin-app-control/vitest.config.ts plugins/plugin-elizacloud/vitest.config.ts plugins/plugin-gitpathologist/vitest.config.ts plugins/plugin-mcp/vitest.config.ts plugins/plugin-local-inference/vitest.config.ts plugins/plugin-shell/vitest.config.ts plugins/plugin-scape/vitest.config.ts plugins/plugin-wallet/vitest.config.ts`\n- `bun run --cwd plugins/plugin-app-control test -- src/services/__tests__/app-verification.integration.test.ts src/services/__tests__/verification-room-bridge.test.ts src/actions/views-management.test.ts` passed: 19 tests\n- `git diff --check`\n\n### Remote Rerun Status\n- New head: `30b24bf97e5e6d435335f4f8cb0b43e275610d2`\n- The previous manual Tests run passed Server, Client, Electrobun, live gates, and keyless UI-smoke, then failed only at app-control verification on the same `@elizaos/logger` source-resolution issue.\n- Fresh manual reruns on this head:\\n  - Tests: https://github.com/elizaOS/eliza/actions/runs/26844986834\\n  - Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26844986920\\n  - Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26844987111\\n  - Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26844987332\n\n## Follow-up Fix (`89e400c7e7`)\n- add `@elizaos/logger` source aliases to computeruse, coding-tools, and local-inference audit Vitest configs that point `@elizaos/core` at source\n\n### Additional Validation\n- `bun x biome check plugins/plugin-computeruse/vitest.config.ts plugins/plugin-coding-tools/vitest.config.ts plugins/plugin-local-inference/vitest.audit.config.ts plugins/plugin-app-control/vitest.config.ts plugins/plugin-elizacloud/vitest.config.ts plugins/plugin-gitpathologist/vitest.config.ts plugins/plugin-mcp/vitest.config.ts plugins/plugin-local-inference/vitest.config.ts plugins/plugin-shell/vitest.config.ts plugins/plugin-scape/vitest.config.ts plugins/plugin-wallet/vitest.config.ts`\n- `bun run --cwd plugins/plugin-computeruse test -- test/helpers/screenshot-quality.test.ts src/__tests__/browser-auto-open.test.ts` passed: 6 tests\n- `bun run --cwd plugins/plugin-app-control test -- src/services/__tests__/app-verification.integration.test.ts src/services/__tests__/verification-room-bridge.test.ts src/actions/views-management.test.ts` passed: 19 tests\n- `git diff --check`\n\n### Remote Rerun Status\n- New head: `89e400c7e73ff6e8a57ac450fc38570c3e6e845c`\n- The previous manual Tests run passed app-control verification and then failed only at computeruse browser auto-open on the same `@elizaos/logger` source-resolution issue.\n- Fresh manual reruns on this head:\\n  - Tests: https://github.com/elizaOS/eliza/actions/runs/26845741148\\n  - Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26845741211\\n  - Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26845741175\\n  - Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26845741183\n\n## Follow-up Fix (`f607dab12b`)\n- add the missing React runtime dependency for `@elizaos/app-model-tester`, matching its direct React imports and fixing fresh plugin-test installs\n- build `@elizaos/plugin-x/lifeops-message-adapter` as an explicit package entry so LifeOps scenario resolution can import the subpath that `plugin-x` already advertises\n- add Node types and plugin-x Vitest source aliases for `@elizaos/core/node` and `@elizaos/logger`, preventing the same unbuilt-workspace logger resolution issue from resurfacing in plugin-x tests\n\n### Additional Validation\n- `bun run --cwd plugins/plugin-x test` passed: 27 tests, 15 skipped\n- `bun run --cwd plugins/app-model-tester test` passed: 2 tests\n- `bun -e \"import('tsup/dist/cli-default.js')\"` from `plugins/plugin-x` passed and emitted `dist/lifeops-message-adapter.js` plus `dist/lifeops-message-adapter.d.ts`\n- `test -f plugins/plugin-x/dist/lifeops-message-adapter.js && test -f plugins/plugin-x/dist/lifeops-message-adapter.d.ts && bun -e 'const m = await import(\"@elizaos/plugin-x/lifeops-message-adapter\"); if (typeof m.XDmAdapter !== \"function\") throw new Error(\"missing XDmAdapter\"); console.log(\"plugin-x adapter subpath OK\")'`\n- `bun run --cwd plugins/app-model-tester test -- src/model-tester-app.test.ts` passed: 1 test\n- `bun x biome check plugins/app-model-tester/package.json plugins/plugin-x/tsconfig.json plugins/plugin-x/tsup.config.ts plugins/plugin-x/vitest.config.ts bun.lock`\n- `git diff --check`\n- Local `packages/scenario-runner test:pr:e2e` now passes the previous plugin-x adapter import point and fails later on unbuilt `@elizaos/cloud-routing` in this worktree; CI has the required workspace build step before scenario execution.\n\n### Remote Rerun Status\n- New head: `f607dab12b9db1d6af2a26d7480fc0c57840c46b`\n- The previous manual Tests run passed the earlier logger-alias slices and then failed only in Plugin Tests (`@elizaos/app-model-tester` missing `react`) and Zero-Key scenario resolution (`@elizaos/plugin-x/lifeops-message-adapter` missing built subpath).\n- Fresh manual reruns on this head:\\n  - Tests: https://github.com/elizaOS/eliza/actions/runs/26847189406\\n  - Scenario PR E2E: https://github.com/elizaOS/eliza/actions/runs/26847189362\\n  - Dev Smoke: https://github.com/elizaOS/eliza/actions/runs/26847189372\\n  - Cloud Tests: https://github.com/elizaOS/eliza/actions/runs/26847189377\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-02T16:15:07Z",
+      "mergedAt": null,
+      "additions": 1105,
+      "deletions": 490
+    }
+  ],
+  "codeChanges": {
+    "additions": 2789,
+    "deletions": 1151,
+    "files": 87,
+    "commitCount": 409
+  },
+  "completedItems": [
+    {
+      "title": "fix(cloud): guarantee response-token budget for all reasoning models",
+      "prNumber": 8189,
+      "type": "bugfix",
+      "body": "## Problem\n\nEliza Cloud inference returns `content: null` (and **bills the consumed tokens**) for reasoning models when `max_tokens` is too small to cover both the hidden chain-of-thought and an answer.\n\nConfirmed live against `api.elizaclo",
+      "files": [
+        "packages/cloud-api/__tests__/chat-completions-tool-choice.test.ts",
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-shared/src/lib/models/catalog.ts",
+        "packages/cloud-shared/src/lib/pricing-reasoning-detection.test.ts",
+        "packages/cloud-shared/src/lib/pricing.ts",
+        "packages/cloud-shared/src/lib/providers/types.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): pin Steward tenant via X-Steward-Tenant header",
+      "prNumber": 8179,
+      "type": "bugfix",
+      "body": "## Why\n\nPR #8176 set \\`NEXT_PUBLIC_STEWARD_TENANT_ID\\` at the Pages build env so the staging SPA would init the Steward SDK with \\`tenantId=elizacloud-staging\\`. But after the deploy, the bundle still didn't contain the literal — Vite isn't",
+      "files": [
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-api/src/steward/embedded.ts",
+        "packages/cloud-frontend/wrangler.toml"
+      ]
+    },
+    {
+      "title": "feat(cloud): isolate Steward tenant for staging magic-link redirect",
+      "prNumber": 8176,
+      "type": "feature",
+      "body": "## Why\n\nStaging email magic-link logins still redirect to **www.elizacloud.ai** (prod) instead of **staging.elizacloud.ai**. Root cause traced to [Steward-Fi/steward](https://github.com/Steward-Fi/steward) `packages/api/src/routes/auth.ts:1",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(install): bootstrap fixes unblocking fresh-clone dev:desktop boot",
+      "prNumber": 8168,
+      "type": "bugfix",
+      "body": "## Summary\n\nTwo one-file fixes that together unblock `bun run dev:desktop` from a fresh clone where the optional `packages/shared/assets/clouds/` directory is absent (e.g. sparse / partial checkouts) **and** where `@elizaos/plugin-worker-ru",
+      "files": [
+        "packages/scripts/build-private-workspace-packages.mjs",
+        "packages/shared/scripts/sync-to-public.mjs"
+      ]
+    },
+    {
+      "title": "feat(cloud): enable agent web UI by default (ELIZA_UI_ENABLE=true)",
+      "prNumber": 8167,
+      "type": "feature",
+      "body": "## Why\n\nThe per-agent web UI is the natural way users interact with a provisioned sandbox. It was disabled by default in `managed-eliza-config` because the original concern was that a public web UI exposed without auth would leak agent stat",
+      "files": [
+        "packages/cloud-shared/src/lib/constants/agent-flavors.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(daemon): use systemKey() helper for KMS preflight key id",
+      "prNumber": 8165,
+      "type": "bugfix",
+      "body": "## Why\r\n\r\nStaging daemon hit a restart loop today (NRestarts=2881 before I caught it). Root cause is a self-conflict between two of recent commits:\r\n\r\n- `0330ba3d64` (2026-05-28) introduces the strict KEY_RE regex in `packages/security/src/",
+      "files": [
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.test.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "style(plugin-twitch): biome-format integration.test.ts (unblocks Format Check CI)",
+      "prNumber": 8163,
+      "type": "tests",
+      "body": "The **Format Check (biome)** CI job is currently failing repo-wide on a single unformatted file — `plugins/plugin-twitch/__tests__/integration.test.ts` — which blocks the `format:check` gate on every open PR against `develop`.\n\n```\n× Format",
+      "files": [
+        "plugins/plugin-twitch/__tests__/integration.test.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): close completion-dedup TOCTOU race (duplicate replies)",
+      "prNumber": 8161,
+      "type": "bugfix",
+      "body": "The cross-session completion-dedup guard (added for #7967) has a check-then-act race. In `SubAgentRouter.routeSessionEvent`:\n\n- the \"first poster\" slot is **read** (`completionHasPostedFromOtherSession`) before the awaited delivery loop (`a",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
+    {
+      "title": "fix(core): route a coding request mentioning a market term to coding, not web",
+      "prNumber": 8160,
+      "type": "bugfix",
+      "body": "`inferDirectCurrentRequestCandidateActions` and `inferAckIntentCandidateActions` checked `looksLikeWebSearchRequest` **before** `looksLikeCodingWorkRequest`. So a coding task that happens to mention a live/market term —\n\n> \"build an app tha",
+      "files": [
+        "packages/core/src/__tests__/message-routing-live-regression.test.ts",
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "fix(core): suppress a leaked TASKS spawn-arg JSON envelope from the user reply",
+      "prNumber": 8159,
+      "type": "bugfix",
+      "body": "A weak planner (gpt-oss-class) sometimes hallucinates its own `TASKS`/spawn-action argument object into `messageToUser`, so the user receives the raw envelope:\n\n```json\n{\"task\":\"Fetch the current Bitcoin price\",\"agentType\":\"opencode\",\"appro",
+      "files": [
+        "packages/core/src/runtime/__tests__/planner-loop-user-facing-text.test.ts",
+        "packages/core/src/runtime/planner-loop.ts"
+      ]
+    },
+    {
+      "title": "refactor(local-inference): remove dead ONNX EOT + orphaned emotion classifier (~919 LOC)",
+      "prNumber": 8154,
+      "type": "refactor",
+      "body": "## Summary\n\nRemoves ~919 LOC of dead voice code identified by a voice-subsystem audit (Tier-A, high-confidence). Every deletion was verified to have zero consumers, and the change is validated: typecheck clean for `services/voice/`, Biome c",
+      "files": [
+        "plugins/plugin-local-inference/src/services/manifest/schema.ts",
+        "plugins/plugin-local-inference/src/services/voice/eot-classifier-ggml.ts",
+        "plugins/plugin-local-inference/src/services/voice/eot-classifier.ts",
+        "plugins/plugin-local-inference/src/services/voice/index.ts",
+        "plugins/plugin-local-inference/src/services/voice/voice-emotion-classifier-ggml.ts",
+        "plugins/plugin-local-inference/src/services/voice/voice-emotion-classifier.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/voice-emotion-classifier.ts"
+      ]
+    },
+    {
+      "title": "feat(desktop): startup model warmup — embedding (deferred) + voice (post-ready)",
+      "prNumber": 8151,
+      "type": "feature",
+      "body": "## Summary\n\nWarms local models in the background at startup so the agent is responsive (and voice-driven UI works) without a first-use stall — **embedding** pre-boot and **voice** post-ready.\n\nThis bundles the in-flight embedding-warmup wor",
+      "files": [
+        "packages/app-core/platforms/electrobun/src/native/agent-state-dir.test.ts",
+        "packages/app-core/platforms/electrobun/src/native/agent.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/scripts/lib/desktop-startup-embedding-warmup-policy.mjs",
+        "packages/app-core/scripts/lib/desktop-startup-embedding-warmup-policy.test.mjs",
+        "packages/app-core/scripts/lib/orchestrator-desktop-dev-banner.mjs",
+        "packages/app-core/scripts/startup-integration-script-drift.test.ts",
+        "packages/app-core/src/runtime/dev-server.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/runtime/voice-warmup.test.ts",
+        "packages/app-core/src/runtime/voice-warmup.ts",
+        "packages/docs/apps/desktop-local-development.md",
+        "packages/docs/configuration.mdx",
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md",
+        "plugins/plugin-local-inference/README.md",
+        "plugins/plugin-local-inference/src/runtime/embedding-warmup-policy.test.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): waifu service-key provisioning + patron chat (auth, system-prompt, agent_message, plugin-worker-runtime)",
+      "prNumber": 8150,
+      "type": "feature",
+      "body": "## Summary\n\nRebased onto current `develop`. Carries tonight's cloud provisioning + patron-chat work that is **already deployed to prod** (via Cloud CF Deploy) but never merged, so `develop` is currently missing it. This PR lands it to persi",
+      "files": [
+        "package.json",
+        "packages/app-core/scripts/collect-docker-runtime-deps.mjs",
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/v1/agents/[agentId]/message/route.ts",
+        "packages/cloud-api/v1/agents/route.ts",
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-shared/src/lib/services/provisioning-job-types.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts"
+      ]
+    },
+    {
+      "title": "feat(desktop): tray-first + decoupled fast startup (opt-in)",
+      "prNumber": 8148,
+      "type": "feature",
+      "body": "## Summary\n\nMakes the elizaOS desktop app start fast and (opt-in) **tray-first**, like the sibling Detour shell. The slowness was **app-layer, not Electrobun** (same framework/version as Detour): the UI was coupled to a separately-spawned a",
+      "files": [
+        "packages/app-core/platforms/electrobun/src/desktop-tray-config.test.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-tray-config.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/platforms/electrobun/src/lifecycle/agent-ready-publish.test.ts",
+        "packages/app-core/platforms/electrobun/src/lifecycle/agent-ready-publish.ts",
+        "packages/app-core/platforms/electrobun/src/native/desktop.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/scripts/lib/renderer-build-action.mjs",
+        "packages/app-core/scripts/lib/renderer-build-action.test.mjs",
+        "packages/ui/src/components/shell/__tests__/useShellController.test.tsx",
+        "packages/ui/src/components/shell/useShellController.ts"
+      ]
+    },
+    {
+      "title": "Claude/hetzner provision smoke",
+      "prNumber": 8147,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".github/workflows/hetzner-provision-smoke.yml",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/app-core/scripts/bun-riscv64/bun-version.json",
+        "packages/app/vite.config.ts",
+        "packages/benchmarks/loadperf/budgets.json",
+        "packages/benchmarks/loadperf/bundle-kpi.mjs",
+        "packages/cloud-shared/docs/CLOUD_ONBOARDING_PROVISIONING_REVIEW.md",
+        "packages/scripts/build-views.mjs",
+        "plugins/plugin-native-agent/android/build.gradle",
+        "plugins/plugin-native-bun-runtime/android/build.gradle",
+        "plugins/plugin-native-camera/android/build.gradle",
+        "plugins/plugin-native-canvas/android/build.gradle",
+        "plugins/plugin-native-gateway/android/build.gradle",
+        "plugins/plugin-native-location/android/build.gradle",
+        "plugins/plugin-native-mobile-agent-bridge/android/build.gradle",
+        "plugins/plugin-native-mobile-signals/android/build.gradle",
+        "plugins/plugin-native-screencapture/android/build.gradle",
+        "plugins/plugin-native-swabble/android/build.gradle",
+        "plugins/plugin-native-talkmode/android/build.gradle",
+        "plugins/plugin-native-websiteblocker/android/build.gradle"
+      ]
+    },
+    {
+      "title": "fix(install): build private workspace packages in postinstall (#8143)",
+      "prNumber": 8146,
+      "type": "bugfix",
+      "body": "Fixes #8143.\n\n## Summary\n\n`@elizaos/plugin-remote-manifest` and `@elizaos/security` ship dist artifacts that other workspace packages import directly (e.g. `@elizaos/plugin-remote-manifest/rpc-mac` from `packages/plugin-worker-runtime/src/d",
+      "files": [
+        "package.json",
+        "packages/scripts/build-private-workspace-packages.mjs"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 276.42515286811624,
+      "prScore": 267.68715286811624,
+      "issueScore": 8.3,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 274.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 274.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 260.23427474778737,
+      "prScore": 259.7962747477874,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 153.36300405685319,
+      "prScore": 153.36300405685319,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 133.0097863029053,
+      "prScore": 132.8097863029053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 121.74350395331497,
+      "prScore": 121.30550395331497,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 104.40182017284491,
+      "prScore": 72.9638201728449,
+      "issueScore": 0,
+      "reviewScore": 31,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "SYMBaiEX",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192078165?u=d1b3acec81367b9ae298ece7ab1c4bd8ff6975bf&v=4",
+      "totalScore": 41.5024865602598,
+      "prScore": 41.302486560259794,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 19.559347869595513,
+      "prScore": 19.559347869595513,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "chopmob-cloud",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/250041792?u=cdfc875d5bdb6918e23dc9e19bf679633ded6fa1&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 40,
+  "mergedPRs": 16,
+  "newIssues": 5,
+  "closedIssues": 10,
+  "activeContributors": 12
+}
