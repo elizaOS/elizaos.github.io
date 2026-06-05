@@ -5,8 +5,57 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-03 to 2026-06-04, elizaos/eliza had 8 new PRs (10 merged), 0 new issues, and 9 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-06-03 to 2026-06-04, elizaos/eliza had 9 new PRs (11 merged), 0 new issues, and 10 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABC2JKkw",
+      "title": "Release orchestrator startup_failure: missing platform-signing secrets",
+      "author": "lalalune",
+      "number": 7837,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nTwo release-orchestration workflows hit `startup_failure` on every tag push (most recently on `v2.0.3`):\n\n- [Release All Platforms](https://github.com/elizaOS/eliza/actions/runs/26156834072) — `.github/workflows/release-all.yml`, triggered by `push: tags: [v*.*.*]`\n- [elizaOS Full OS Release](https://github.com/elizaOS/eliza/actions/runs/26156833438) — `.github/workflows/elizaos-os-full-release.yml`, triggered by `release: types: [created]`\n\nBoth fail before any job runs (`This run likely failed because of a workflow file issue.`). YAML parses cleanly locally; all referenced reusable workflows exist at the tag.\n\n## Root cause\n\nBoth orchestrators call reusable workflows whose `secrets:` blocks declare `required: true` for repo secrets that don't exist in `elizaOS/eliza`. When `secrets: inherit` can't supply a `required: true` secret, GitHub fails the parent at startup.\n\nConfirmed via `gh secret list -R elizaOS/eliza` that these are missing:\n\n| Secret | Required by | Purpose |\n|---|---|---|\n| `DEBIAN_GPG_PRIVATE_KEY` | `publish-apt-repo.yml` | sign apt repo |\n| `DEBIAN_GPG_KEY_ID` | `publish-apt-repo.yml` | sign apt repo |\n| `DEBIAN_GPG_PASSPHRASE` | `publish-apt-repo.yml` | sign apt repo |\n| `CSC_LINK` | `release-electrobun.yml` (macOS sign) | Developer ID .p12 (base64) |\n| `CSC_KEY_PASSWORD` | `release-electrobun.yml` | .p12 password |\n| `APPLE_ID` | `release-electrobun.yml`, `apple-store-release.yml` | notarization Apple ID |\n| `APPLE_APP_SPECIFIC_PASSWORD` | `release-electrobun.yml`, `apple-store-release.yml` | notarization |\n| `APPLE_TEAM_ID` | `release-electrobun.yml`, `apple-store-release.yml` | Apple Developer Team ID |\n| `ITC_TEAM_ID` | `apple-store-release.yml` | App Store Connect team ID |\n| `APP_STORE_APP_ID` | `apple-store-release.yml` | numeric app ID |\n| `MATCH_PASSWORD` | `apple-store-release.yml` | Fastlane Match passphrase |\n| `MATCH_GIT_URL` | `apple-store-release.yml` | Fastlane Match repo |\n| `WINDOWS_SIGN_CERT_BASE64` | `windows-store-release.yml` | Windows code-signing cert |\n| `WINDOWS_SIGN_CERT_PASSWORD` | `windows-store-release.yml` | cert password |\n| `WINDOWS_SIGN_TIMESTAMP_URL` | `windows-store-release.yml` | RFC 3161 timestamp server |\n| `FLATHUB_TOKEN` | `flatpak-publish.yml` | declared `required: false`, not blocking |\n\nThe full secret list expected is documented in the header comment of `.github/workflows/release-all.yml`.\n\n## Why the other release workflows worked\n\n`NPM Release`, `Build Agent Image`, `Build elizaOS Linux ISO`, `Build elizaOS Debian Package` (build-only, not publish), `Release AOSP Flasher`, `Release Orchestrator`, `Snap Build & Test`, `Build & Release (Electrobun)`, `Release USB Installer` all started fine — their workflows don't `require: true` any missing secret. (USB Installer separately failed mid-run on a now-fixed `electrobun` PATH issue.)\n\n## Resolution options\n\n1. **Add the missing secrets** to `elizaOS/eliza` → Settings → Secrets and variables → Actions. This is the intended end state per the workflow header docs.\n2. **Downgrade `required: true` → `required: false`** in the reusable workflows for platforms we don't intend to ship yet (e.g. if Windows Store / Apple Store / signed apt repo aren't in scope for v2.0.x). The leaf workflows already self-guard most calls.\n3. **Stop calling unconfigured publish workflows** from `release-all.yml` until their secrets exist.\n\nProbably want a mix: add Debian GPG (lowest-risk, internal-only) and Apple signing (highest-value), and gate Windows Store + Flathub behind explicit opt-in until those credentials are arranged.\n\n## Context\n\n- Tag for `v2.0.3` is live on `main` (`fa240156ed`). All other release workflows (NPM, Linux ISO, Android, Snap, Electrobun, etc.) ran or are running normally.\n- Failed runs are also reproducible on the prior `v2.0.2` attempt — this is the pre-existing block, not a new regression.\n- I don't have admin rights to download the run logs, which would confirm the exact secret-validation error message. Anyone with admin can drop the snippet here for the record.",
+      "createdAt": "2026-05-20T11:29:29Z",
+      "closedAt": "2026-06-03T23:42:14Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEJzNVg",
+      "title": "Orchestrator UI: odysseus-style chat workbench for plugin-task-coordinator",
+      "author": "NubsCarson",
+      "number": 8188,
+      "repository": "elizaos/eliza",
+      "body": "## Motivation\n\nThe multi-agent orchestrator surface (`/orchestrator`, `@elizaos/plugin-task-coordinator`) is functional but minimal. A richer, full-window **chat-shell UX** — labeled session sidebar, a real composer, theme engine, memory/skills/notes/settings panels, and per-task tool views — would make driving and observing multi-agent runs far nicer, and would give the orchestrator a first-class home in the app shell.\n\nThe [odysseus](https://github.com/pewdiepie-archdaemon/odysseus) frontend (MIT) already has a polished, well-considered design for exactly this kind of agent chat workbench.\n\n## Proposal\n\nPort the odysseus **frontend** 1:1 into `plugin-task-coordinator`, **rebuilt in React on `@elizaos/ui`** and wired to elizaOS's **existing runtime** — no new backend, no odysseus Python. Surface it as a new full-bleed `/odysseus` app-shell page (and apply the same full-bleed treatment to `/orchestrator`).\n\nTo support a view owning its whole window with no host chrome, add an opt-in `fullBleed` flag to `AppShellPageRegistration` (backward-compatible).\n\n## Scope\n\n- **Frontend only.** All task/session state stays in `@elizaos/plugin-agent-orchestrator`; this is the display/control layer.\n- Where elizaOS has no client method for a surface yet (email IMAP/SMTP, calendar CalDAV, gallery backend, voice TTS/STT, …), the view renders an **honest empty/disabled state** rather than fabricated data or dead controls.\n- **Credit:** original UI/UX design from odysseus (MIT).\n\n## Implementation\n\nImplemented in #8180 (depends on #8187 for the repo-wide Format Check gate).\n",
+      "createdAt": "2026-06-02T17:40:49Z",
+      "closedAt": "2026-06-03T23:42:10Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEGWwMQ",
+      "title": "CI: agent/server tests fail to resolve @elizaos/logger (default exports point at unbuilt dist)",
+      "author": "NubsCarson",
+      "number": 8164,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`develop` CI is currently red on **Server Tests** / **Plugin Tests** / **Zero-Key E2E** / **Build production Docker image** because vite-based tests fail to resolve the new `@elizaos/logger` package:\n\n```\nError: Failed to resolve entry for package \"@elizaos/logger\".\nThe package may have incorrect main/module/exports specified in its package.json.\n ❯ packageEntryFailure node_modules/.bun/vite@.../vite/dist/node/chunks/config.js\nFAIL packages/agent/src/__tests__/views-system-smoke.test.ts\nFAIL packages/agent/src/__tests__/views-registry-integration.test.ts\nFAIL packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts\n```\n\n(This blocks every open PR against `develop`, since they all inherit it.)\n\n## Root cause\n\n`packages/logger/package.json` resolves `.` to **`./dist/index.js`** by default, with a non-default `eliza-source` condition pointing at `./src/index.ts`:\n\n```jsonc\n\"exports\": {\n  \".\": {\n    \"types\": \"./dist/index.d.ts\",\n    \"eliza-source\": { \"import\": \"./src/index.ts\", \"default\": \"./src/index.ts\" },\n    \"import\": \"./dist/index.js\",\n    \"default\": \"./dist/index.js\"\n  }\n}\n```\n\n`@elizaos/core` depends on it (`\"@elizaos/logger\": \"workspace:*\"`, imported in `packages/core/src/logger.ts`). Local/dev setups resolve fine because they run with `--conditions eliza-source` (→ `src`). But the CI vite test runner uses the **`default`** condition → `./dist/index.js`, and **`packages/logger/dist` is not built** before these tests run — so resolution fails.\n\nThe test build steps (e.g. Plugin Tests' `run build --filter=@elizaos/core …`) don't build `@elizaos/logger`, and it doesn't get built as a transitive dep in that path either.\n\n## Suggested fixes (pick one)\n\n1. **Build `@elizaos/logger` before the agent/server vite tests** — add it to the build filter list in the test scripts (or ensure turbo builds it as a `^build` dep of `@elizaos/core`).\n2. **Resolve `@elizaos/logger` to `src` in the vite test config** — set `resolve.conditions: ['eliza-source', …]` in the agent test vite/vitest config, matching how the runtime resolves it.\n\nHappy to PR whichever direction maintainers prefer.\n\n(Separately, the **Format Check** job was red on one unformatted file in `plugin-twitch/__tests__/integration.test.ts` — fixed in #8163.)",
+      "createdAt": "2026-06-02T09:09:16Z",
+      "closedAt": "2026-06-03T23:42:13Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEDmFzw",
+      "title": "audit:cloud: landing + dashboard-billing-success time out (Vite dev dep-optimizer race)",
+      "author": "lalalune",
+      "number": 8144,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/cloud-frontend`'s `audit:cloud` Playwright run times out (`page.goto` 60s) on exactly two routes — `landing` (`/`) and `dashboard-billing-success` — while all other ~51 routes pass. The server returns these routes fine; the timeout is a Vite **dev-mode dependency-optimizer race** during the first navigation.\n\nSurfaced by a downstream QA smoke pass (milady-ai/milady#2179, finding #9).\n\n## Evidence\n\n- `page.goto(route, { waitUntil: \"domcontentloaded\", timeout: 60_000 })` exceeds 60s for the two routes only.\n- Probing the audit's Vite dev server directly: `/` and `/dashboard/billing/success` both return HTTP 200 with full HTML (~10 KB) in <1s. The `/` HTML is byte-for-byte identical to `/os` (which the audit passes) via the SPA shell — server-side is innocent.\n- The audit log shows `[vite] (client) [optimizer] scanning dependencies... bundling dependencies...` during the first route load — the dev dep-optimizer fires on first navigation (alphabetically `landing`/`/` is first) and its bundling step delays `DOMContentLoaded` past 60s under headless Chromium.\n\n## Proposed fixes\n\n- Switch `packages/cloud-frontend/playwright.config.ts` `webServer.command` from dev (`bun --bun vite`) to a **built `vite preview`** (no dep optimizer) for the audit.\n- Or add a warm-up `page.goto(LOCAL_URL)` in `globalSetup` so the optimizer finishes before any timed route is measured.\n\n## Severity\n\nMedium-low — flaky / environment-dependent, not a product regression, but it makes the visual audit unreliable.\n",
+      "createdAt": "2026-06-01T23:44:12Z",
+      "closedAt": "2026-06-03T23:42:11Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOMT5cIs7h1HP3",
@@ -70,10 +119,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 4008,
-    "deletions": 823,
-    "files": 114,
-    "commitCount": 171
+    "additions": 4500,
+    "deletions": 1249,
+    "files": 122,
+    "commitCount": 179
   },
   "completedItems": [
     {
@@ -270,6 +319,22 @@
       "files": [
         "packages/cloud-frontend/src/pages/auth/callback/email/page.tsx"
       ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 6 directories with 2 updates",
+      "prNumber": 8202,
+      "type": "other",
+      "body": "\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/pyproject.toml",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/benchmarks/vending-bench/pyproject.toml",
+        "packages/benchmarks/vending-bench/uv.lock",
+        "packages/benchmarks/visualwebbench/uv.lock",
+        "packages/feed/packages/examples/feed-langgraph-agent/uv.lock",
+        "packages/training/uv.lock"
+      ]
     }
   ],
   "topContributors": [
@@ -324,9 +389,9 @@
       "summary": null
     }
   ],
-  "newPRs": 8,
-  "mergedPRs": 10,
+  "newPRs": 9,
+  "mergedPRs": 11,
   "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 9
+  "closedIssues": 4,
+  "activeContributors": 10
 }

@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-05-31 to 2026-06-07, elizaos/eliza had 115 new PRs (59 merged), 16 new issues, and 19 active contributors.",
+  "overview": "From 2026-05-31 to 2026-06-07, elizaos/eliza had 171 new PRs (96 merged), 21 new issues, and 20 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABEGUTAg",
@@ -15,9 +15,45 @@
       "repository": "elizaos/eliza",
       "body": "## Summary\n\nWhen the planner narrates a coding sub-agent's `task_complete` back to the user, the **deliverable** (the printed value / command output) is frequently dropped, truncated, or buried under process chatter — while the underlying sub-agent work is correct. This is a *presentation* defect, not a capability one.\n\nEvidence: a live 48-prompt sweep (30-scenario battery + smart/normie/harden suites) across all three backends found **0 capability-broken defects** — every answer was correct, every spawn produced its artifact, every safety probe handled. The **only** remaining defect class is this narration-envelope.\n\n## Manifestations (all observed live)\n\n1. **Deliverable drop on combo / printed-value tasks.** On the no-change-set completion path, `composeNarration` → `stripToolTranscript(response)` (`sub-agent-router.ts`) deletes the entire `[tool output: …] … [/tool output]` block. For a \"print a value / run a command and report the output\" task (no files changed → no diff), that block *is* the deliverable, so it's gone before the user sees it.\n2. **Value truncation by the parent model.** The synthetic `task_complete` memory is re-rendered by the parent `RESPONSE_HANDLER` (a weak planner in some deployments), which truncates the value — e.g. `2026-06-02` → `202`, a BTC price `70234` → `705`. Per-backend signature: opencode truncates, codex emits verbose process narration + `Completed <task>` banners, claude is cleanest.\n3. **Stale retry attempts leak.** When a first attempt errors (e.g. `session_state_lost` / an ACP crash) and a respawn recovers, the user sees *both* `\"the sub-agent was blocked / crashed, let me try again\"` **and** the eventual deliverable.\n4. **Process chatter.** Sub-agents (esp. codex) narrate their steps (`\"I'll load the workspace context first\"`, `\"rg is not installed\"`, `\"reverse.py already exists\"`); the parent relays it.\n\n## Proposed structural fixes\n\n**(a) Carry the printed-value deliverable verbatim (fixes #1, mitigates #2).** A structural carrier that mirrors the existing verified-URL carrier:\n- *Producer* (`sub-agent-router.ts`): on the `task_complete && !changeSet && verifiedUrls.length === 0` path, recover the captured stdout from the **raw** `response` (before `composeNarration` strips it) via the inverse of `stripToolTranscript`, and stamp it as `metadata.subAgentDeliverable` (gated to a short single block, ≤2KB, so multi-KB transcripts stay on the model-rendered path). *(I have a ready, tested producer patch for this.)*\n- *Consumer* (`evaluators/sub-agent-completion.ts`): when `subAgentDeliverable` is present, relay it **verbatim** instead of letting the model re-summarize/truncate it — parallel to how `subAgentVerifiedUrls` is already consumed.\n\n**(b) Terminal-reply filter (fixes #3, #4).** Emit only the *terminal* sub-agent reply; suppress stale `blocked`/`failed`/`state_lost` attempts that a later retry superseded, plus raw tool chatter and `Completed <task>` banners. **Caveat — needs care:** the `session_state_lost` error event is currently *coupled to the respawn trigger* (re-injecting it is what prompts the parent to respawn), so suppressing the user-facing narration requires an internal-only routing path that keeps the respawn signal. This is the part that needs design discussion.\n\n**(c) Already shipped — source-side mitigation.** #8158 adds an output-discipline section to the scaffolded sub-agent operating manual (\"lead with the deliverable, don't narrate process, no `Completed <task>` banner, a bare workspace has no SOUL.md/USER.md — don't hunt for them\"), which measurably reduced #4 at the source (codex re-probes went from a verbose banner to a bare `5050` / `2026-06-02`).\n\n## Coordination note\n\n`sub-agent-router.ts` and `evaluators/sub-agent-completion.ts` were recently rewritten on `develop`; this should be coordinated with that work rather than landed blind. Happy to open the (a)-producer + (a)-consumer as a focused PR if the approach looks right.",
       "createdAt": "2026-06-02T09:02:59Z",
+      "closedAt": "2026-06-04T00:23:03Z",
+      "state": "CLOSED",
+      "commentCount": 4
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEDmEnQ",
+      "title": "app-core dist/entry.js externalizes un-hoisted transitive deps (jose, @node-rs/argon2) → ERR_MODULE_NOT_FOUND outside Bun's loader",
+      "author": "lalalune",
+      "number": 8142,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/app-core`'s built `dist/entry.js` imports transitive runtime deps (`jose`, `@node-rs/argon2`, and likely more) as **external** packages. These deps live in Bun's content-addressable store but are not linked at the top level where Node-style resolution looks, so any command that runs `dist/entry.js` outside Bun's workspace-aware loader fails with `Cannot find module`.\n\nSurfaced by a downstream QA smoke pass (milady-ai/milady#2179, finding #1 \"layer 2\").\n\n## Repro\n\n1. Build the app-core entry (`dist/entry.js`, ~7.6 MB across ~20 chunks).\n2. Run it with a plain Node-style loader (e.g. via `doctor`, or any path that doesn't go through Bun's workspace loader).\n3. First failure: `Cannot find module 'jose'`. Manually linking `jose` from Bun's store unblocks it, then it immediately hits `Cannot find module '@node-rs/argon2'`, and so on — whack-a-mole suggesting dozens more.\n\n## Root cause\n\nThe bundler (tsdown) marks these runtime deps `external`, but they are transitive (not hoisted to the top-level `node_modules`), so Node-style resolution from `dist/entry.js` can't find them.\n\n## Proposed fixes (pick one)\n\n- (a) Bundle the needed transitive runtime deps **inline** in `dist/entry.js` (tsdown config: move them out of `external`).\n- (b) Declare all needed runtime deps as **direct deps** of the package so they hoist to the top level.\n- (c) Ship a runtime/loader that knows how to resolve into Bun's store.\n\n## Severity\n\nMedium — affects any command that runs `dist/entry.js` outside Bun's loader (e.g. `doctor`), and is broader than a single command.\n",
+      "createdAt": "2026-06-01T23:44:09Z",
+      "closedAt": "2026-06-04T00:28:19Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEhtd5g",
+      "title": "Steward login broken in prod: OAuth authorize 400 (code_challenge) + email/send 400 — blocks all Sign in with Eliza Cloud",
+      "author": "NubsCarson",
+      "number": 8257,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nSteward login is broken in production — **both** email and Google OAuth fail with 400 — which blocks \"Sign in with Eliza Cloud\" for **every** app (the cli-login flow bounces all third-party apps + the dashboard through this same login).\n\nReproduces with plain `curl` (no browser, no extensions), so it's a server-side prod issue, not a client environment.\n\n## Symptoms (prod, `api.elizacloud.ai`)\n**Google/OAuth** — `GET /steward/auth/oauth/google/authorize?...&response_type=code`:\n```\n{\"ok\":false,\"error\":\"code_challenge is required for response_type=code\"}\n```\nAdding `code_challenge` + `code_challenge_method=S256` still returns **400**.\n\n**Email** — `POST /steward/auth/email/send` → **400 Bad Request** (from `steward-login-section.tsx` → `signInWithEmail`).\n\n## Root cause (the OAuth half)\nThe Steward `/authorize` endpoint now **requires PKCE** (`code_challenge`), but:\n- `packages/cloud-frontend/src/pages/login/steward-oauth-url.ts` → `buildStewardOAuthAuthorizeUrl()` builds the URL with `response_type: \"code\"` and **no** `code_challenge` / `code_challenge_method`.\n- The exchange flow is **nonce-based with no verifier**: `packages/cloud-api/auth/steward-nonce-exchange/route.ts` documents *\"The Steward API authenticates the exchange purely by possession of the one-time `code` — there is no client [verifier].\"*\n\nSo the authorize service (PKCE-required) and the cloud login flow (nonce-based, no PKCE) are out of sync — and even a hand-added `code_challenge` still 400s, suggesting a deeper Steward auth misconfig/regression in prod.\n\n## Impact\nNo one can sign in via Eliza Cloud right now — dashboard, edad, and every third-party app using the cli-login \"Sign in with Eliza Cloud\" bounce here and dead-end at this login.\n\n## Fix options\n- **A (restore parity):** make Steward `/authorize` accept the nonce flow **without** `code_challenge` (matches the existing nonce-exchange contract). Simplest if PKCE was enabled unintentionally.\n- **B (full PKCE):** frontend generates a `code_verifier` + S256 `code_challenge`, sends `code_challenge` at `/authorize` and stores the verifier; `steward-nonce-exchange` forwards `code_verifier` to `/auth/oauth/exchange`.\n\nThe `email/send` 400 handler isn't in this monorepo (Steward service) — flag for that team too; it may share the same prod regression.\n\nFound via the cli-login flow from a third-party browser app.\n",
+      "createdAt": "2026-06-05T17:18:26Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 3
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABC2JKkw",
+      "title": "Release orchestrator startup_failure: missing platform-signing secrets",
+      "author": "lalalune",
+      "number": 7837,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nTwo release-orchestration workflows hit `startup_failure` on every tag push (most recently on `v2.0.3`):\n\n- [Release All Platforms](https://github.com/elizaOS/eliza/actions/runs/26156834072) — `.github/workflows/release-all.yml`, triggered by `push: tags: [v*.*.*]`\n- [elizaOS Full OS Release](https://github.com/elizaOS/eliza/actions/runs/26156833438) — `.github/workflows/elizaos-os-full-release.yml`, triggered by `release: types: [created]`\n\nBoth fail before any job runs (`This run likely failed because of a workflow file issue.`). YAML parses cleanly locally; all referenced reusable workflows exist at the tag.\n\n## Root cause\n\nBoth orchestrators call reusable workflows whose `secrets:` blocks declare `required: true` for repo secrets that don't exist in `elizaOS/eliza`. When `secrets: inherit` can't supply a `required: true` secret, GitHub fails the parent at startup.\n\nConfirmed via `gh secret list -R elizaOS/eliza` that these are missing:\n\n| Secret | Required by | Purpose |\n|---|---|---|\n| `DEBIAN_GPG_PRIVATE_KEY` | `publish-apt-repo.yml` | sign apt repo |\n| `DEBIAN_GPG_KEY_ID` | `publish-apt-repo.yml` | sign apt repo |\n| `DEBIAN_GPG_PASSPHRASE` | `publish-apt-repo.yml` | sign apt repo |\n| `CSC_LINK` | `release-electrobun.yml` (macOS sign) | Developer ID .p12 (base64) |\n| `CSC_KEY_PASSWORD` | `release-electrobun.yml` | .p12 password |\n| `APPLE_ID` | `release-electrobun.yml`, `apple-store-release.yml` | notarization Apple ID |\n| `APPLE_APP_SPECIFIC_PASSWORD` | `release-electrobun.yml`, `apple-store-release.yml` | notarization |\n| `APPLE_TEAM_ID` | `release-electrobun.yml`, `apple-store-release.yml` | Apple Developer Team ID |\n| `ITC_TEAM_ID` | `apple-store-release.yml` | App Store Connect team ID |\n| `APP_STORE_APP_ID` | `apple-store-release.yml` | numeric app ID |\n| `MATCH_PASSWORD` | `apple-store-release.yml` | Fastlane Match passphrase |\n| `MATCH_GIT_URL` | `apple-store-release.yml` | Fastlane Match repo |\n| `WINDOWS_SIGN_CERT_BASE64` | `windows-store-release.yml` | Windows code-signing cert |\n| `WINDOWS_SIGN_CERT_PASSWORD` | `windows-store-release.yml` | cert password |\n| `WINDOWS_SIGN_TIMESTAMP_URL` | `windows-store-release.yml` | RFC 3161 timestamp server |\n| `FLATHUB_TOKEN` | `flatpak-publish.yml` | declared `required: false`, not blocking |\n\nThe full secret list expected is documented in the header comment of `.github/workflows/release-all.yml`.\n\n## Why the other release workflows worked\n\n`NPM Release`, `Build Agent Image`, `Build elizaOS Linux ISO`, `Build elizaOS Debian Package` (build-only, not publish), `Release AOSP Flasher`, `Release Orchestrator`, `Snap Build & Test`, `Build & Release (Electrobun)`, `Release USB Installer` all started fine — their workflows don't `require: true` any missing secret. (USB Installer separately failed mid-run on a now-fixed `electrobun` PATH issue.)\n\n## Resolution options\n\n1. **Add the missing secrets** to `elizaOS/eliza` → Settings → Secrets and variables → Actions. This is the intended end state per the workflow header docs.\n2. **Downgrade `required: true` → `required: false`** in the reusable workflows for platforms we don't intend to ship yet (e.g. if Windows Store / Apple Store / signed apt repo aren't in scope for v2.0.x). The leaf workflows already self-guard most calls.\n3. **Stop calling unconfigured publish workflows** from `release-all.yml` until their secrets exist.\n\nProbably want a mix: add Debian GPG (lowest-risk, internal-only) and Apple signing (highest-value), and gate Windows Store + Flathub behind explicit opt-in until those credentials are arranged.\n\n## Context\n\n- Tag for `v2.0.3` is live on `main` (`fa240156ed`). All other release workflows (NPM, Linux ISO, Android, Snap, Electrobun, etc.) ran or are running normally.\n- Failed runs are also reproducible on the prior `v2.0.2` attempt — this is the pre-existing block, not a new regression.\n- I don't have admin rights to download the run logs, which would confirm the exact secret-validation error message. Anyone with admin can drop the snippet here for the record.",
+      "createdAt": "2026-05-20T11:29:29Z",
+      "closedAt": "2026-06-03T23:42:14Z",
+      "state": "CLOSED",
+      "commentCount": 1
     },
     {
       "id": "I_kwDOMT5cIs8AAAABDWGTpw",
@@ -27,42 +63,6 @@
       "repository": "elizaos/eliza",
       "body": "## context\n\nafter #7988 lands the windows-x86_64 ffi build path, `libeliza-llama-shim.dll` loads into `bun:ffi` with all 39 symbols resolved. the very next layer — prewarm — crashes with a ggml batch-sizing assert on `eliza-1-0_8b` text bundle.\n\n## crash\n\n```\nGGML_ASSERT(n_tokens_all <= cparams.n_batch) failed\n```\n\nrepro: `~/.eliza` already has the `eliza-1-0_8b-128k.gguf` bundle staged; on first activation the prewarm batch builder asks the runtime to decode more tokens than the context's `n_batch` slot allows. fatal.\n\n## environment\n\n- platform: windows-x86_64\n- backend: cuda (cuda 12.4, msvc, ninja, llama.cpp pinned to the ref in `build-llama-cpp-desktop-dylib.mjs`)\n- shim: built from `eliza_llama_shim.c` with the stub set added in #7988\n- bundle: `bundles/0_8b/text/eliza-1-0_8b-128k.gguf` from default-user `~/.eliza/local-inference/`\n- runtime: `desktop-llama-adapter.ts` → `eliza_llama_decode_unified` path\n\n## what i think is going on\n\nthe prewarm path appears to construct a batch that targets the manifest's declared context window (128k tokens) without first clamping against the actual `cparams.n_batch` value the ffi context was created with. on linux/macos this might be masked by larger default `n_batch` or different prewarm sizing; on windows-cuda the assert fires.\n\ncandidates (i don't want to put words in anyone's mouth):\n\n1. prewarm should size the batch off `cparams.n_batch`, not `n_ctx`.\n2. context creation on the desktop adapter should set `n_batch >= prewarm_tokens` for the chosen bundle.\n3. the bundle manifest's recommended prewarm token count should be exposed and used as both inputs.\n\n## scope\n\n- not blocked by anything outstanding once #7988 lands.\n- separate from the build-time fixes in #7988 (which are infrastructure) — this is a runtime sizing bug one layer down.\n- related context PR: #7983 (local-inference dflash discovery + runtime router wiring).\n",
       "createdAt": "2026-05-25T20:51:21Z",
-      "closedAt": "2026-06-02T01:14:46Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABDSMMxA",
-      "title": "USE_SKILL output wrapping leaks raw bash invocation JSON to user reply",
-      "author": "NubsCarson",
-      "number": 7970,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\nWhen a sub-agent invokes a skill via USE_SKILL (e.g. weather skill running \\`wttr.in\\`), the bot's reply to Discord contains the raw bash command + JSON wrapping AS prose, then the clean output, glued together:\n\n\\`\\`\\`\n{\"cmd\":[\"bash\",\"-lc\",\"curl -s \\\"wttr.in/Paris?format=%l:+%c+%t+%h+%w\\\"\"]}{\"output\":\"Paris: 🌦️ +15°C 68% ↙3km/h\"}Paris: 🌦️ +15°C 68% ↙3 km/h\n\\`\\`\\`\n\nThree layers leaked verbatim:\n1. \\`{\"cmd\":[\"bash\",\"-lc\",...]}\\` — the bash invocation envelope\n2. \\`{\"output\":\"...\"}\\` — the captured-output envelope\n3. The actual user-friendly result (also rendered, fortunately)\n\n## Repro\n\nLive 2026-05-25 07:49 UTC. Probe: \\`@bot use the weather skill for paris\\`. Trajectory \\`tj-1be9e601583b7e.json\\`. Stage 0: \\`simple=true reqTool=false candidates=[\"WEATHER_FETCH\"]\\` reply=\"On it.\" (routing-layer promoted to planning via the candidateActions->planning fix). Iter 1: \\`USE_SKILL slug=weather mode=auto\\`. The skill captured stdout via a wrapper that emits the cmd+output envelopes; the planner's REPLY text concatenated all three.\n\nProbe \\`use the weather skill to get weather for tokyo\\` had the same shape but the wrapping was less visible because the final paraphrase was cleaner.\n\n## Why it matters\n\nUser-facing UX: the bot dumps internal shell invocation details to Discord. Looks broken; reveals \"I am running bash\". Pollutes the channel.\n\n## Suggested fix\n\nUSE_SKILL action's result construction should produce a clean \\`userFacingText\\` (the actual command output) separate from the diagnostic \\`text\\` (which can include cmd + envelopes for trajectory recording). The planner-loop's \\`preferredFinalMessageFromToolOrModel\\` already prefers \\`userFacingText\\` when set with \\`verifiedUserFacing: true\\` — USE_SKILL should opt in for skills whose stdout is the user answer (weather, github, healthcheck, etc.).\n\nOr simpler interim fix: in the skill-invocation wrapper, when producing the REPLY text, parse + strip the \\`{\"cmd\":...}\\` and \\`{\"output\":...}\\` envelopes before they're concatenated into the model's REPLY context.\n\n## Acceptance\n\n- \\`use the weather skill for paris\\` returns just \\`Paris: 🌦️ +15°C 68% ↙3 km/h\\`, no JSON envelopes.\n- No regression on skills that already produce clean output (some did in this same sweep — github, healthcheck honest refusals didn't leak).\n\nReported via 50-probe deep sweep on milady deployment 2026-05-25.",
-      "createdAt": "2026-05-25T08:10:17Z",
-      "closedAt": "2026-06-02T01:14:46Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABEDfjVQ",
-      "title": "Orchestrator workbench: Codex-parity conversation UI + reasoning + prose-assembly bug",
-      "author": "NubsCarson",
-      "number": 8136,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\nThe `/orchestrator` workbench (`@elizaos/plugin-task-coordinator`) conversation surface has several UI-parity gaps versus the design target (Codex/Claude-style coding-agent UIs), plus one backend prose-assembly bug. This issue tracks bringing the conversation view to a clean, premium, conversation-centric parity bar.\n\n## Problems\n\n**Conversation surface (`plugin-task-coordinator`)**\n- The workbench inherits a blue tint: `base.css` routes `--bg-accent` / `--ring` / `--info` / `--link` through `--brand-blue`, so the room reads cold-blue (design rule is no blue).\n- Tool-call cards are over-chromed: the shell command is echoed twice (header + a `$`-bar), a wall-clock timestamp is stamped on every row (5+ identical stamps per viewport), and cards print the raw tool name (`bash`) instead of an action verb.\n- Output is truncated head-only, dropping the meaningful tail (errors/exit summary live at the end).\n- The primary CTA is a loud full-saturation orange fill; loading states pop in with bare centered text (no skeleton).\n- No collapsible \"thinking\" cell for reasoning.\n\n**Backend (`plugin-agent-orchestrator`)**\n- Assistant prose loses word-boundary spaces (`\"is\"+\"proven\" -> \"isproven\"`): `extractAssistantText()` joins a codex-acp word-split content-block array with `join(\"\")`.\n- `agent_thought_chunk` (reasoning) is silently dropped in the `session/update` handler — only token counts are captured, so reasoning text never reaches the UI.\n\n**Dev experience**\n- `node --watch` re-evaluates the whole `eliza-source` module graph, so unrelated edits reboot the agent (and reopen the PGlite vault).\n\n## Proposed\n\nA focused conversation-UI parity pass: de-blue (scoped token override), real interleaved diff, slim cards with status-aware verb labels + exit/duration meta, markdown via the `marked` token AST, two-tier turn rhythm, head+tail truncation, de-loud CTA + skeletons + streaming cue, a collapsible reasoning cell; the backend prose re-spacing + reasoning forwarding; and scoping `--watch` to source roots. Verified with the existing unit suite + a new live Playwright e2e.",
-      "createdAt": "2026-06-01T23:18:34Z",
-      "closedAt": "2026-06-01T23:21:19Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABEDBuaA",
-      "title": "orchestrator: served-200 build false-flagged as stale by mtime freshness gate (GAP-C retry/recall regression)",
-      "author": "NubsCarson",
-      "number": 8127,
-      "repository": "elizaos/eliza",
-      "body": "### Summary\n\n`verifyLocalTarget` in `plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts` false-positives on a healthy, served static app, marking it \"dead\" purely because its local file mtime is older than `session.createdAt - 5s`.\n\n### Root cause\n\nIn the completion-URL verification pass (`annotateUnverifiedUrls`), after a URL probes a healthy HTTP 200 (`probe()` returns `status === null`), the code still consults `verifyMappedLocalUrl` → `verifyLocalTarget`, which applies a wall-clock freshness gate:\n\n```ts\nif (requireFresh && stat.mtimeMs < sessionStartedAtMs - 5000) {\n  return `mapped local target was not updated during this session: ...`;\n}\n```\n\nA static app (e.g. `color-pop/index.html`) that exists, is non-empty, and serves HTTP 200 gets flagged \"dead\" because the deploy step copied the build into place and preserved the source file's mtime (mtime skew vs `session.createdAt`).\n\n### Impact (GAP-C chain)\n\n1. The false-dead triggers a spurious verify-retry.\n2. The retry suppresses the round-1 `task_complete`.\n3. The in-flight retry session trips `newerTaskSince` in `coding-session-changes.ts`.\n4. The REAL diff is withheld — so a follow-up \"what did you change?\" wrongly answers \"no captured file diff\".\n\n### Fix\n\nThe live HTTP 200 probe is authoritative for a served URL. The mtime-freshness comparison must not override a healthy 200; reserve the freshness gate for cases where the URL is NOT serving (where the local file is the only liveness signal). The missing-file and empty-file checks remain unconditional.\n\nTracked by PR with a regression test that pins both the served-200 (not flagged) and unserved (still flagged) cases.",
-      "createdAt": "2026-06-01T21:35:23Z",
       "closedAt": "2026-06-02T01:14:46Z",
       "state": "CLOSED",
       "commentCount": 1
@@ -118,23 +118,23 @@
       "deletions": 4147
     },
     {
-      "id": "PR_kwDOMT5cIs7h0U4g",
-      "title": "feat(ui): continuous-chat overlay + restored app shell, and a Storybook catalog",
-      "author": "NubsCarson",
-      "number": 8178,
-      "body": "> **Draft-quality note for reviewers:** part of this PR (the `App.tsx`/`Header.tsx` restoration) reverts the intentional pill-only cleanup on `develop`. That is a maintainer call by design — flagged explicitly, not slipped in. The branch is **synced up to `develop` and `MERGEABLE`** (see \"Sync status\").\n\n## What this is\n\nTwo separable bodies of work on `packages/ui`:\n\n### 1. Her-style continuous-chat overlay + restored full app shell  *(behavioral — reverts part of the pill-only strip)*\n- `ContinuousChatOverlay` — a self-contained, presentational glass \"continuous chat\" overlay (whisper lines that dissolve over any view, expand-to-thread, voice, ChatGPT-style mic↔send swap, full a11y, safe-area + mobile-nav-offset aware). Controller injected via prop (`useShellController`); no bespoke state duplication.\n- Restored the full **3-panel chat workspace** (`ConversationsSidebar | ChatView | TasksEventsPanel`) and the **header navigation**, both unwired by the June pill-only cleanup (the components/nav model were never deleted, just disconnected).\n- The overlay is the single shared chat input: it floats over every view, and on the chat tab `ChatView` hides its in-view composer (`hideComposer`) so there's no duplicate composer — both read the same conversation.\n- `MINIMAL_SHELL` flag (`shell-chrome.ts`) gates a minimal conversational-OS home vs. the full workspace.\n\n### 2. Storybook catalog for `@elizaos/ui`  *(purely additive)*\n- Real `@storybook/react-vite` catalog (`packages/ui/.storybook`), **424 stories** across primitives, composites, shell, and presentational feature surfaces.\n- Harness: Tailwind v4 plugin, `@elizaos/*` source aliases mirroring `vitest.config.ts`, a `mockApp()` decorator (under `src/` so it shares the preview module graph), and a `node:fs` stub.\n- A documented gap (`.storybook/README.md` #3, tracked in #8177): i18n/model-hub stories that transitively import `@elizaos/core` can't render yet (Vite dep-optimizer resolves core via its Node entry → `plugin-manager` → `fs-extra`). Those stories are held back rather than shipped broken.\n\n## Verification (this branch, merged up to develop)\n- `packages/ui` unit tests: **479 pass** (overlay/shell-chrome/cloud-shell suites incl. behavioral window-shell + mic/send-guard cases).\n- `bun run --cwd packages/ui lint` (biome) and `typecheck`: **clean, 0 errors**.\n- Storybook catalog render-verified headless (Playwright) across all surfaces.\n- A multi-dimension review (eliza-conventions / hacky / correctness / react-quality / fits-architecture / test-quality) ran with adversarial verification; all confirmed findings were fixed (notably two mobile-layout bugs: a phantom bottom-nav padding gap under `MINIMAL_SHELL`, and the overlay composer occluding the mobile bottom nav).\n\n## Sync status\n**Merged up to `develop`; `MERGEABLE`.** The only conflict was `App.tsx` (resolved toward the restoration). Drift handled: dropped an orphaned import + stale comment; removed `voice/VoiceWaveform.stories.tsx` because `develop` deleted that component in a perf pass (\"kill VoiceWaveform\"); reconciled `bun.lock` for develop's new workspace packages.\n\n## CI triage — the red checks are NOT introduced by this branch\nThis branch changes **only `packages/ui` + `bun.lock`** (0 server/plugin source files). Green on every lane this code affects: **Client Tests, unit-tests, lint-and-types, integration-tests, coverage, Format(biome) for ui, Electrobun, CodeQL**. The reds are inherited from `develop` (currently red there, maintainers actively repairing) or CI infra:\n- `Format Check (biome)` → `@elizaos/plugin-app-control` (untouched here; develop's own unformatted file).\n- `Server Tests` / `Plugin Tests` → server/plugin packages (untouched here; red on develop).\n- `Dev Smoke (onboarding chat)` / `Zero-Key Deterministic E2E` → red on develop (in-flight \"fix(ci)\" commits).\n- `env:audit:check` → `@discordjs/opus` prebuilt-binary 404 (CI/upstream native-build flake; dep byte-identical to develop).\n- `All Tests Passed` → aggregate gate that fails because of the above.\n\n**One interaction for a maintainer eye:** `dev-smoke/bun-dev-onboarding-chat.spec.ts:198` asserts `getByTestId(\"chat-composer-textarea\")` visible at `/chat`. This branch hides the in-view composer there (overlay is the input). If the restored input model is accepted, that testid/assertion needs reconciling (e.g. the overlay composer exposing the canonical testid). Not edited here — those specs are under active repair on `develop` and this touches the restore-vs-pill direction.\n\n## For reviewers\nIf the shell restoration needs more discussion, the **Storybook catalog (#2) is additive and can be split into its own PR** off `develop` — happy to do that on request. Tracked follow-up: #8177.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "id": "PR_kwDOMT5cIs7irYx4",
+      "title": "feat(cloud): replace BitRouter cloud routing",
+      "author": "lalalune",
+      "number": 8233,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-06-02T13:55:34Z",
-      "mergedAt": null,
-      "additions": 9115,
-      "deletions": 981
+      "createdAt": "2026-06-04T12:37:12Z",
+      "mergedAt": "2026-06-04T18:14:13Z",
+      "additions": 20806,
+      "deletions": 13229
     }
   ],
   "codeChanges": {
-    "additions": 21781,
-    "deletions": 7761,
-    "files": 484,
-    "commitCount": 1049
+    "additions": 34196,
+    "deletions": 11873,
+    "files": 663,
+    "commitCount": 1496
   },
   "completedItems": [
     {
@@ -1134,77 +1134,655 @@
       "files": [
         "packages/cloud-frontend/src/pages/auth/callback/email/page.tsx"
       ]
+    },
+    {
+      "title": "fix(cloud-api): prefer agent bridge_url over broken UUID subdomain for pairing",
+      "prNumber": 8262,
+      "type": "bugfix",
+      "body": "## Why\n\nThe pairing-token endpoint returns \\`redirectUrl=<uuid>.<ELIZA_CLOUD_AGENT_BASE_DOMAIN>/pair?token=…\\` for Docker-backed agents. That hostname only resolves to the agent if a wildcard Worker / signed tunnel-proxy entry is in place —",
+      "files": [
+        "packages/cloud-api/__tests__/pairing-token-bridge-url.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/pairing-token/route.ts",
+        "packages/test/cloud-e2e/tests/provision.spec.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-frontend): wizard exposes Shared vs Dedicated execution mode explicitly",
+      "prNumber": 8261,
+      "type": "feature",
+      "body": "## Why\n\nPR #8223 introduced agent tiering (`cloud-shared/agent-tier.ts`): an agent without a docker image runs container-free on the shared multi-tenant runtime; an agent with one gets its own Docker container on Hetzner. The wizard hid tha",
+      "files": [
+        "packages/cloud-frontend/src/dashboard/agents/_components/create-eliza-agent-dialog.tsx",
+        "packages/test/cloud-e2e/tests/dashboard.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): send PKCE on Steward OAuth + sign the nonce-exchange call",
+      "prNumber": 8259,
+      "type": "bugfix",
+      "body": "## What\n\nMake the Eliza Cloud login send **PKCE** on the Steward OAuth flow, and have the\nnonce-exchange route **sign** its direct upstream call — the two client-side\ngaps that broke \"Sign in with Eliza Cloud\" after Steward's auth hardening",
+      "files": [
+        "packages/cloud-api/__tests__/steward-sign.test.ts",
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/src/steward/sign.ts",
+        "packages/cloud-frontend/src/lib/steward-session.ts",
+        "packages/cloud-frontend/src/pages/login/steward-login-section.tsx",
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.test.ts",
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-api): add /api/v1/containers deploy + read route",
+      "prNumber": 8258,
+      "type": "feature",
+      "body": "## What\n\nThe parent-agent broker exposes `containers.create/list/get/quota`\n(→ `/api/v1/containers`) and the `build-monetized-app` skill's deploy step is\n\"deploy container with POST /api/v1/containers using `image`\" — but **no route\nfile ex",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/containers/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): sign Steward proxy requests to satisfy HMAC guard",
+      "prNumber": 8256,
+      "type": "bugfix",
+      "body": "## Why\n\nSteward backend now ships two middlewares on mutating sensitive paths (\\`/auth\\`, \\`/agents\\`, \\`/vault\\`, \\`/trade\\`, etc — see [Steward sensitive-paths.ts](https://github.com/Steward-Fi/steward/blob/main/packages/api/src/middlewar",
+      "files": [
+        "packages/cloud-api/__tests__/steward-embedded-signing.test.ts",
+        "packages/cloud-api/src/steward/embedded.ts"
+      ]
+    },
+    {
+      "title": "docs(skills,examples): correct Eliza Cloud monetization docs",
+      "prNumber": 8255,
+      "type": "docs",
+      "body": "Audited the monetization **skill + docs + example** against the actual code and fixed **23 verified inaccuracies** across 5 files. No code changes.\n\n### `build-monetized-app/SKILL.md`\n- 3 dead/stale links repointed in-monorepo: SDK README (",
+      "files": [
+        "packages/examples/cloud/edad/README.md",
+        "packages/skills/skills/build-monetized-app/SKILL.md",
+        "packages/skills/skills/build-monetized-app/references/sdk-flow.md",
+        "packages/skills/skills/eliza-cloud/SKILL.md",
+        "packages/skills/skills/eliza-cloud/references/payments-and-promotion.md"
+      ]
+    },
+    {
+      "title": "feat(cloud-auth): mint agent tokens with trade:order scope",
+      "prNumber": 8254,
+      "type": "feature",
+      "body": "## What\n\nCloud-provisioned agent tokens (`/api/v1/agent-tokens`, minted in `packages/cloud-shared/src/lib/auth/agent-token.ts`) currently carry only `agent_id` — no scope claim.\n\nSteward's hyperliquid order endpoint (`POST /v1/trade/hyperli",
+      "files": [
+        "packages/cloud-shared/src/lib/auth/agent-token.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): allow Idempotency-Key + X-Affiliate-Code in CORS",
+      "prNumber": 8252,
+      "type": "bugfix",
+      "body": "`/api/v1/chat/completions` reads `idempotency-key` (safe retries) and `X-Affiliate-Code` (affiliate attribution), but neither is in `CORS_ALLOW_HEADER_NAMES`. Hono's `cors()` reflects only that fixed allow-list, so a browser preflight sendi",
+      "files": [
+        "packages/cloud-shared/src/lib/cors-constants.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-sdk): web sign-in helper + X-App-Id affordance for inference",
+      "prNumber": 8251,
+      "type": "feature",
+      "body": "## Why\nThird-party web apps signing in with Eliza Cloud + monetizing via app-credits currently have to **hand-roll** two things the SDK should provide: the cli-login polling loop, and a raw `fetch` to send the `X-App-Id` header (the typed i",
+      "files": [
+        "packages/cloud-sdk/README.md",
+        "packages/cloud-sdk/src/client.test.ts",
+        "packages/cloud-sdk/src/client.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): let /goal autonomously drive the monetized-app loop (capped self-spend + economics capabilities)",
+      "prNumber": 8250,
+      "type": "feature",
+      "body": "## Why\n\nA `/goal` sub-agent is fenced to coding-only capabilities\n(`DEFAULT_GOAL_CAPABILITIES`), and every paid Cloud command through the\nparent-agent broker requires an explicit human \"yes\". Together these mean an\nagent **cannot autonomous",
+      "files": [
+        "packages/ui/src/api/client-types-cloud.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/goal-prompt.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/parent-agent-broker.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/spend-allowance.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/goal-prompt.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/parent-agent-broker.ts",
+        "plugins/plugin-agent-orchestrator/src/services/spend-allowance.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/hooks/useChatSubmit.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/util/composer-directives.test.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/util/composer-directives.ts"
+      ]
+    },
+    {
+      "title": "fix: resolve bun.exe on Windows so cloud:mock and cloud-e2e boot",
+      "prNumber": 8248,
+      "type": "bugfix",
+      "body": "## Problem\n\nOn Windows, `bun run cloud:mock` and the `cloud-e2e` stack cannot boot the\ncloud-api. The dev launchers `spawn(\"bun\", …)` to start `pglite-server.ts`\n(and wrangler / migrate), but Node cannot exec the extensionless npm `bun`\nshi",
+      "files": [
+        "packages/scripts/cloud/admin/dev/cloud-api-dev.mjs",
+        "packages/test/cloud-e2e/src/fixtures/stack.ts"
+      ]
+    },
+    {
+      "title": "Shaw/bitrouter cloud replacement",
+      "prNumber": 8247,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/lifeops-bench.yml",
+        ".gitignore",
+        "PLACEHOLDER_AUDIT.md",
+        "bun.lock",
+        "package.json",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/config-env.ts",
+        "packages/agent/src/api/connector-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/mobile-optional-routes.ts",
+        "packages/agent/src/api/pending-request-map.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/view-registry-types.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/api/views-routes.ts",
+        "packages/agent/src/api/views-search-index.ts",
+        "packages/agent/src/auth/oauth-flow.ts",
+        "packages/agent/src/auth/openai-codex.ts",
+        "packages/agent/src/cli/index.ts",
+        "packages/agent/src/providers/role-backfill.ts",
+        "packages/agent/src/runtime/boot-telemetry.ts",
+        "packages/agent/src/runtime/conversation-compactor-runtime.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/agent/src/runtime/operations/reload-hot.ts",
+        "packages/agent/src/runtime/prompt-optimization.ts",
+        "packages/agent/src/runtime/restart.ts",
+        "packages/agent/src/runtime/sandbox-character.ts",
+        "packages/agent/src/runtime/tool-call-cache/cache.ts",
+        "packages/agent/src/runtime/trajectory-storage.ts",
+        "packages/agent/src/runtime/view-action-affinity.ts",
+        "packages/agent/src/services/capability-broker.ts",
+        "packages/agent/src/services/permissions/probers/_bridge.ts",
+        "packages/agent/src/services/registry-client-local.ts",
+        "packages/agent/src/services/registry-client.ts",
+        "packages/agent/src/services/remote-capability-cloud-sandbox.test.ts",
+        "packages/agent/src/services/remote-capability-cloud-sandbox.ts",
+        "packages/alberta/alberta_framework/security.py",
+        "packages/app-core/AGENTS.md",
+        "packages/app-core/CLAUDE.md",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/scripts/desktop-llama-shim/eliza_llama_shim.c",
+        "packages/app-core/scripts/desktop-llama-shim/eliza_llama_shim.h",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/scripts/docker-ci-smoke.sh",
+        "packages/app-core/scripts/ensure-avatars.mjs"
+      ]
+    },
+    {
+      "title": "Shaw/bitrouter openrouter cleanup",
+      "prNumber": 8246,
+      "type": "refactor",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/Dockerfile",
+        "packages/cloud-infra/cloud/bitrouter/README.md",
+        "packages/cloud-infra/cloud/bitrouter/auth-proxy.mjs",
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml",
+        "packages/cloud-infra/cloud/bitrouter/entrypoint.sh",
+        "packages/cloud-infra/tests/bitrouter-service.test.ts",
+        "packages/cloud-shared/src/lib/models/catalog.ts",
+        "packages/cloud-shared/src/lib/pricing.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/candidate-selection.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/dimensions.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): allow third-party app origins on the public API (CORS)",
+      "prNumber": 8245,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe global CORS middleware (`app.use(\"*\", corsMiddleware)` in `cloud-api/src/bootstrap-app.ts`) reflects `Access-Control-Allow-Origin` **only** for first-party origins (`elizacloud.ai` + localhost + pages previews) with `credent",
+      "files": [
+        "packages/cloud-shared/src/lib/cors/cloud-api-hono-cors.test.ts",
+        "packages/cloud-shared/src/lib/cors/cloud-api-hono-cors.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): normalize BitRouter per-million token prices to per-token",
+      "prNumber": 8244,
+      "type": "bugfix",
+      "body": "## Problem\n\nBitRouter's catalog exposes token prices under the structured fields\n`pricing.input_tokens.no_cache` / `pricing.output_tokens.text` in **USD per\nmillion tokens**, whereas the legacy flat `pricing.prompt` / `pricing.completion`\nf",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing-bitrouter-units.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump hono 4.12.18 -> 4.12.21 across cloud packages",
+      "prNumber": 8243,
+      "type": "other",
+      "body": "Supersedes #8239 (Dependabot). That PR bumped `hono` 4.12.18 → 4.12.21 in 8 `package.json`s **but did not update `bun.lock`**, so `bun install --frozen-lockfile` failed (`lockfile had changes, but lockfile is frozen`) and it could not merge",
+      "files": [
+        "bun.lock",
+        "packages/cloud-api/package.json",
+        "packages/cloud-services/_smoke-mcp/package.json",
+        "packages/cloud-services/container-control-plane/package.json",
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-webhook/package.json",
+        "packages/cloud-shared/package.json",
+        "packages/feed/packages/engine/package.json",
+        "packages/test/cloud-mocks/package.json"
+      ]
+    },
+    {
+      "title": "fix(ci): stabilize lifeops and companion visual smoke",
+      "prNumber": 8242,
+      "type": "bugfix",
+      "body": "## Summary\n- treat Cerebras 429 queue/quota responses during LifeOps benchmark verification as provider throttling instead of code failure\n- skip LifeOps benchmark/artifact/comment steps when provider throttling is detected, while preservin",
+      "files": [
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/lifeops-bench.yml",
+        "packages/app/test/ui-smoke/apps-utility-interactions.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-lifecycle.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/titlebar-navigation.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts",
+        "packages/scripts/check-scenario-workflow-coverage.mjs",
+        "plugins/plugin-task-coordinator/__tests__/unit/orchestrator-capability-parity.test.ts",
+        "plugins/plugin-xr/src/__tests__/xr-functional-parity.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): route Cerebras default models to Cerebras before BitRouter",
+      "prNumber": 8241,
+      "type": "bugfix",
+      "body": "## Problem (potential production default-inference break)\n\n#8233 set the default text models to **bare Cerebras IDs** (`gpt-oss-120b`, `zai-glm-4.7` — `catalog.ts:46-47`), but `getLanguageModel` routes **every** model through the BitRouter ",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): carry BitRouter follow-up checks onto develop",
+      "prNumber": 8240,
+      "type": "bugfix",
+      "body": "## Summary\n- Carry forward the Vite date-fns prebundle fix that prevents dev-server restart storms.\n- Carry forward the Android App Actions Milady-to-elizaOS rewrite and stale-template validation.\n- Carry forward the game TUI test import fi",
+      "files": [
+        ".github/workflows/lifeops-bench.yml",
+        "packages/app/test/ui-smoke/view-manager-actual-flow.spec.ts",
+        "packages/app/vite.config.ts",
+        "plugins/plugin-computeruse/src/__tests__/android-bridge.test.ts",
+        "plugins/plugin-training/src/ui/FineTuningTuiView.test.tsx"
+      ]
+    },
+    {
+      "title": "feat(ui): liquid-glass motion pass for the continuous-chat overlay + ambient home greeting",
+      "prNumber": 8238,
+      "type": "feature",
+      "body": "## What\n\nA motion/animation polish pass on the continuous-chat overlay and the ambient `/chat` home, using the package's existing `motion/react` dependency — no new deps.\n\n**Overlay (`ContinuousChatOverlay.tsx`)**\n- Chat bubbles fade + rise",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/ui/.storybook/preview.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "patches/CHECKSUMS.sha256",
+        "patches/bigint-buffer@1.1.5.patch"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 2 directories with 1 update",
+      "prNumber": 8237,
+      "type": "other",
+      "body": "Bumps the uv group with 1 update in the /packages/benchmarks/OSWorld directory: [starlette](https://github.com/Kludex/starlette).\nBumps the uv group with 1 update in the /packages/training directory: [starlette](https://github.com/Kludex/st",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(agent): wire cloud SSO /pair handler into the real HTTP server",
+      "prNumber": 8236,
+      "type": "bugfix",
+      "body": "## Why\n\nCloud SSO popup opens `<agent-web-ui>/pair?token=X`. The handler exists in `packages/app-core/src/api/cloud-pair-route.ts` (added in #8198 + Shaw's follow-up `3ca095d004`), but the wiring was on `packages/app-core/src/api/server.ts`",
+      "files": [
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/package.json"
+      ]
+    },
+    {
+      "title": "feat(cloud): replace BitRouter cloud routing",
+      "prNumber": 8233,
+      "type": "feature",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "PLACEHOLDER_AUDIT.md",
+        "bun.lock",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/view-registry-types.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/services/remote-plugin-adapter.test.ts",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.test.mjs",
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "packages/app-core/src/browser.ts",
+        "packages/app-core/src/runtime/desktop/AppWindowRenderer.tsx",
+        "packages/app-core/src/runtime/desktop/DesktopTrayRuntime.tsx",
+        "packages/app-core/src/runtime/desktop/browser-entry-tray-exports.test.ts",
+        "packages/app-core/src/runtime/desktop/index.ts",
+        "packages/app-core/src/runtime/desktop/tray-menu.ts",
+        "packages/app/index.html",
+        "packages/app/src/shims/cookie.ts",
+        "packages/app/src/shims/debug.ts",
+        "packages/app/src/shims/decimal-js-light.ts",
+        "packages/app/src/shims/es-toolkit-compat-get.ts",
+        "packages/app/src/shims/es-toolkit-compat-isPlainObject.ts",
+        "packages/app/src/shims/es-toolkit-compat-last.ts",
+        "packages/app/src/shims/es-toolkit-compat-maxBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-minBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-omit.ts",
+        "packages/app/src/shims/es-toolkit-compat-range.ts",
+        "packages/app/src/shims/es-toolkit-compat-sortBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-sumBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-throttle.ts",
+        "packages/app/src/shims/es-toolkit-compat-uniqBy.ts",
+        "packages/app/src/shims/es-toolkit-compat.ts",
+        "packages/app/src/shims/eventemitter3.ts",
+        "packages/app/src/shims/extend.ts",
+        "packages/app/src/shims/nprogress.ts",
+        "packages/app/src/shims/react-is.ts",
+        "packages/app/src/shims/set-cookie-parser.ts",
+        "packages/app/src/shims/style-to-js.ts",
+        "packages/app/src/shims/use-sync-external-store-with-selector.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts",
+        "packages/app/test/ui-smoke/titlebar-navigation.spec.ts",
+        "packages/app/vite.config.ts",
+        "packages/benchmarks/docs/SMITHERS_INTEGRATION.md",
+        "packages/benchmarks/smithers-adapter/AGENTS.md",
+        "packages/benchmarks/smithers-adapter/CLAUDE.md",
+        "packages/benchmarks/smithers-adapter/README.md",
+        "packages/benchmarks/smithers-adapter/smithers_adapter/client.py",
+        "packages/benchmarks/smithers-adapter/smithers_adapter/optimization.mjs"
+      ]
+    },
+    {
+      "title": "fix(release): restore release-check + regression-matrix script wiring",
+      "prNumber": 8232,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **Release Workflow Contract** check is red on `develop` and on every PR branched from it:\n\n```\nrelease-check: package.json is missing required release/audit script wiring:\n  - release:check: scripts/run-release-check.mjs\n  -",
+      "files": [
+        "package.json",
+        "packages/app-core/scripts/release-check.ts",
+        "packages/app-core/scripts/run-eliza-app-core-script.mjs",
+        "packages/app-core/scripts/run-release-check.mjs"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): operator inspector and recovery controls",
+      "prNumber": 8231,
+      "type": "feature",
+      "body": "## Summary\n\nThis draft branch integrates the orchestrator/operator-inspector work into the elizaOS app and agent surfaces so it can be reviewed, tested, and selectively harvested. It adds richer orchestrator task APIs, operator recovery con",
+      "files": [
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "plugins/plugin-agent-orchestrator/src/api/orchestrator-routes.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-task-coordinator/__tests__/unit/NotesPanel.test.tsx",
+        "plugins/plugin-task-coordinator/__tests__/unit/SearchPalette.test.tsx",
+        "plugins/plugin-task-coordinator/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): reset CompareView round on provider/model swap",
+      "prNumber": 8230,
+      "type": "bugfix",
+      "body": "## What\n\nPR #8226 added `resetRound()` (clears `revealed` + `winnerIdx`) on **add / remove / shuffle** of compare slots, but not when a slot's **provider or model is swapped** mid-round. Because the winner is tracked by array **index** and ",
+      "files": [
+        "plugins/plugin-task-coordinator/src/odysseus/CompareView.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/SearchPalette.tsx"
+      ]
+    },
+    {
+      "title": "feat(ui/chat): reveal bubbles + suggestions on hover or focus, with a…",
+      "prNumber": 8229,
+      "type": "feature",
+      "body": "… quick fade\r\n\r\nThe resting chat bubbles (last 2 turns) and the suggestion strip now reveal together on hover OR click-into-input (previously focus only), and fade in/out quickly (200ms opacity, always-mounted) instead of snapping. `peek` (",
+      "files": [
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx"
+      ]
+    },
+    {
+      "title": "fix(dev): reliable agent hot-reload via source-only watcher",
+      "prNumber": 8228,
+      "type": "bugfix",
+      "body": "The dev API child ran with watch off by default (and auto-disabled whenever a concurrent build was detected), so agent/plugin source edits never reached the running agent. `node --watch` followed imports into dist/ and hot-reloaded mid-buil",
+      "files": [
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.test.mjs",
+        "packages/app-core/scripts/lib/api-supervisor.mjs",
+        "packages/app-core/scripts/lib/api-supervisor.test.mjs",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/local-asr-transcribe.ts",
+        "packages/ui/src/voice/voice-capture-factory.test.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts",
+        "plugins/plugin-local-inference/src/services/voice/whisper-cpp-asr.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): odysseus Notes focus + Search highlight bugs",
+      "prNumber": 8227,
+      "type": "bugfix",
+      "body": "Two adversarially-verified, user-facing, **frontend-only** bugs found in a deep-scan of the odysseus views:\n\n### NotesPanel — quick-add ate every keystroke after the first\nTyping the first character into the quick-add bar fires `openNewForm",
+      "files": [
+        "plugins/plugin-task-coordinator/src/odysseus/NotesPanel.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/SearchPalette.tsx"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): reset CompareView round on slot-set changes",
+      "prNumber": 8226,
+      "type": "bugfix",
+      "body": "## What\nThree adversarially-verified bugs in the odysseus **Compare arena**, all one root cause: a vote is tracked by **index** (`winnerIdx`) + a `revealed` flag, but the slot-set mutators never cleared it — so a stale verdict survived chan",
+      "files": [
+        "plugins/plugin-task-coordinator/src/odysseus/CompareView.tsx"
+      ]
+    },
+    {
+      "title": "feat(ui): time-of-day + history-aware prompt suggestions on the continuous-chat overlay",
+      "prNumber": 8224,
+      "type": "feature",
+      "body": "## What\nMakes the resting-overlay's 5-prompt suggestion strip lightly **tailored** (client-side, no backend): the lead chip now matches the overlay's own greeting — **\"Plan my day\"** (morning) · **\"What's left today?\"** (afternoon) · **\"Rec",
+      "files": [
+        "packages/ui/src/components/shell/usePromptSuggestions.test.ts",
+        "packages/ui/src/components/shell/usePromptSuggestions.ts"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group across 1 directory with 9 updates",
+      "prNumber": 8222,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 9 updates in the / directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [@biomejs/biome](https://github.com/biomejs/biome/tree/HEAD/packages/@biomejs/biome) | `2.4.15` | `2.4.16` |\n| [@types/bun](h",
+      "files": [
+        "package.json",
+        "packages/cloud-routing/package.json",
+        "packages/cloud-services/operator/package.json",
+        "packages/feed/apps/web/package.json",
+        "packages/feed/package.json",
+        "packages/feed/packages/examples/local-a2a-server/package.json",
+        "packages/sweagent/package.json",
+        "plugins/plugin-native-camera/package.json"
+      ]
+    },
+    {
+      "title": "chore(ui): remove four dead Storybook stories (zero-consumer composites)",
+      "prNumber": 8220,
+      "type": "other",
+      "body": "## What\n\nRemoves four Storybook stories whose underlying components have **zero real consumers** anywhere in the monorepo — only their own story referenced them:\n\n- `composites/search/search-input.stories.tsx` (`SearchInput`)\n- `composites/",
+      "files": [
+        "packages/ui/src/components/composites/form-field/form-field.stories.tsx",
+        "packages/ui/src/components/composites/search/search-input.stories.tsx",
+        "packages/ui/src/components/composites/search/searchbar.stories.tsx",
+        "packages/ui/src/components/composites/sidebar/sidebar-filter-bar.stories.tsx"
+      ]
+    },
+    {
+      "title": "feat(plugin-calendar): extract first-class calendar plugin from lifeops; wire Odysseus (#8203)",
+      "prNumber": 8219,
+      "type": "feature",
+      "body": "## Summary\n\nExtracts the **entire** calendar surface out of `@elizaos/plugin-lifeops` into a new first-class **`@elizaos/plugin-calendar`**, keeps LifeOps fully working via thin wrappers + delegation, and wires the Odysseus `CalendarView` t",
+      "files": [
+        "plugins/plugin-calendar/package.json",
+        "plugins/plugin-calendar/src/actions/calendar-handler.ts",
+        "plugins/plugin-calendar/src/actions/deps.ts",
+        "plugins/plugin-calendar/src/actions/index.ts",
+        "plugins/plugin-calendar/src/components/CalendarSection.tsx",
+        "plugins/plugin-calendar/src/components/EventEditorDrawer.tsx",
+        "plugins/plugin-calendar/src/hooks/useCalendarWeek.ts",
+        "plugins/plugin-calendar/src/index.ts",
+        "plugins/plugin-calendar/src/internal/detail.ts",
+        "plugins/plugin-calendar/src/internal/format.ts",
+        "plugins/plugin-calendar/src/routes/calendar-routes.ts",
+        "plugins/plugin-calendar/src/ui.ts",
+        "plugins/plugin-calendar/test/calendar-normalize.test.ts",
+        "plugins/plugin-calendar/test/calendar-service.test.ts",
+        "plugins/plugin-lifeops/src/actions/calendar.ts",
+        "plugins/plugin-lifeops/src/components/LifeOpsCalendarSection.tsx",
+        "plugins/plugin-lifeops/src/components/LifeOpsOverviewSection.tsx",
+        "plugins/plugin-lifeops/src/components/LifeOpsVisualCopy.test.ts",
+        "plugins/plugin-lifeops/src/lifeops/service-normalize-calendar.ts",
+        "plugins/plugin-lifeops/src/routes/lifeops-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): restore the inline chevron expand affordance on the continuous-chat overlay",
+      "prNumber": 8218,
+      "type": "bugfix",
+      "body": "## What\n\nThe continuous-chat overlay's expand/collapse control had drifted into a **separate floating speech-bubble button** hovering above the composer bar. It reads as heavy chrome and breaks the overlay's minimal, single-surface feel.\n\nT",
+      "files": [
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): four state/parity bugs in the odysseus views",
+      "prNumber": 8204,
+      "type": "bugfix",
+      "body": "## What\n\nFour confirmed, **adversarially-verified** state/correctness bugs in the LIVE odysseus views, each a minimal targeted fix that matches upstream odysseus behavior. No backend/API changes.\n\n| # | View | Bug | Fix |\n|---|------|-----|",
+      "files": [
+        "plugins/plugin-task-coordinator/__tests__/unit/orchestrator-stream.test.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/GroupChatView.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/TasksView.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/VoiceView.tsx",
+        "plugins/plugin-task-coordinator/src/orchestrator-stream.tsx"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 6 directories with 2 updates",
+      "prNumber": 8202,
+      "type": "other",
+      "body": "\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/pyproject.toml",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/benchmarks/vending-bench/pyproject.toml",
+        "packages/benchmarks/vending-bench/uv.lock",
+        "packages/benchmarks/visualwebbench/uv.lock",
+        "packages/feed/packages/examples/feed-langgraph-agent/uv.lock",
+        "packages/training/uv.lock"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 1028.8053486786037,
-      "prScore": 1000.5533486786037,
-      "issueScore": 26.5,
+      "totalScore": 1545.0992315765418,
+      "prScore": 1501.6712315765417,
+      "issueScore": 40.8,
       "reviewScore": 0,
-      "commentScore": 1.7519999999999998,
+      "commentScore": 2.6279999999999997,
       "summary": null
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 535.7,
+      "totalScore": 963.2,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 535.5,
+      "reviewScore": 963,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "0xSolace",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
-      "totalScore": 485.09493747525187,
-      "prScore": 484.6569374752519,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "Dexploarer",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
-      "totalScore": 411.52130411777625,
-      "prScore": 411.08330411777627,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 766.5484481622484,
+      "prScore": 731.3584481622484,
+      "issueScore": 2,
+      "reviewScore": 31,
+      "commentScore": 2.1899999999999995,
       "summary": null
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 388.4482179267737,
-      "prScore": 387.61021792677366,
+      "totalScore": 540.5514926980179,
+      "prScore": 539.713492698018,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.838,
       "summary": null
     },
     {
-      "username": "lalalune",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 203.7129052729053,
-      "prScore": 169.39890527290527,
-      "issueScore": 2,
-      "reviewScore": 31,
-      "commentScore": 1.3139999999999998,
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 510.72188511165103,
+      "prScore": 509.84588511165106,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 451.22407801435236,
+      "prScore": 450.78607801435237,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "2-A-M",
       "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
-      "totalScore": 195.05038499373637,
-      "prScore": 194.51038499373638,
+      "totalScore": 339.42086473462564,
+      "prScore": 338.8808647346257,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 127.21303549289438,
+      "prScore": 127.01303549289437,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1222,16 +1800,6 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/172897890?u=13dcfbbffef5a3f90ae60741795eaf47cc93a244&v=4",
       "totalScore": 86.39332985768858,
       "prScore": 86.39332985768858,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 70.56712176617161,
-      "prScore": 70.56712176617161,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -1280,10 +1848,20 @@
     {
       "username": "github-code-quality",
       "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
-      "totalScore": 9,
+      "totalScore": 13.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "LamboPoewert",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91011698?u=a8b0456dbd9d3e15b0fee96b4cf2813a5e15022c&v=4",
+      "totalScore": 11.822692619390967,
+      "prScore": 11.822692619390967,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1298,9 +1876,9 @@
       "summary": null
     }
   ],
-  "newPRs": 115,
-  "mergedPRs": 59,
-  "newIssues": 16,
-  "closedIssues": 16,
-  "activeContributors": 19
+  "newPRs": 171,
+  "mergedPRs": 96,
+  "newIssues": 21,
+  "closedIssues": 25,
+  "activeContributors": 20
 }

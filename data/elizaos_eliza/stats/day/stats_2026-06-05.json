@@ -1,0 +1,478 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-05T00:00:00.000Z",
+    "intervalEnd": "2026-06-06T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-05 to 2026-06-06, elizaos/eliza had 16 new PRs (18 merged), 2 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABEhtd5g",
+      "title": "Steward login broken in prod: OAuth authorize 400 (code_challenge) + email/send 400 — blocks all Sign in with Eliza Cloud",
+      "author": "NubsCarson",
+      "number": 8257,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nSteward login is broken in production — **both** email and Google OAuth fail with 400 — which blocks \"Sign in with Eliza Cloud\" for **every** app (the cli-login flow bounces all third-party apps + the dashboard through this same login).\n\nReproduces with plain `curl` (no browser, no extensions), so it's a server-side prod issue, not a client environment.\n\n## Symptoms (prod, `api.elizacloud.ai`)\n**Google/OAuth** — `GET /steward/auth/oauth/google/authorize?...&response_type=code`:\n```\n{\"ok\":false,\"error\":\"code_challenge is required for response_type=code\"}\n```\nAdding `code_challenge` + `code_challenge_method=S256` still returns **400**.\n\n**Email** — `POST /steward/auth/email/send` → **400 Bad Request** (from `steward-login-section.tsx` → `signInWithEmail`).\n\n## Root cause (the OAuth half)\nThe Steward `/authorize` endpoint now **requires PKCE** (`code_challenge`), but:\n- `packages/cloud-frontend/src/pages/login/steward-oauth-url.ts` → `buildStewardOAuthAuthorizeUrl()` builds the URL with `response_type: \"code\"` and **no** `code_challenge` / `code_challenge_method`.\n- The exchange flow is **nonce-based with no verifier**: `packages/cloud-api/auth/steward-nonce-exchange/route.ts` documents *\"The Steward API authenticates the exchange purely by possession of the one-time `code` — there is no client [verifier].\"*\n\nSo the authorize service (PKCE-required) and the cloud login flow (nonce-based, no PKCE) are out of sync — and even a hand-added `code_challenge` still 400s, suggesting a deeper Steward auth misconfig/regression in prod.\n\n## Impact\nNo one can sign in via Eliza Cloud right now — dashboard, edad, and every third-party app using the cli-login \"Sign in with Eliza Cloud\" bounce here and dead-end at this login.\n\n## Fix options\n- **A (restore parity):** make Steward `/authorize` accept the nonce flow **without** `code_challenge` (matches the existing nonce-exchange contract). Simplest if PKCE was enabled unintentionally.\n- **B (full PKCE):** frontend generates a `code_verifier` + S256 `code_challenge`, sends `code_challenge` at `/authorize` and stores the verifier; `steward-nonce-exchange` forwards `code_verifier` to `/auth/oauth/exchange`.\n\nThe `email/send` 400 handler isn't in this monorepo (Steward service) — flag for that team too; it may share the same prod regression.\n\nFound via the cli-login flow from a third-party browser app.\n",
+      "createdAt": "2026-06-05T17:18:26Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEYycSA",
+      "title": "plugin-local-inference: voice→entity binding (bindEntity) is never called at runtime — recognized speakers never persist to the relationship graph",
+      "author": "NubsCarson",
+      "number": 8234,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nIn `plugin-local-inference`'s voice pipeline, the plumbing to tie a recognized voice to an elizaOS `Entity` is fully present, but the **bind step appears to be unreachable at runtime** — `VoiceProfileStore.bindEntity` / `unbindEntity` have no caller outside tests. As a result a profile's `entityId` stays `null` in practice: attribution can resolve *which voice* is speaking, but the agent never persists *who that is* into the relationship graph.\n\n> Grep-level finding on current `develop` — happy to be corrected if there's a dynamic/registered path I missed.\n\n## What already works (so this isn't a rebuild)\n\n- Voice profiles carry and persist an `entityId` — `plugins/plugin-local-inference/src/services/voice/profile-store.ts` (`bindEntity` L605, `unbindEntity` L627).\n- Attribution resolves the entity on recognition — `src/services/voice/speaker/attribution-pipeline.ts:199` (`entityId: refined?.entityId ?? match.profile.entityId ?? null`).\n- The UI already crowns the OWNER when the speaking voice's entity matches the owner — `packages/ui/.../ChatVoiceStatusBar` (`speakerEntityId === ownerEntityId`).\n\n## The gap\n\n`grep -rn bindEntity` across `plugins/` + `packages/` returns only the definitions in `profile-store.ts` and references in `__tests__/voice-profile-store.test.ts`. The voice-profile routes (`src/services/voice/voice-profile-routes.ts`) expose `activate` / list / soft-delete, but **no bind/claim endpoint**, and there is no agent action that binds. So there is no runtime path (route, action, or UI affordance) for \"this voice = this entity.\"\n\nConsequence: `entityId` stays `null`, the OWNER-crown only lights up in tests, and recognized speaker identity never reaches the relationship graph — the agent hears a known voice but can't remember *who* across sessions.\n\n## Suggested shape (open to direction)\n\n1. A bind/unbind route alongside the existing voice-profile routes, e.g. `POST /v1/voice/profiles/:id/bind { entityId }`.\n2. An agent action so the agent can bind by voice (\"this is &lt;name&gt;\"), mirroring how `GENERATE_MEDIA` is wired.\n3. On bind, route through `EntityStore` / `RelationshipStore` + the identity merge engine (per the root `CLAUDE.md` rule — don't bypass it), so the bound voice becomes a first-class relationship node.\n\nHappy to take a first cut if this is wanted and not already in progress.\n",
+      "createdAt": "2026-06-04T14:09:50Z",
+      "closedAt": "2026-06-05T21:33:05Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEhH8Pg",
+      "title": "App-credits: purchases fund the per-app pool but inference debits the org balance (stranded credits)",
+      "author": "NubsCarson",
+      "number": 8253,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nApp-credits purchases and inference spend use **two different ledgers**, so credits a user buys for a monetized app can't be spent — and a user with cloud/org credits is blocked from a monetized app unless they separately top up the app pool. This blocks third-party browser apps monetizing via `X-App-Id` end-to-end.\n\nThis looks like a half-finished migration (see the `// Switched from app_credit_balances ... to the org balance` comment), so flagging rather than unilaterally changing billing.\n\n## Details (origin/develop)\n- **Purchase funds the per-app pool.** `processPurchase` credits `app_credit_balances` via `appCreditBalancesRepository.addCredits(...)` — `packages/cloud-shared/src/lib/services/app-credits.ts:~307`.\n- **Balance check reads the per-app pool.** `checkBalance` → `appCreditBalancesRepository.findByAppAndUser(...)` — `app-credits.ts:~193`.\n- **Spend debits the ORG balance.** The spend path was switched to `creditsService.reserveAndDeductCredits({ organizationId })` — `app-credits.ts:~408` (the \"Switched from app_credit_balances ... to the org balance\" comment). The `X-App-Id` completions path also reserves against the org: `reserveCredits({ organizationId })` — `packages/cloud-api/v1/chat/completions/route.ts:~934`.\n\n## Impact\n1. A user buys app-credits → funds land in `app_credit_balances` → inference debits the **org** balance → \"Insufficient credits\" against an empty org balance. **Money paid, credits never spendable.**\n2. `checkBalance` gates on the app pool, so a user who *does* have org/cloud credits is rejected from a monetized app unless they top up the app pool too.\n3. The `/api/v1/apps/[id]/chat` 402 says \"Insufficient app credits\" but deducts from the org balance (`route.ts:~295-333`), so the error misdirects users.\n\n## Suggested fix (pick one ledger)\n- **A — org-only (matches the \"Switched\" comment's intent):** make `processPurchase` credit the **org** balance (and have `/api/v1/app-credits/balance` + `checkBalance` report/read org). App-credits checkout becomes \"top up cloud credits for this app\"; creator still earns markup via `recordCreatorEarnings()`. Simplest if the per-app pool is being retired.\n- **B — app-pool-only:** make the `X-App-Id` spend path read+debit `app_credit_balances` instead of the org balance.\n\nHappy to open the PR once you confirm the direction (A or B) — A looks consistent with the existing comment + `recordCreatorEarnings`. Also a one-line follow-up: word the `/apps/[id]/chat` 402 to match whichever ledger is checked.\n\nFound while building a third-party app (SupaKan) on the `X-App-Id` app-credits flow.\n",
+      "createdAt": "2026-06-05T15:38:34Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7jFo5v",
+      "title": "Shaw/bitrouter cloud replacement",
+      "author": "lalalune",
+      "number": 8247,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-05T11:59:21Z",
+      "mergedAt": "2026-06-05T13:13:10Z",
+      "additions": 19834,
+      "deletions": 18152
+    },
+    {
+      "id": "PR_kwDOMT5cIs7iinhR",
+      "title": "feat(cloud): add shared runtime provisioning path",
+      "author": "Dexploarer",
+      "number": 8223,
+      "body": "## Summary\n- add execution-tier aware provisioning so shared Eliza agents run through the shared runtime without container provisioning\n- wire create/provision/lifecycle/bridge routing around shared vs container-backed execution tiers\n- add the ComputeProvider seam, DigitalOcean provider implementation, billing exclusions for shared agents, and cloud E2E coverage for shared/custom/lifecycle/dashboard flows\n\n## Behind-base impact\n- `origin/develop` did overlap with our edits in `packages/cloud-api/v1/coding-containers/route.ts`, `packages/cloud-shared/src/db/repositories/agent-billing.ts`, `packages/cloud-shared/src/lib/services/eliza-sandbox.ts`, and `packages/ui/src/App.tsx`\n- the full local branch also carried older UI/desktop commits that conflicted with current `develop`, so this PR is the focused cloud provisioning slice on top of `fd73d4b6f2`\n- the only semantic conflict in the focused slice was `eliza-sandbox.ts`; it is resolved by preserving upstream `buildAgentInsertData` and threading `executionTier`/status through that helper\n\n## Validation\n- `bunx @biomejs/biome check --write <touched files>` passed; existing optional-chain suggestions remain in `packages/test/cloud-mocks/src/control-plane/server.ts`\n- `bun test packages/cloud-api/__tests__/agent-bridge-runtime-routing.test.ts` passed, 2/2\n- `git diff --check origin/develop..HEAD` passed\n- conflict-marker scan over touched cloud paths passed\n\n## Local validation caveat\n- The original cloud branch with this focused code passed `bun run --cwd packages/test/cloud-e2e test` 18/18, `bun run --cwd packages/cloud-frontend audit:cloud` 116/116, and `bun run verify` 460/460 before rebasing.\n- In the rebased PR worktree, broader package typechecks/tests are blocked by local dependency hydration: `bun install --frozen-lockfile --ignore-scripts` reports the lockfile would change, symlinked `node_modules` is missing required packages, and a detached verification checkout hit `No space left on device` before install. CI should re-run the full lane from a clean checkout.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T05:23:28Z",
+      "mergedAt": null,
+      "additions": 9738,
+      "deletions": 716
+    },
+    {
+      "id": "PR_kwDOMT5cIs7irIoY",
+      "title": "feat(orchestrator): operator inspector and recovery controls",
+      "author": "NubsCarson",
+      "number": 8231,
+      "body": "## Summary\n\nThis draft branch integrates the orchestrator/operator-inspector work into the elizaOS app and agent surfaces so it can be reviewed, tested, and selectively harvested. It adds richer orchestrator task APIs, operator recovery controls, edited-plan restart flow, timeline/message/usage plumbing, typed UI client coverage, and a workbench-style UI for inspecting tasks and sub-agent sessions.\n\nThis is intentionally a **draft**. The branch proves the end-to-end contracts and test coverage, but the UI should be reviewed critically before anything is treated as final visual/product direction.\n\n## What changed\n\n- Extended the orchestrator API surface for task detail, task lists, messages, events, timeline, usage, plan revisions, pause/resume, archive/reopen, fork, validate, retry, rerun, restart, and restart-with-edited-plan flows.\n- Hardened orchestrator task service/store/mapper behavior around richer operator state, including sessions, artifacts, plan revisions, usage, active task/session counts, recovery state, and persisted task metadata.\n- Expanded `OrchestratorWorkbench` with an operator inspector, task rail, sub-agent session cards, message/timeline rendering, plan/acceptance panels, recovery controls, plan editor, and message composer wiring.\n- Added typed client methods and contract coverage for the new orchestrator API shapes in `packages/ui`.\n- Stabilized app-shell route loading and smoke/live-stack behavior for `/`, `/chat`, `/orchestrator`, `/apps/tasks`, app routes, and settings/connectors paths.\n- Added an env-gated local demo fixture mode for the smoke API stub: `ELIZA_UI_SMOKE_DEMO_ORCHESTRATOR=1`. This lets reviewers open the normal app locally and see a populated orchestrator task with demo sub-agents without needing real provider credentials.\n- Added detailed and simple HTML docs describing the branch, status, vision, validation, and how the orchestrator/operator inspector fits into elizaOS.\n\n## Reviewer note for Shaw / agent review\n\nThe useful review path is probably:\n\n1. Start with `plugins/plugin-agent-orchestrator/src/api/orchestrator-routes.ts` and the matching service/store changes to verify the backend contract and recovery semantics.\n2. Check `packages/ui/src/api/client-agent.ts` and `client-types-cloud.ts` to confirm the frontend contract matches the route behavior.\n3. Review `plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx` for product/UX direction, but treat this part as rough draft UI rather than final polish.\n4. Review the smoke fixture in `packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs` as local test/demo support only. It is behind `ELIZA_UI_SMOKE_DEMO_ORCHESTRATOR=1` and should not affect default smoke behavior.\n5. Use the tests below to decide which parts are ready to keep versus split or refine.\n\n## Local demo command\n\nTo see the populated local orchestrator surface without real agents/providers:\n\n```bash\nELIZA_UI_SMOKE_SKIP_BUILD=1 \\\nELIZA_UI_SMOKE_FORCE_STUB=1 \\\nELIZA_UI_SMOKE_DEMO_ORCHESTRATOR=1 \\\nELIZA_UI_SMOKE_API_PORT=31338 \\\nELIZA_UI_SMOKE_PORT=2144 \\\nnode packages/app-core/scripts/run-node-tsx.mjs packages/app-core/scripts/playwright-ui-live-stack.ts\n```\n\nThen open:\n\n- `http://127.0.0.1:2144/orchestrator`\n- `http://127.0.0.1:2144/apps/tasks`\n- `http://127.0.0.1:2144/chat`\n- `http://127.0.0.1:2144/`\n\nThe demo fixture seeds a task named `Build Kanban planner app` with `Codex Builder` and `Cerebras Reviewer` sessions, usage counters, timeline/messages, plan state, and operator controls.\n\n## Validation performed\n\n- `packages/app` lint, typecheck, and build passed.\n- `packages/ui` typecheck and build passed.\n- `packages/agent` lint, typecheck, and build passed.\n- `plugin-agent-orchestrator` unit tests/build passed.\n- `plugin-task-coordinator` unit tests/build passed.\n- `plugin-app-manager` tests/build passed.\n- App route/view/smoke coverage tests passed.\n- Selector-based local route sweep passed for `/`, `/chat`, `/orchestrator`, `/apps/skills`, `/apps/trajectories`, `/apps/tasks`, and `/settings#connectors`.\n- `bun run --cwd packages/app test:e2e test/ui-smoke/orchestrator-gui-workbench.spec.ts` passed.\n- Live demo stack was verified with Playwright: opened `/orchestrator`, selected the seeded task, confirmed the sub-agent inspector, sent a prompt through the composer, and confirmed the demo orchestrator response rendered in the message list.\n\nNotes: app build still emits existing Vite dynamic-import warnings, and agent lint still emits existing warnings in `conversation-routes.ts`. Those were not introduced by this branch.\n\n## Known caveats\n\n- The UI is draft-quality and should not be merged as final visual design without product/design review.\n- The local demo fixture is not a real agent runner; it is an env-gated stub for review and smoke testing.\n- This is a broad branch. It may be worth splitting before merge into backend contract/service changes, UI workbench changes, smoke/test harness changes, and docs.\n- No PR merge is requested from this branch as-is; this draft exists so reviewers can inspect the work and decide what to keep.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T12:26:17Z",
+      "mergedAt": "2026-06-05T12:06:24Z",
+      "additions": 1560,
+      "deletions": 17
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jJg-V",
+      "title": "feat(orchestrator): let /goal autonomously drive the monetized-app loop (capped self-spend + economics capabilities)",
+      "author": "2-A-M",
+      "number": 8250,
+      "body": "## Why\n\nA `/goal` sub-agent is fenced to coding-only capabilities\n(`DEFAULT_GOAL_CAPABILITIES`), and every paid Cloud command through the\nparent-agent broker requires an explicit human \"yes\". Together these mean an\nagent **cannot autonomously drive the build-monetized-app loop** (create app →\ndeploy → monetize → buy domain → stay alive on earnings) — the loop the\n`build-monetized-app` skill and the survival-economics cron were built for.\n\nThis PR adds two **opt-in** pieces so a goal task can drive that loop, with\n**no change to any default behavior**.\n\n## 1. Capped self-spend allowance (`spend-allowance.ts`)\n\nGate broker Cloud commands by a per-session USD budget\n(`ELIZA_AGENT_SPEND_CAP_USD`, default `0` = today's confirm-everything behavior).\n\n- `read` / `dry-run` → never gated (unchanged).\n- `destructive` → ALWAYS require human confirmation, regardless of cap.\n- self-spend commands (debit our own credits: `domains.buy`,\n  `containers.create`, media/promote/ads) → auto-authorize only while running\n  total + estimated cost ≤ cap; over cap or unknown cost → confirm.\n- other mutating / revenue commands (`apps.create`, `apps.charges.create` —\n  funded by the payer, not us) → auto-authorize while the allowance is active.\n\nCost hints come from a reserved `spendEstimateUsd` param that is stripped before\nthe outbound request. The ledger is in-memory per child session (a safety\nthrottle — real money is still gated server-side by atomic debit/refund). The\npure decision logic is fully unit-tested.\n\n## 2. Economics capability profile (`goal-prompt.ts`)\n\n`ECONOMICS_GOAL_CAPABILITIES` extends the coding fence with the parent-agent\nCloud bridge (apps / containers / domains / charges / credits). A task opts in\nvia `metadata.capabilityProfile = \"economics\"`; `spawnAgentForTask` applies it.\nThe default coding-only fence is unchanged. UI: a leading `/economics` (or\n`/monetize`) directive in the Odysseus composer creates the task with that\nprofile.\n\n## Safety\n\n- **Off by default**: cap `0` + the default profile reproduce today's behavior\n  exactly.\n- Destructive actions and over-cap spend still require a human.\n- Auto-authorizations are logged for audit.\n\n## Tests\n\nNew unit tests: `spend-allowance.test.ts`, `goal-prompt.test.ts`, broker\nallowance integration cases in `parent-agent-broker.test.ts`, and\n`composer-directives.test.ts`. All green; orchestrator typecheck clean. The\nend-to-end money path these capabilities drive is covered by the smoke test in\n#8249.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-05T15:01:56Z",
+      "mergedAt": "2026-06-05T17:33:28Z",
+      "additions": 894,
+      "deletions": 14
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jOZTf",
+      "title": "fix(cloud): send PKCE on Steward OAuth + sign the nonce-exchange call",
+      "author": "NubsCarson",
+      "number": 8259,
+      "body": "## What\n\nMake the Eliza Cloud login send **PKCE** on the Steward OAuth flow, and have the\nnonce-exchange route **sign** its direct upstream call — the two client-side\ngaps that broke \"Sign in with Eliza Cloud\" after Steward's auth hardening.\n\nRefs #8257.\n\n## Why (root cause — verified against prod `api.elizacloud.ai`)\n\nSteward was hardened on 2026-05-28 (`3faf518`) to require, on `/auth/*`:\n1. a PKCE `code_challenge` (S256) on `GET /auth/oauth/:provider/authorize` for\n   `response_type=code`, and\n2. an HMAC request signature (`X-Steward-Signature: v1=<hex>`) + freshness\n   header on mutating routes.\n\nThe Eliza Cloud client never sent either, so live reproduction shows:\n\n```\nGET  /steward/auth/oauth/google/authorize?...&response_type=code\n  → 400 {\"error\":\"code_challenge is required for response_type=code\"}\nPOST /steward/auth/oauth/exchange   (and /auth/email/send)\n  → 401 {\"error\":\"X-Steward-Signature header required\"}\n```\n\nThe **signing** half of the proxy path was already fixed in #8256\n(`embeddedStewardHandler`). This PR closes the remaining client gaps:\n\n- **PKCE** is not sent anywhere by the SPA.\n- The **nonce-exchange route bypasses the `/steward/*` signing proxy** (it calls\n  upstream Steward directly to pin the tenant), so its `/auth/oauth/exchange`\n  POST is unsigned and 401s even after #8256 ships.\n\n## Changes\n\n**Frontend PKCE (`packages/cloud-frontend`)**\n- `pages/login/steward-oauth-url.ts`: add `createStewardPkcePair` /\n  `createStewardPkceChallenge` / `generateStewardPkceVerifier` (S256, RFC 7636)\n  and `store`/`consumeStewardPkceVerifier` (sessionStorage, single-use); add a\n  `codeChallenge` option on `buildStewardOAuthAuthorizeUrl`.\n- `pages/login/steward-login-section.tsx`: mint + stash the verifier before the\n  `/authorize` redirect; replay it on the callback into the exchange.\n- `lib/steward-session.ts`: forward `codeVerifier` to the nonce-exchange route.\n\n**Exchange signing (`packages/cloud-api`)**\n- `src/steward/sign.ts` (new): `buildStewardCanonicalRequest` +\n  `signStewardMutatingRequest` — a faithful, **lockstep** copy of the proxy\n  signer in `src/steward/embedded.ts` (and Steward's\n  `authorization-signature.ts`). Same 15-field canonical, same `v1=` HMAC.\n- `auth/steward-nonce-exchange/route.ts`: forward `code_verifier` to Steward and\n  sign the upstream `/auth/oauth/exchange` POST when\n  `STEWARD_REQUEST_SIGNING_SECRET` is set (unsigned otherwise — same posture as\n  the proxy).\n\n## Backward compatibility\n\n- Wallet (SIWE/SIWS), email/magic-link, and passkey flows are untouched.\n- The exchange still works with **no** verifier and/or **no** signing secret\n  (both forwarded only when present); legacy pre-PKCE callbacks degrade to\n  Steward's own error rather than crashing.\n- Accepts both `codeVerifier` and `code_verifier` body shapes.\n\n## Testing\n\n- `packages/cloud-frontend/.../steward-oauth-url.test.ts` — PKCE S256 locked to\n  the RFC 7636 Appendix B vector (`dBjf… → E9Me…`, identical to Steward's\n  `pkceChallengeForVerifier`), verifier charset/length, single-use store/consume,\n  and conditional `code_challenge` query params.\n- `packages/cloud-api/__tests__/steward-sign.test.ts` — canonical field order,\n  freshness + idempotency stamping, an **independently-recomputed signature that\n  verifies**, idempotency-key preservation, and body-tamper rejection.\n\n> Note: the full monorepo install/test run was done in CI (local install was not\n> possible in my environment). The PKCE crypto and the signer were additionally\n> proven against standalone references before commit.\n\n## NOT in this PR — required deploy/ops follow-ups for prod to go green\n\nThis PR is the client code. Prod login also needs (cannot be done in-repo):\n1. **Redeploy `cloud-api`** with #8256 **and set `STEWARD_REQUEST_SIGNING_SECRET`**\n   (matching the upstream Steward `STEWARD_REQUEST_SIGNING_SECRETS`) — unblocks\n   email/passkey/wallet immediately.\n2. **Configure the `elizacloud` tenant's OAuth redirect allowlist**\n   (`STEWARD_OAUTH_ALLOWED_REDIRECTS` or tenant `allowedRedirectUrls`,\n   e.g. `https://www.elizacloud.ai/login`, `https://staging.elizacloud.ai/login`)\n   — currently returns `\"OAuth redirect_uri allowlist is not configured for this\n   tenant\"`, the last gate for Google after PKCE.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-05T18:58:56Z",
+      "mergedAt": "2026-06-05T22:06:59Z",
+      "additions": 489,
+      "deletions": 7
+    }
+  ],
+  "codeChanges": {
+    "additions": 6529,
+    "deletions": 673,
+    "files": 124,
+    "commitCount": 167
+  },
+  "completedItems": [
+    {
+      "title": "fix(cloud-api): prefer agent bridge_url over broken UUID subdomain for pairing",
+      "prNumber": 8262,
+      "type": "bugfix",
+      "body": "## Why\n\nThe pairing-token endpoint returns \\`redirectUrl=<uuid>.<ELIZA_CLOUD_AGENT_BASE_DOMAIN>/pair?token=…\\` for Docker-backed agents. That hostname only resolves to the agent if a wildcard Worker / signed tunnel-proxy entry is in place —",
+      "files": [
+        "packages/cloud-api/__tests__/pairing-token-bridge-url.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/pairing-token/route.ts",
+        "packages/test/cloud-e2e/tests/provision.spec.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-frontend): wizard exposes Shared vs Dedicated execution mode explicitly",
+      "prNumber": 8261,
+      "type": "feature",
+      "body": "## Why\n\nPR #8223 introduced agent tiering (`cloud-shared/agent-tier.ts`): an agent without a docker image runs container-free on the shared multi-tenant runtime; an agent with one gets its own Docker container on Hetzner. The wizard hid tha",
+      "files": [
+        "packages/cloud-frontend/src/dashboard/agents/_components/create-eliza-agent-dialog.tsx",
+        "packages/test/cloud-e2e/tests/dashboard.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): send PKCE on Steward OAuth + sign the nonce-exchange call",
+      "prNumber": 8259,
+      "type": "bugfix",
+      "body": "## What\n\nMake the Eliza Cloud login send **PKCE** on the Steward OAuth flow, and have the\nnonce-exchange route **sign** its direct upstream call — the two client-side\ngaps that broke \"Sign in with Eliza Cloud\" after Steward's auth hardening",
+      "files": [
+        "packages/cloud-api/__tests__/steward-sign.test.ts",
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/src/steward/sign.ts",
+        "packages/cloud-frontend/src/lib/steward-session.ts",
+        "packages/cloud-frontend/src/pages/login/steward-login-section.tsx",
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.test.ts",
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-api): add /api/v1/containers deploy + read route",
+      "prNumber": 8258,
+      "type": "feature",
+      "body": "## What\n\nThe parent-agent broker exposes `containers.create/list/get/quota`\n(→ `/api/v1/containers`) and the `build-monetized-app` skill's deploy step is\n\"deploy container with POST /api/v1/containers using `image`\" — but **no route\nfile ex",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/containers/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): sign Steward proxy requests to satisfy HMAC guard",
+      "prNumber": 8256,
+      "type": "bugfix",
+      "body": "## Why\n\nSteward backend now ships two middlewares on mutating sensitive paths (\\`/auth\\`, \\`/agents\\`, \\`/vault\\`, \\`/trade\\`, etc — see [Steward sensitive-paths.ts](https://github.com/Steward-Fi/steward/blob/main/packages/api/src/middlewar",
+      "files": [
+        "packages/cloud-api/__tests__/steward-embedded-signing.test.ts",
+        "packages/cloud-api/src/steward/embedded.ts"
+      ]
+    },
+    {
+      "title": "docs(skills,examples): correct Eliza Cloud monetization docs",
+      "prNumber": 8255,
+      "type": "docs",
+      "body": "Audited the monetization **skill + docs + example** against the actual code and fixed **23 verified inaccuracies** across 5 files. No code changes.\n\n### `build-monetized-app/SKILL.md`\n- 3 dead/stale links repointed in-monorepo: SDK README (",
+      "files": [
+        "packages/examples/cloud/edad/README.md",
+        "packages/skills/skills/build-monetized-app/SKILL.md",
+        "packages/skills/skills/build-monetized-app/references/sdk-flow.md",
+        "packages/skills/skills/eliza-cloud/SKILL.md",
+        "packages/skills/skills/eliza-cloud/references/payments-and-promotion.md"
+      ]
+    },
+    {
+      "title": "feat(cloud-auth): mint agent tokens with trade:order scope",
+      "prNumber": 8254,
+      "type": "feature",
+      "body": "## What\n\nCloud-provisioned agent tokens (`/api/v1/agent-tokens`, minted in `packages/cloud-shared/src/lib/auth/agent-token.ts`) currently carry only `agent_id` — no scope claim.\n\nSteward's hyperliquid order endpoint (`POST /v1/trade/hyperli",
+      "files": [
+        "packages/cloud-shared/src/lib/auth/agent-token.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): allow Idempotency-Key + X-Affiliate-Code in CORS",
+      "prNumber": 8252,
+      "type": "bugfix",
+      "body": "`/api/v1/chat/completions` reads `idempotency-key` (safe retries) and `X-Affiliate-Code` (affiliate attribution), but neither is in `CORS_ALLOW_HEADER_NAMES`. Hono's `cors()` reflects only that fixed allow-list, so a browser preflight sendi",
+      "files": [
+        "packages/cloud-shared/src/lib/cors-constants.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-sdk): web sign-in helper + X-App-Id affordance for inference",
+      "prNumber": 8251,
+      "type": "feature",
+      "body": "## Why\nThird-party web apps signing in with Eliza Cloud + monetizing via app-credits currently have to **hand-roll** two things the SDK should provide: the cli-login polling loop, and a raw `fetch` to send the `X-App-Id` header (the typed i",
+      "files": [
+        "packages/cloud-sdk/README.md",
+        "packages/cloud-sdk/src/client.test.ts",
+        "packages/cloud-sdk/src/client.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): let /goal autonomously drive the monetized-app loop (capped self-spend + economics capabilities)",
+      "prNumber": 8250,
+      "type": "feature",
+      "body": "## Why\n\nA `/goal` sub-agent is fenced to coding-only capabilities\n(`DEFAULT_GOAL_CAPABILITIES`), and every paid Cloud command through the\nparent-agent broker requires an explicit human \"yes\". Together these mean an\nagent **cannot autonomous",
+      "files": [
+        "packages/ui/src/api/client-types-cloud.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/goal-prompt.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/parent-agent-broker.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/spend-allowance.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/goal-prompt.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/parent-agent-broker.ts",
+        "plugins/plugin-agent-orchestrator/src/services/spend-allowance.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/hooks/useChatSubmit.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/util/composer-directives.test.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/util/composer-directives.ts"
+      ]
+    },
+    {
+      "title": "fix: resolve bun.exe on Windows so cloud:mock and cloud-e2e boot",
+      "prNumber": 8248,
+      "type": "bugfix",
+      "body": "## Problem\n\nOn Windows, `bun run cloud:mock` and the `cloud-e2e` stack cannot boot the\ncloud-api. The dev launchers `spawn(\"bun\", …)` to start `pglite-server.ts`\n(and wrangler / migrate), but Node cannot exec the extensionless npm `bun`\nshi",
+      "files": [
+        "packages/scripts/cloud/admin/dev/cloud-api-dev.mjs",
+        "packages/test/cloud-e2e/src/fixtures/stack.ts"
+      ]
+    },
+    {
+      "title": "Shaw/bitrouter cloud replacement",
+      "prNumber": 8247,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/lifeops-bench.yml",
+        ".gitignore",
+        "PLACEHOLDER_AUDIT.md",
+        "bun.lock",
+        "package.json",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/config-env.ts",
+        "packages/agent/src/api/connector-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/mobile-optional-routes.ts",
+        "packages/agent/src/api/pending-request-map.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/view-registry-types.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/api/views-routes.ts",
+        "packages/agent/src/api/views-search-index.ts",
+        "packages/agent/src/auth/oauth-flow.ts",
+        "packages/agent/src/auth/openai-codex.ts",
+        "packages/agent/src/cli/index.ts",
+        "packages/agent/src/providers/role-backfill.ts",
+        "packages/agent/src/runtime/boot-telemetry.ts",
+        "packages/agent/src/runtime/conversation-compactor-runtime.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/agent/src/runtime/operations/reload-hot.ts",
+        "packages/agent/src/runtime/prompt-optimization.ts",
+        "packages/agent/src/runtime/restart.ts",
+        "packages/agent/src/runtime/sandbox-character.ts",
+        "packages/agent/src/runtime/tool-call-cache/cache.ts",
+        "packages/agent/src/runtime/trajectory-storage.ts",
+        "packages/agent/src/runtime/view-action-affinity.ts",
+        "packages/agent/src/services/capability-broker.ts",
+        "packages/agent/src/services/permissions/probers/_bridge.ts",
+        "packages/agent/src/services/registry-client-local.ts",
+        "packages/agent/src/services/registry-client.ts",
+        "packages/agent/src/services/remote-capability-cloud-sandbox.test.ts",
+        "packages/agent/src/services/remote-capability-cloud-sandbox.ts",
+        "packages/alberta/alberta_framework/security.py",
+        "packages/app-core/AGENTS.md",
+        "packages/app-core/CLAUDE.md",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/scripts/desktop-llama-shim/eliza_llama_shim.c",
+        "packages/app-core/scripts/desktop-llama-shim/eliza_llama_shim.h",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/scripts/docker-ci-smoke.sh",
+        "packages/app-core/scripts/ensure-avatars.mjs"
+      ]
+    },
+    {
+      "title": "Shaw/bitrouter openrouter cleanup",
+      "prNumber": 8246,
+      "type": "refactor",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/Dockerfile",
+        "packages/cloud-infra/cloud/bitrouter/README.md",
+        "packages/cloud-infra/cloud/bitrouter/auth-proxy.mjs",
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml",
+        "packages/cloud-infra/cloud/bitrouter/entrypoint.sh",
+        "packages/cloud-infra/tests/bitrouter-service.test.ts",
+        "packages/cloud-shared/src/lib/models/catalog.ts",
+        "packages/cloud-shared/src/lib/pricing.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/candidate-selection.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/dimensions.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): allow third-party app origins on the public API (CORS)",
+      "prNumber": 8245,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe global CORS middleware (`app.use(\"*\", corsMiddleware)` in `cloud-api/src/bootstrap-app.ts`) reflects `Access-Control-Allow-Origin` **only** for first-party origins (`elizacloud.ai` + localhost + pages previews) with `credent",
+      "files": [
+        "packages/cloud-shared/src/lib/cors/cloud-api-hono-cors.test.ts",
+        "packages/cloud-shared/src/lib/cors/cloud-api-hono-cors.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): normalize BitRouter per-million token prices to per-token",
+      "prNumber": 8244,
+      "type": "bugfix",
+      "body": "## Problem\n\nBitRouter's catalog exposes token prices under the structured fields\n`pricing.input_tokens.no_cache` / `pricing.output_tokens.text` in **USD per\nmillion tokens**, whereas the legacy flat `pricing.prompt` / `pricing.completion`\nf",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing-bitrouter-units.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): stabilize lifeops and companion visual smoke",
+      "prNumber": 8242,
+      "type": "bugfix",
+      "body": "## Summary\n- treat Cerebras 429 queue/quota responses during LifeOps benchmark verification as provider throttling instead of code failure\n- skip LifeOps benchmark/artifact/comment steps when provider throttling is detected, while preservin",
+      "files": [
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/lifeops-bench.yml",
+        "packages/app/test/ui-smoke/apps-utility-interactions.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-lifecycle.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/titlebar-navigation.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts",
+        "packages/scripts/check-scenario-workflow-coverage.mjs",
+        "plugins/plugin-task-coordinator/__tests__/unit/orchestrator-capability-parity.test.ts",
+        "plugins/plugin-xr/src/__tests__/xr-functional-parity.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): liquid-glass motion pass for the continuous-chat overlay + ambient home greeting",
+      "prNumber": 8238,
+      "type": "feature",
+      "body": "## What\n\nA motion/animation polish pass on the continuous-chat overlay and the ambient `/chat` home, using the package's existing `motion/react` dependency — no new deps.\n\n**Overlay (`ContinuousChatOverlay.tsx`)**\n- Chat bubbles fade + rise",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/ui/.storybook/preview.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "patches/CHECKSUMS.sha256",
+        "patches/bigint-buffer@1.1.5.patch"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): operator inspector and recovery controls",
+      "prNumber": 8231,
+      "type": "feature",
+      "body": "## Summary\n\nThis draft branch integrates the orchestrator/operator-inspector work into the elizaOS app and agent surfaces so it can be reviewed, tested, and selectively harvested. It adds richer orchestrator task APIs, operator recovery con",
+      "files": [
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "plugins/plugin-agent-orchestrator/src/api/orchestrator-routes.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-task-coordinator/__tests__/unit/NotesPanel.test.tsx",
+        "plugins/plugin-task-coordinator/__tests__/unit/SearchPalette.test.tsx",
+        "plugins/plugin-task-coordinator/vitest.config.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 162.79549562364159,
+      "prScore": 158.1574956236416,
+      "issueScore": 4.2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 144.37047974088927,
+      "prScore": 144.37047974088927,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 139.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 139.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 123.24636812145627,
+      "prScore": 123.24636812145627,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 118.94704745296318,
+      "prScore": 118.50904745296317,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 30.410474426894577,
+      "prScore": 30.210474426894578,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 25.626947636399187,
+      "prScore": 25.188947636399188,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "LamboPoewert",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91011698?u=a8b0456dbd9d3e15b0fee96b4cf2813a5e15022c&v=4",
+      "totalScore": 11.822692619390967,
+      "prScore": 11.822692619390967,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 16,
+  "mergedPRs": 18,
+  "newIssues": 2,
+  "closedIssues": 1,
+  "activeContributors": 9
+}

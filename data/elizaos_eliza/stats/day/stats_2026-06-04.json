@@ -1,0 +1,496 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-04T00:00:00.000Z",
+    "intervalEnd": "2026-06-05T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-04 to 2026-06-05, elizaos/eliza had 39 new PRs (18 merged), 3 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABEGUTAg",
+      "title": "orchestrator: sub-agent completion narration drops/garbles the deliverable (narration-envelope)",
+      "author": "NubsCarson",
+      "number": 8162,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen the planner narrates a coding sub-agent's `task_complete` back to the user, the **deliverable** (the printed value / command output) is frequently dropped, truncated, or buried under process chatter — while the underlying sub-agent work is correct. This is a *presentation* defect, not a capability one.\n\nEvidence: a live 48-prompt sweep (30-scenario battery + smart/normie/harden suites) across all three backends found **0 capability-broken defects** — every answer was correct, every spawn produced its artifact, every safety probe handled. The **only** remaining defect class is this narration-envelope.\n\n## Manifestations (all observed live)\n\n1. **Deliverable drop on combo / printed-value tasks.** On the no-change-set completion path, `composeNarration` → `stripToolTranscript(response)` (`sub-agent-router.ts`) deletes the entire `[tool output: …] … [/tool output]` block. For a \"print a value / run a command and report the output\" task (no files changed → no diff), that block *is* the deliverable, so it's gone before the user sees it.\n2. **Value truncation by the parent model.** The synthetic `task_complete` memory is re-rendered by the parent `RESPONSE_HANDLER` (a weak planner in some deployments), which truncates the value — e.g. `2026-06-02` → `202`, a BTC price `70234` → `705`. Per-backend signature: opencode truncates, codex emits verbose process narration + `Completed <task>` banners, claude is cleanest.\n3. **Stale retry attempts leak.** When a first attempt errors (e.g. `session_state_lost` / an ACP crash) and a respawn recovers, the user sees *both* `\"the sub-agent was blocked / crashed, let me try again\"` **and** the eventual deliverable.\n4. **Process chatter.** Sub-agents (esp. codex) narrate their steps (`\"I'll load the workspace context first\"`, `\"rg is not installed\"`, `\"reverse.py already exists\"`); the parent relays it.\n\n## Proposed structural fixes\n\n**(a) Carry the printed-value deliverable verbatim (fixes #1, mitigates #2).** A structural carrier that mirrors the existing verified-URL carrier:\n- *Producer* (`sub-agent-router.ts`): on the `task_complete && !changeSet && verifiedUrls.length === 0` path, recover the captured stdout from the **raw** `response` (before `composeNarration` strips it) via the inverse of `stripToolTranscript`, and stamp it as `metadata.subAgentDeliverable` (gated to a short single block, ≤2KB, so multi-KB transcripts stay on the model-rendered path). *(I have a ready, tested producer patch for this.)*\n- *Consumer* (`evaluators/sub-agent-completion.ts`): when `subAgentDeliverable` is present, relay it **verbatim** instead of letting the model re-summarize/truncate it — parallel to how `subAgentVerifiedUrls` is already consumed.\n\n**(b) Terminal-reply filter (fixes #3, #4).** Emit only the *terminal* sub-agent reply; suppress stale `blocked`/`failed`/`state_lost` attempts that a later retry superseded, plus raw tool chatter and `Completed <task>` banners. **Caveat — needs care:** the `session_state_lost` error event is currently *coupled to the respawn trigger* (re-injecting it is what prompts the parent to respawn), so suppressing the user-facing narration requires an internal-only routing path that keeps the respawn signal. This is the part that needs design discussion.\n\n**(c) Already shipped — source-side mitigation.** #8158 adds an output-discipline section to the scaffolded sub-agent operating manual (\"lead with the deliverable, don't narrate process, no `Completed <task>` banner, a bare workspace has no SOUL.md/USER.md — don't hunt for them\"), which measurably reduced #4 at the source (codex re-probes went from a verbose banner to a bare `5050` / `2026-06-02`).\n\n## Coordination note\n\n`sub-agent-router.ts` and `evaluators/sub-agent-completion.ts` were recently rewritten on `develop`; this should be coordinated with that work rather than landed blind. Happy to open the (a)-producer + (a)-consumer as a focused PR if the approach looks right.",
+      "createdAt": "2026-06-02T09:02:59Z",
+      "closedAt": "2026-06-04T00:23:03Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEDmEnQ",
+      "title": "app-core dist/entry.js externalizes un-hoisted transitive deps (jose, @node-rs/argon2) → ERR_MODULE_NOT_FOUND outside Bun's loader",
+      "author": "lalalune",
+      "number": 8142,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`packages/app-core`'s built `dist/entry.js` imports transitive runtime deps (`jose`, `@node-rs/argon2`, and likely more) as **external** packages. These deps live in Bun's content-addressable store but are not linked at the top level where Node-style resolution looks, so any command that runs `dist/entry.js` outside Bun's workspace-aware loader fails with `Cannot find module`.\n\nSurfaced by a downstream QA smoke pass (milady-ai/milady#2179, finding #1 \"layer 2\").\n\n## Repro\n\n1. Build the app-core entry (`dist/entry.js`, ~7.6 MB across ~20 chunks).\n2. Run it with a plain Node-style loader (e.g. via `doctor`, or any path that doesn't go through Bun's workspace loader).\n3. First failure: `Cannot find module 'jose'`. Manually linking `jose` from Bun's store unblocks it, then it immediately hits `Cannot find module '@node-rs/argon2'`, and so on — whack-a-mole suggesting dozens more.\n\n## Root cause\n\nThe bundler (tsdown) marks these runtime deps `external`, but they are transitive (not hoisted to the top-level `node_modules`), so Node-style resolution from `dist/entry.js` can't find them.\n\n## Proposed fixes (pick one)\n\n- (a) Bundle the needed transitive runtime deps **inline** in `dist/entry.js` (tsdown config: move them out of `external`).\n- (b) Declare all needed runtime deps as **direct deps** of the package so they hoist to the top level.\n- (c) Ship a runtime/loader that knows how to resolve into Bun's store.\n\n## Severity\n\nMedium — affects any command that runs `dist/entry.js` outside Bun's loader (e.g. `doctor`), and is broader than a single command.\n",
+      "createdAt": "2026-06-01T23:44:09Z",
+      "closedAt": "2026-06-04T00:28:19Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEUO7aQ",
+      "title": "odysseus CalendarView: wire to the canonical LifeOps calendar API (2 decisions needed)",
+      "author": "NubsCarson",
+      "number": 8203,
+      "repository": "elizaos/eliza",
+      "body": "## Context\n\nThe odysseus `CalendarView` (`plugins/plugin-task-coordinator/src/odysseus/CalendarView.tsx`) is currently **localStorage-backed** (keys `calendars` / `calendar-events`), and its header comment claims *\"no frontend-callable client method exists to fetch/create events\"* — **this is stale/wrong.** The full canonical stack exists and is live-mounted:\n\n- **Types:** `LifeOpsCalendarEvent` / `LifeOpsCalendarFeed` / `CreateLifeOpsCalendarEventRequest` (`packages/shared/src/contracts/lifeops.ts`)\n- **Service:** `LifeOpsCalendarService` (`plugins/plugin-lifeops/src/lifeops/service-mixin-calendar.ts`) over table `app_lifeops.life_calendar_events`\n- **Routes (mounted):** `GET /api/lifeops/calendar/feed`, `/calendars`, `POST/PATCH/DELETE /calendar/events` (`plugins/plugin-lifeops/src/routes/lifeops-routes.ts`)\n- **Client methods:** `client.getLifeOpsCalendarFeed / getLifeOpsCalendars / create|update|deleteLifeOpsCalendarEvent` (`plugins/plugin-lifeops/src/api/client-lifeops.ts`), augmented onto the `@elizaos/ui` `client`\n- **Reference live consumer:** `useCalendarWeek.ts` → `LifeOpsCalendarSection.tsx`\n\nSo wiring CalendarView needs **no new API** — just reuse the canonical one, mirroring `useCalendarWeek`. But two decisions are yours to make before I open a PR:\n\n### 1. Package boundary\n`plugin-task-coordinator` depends only on `@elizaos/ui`, not `plugin-lifeops`; the calendar methods are attached as a **side-effect** of importing plugin-lifeops, so `client.getLifeOpsCalendarFeed` is `undefined` in the view bundle today.\n- **Option A (smaller):** add `@elizaos/plugin-lifeops` dep + `import \"@elizaos/plugin-lifeops/ui\"` side-effect to the task-coordinator view entry.\n- **Option B (first-class):** relocate the calendar client methods into the `@elizaos/ui` `api/` barrel (matches how orchestrator methods live in `client-agent.ts`). Cross-cutting @elizaos/ui change.\n\n### 2. Product direction\n`LifeOpsCalendarEvent` is a **Google/Apple-provider-backed** sync cache (writes 403 without a grant). odysseus CalendarView is **local-first** (free-form CRUD, per-calendar colors, `.ics` import/export). Should the wired CalendarView **replace** local-first with the provider feed, or **augment** it (provider feed + keep local calendars + .ics)?\n\n## Proposed first slice (once decided)\nRead-only: swap the `getLifeOpsCalendars` + `getLifeOpsCalendarFeed` load (mirror `useCalendarWeek`), keep `.ics`/quick-add honestly local/disabled, fix the stale header. Writes (create/update/delete) in a follow-up. PR-for-review, no surprise merge.\n\ncc @shawmakesmagic — which option (A/B) + replace-vs-augment do you want? Then I'll ship the read-only slice.",
+      "createdAt": "2026-06-04T00:09:16Z",
+      "closedAt": "2026-06-04T00:36:49Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEIEaeg",
+      "title": "Storybook (packages/ui): feature-surface stories blocked — Vite dep-optimizer resolves @elizaos/core via its Node entry (pulls plugin-manager → fs-extra)",
+      "author": "NubsCarson",
+      "number": 8177,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nIn the `packages/ui` Storybook catalog, stories for **feature-surface components that transitively import `@elizaos/core`** cannot render in the browser preview. This tracks the root cause + fix options so the deferred stories can be added once the harness lands.\n\nScope: Storybook-harness follow-up for the work on branch `nubs/continuous-chat-overlay` (commits `0fceb71f9c`, `f4abd24189`). The purely-presentational stories already ship and render; this is only about the i18n / model-hub surfaces. Full write-up lives in `packages/ui/.storybook/README.md` (limitation #3).\n\n## Affected stories (written, held back — not committed broken)\n\n- `apps/RunningAppsRow`, `apps/AppIdentity`\n- `local-inference/{ActiveModelBar, DownloadProgress, ModelUpdatesPanel}`\n- `policy-controls/{PolicyToggle, RateLimitSection, SpendingLimitSection, AutoApproveSection, TimeWindowSection, ApprovedAddressesSection}`\n\n## Root cause\n\nThese components reach `@elizaos/core` via `state/TranslationContext` → `state/persistence` (`import { logger } from \"@elizaos/core\"`). Two layered problems:\n\n1. **Vite's dependency optimizer ignores `resolve.alias`.** It resolves bare `@elizaos/core` via `package.json` `exports` → the **Node** build (`src/index.node.ts`), not the browser entry. (A `resolve.alias` to `index.browser.ts` fixes on-demand transforms but not the pre-bundle pass.)\n2. The Node entry pulls `features/plugin-manager`, which (a) calls `process.cwd()` at module-eval (`pluginAction = createPluginAction()`), and (b) imports `fs-extra`/`graceful-fs` that monkey-patch `fs.close` at eval. The patch throws `Cannot set property close … which has only a getter` against a read-only ESM `fs` stub (and `String(symbol)` inside Vite's `browser-external` proxy throws the misleading `Cannot convert a Symbol value to a string`).\n\n## Already tried (clears the first two error classes, not the third)\n\n- `@elizaos/core` → `index.browser.ts` alias (on-demand only)\n- Node-builtin stub in **both** a Vite plugin and the optimizer's esbuild pass (proven `Reflect.get`-deferring proxy — fixes the Symbol-coercion class)\n- Ambient `process` shim via preview `<head>` (fixes the `process.cwd` class)\n- `optimizeDeps.exclude` of workspace pkgs — **regressed** `RunningAppsRow`, didn't sever fs-extra\n- esbuild `onResolve` marking `@elizaos/core` external — didn't sever fs-extra (the scanner still discovers it)\n\n`fs-extra` keeps reaching the optimizer graph through core's Node entry.\n\n## Proposed fixes (any one)\n\n1. **(preferred)** An `optimizeDeps.esbuildOptions` `onResolve` that maps `@elizaos/core` (and subpaths) to `index.browser.ts` **as a path** (not `external`), so the optimizer scanner crawls the browser graph (no `plugin-manager` → no `fs-extra`). Untried; the precise counter to \"optimizer ignores `resolve.alias`\".\n2. A mutable (CJS) `fs` stub that `graceful-fs` can patch without throwing.\n3. Decouple `state/persistence` from a *value* import of `@elizaos/core` — import `logger` from a lighter, browser-safe entry.\n\n## Acceptance\n\nThe 11 stories above render in `storybook dev` (headless Playwright probe), and `bun run --cwd packages/ui lint && typecheck` stay clean.\n",
+      "createdAt": "2026-06-02T13:32:20Z",
+      "closedAt": "2026-06-04T00:30:33Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEYycSA",
+      "title": "plugin-local-inference: voice→entity binding (bindEntity) is never called at runtime — recognized speakers never persist to the relationship graph",
+      "author": "NubsCarson",
+      "number": 8234,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nIn `plugin-local-inference`'s voice pipeline, the plumbing to tie a recognized voice to an elizaOS `Entity` is fully present, but the **bind step appears to be unreachable at runtime** — `VoiceProfileStore.bindEntity` / `unbindEntity` have no caller outside tests. As a result a profile's `entityId` stays `null` in practice: attribution can resolve *which voice* is speaking, but the agent never persists *who that is* into the relationship graph.\n\n> Grep-level finding on current `develop` — happy to be corrected if there's a dynamic/registered path I missed.\n\n## What already works (so this isn't a rebuild)\n\n- Voice profiles carry and persist an `entityId` — `plugins/plugin-local-inference/src/services/voice/profile-store.ts` (`bindEntity` L605, `unbindEntity` L627).\n- Attribution resolves the entity on recognition — `src/services/voice/speaker/attribution-pipeline.ts:199` (`entityId: refined?.entityId ?? match.profile.entityId ?? null`).\n- The UI already crowns the OWNER when the speaking voice's entity matches the owner — `packages/ui/.../ChatVoiceStatusBar` (`speakerEntityId === ownerEntityId`).\n\n## The gap\n\n`grep -rn bindEntity` across `plugins/` + `packages/` returns only the definitions in `profile-store.ts` and references in `__tests__/voice-profile-store.test.ts`. The voice-profile routes (`src/services/voice/voice-profile-routes.ts`) expose `activate` / list / soft-delete, but **no bind/claim endpoint**, and there is no agent action that binds. So there is no runtime path (route, action, or UI affordance) for \"this voice = this entity.\"\n\nConsequence: `entityId` stays `null`, the OWNER-crown only lights up in tests, and recognized speaker identity never reaches the relationship graph — the agent hears a known voice but can't remember *who* across sessions.\n\n## Suggested shape (open to direction)\n\n1. A bind/unbind route alongside the existing voice-profile routes, e.g. `POST /v1/voice/profiles/:id/bind { entityId }`.\n2. An agent action so the agent can bind by voice (\"this is &lt;name&gt;\"), mirroring how `GENERATE_MEDIA` is wired.\n3. On bind, route through `EntityStore` / `RelationshipStore` + the identity merge engine (per the root `CLAUDE.md` rule — don't bypass it), so the bound voice becomes a first-class relationship node.\n\nHappy to take a first cut if this is wanted and not already in progress.\n",
+      "createdAt": "2026-06-04T14:09:50Z",
+      "closedAt": "2026-06-05T21:33:05Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7irYx4",
+      "title": "feat(cloud): replace BitRouter cloud routing",
+      "author": "lalalune",
+      "number": 8233,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T12:37:12Z",
+      "mergedAt": "2026-06-04T18:14:13Z",
+      "additions": 20806,
+      "deletions": 13229
+    },
+    {
+      "id": "PR_kwDOMT5cIs7iinhR",
+      "title": "feat(cloud): add shared runtime provisioning path",
+      "author": "Dexploarer",
+      "number": 8223,
+      "body": "## Summary\n- add execution-tier aware provisioning so shared Eliza agents run through the shared runtime without container provisioning\n- wire create/provision/lifecycle/bridge routing around shared vs container-backed execution tiers\n- add the ComputeProvider seam, DigitalOcean provider implementation, billing exclusions for shared agents, and cloud E2E coverage for shared/custom/lifecycle/dashboard flows\n\n## Behind-base impact\n- `origin/develop` did overlap with our edits in `packages/cloud-api/v1/coding-containers/route.ts`, `packages/cloud-shared/src/db/repositories/agent-billing.ts`, `packages/cloud-shared/src/lib/services/eliza-sandbox.ts`, and `packages/ui/src/App.tsx`\n- the full local branch also carried older UI/desktop commits that conflicted with current `develop`, so this PR is the focused cloud provisioning slice on top of `fd73d4b6f2`\n- the only semantic conflict in the focused slice was `eliza-sandbox.ts`; it is resolved by preserving upstream `buildAgentInsertData` and threading `executionTier`/status through that helper\n\n## Validation\n- `bunx @biomejs/biome check --write <touched files>` passed; existing optional-chain suggestions remain in `packages/test/cloud-mocks/src/control-plane/server.ts`\n- `bun test packages/cloud-api/__tests__/agent-bridge-runtime-routing.test.ts` passed, 2/2\n- `git diff --check origin/develop..HEAD` passed\n- conflict-marker scan over touched cloud paths passed\n\n## Local validation caveat\n- The original cloud branch with this focused code passed `bun run --cwd packages/test/cloud-e2e test` 18/18, `bun run --cwd packages/cloud-frontend audit:cloud` 116/116, and `bun run verify` 460/460 before rebasing.\n- In the rebased PR worktree, broader package typechecks/tests are blocked by local dependency hydration: `bun install --frozen-lockfile --ignore-scripts` reports the lockfile would change, symlinked `node_modules` is missing required packages, and a detached verification checkout hit `No space left on device` before install. CI should re-run the full lane from a clean checkout.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T05:23:28Z",
+      "mergedAt": null,
+      "additions": 9738,
+      "deletions": 716
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ifw7l",
+      "title": "feat(plugin-calendar): extract first-class calendar plugin from lifeops; wire Odysseus (#8203)",
+      "author": "lalalune",
+      "number": 8219,
+      "body": "## Summary\n\nExtracts the **entire** calendar surface out of `@elizaos/plugin-lifeops` into a new first-class **`@elizaos/plugin-calendar`**, keeps LifeOps fully working via thin wrappers + delegation, and wires the Odysseus `CalendarView` to the canonical calendar API (resolves #8203).\n\n## What now lives in `@elizaos/plugin-calendar`\n- **`CalendarService`** (former 1209-line mixin) + **`CalendarRepository`** + **drizzle schema** — same `app_lifeops.life_calendar_*` tables (no data migration).\n- **Apple bridge**, **Google delegates**, **normalize helpers**.\n- **Client methods** (`api/client-calendar.ts`, side-effect augmentation of the `@elizaos/ui` `ElizaClient`).\n- **HTTP routes** — `handleCalendarRoutes` in `routes/calendar-routes.ts` (paths unchanged: `/api/lifeops/calendar/*`).\n- **CALENDAR action + ~4280-line LLM handler** — `createCalendarActionRunner(deps)` + `extractCalendarPlanWithLlm`.\n- **Dashboard UI** — `CalendarSection`, `EventEditorDrawer`, `useCalendarWeek` (exported via a server-graph-free `./ui` barrel).\n- **Contract types** in `@elizaos/shared/contracts/calendar` (the only layer both `@elizaos/ui` and the plugins can depend on without a cycle).\n\n## The seam (no dependency cycle — strictly `lifeops → calendar`)\nCross-domain concerns calendar can't own are **injected** from thin LifeOps wrappers (mirrors the documented plugin-health owner-action pattern):\n- `CalendarHostGate` — Google connector grants + reminder-plan/audit persistence (default gate resolves Google directly + no-ops reminders; LifeOps injects the real impl at init).\n- `CalendarRouteDeps` — LifeOps' HTTP plumbing (telemetry/schema-bootstrap, rate limiting, body parsing).\n- `CalendarActionDeps` — trajectory LLM model runners, recent-conversation context, optional travel-time buffer.\n- `CalendarSectionProps` — dashboard-shell deps (chat launcher, selection, event priming).\n\nLifeOps retains only thin wrappers (delegation shim for the service methods, gate impl, the `CALENDAR` owner-action wrapper with `hasLifeOpsAccess` gating, the `LifeOpsCalendarSection` wrapper) — plus the legitimate cross-domain consumers (reminders/google reading the calendar cache).\n\n## Odysseus (#8203)\n`CalendarView` overlays a **read-only provider feed** (Google/Apple via the calendar client) on top of the existing local-first calendars + `.ics` (the **augment** option). Stale header fixed.\n\n## Verification (all green)\n- `@elizaos/plugin-calendar`: typecheck (0 errors) + build + **31 tests** (Apple bridge, normalize/merge units, real-PGlite `CalendarService` CRUD asserting persistence, feed aggregation, next-event context, and gate reminder-plan side effects).\n- `@elizaos/plugin-lifeops`: full build (js + **views bundle** + types) + 53 calendar-touching unit tests.\n- `@elizaos/plugin-task-coordinator`: build + 25 tests. `@elizaos/shared`: 777 tests + typecheck. `@elizaos/ui`: typecheck.\n- No `@elizaos/plugin-lifeops` import anywhere in `plugin-calendar` (cycle-free).\n\n## Follow-up (noted, low-harm)\nA few calendar-specific formatters/delegates were copied into plugin-calendar and are now unused inside LifeOps' shared `google/format-helpers.ts` / `google-plugin-delegates.ts`; surgical removal from those multi-export files was deferred.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T02:18:38Z",
+      "mergedAt": "2026-06-04T03:38:42Z",
+      "additions": 2712,
+      "deletions": 1914
+    },
+    {
+      "id": "PR_kwDOMT5cIs7irIoY",
+      "title": "feat(orchestrator): operator inspector and recovery controls",
+      "author": "NubsCarson",
+      "number": 8231,
+      "body": "## Summary\n\nThis draft branch integrates the orchestrator/operator-inspector work into the elizaOS app and agent surfaces so it can be reviewed, tested, and selectively harvested. It adds richer orchestrator task APIs, operator recovery controls, edited-plan restart flow, timeline/message/usage plumbing, typed UI client coverage, and a workbench-style UI for inspecting tasks and sub-agent sessions.\n\nThis is intentionally a **draft**. The branch proves the end-to-end contracts and test coverage, but the UI should be reviewed critically before anything is treated as final visual/product direction.\n\n## What changed\n\n- Extended the orchestrator API surface for task detail, task lists, messages, events, timeline, usage, plan revisions, pause/resume, archive/reopen, fork, validate, retry, rerun, restart, and restart-with-edited-plan flows.\n- Hardened orchestrator task service/store/mapper behavior around richer operator state, including sessions, artifacts, plan revisions, usage, active task/session counts, recovery state, and persisted task metadata.\n- Expanded `OrchestratorWorkbench` with an operator inspector, task rail, sub-agent session cards, message/timeline rendering, plan/acceptance panels, recovery controls, plan editor, and message composer wiring.\n- Added typed client methods and contract coverage for the new orchestrator API shapes in `packages/ui`.\n- Stabilized app-shell route loading and smoke/live-stack behavior for `/`, `/chat`, `/orchestrator`, `/apps/tasks`, app routes, and settings/connectors paths.\n- Added an env-gated local demo fixture mode for the smoke API stub: `ELIZA_UI_SMOKE_DEMO_ORCHESTRATOR=1`. This lets reviewers open the normal app locally and see a populated orchestrator task with demo sub-agents without needing real provider credentials.\n- Added detailed and simple HTML docs describing the branch, status, vision, validation, and how the orchestrator/operator inspector fits into elizaOS.\n\n## Reviewer note for Shaw / agent review\n\nThe useful review path is probably:\n\n1. Start with `plugins/plugin-agent-orchestrator/src/api/orchestrator-routes.ts` and the matching service/store changes to verify the backend contract and recovery semantics.\n2. Check `packages/ui/src/api/client-agent.ts` and `client-types-cloud.ts` to confirm the frontend contract matches the route behavior.\n3. Review `plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx` for product/UX direction, but treat this part as rough draft UI rather than final polish.\n4. Review the smoke fixture in `packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs` as local test/demo support only. It is behind `ELIZA_UI_SMOKE_DEMO_ORCHESTRATOR=1` and should not affect default smoke behavior.\n5. Use the tests below to decide which parts are ready to keep versus split or refine.\n\n## Local demo command\n\nTo see the populated local orchestrator surface without real agents/providers:\n\n```bash\nELIZA_UI_SMOKE_SKIP_BUILD=1 \\\nELIZA_UI_SMOKE_FORCE_STUB=1 \\\nELIZA_UI_SMOKE_DEMO_ORCHESTRATOR=1 \\\nELIZA_UI_SMOKE_API_PORT=31338 \\\nELIZA_UI_SMOKE_PORT=2144 \\\nnode packages/app-core/scripts/run-node-tsx.mjs packages/app-core/scripts/playwright-ui-live-stack.ts\n```\n\nThen open:\n\n- `http://127.0.0.1:2144/orchestrator`\n- `http://127.0.0.1:2144/apps/tasks`\n- `http://127.0.0.1:2144/chat`\n- `http://127.0.0.1:2144/`\n\nThe demo fixture seeds a task named `Build Kanban planner app` with `Codex Builder` and `Cerebras Reviewer` sessions, usage counters, timeline/messages, plan state, and operator controls.\n\n## Validation performed\n\n- `packages/app` lint, typecheck, and build passed.\n- `packages/ui` typecheck and build passed.\n- `packages/agent` lint, typecheck, and build passed.\n- `plugin-agent-orchestrator` unit tests/build passed.\n- `plugin-task-coordinator` unit tests/build passed.\n- `plugin-app-manager` tests/build passed.\n- App route/view/smoke coverage tests passed.\n- Selector-based local route sweep passed for `/`, `/chat`, `/orchestrator`, `/apps/skills`, `/apps/trajectories`, `/apps/tasks`, and `/settings#connectors`.\n- `bun run --cwd packages/app test:e2e test/ui-smoke/orchestrator-gui-workbench.spec.ts` passed.\n- Live demo stack was verified with Playwright: opened `/orchestrator`, selected the seeded task, confirmed the sub-agent inspector, sent a prompt through the composer, and confirmed the demo orchestrator response rendered in the message list.\n\nNotes: app build still emits existing Vite dynamic-import warnings, and agent lint still emits existing warnings in `conversation-routes.ts`. Those were not introduced by this branch.\n\n## Known caveats\n\n- The UI is draft-quality and should not be merged as final visual design without product/design review.\n- The local demo fixture is not a real agent runner; it is an env-gated stub for review and smoke testing.\n- This is a broad branch. It may be worth splitting before merge into backend contract/service changes, UI workbench changes, smoke/test harness changes, and docs.\n- No PR merge is requested from this branch as-is; this draft exists so reviewers can inspect the work and decide what to keep.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T12:26:17Z",
+      "mergedAt": "2026-06-05T12:06:24Z",
+      "additions": 1560,
+      "deletions": 17
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ip4-j",
+      "title": "fix(dev): reliable agent hot-reload via source-only watcher",
+      "author": "lalalune",
+      "number": 8228,
+      "body": "The dev API child ran with watch off by default (and auto-disabled whenever a concurrent build was detected), so agent/plugin source edits never reached the running agent. `node --watch` followed imports into dist/ and hot-reloaded mid-build, which is why it had to stay disabled.\r\n\r\nReplace it with a source-only watcher (packages/*/src + plugins/*/src, excluding frontend packages, dist, node_modules, and tests) that bounces the supervised API child on change — decoupled from dist churn, so concurrent builds never trigger it. Add an intentional restart() to the API supervisor that relaunches immediately without counting toward the crash-loop streak. On by default; opt out with ELIZA_DEV_NO_WATCH=1.\r\n\r\n<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-04T11:28:01Z",
+      "mergedAt": "2026-06-04T11:28:32Z",
+      "additions": 635,
+      "deletions": 166
+    }
+  ],
+  "codeChanges": {
+    "additions": 5394,
+    "deletions": 3013,
+    "files": 123,
+    "commitCount": 272
+  },
+  "completedItems": [
+    {
+      "title": "chore(deps): bump hono 4.12.18 -> 4.12.21 across cloud packages",
+      "prNumber": 8243,
+      "type": "other",
+      "body": "Supersedes #8239 (Dependabot). That PR bumped `hono` 4.12.18 → 4.12.21 in 8 `package.json`s **but did not update `bun.lock`**, so `bun install --frozen-lockfile` failed (`lockfile had changes, but lockfile is frozen`) and it could not merge",
+      "files": [
+        "bun.lock",
+        "packages/cloud-api/package.json",
+        "packages/cloud-services/_smoke-mcp/package.json",
+        "packages/cloud-services/container-control-plane/package.json",
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-webhook/package.json",
+        "packages/cloud-shared/package.json",
+        "packages/feed/packages/engine/package.json",
+        "packages/test/cloud-mocks/package.json"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): route Cerebras default models to Cerebras before BitRouter",
+      "prNumber": 8241,
+      "type": "bugfix",
+      "body": "## Problem (potential production default-inference break)\n\n#8233 set the default text models to **bare Cerebras IDs** (`gpt-oss-120b`, `zai-glm-4.7` — `catalog.ts:46-47`), but `getLanguageModel` routes **every** model through the BitRouter ",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): carry BitRouter follow-up checks onto develop",
+      "prNumber": 8240,
+      "type": "bugfix",
+      "body": "## Summary\n- Carry forward the Vite date-fns prebundle fix that prevents dev-server restart storms.\n- Carry forward the Android App Actions Milady-to-elizaOS rewrite and stale-template validation.\n- Carry forward the game TUI test import fi",
+      "files": [
+        ".github/workflows/lifeops-bench.yml",
+        "packages/app/test/ui-smoke/view-manager-actual-flow.spec.ts",
+        "packages/app/vite.config.ts",
+        "plugins/plugin-computeruse/src/__tests__/android-bridge.test.ts",
+        "plugins/plugin-training/src/ui/FineTuningTuiView.test.tsx"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 2 directories with 1 update",
+      "prNumber": 8237,
+      "type": "other",
+      "body": "Bumps the uv group with 1 update in the /packages/benchmarks/OSWorld directory: [starlette](https://github.com/Kludex/starlette).\nBumps the uv group with 1 update in the /packages/training directory: [starlette](https://github.com/Kludex/st",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(agent): wire cloud SSO /pair handler into the real HTTP server",
+      "prNumber": 8236,
+      "type": "bugfix",
+      "body": "## Why\n\nCloud SSO popup opens `<agent-web-ui>/pair?token=X`. The handler exists in `packages/app-core/src/api/cloud-pair-route.ts` (added in #8198 + Shaw's follow-up `3ca095d004`), but the wiring was on `packages/app-core/src/api/server.ts`",
+      "files": [
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/package.json"
+      ]
+    },
+    {
+      "title": "feat(cloud): replace BitRouter cloud routing",
+      "prNumber": 8233,
+      "type": "feature",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "PLACEHOLDER_AUDIT.md",
+        "bun.lock",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/view-registry-types.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/services/remote-plugin-adapter.test.ts",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.test.mjs",
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "packages/app-core/src/browser.ts",
+        "packages/app-core/src/runtime/desktop/AppWindowRenderer.tsx",
+        "packages/app-core/src/runtime/desktop/DesktopTrayRuntime.tsx",
+        "packages/app-core/src/runtime/desktop/browser-entry-tray-exports.test.ts",
+        "packages/app-core/src/runtime/desktop/index.ts",
+        "packages/app-core/src/runtime/desktop/tray-menu.ts",
+        "packages/app/index.html",
+        "packages/app/src/shims/cookie.ts",
+        "packages/app/src/shims/debug.ts",
+        "packages/app/src/shims/decimal-js-light.ts",
+        "packages/app/src/shims/es-toolkit-compat-get.ts",
+        "packages/app/src/shims/es-toolkit-compat-isPlainObject.ts",
+        "packages/app/src/shims/es-toolkit-compat-last.ts",
+        "packages/app/src/shims/es-toolkit-compat-maxBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-minBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-omit.ts",
+        "packages/app/src/shims/es-toolkit-compat-range.ts",
+        "packages/app/src/shims/es-toolkit-compat-sortBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-sumBy.ts",
+        "packages/app/src/shims/es-toolkit-compat-throttle.ts",
+        "packages/app/src/shims/es-toolkit-compat-uniqBy.ts",
+        "packages/app/src/shims/es-toolkit-compat.ts",
+        "packages/app/src/shims/eventemitter3.ts",
+        "packages/app/src/shims/extend.ts",
+        "packages/app/src/shims/nprogress.ts",
+        "packages/app/src/shims/react-is.ts",
+        "packages/app/src/shims/set-cookie-parser.ts",
+        "packages/app/src/shims/style-to-js.ts",
+        "packages/app/src/shims/use-sync-external-store-with-selector.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts",
+        "packages/app/test/ui-smoke/titlebar-navigation.spec.ts",
+        "packages/app/vite.config.ts",
+        "packages/benchmarks/docs/SMITHERS_INTEGRATION.md",
+        "packages/benchmarks/smithers-adapter/AGENTS.md",
+        "packages/benchmarks/smithers-adapter/CLAUDE.md",
+        "packages/benchmarks/smithers-adapter/README.md",
+        "packages/benchmarks/smithers-adapter/smithers_adapter/client.py",
+        "packages/benchmarks/smithers-adapter/smithers_adapter/optimization.mjs"
+      ]
+    },
+    {
+      "title": "fix(release): restore release-check + regression-matrix script wiring",
+      "prNumber": 8232,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **Release Workflow Contract** check is red on `develop` and on every PR branched from it:\n\n```\nrelease-check: package.json is missing required release/audit script wiring:\n  - release:check: scripts/run-release-check.mjs\n  -",
+      "files": [
+        "package.json",
+        "packages/app-core/scripts/release-check.ts",
+        "packages/app-core/scripts/run-eliza-app-core-script.mjs",
+        "packages/app-core/scripts/run-release-check.mjs"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): reset CompareView round on provider/model swap",
+      "prNumber": 8230,
+      "type": "bugfix",
+      "body": "## What\n\nPR #8226 added `resetRound()` (clears `revealed` + `winnerIdx`) on **add / remove / shuffle** of compare slots, but not when a slot's **provider or model is swapped** mid-round. Because the winner is tracked by array **index** and ",
+      "files": [
+        "plugins/plugin-task-coordinator/src/odysseus/CompareView.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/SearchPalette.tsx"
+      ]
+    },
+    {
+      "title": "feat(ui/chat): reveal bubbles + suggestions on hover or focus, with a…",
+      "prNumber": 8229,
+      "type": "feature",
+      "body": "… quick fade\r\n\r\nThe resting chat bubbles (last 2 turns) and the suggestion strip now reveal together on hover OR click-into-input (previously focus only), and fade in/out quickly (200ms opacity, always-mounted) instead of snapping. `peek` (",
+      "files": [
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx"
+      ]
+    },
+    {
+      "title": "fix(dev): reliable agent hot-reload via source-only watcher",
+      "prNumber": 8228,
+      "type": "bugfix",
+      "body": "The dev API child ran with watch off by default (and auto-disabled whenever a concurrent build was detected), so agent/plugin source edits never reached the running agent. `node --watch` followed imports into dist/ and hot-reloaded mid-buil",
+      "files": [
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.test.mjs",
+        "packages/app-core/scripts/lib/api-supervisor.mjs",
+        "packages/app-core/scripts/lib/api-supervisor.test.mjs",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/local-asr-transcribe.ts",
+        "packages/ui/src/voice/voice-capture-factory.test.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts",
+        "plugins/plugin-local-inference/src/services/voice/whisper-cpp-asr.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): odysseus Notes focus + Search highlight bugs",
+      "prNumber": 8227,
+      "type": "bugfix",
+      "body": "Two adversarially-verified, user-facing, **frontend-only** bugs found in a deep-scan of the odysseus views:\n\n### NotesPanel — quick-add ate every keystroke after the first\nTyping the first character into the quick-add bar fires `openNewForm",
+      "files": [
+        "plugins/plugin-task-coordinator/src/odysseus/NotesPanel.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/SearchPalette.tsx"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): reset CompareView round on slot-set changes",
+      "prNumber": 8226,
+      "type": "bugfix",
+      "body": "## What\nThree adversarially-verified bugs in the odysseus **Compare arena**, all one root cause: a vote is tracked by **index** (`winnerIdx`) + a `revealed` flag, but the slot-set mutators never cleared it — so a stale verdict survived chan",
+      "files": [
+        "plugins/plugin-task-coordinator/src/odysseus/CompareView.tsx"
+      ]
+    },
+    {
+      "title": "feat(ui): time-of-day + history-aware prompt suggestions on the continuous-chat overlay",
+      "prNumber": 8224,
+      "type": "feature",
+      "body": "## What\nMakes the resting-overlay's 5-prompt suggestion strip lightly **tailored** (client-side, no backend): the lead chip now matches the overlay's own greeting — **\"Plan my day\"** (morning) · **\"What's left today?\"** (afternoon) · **\"Rec",
+      "files": [
+        "packages/ui/src/components/shell/usePromptSuggestions.test.ts",
+        "packages/ui/src/components/shell/usePromptSuggestions.ts"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group across 1 directory with 9 updates",
+      "prNumber": 8222,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 9 updates in the / directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [@biomejs/biome](https://github.com/biomejs/biome/tree/HEAD/packages/@biomejs/biome) | `2.4.15` | `2.4.16` |\n| [@types/bun](h",
+      "files": [
+        "package.json",
+        "packages/cloud-routing/package.json",
+        "packages/cloud-services/operator/package.json",
+        "packages/feed/apps/web/package.json",
+        "packages/feed/package.json",
+        "packages/feed/packages/examples/local-a2a-server/package.json",
+        "packages/sweagent/package.json",
+        "plugins/plugin-native-camera/package.json"
+      ]
+    },
+    {
+      "title": "chore(ui): remove four dead Storybook stories (zero-consumer composites)",
+      "prNumber": 8220,
+      "type": "other",
+      "body": "## What\n\nRemoves four Storybook stories whose underlying components have **zero real consumers** anywhere in the monorepo — only their own story referenced them:\n\n- `composites/search/search-input.stories.tsx` (`SearchInput`)\n- `composites/",
+      "files": [
+        "packages/ui/src/components/composites/form-field/form-field.stories.tsx",
+        "packages/ui/src/components/composites/search/search-input.stories.tsx",
+        "packages/ui/src/components/composites/search/searchbar.stories.tsx",
+        "packages/ui/src/components/composites/sidebar/sidebar-filter-bar.stories.tsx"
+      ]
+    },
+    {
+      "title": "feat(plugin-calendar): extract first-class calendar plugin from lifeops; wire Odysseus (#8203)",
+      "prNumber": 8219,
+      "type": "feature",
+      "body": "## Summary\n\nExtracts the **entire** calendar surface out of `@elizaos/plugin-lifeops` into a new first-class **`@elizaos/plugin-calendar`**, keeps LifeOps fully working via thin wrappers + delegation, and wires the Odysseus `CalendarView` t",
+      "files": [
+        "plugins/plugin-calendar/package.json",
+        "plugins/plugin-calendar/src/actions/calendar-handler.ts",
+        "plugins/plugin-calendar/src/actions/deps.ts",
+        "plugins/plugin-calendar/src/actions/index.ts",
+        "plugins/plugin-calendar/src/components/CalendarSection.tsx",
+        "plugins/plugin-calendar/src/components/EventEditorDrawer.tsx",
+        "plugins/plugin-calendar/src/hooks/useCalendarWeek.ts",
+        "plugins/plugin-calendar/src/index.ts",
+        "plugins/plugin-calendar/src/internal/detail.ts",
+        "plugins/plugin-calendar/src/internal/format.ts",
+        "plugins/plugin-calendar/src/routes/calendar-routes.ts",
+        "plugins/plugin-calendar/src/ui.ts",
+        "plugins/plugin-calendar/test/calendar-normalize.test.ts",
+        "plugins/plugin-calendar/test/calendar-service.test.ts",
+        "plugins/plugin-lifeops/src/actions/calendar.ts",
+        "plugins/plugin-lifeops/src/components/LifeOpsCalendarSection.tsx",
+        "plugins/plugin-lifeops/src/components/LifeOpsOverviewSection.tsx",
+        "plugins/plugin-lifeops/src/components/LifeOpsVisualCopy.test.ts",
+        "plugins/plugin-lifeops/src/lifeops/service-normalize-calendar.ts",
+        "plugins/plugin-lifeops/src/routes/lifeops-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): restore the inline chevron expand affordance on the continuous-chat overlay",
+      "prNumber": 8218,
+      "type": "bugfix",
+      "body": "## What\n\nThe continuous-chat overlay's expand/collapse control had drifted into a **separate floating speech-bubble button** hovering above the composer bar. It reads as heavy chrome and breaks the overlay's minimal, single-surface feel.\n\nT",
+      "files": [
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx"
+      ]
+    },
+    {
+      "title": "fix(plugin-task-coordinator): four state/parity bugs in the odysseus views",
+      "prNumber": 8204,
+      "type": "bugfix",
+      "body": "## What\n\nFour confirmed, **adversarially-verified** state/correctness bugs in the LIVE odysseus views, each a minimal targeted fix that matches upstream odysseus behavior. No backend/API changes.\n\n| # | View | Bug | Fix |\n|---|------|-----|",
+      "files": [
+        "plugins/plugin-task-coordinator/__tests__/unit/orchestrator-stream.test.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/GroupChatView.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/TasksView.tsx",
+        "plugins/plugin-task-coordinator/src/odysseus/VoiceView.tsx",
+        "plugins/plugin-task-coordinator/src/orchestrator-stream.tsx"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 443.8884954363799,
+      "prScore": 443.4504954363799,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 353.49838727429653,
+      "prScore": 342.9603872742965,
+      "issueScore": 10.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 288,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 288,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 39.7027738965761,
+      "prScore": 39.7027738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 28.856906649788,
+      "prScore": 28.856906649788,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 26.23543929982819,
+      "prScore": 26.23543929982819,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 39,
+  "mergedPRs": 18,
+  "newIssues": 3,
+  "closedIssues": 4,
+  "activeContributors": 8
+}
