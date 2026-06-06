@@ -1,0 +1,388 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-06T00:00:00.000Z",
+    "intervalEnd": "2026-06-07T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-06 to 2026-06-07, elizaos/eliza had 24 new PRs (11 merged), 0 new issues, and 12 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABEhH8Pg",
+      "title": "App-credits: purchases fund the per-app pool but inference debits the org balance (stranded credits)",
+      "author": "NubsCarson",
+      "number": 8253,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nApp-credits purchases and inference spend use **two different ledgers**, so credits a user buys for a monetized app can't be spent — and a user with cloud/org credits is blocked from a monetized app unless they separately top up the app pool. This blocks third-party browser apps monetizing via `X-App-Id` end-to-end.\n\nThis looks like a half-finished migration (see the `// Switched from app_credit_balances ... to the org balance` comment), so flagging rather than unilaterally changing billing.\n\n## Details (origin/develop)\n- **Purchase funds the per-app pool.** `processPurchase` credits `app_credit_balances` via `appCreditBalancesRepository.addCredits(...)` — `packages/cloud-shared/src/lib/services/app-credits.ts:~307`.\n- **Balance check reads the per-app pool.** `checkBalance` → `appCreditBalancesRepository.findByAppAndUser(...)` — `app-credits.ts:~193`.\n- **Spend debits the ORG balance.** The spend path was switched to `creditsService.reserveAndDeductCredits({ organizationId })` — `app-credits.ts:~408` (the \"Switched from app_credit_balances ... to the org balance\" comment). The `X-App-Id` completions path also reserves against the org: `reserveCredits({ organizationId })` — `packages/cloud-api/v1/chat/completions/route.ts:~934`.\n\n## Impact\n1. A user buys app-credits → funds land in `app_credit_balances` → inference debits the **org** balance → \"Insufficient credits\" against an empty org balance. **Money paid, credits never spendable.**\n2. `checkBalance` gates on the app pool, so a user who *does* have org/cloud credits is rejected from a monetized app unless they top up the app pool too.\n3. The `/api/v1/apps/[id]/chat` 402 says \"Insufficient app credits\" but deducts from the org balance (`route.ts:~295-333`), so the error misdirects users.\n\n## Suggested fix (pick one ledger)\n- **A — org-only (matches the \"Switched\" comment's intent):** make `processPurchase` credit the **org** balance (and have `/api/v1/app-credits/balance` + `checkBalance` report/read org). App-credits checkout becomes \"top up cloud credits for this app\"; creator still earns markup via `recordCreatorEarnings()`. Simplest if the per-app pool is being retired.\n- **B — app-pool-only:** make the `X-App-Id` spend path read+debit `app_credit_balances` instead of the org balance.\n\nHappy to open the PR once you confirm the direction (A or B) — A looks consistent with the existing comment + `recordCreatorEarnings`. Also a one-line follow-up: word the `/apps/[id]/chat` 402 to match whichever ledger is checked.\n\nFound while building a third-party app (SupaKan) on the `X-App-Id` app-credits flow.\n",
+      "createdAt": "2026-06-05T15:38:34Z",
+      "closedAt": "2026-06-06T01:16:34Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEWmdhw",
+      "title": "proposal: GET /api/suggestions — server-tailored prompt suggestions for the continuous-chat overlay",
+      "author": "NubsCarson",
+      "number": 8225,
+      "repository": "elizaos/eliza",
+      "body": "## Context\nThe continuous-chat overlay shows an always-5 prompt-suggestion strip (#8201), now lightly tailored client-side (time-of-day + history; #8224). The next step toward genuinely **context/history/memory-aware** suggestions is a small server endpoint — filing as an issue first (non-trivial, touches `@elizaos/agent`) to coordinate before any PR.\n\n## Proposed design (mirrors the existing `quickContext` pattern)\n- **`GET /api/suggestions?scope=<PageScope>&roomId=<uuid>`** in `@elizaos/agent` (handler alongside `handleMemoryRoutes`; `quickContext`/`/api/context/quick` is the blueprint — `packages/agent/src/api/memory-routes.ts`). Returns a typed `{ suggestions: PromptSuggestion[5], tier, generatedAt }`.\n- **Client**: `client.getPromptSuggestions(scope, opts)` on `@elizaos/ui` (mirror `client.quickContext`).\n- **Wiring**: `usePromptSuggestions` calls it on view-change / convo-switch / message-settled (debounced), with the current **static set as the offline fallback** (no signature change — already structured for this).\n- **Tailoring inputs** (all eliza-native, no odysseus backend): active view/route (`app.tab`→`PageScope`), recent thread (`getMemories`), optional memory (`searchMemories`), time of day.\n- **Phasing**: Phase-1 = scope + recent-thread heuristic, **zero model calls** (cheap, cacheable); Phase-2 = optional single `TEXT_SMALL` rank. Always returns 5; degrade-not-empty.\n\n## Why an issue, not a PR\nThis adds a public backend endpoint + client surface — wanted @shawmakesmagic's steer on (a) endpoint shape vs. a provider, and (b) whether this overlaps anything you're already doing, before I build it. Happy to implement once there's a direction.\n\nRefs: #8201 (strip), #8224 (client-side tailoring).",
+      "createdAt": "2026-06-04T08:24:12Z",
+      "closedAt": "2026-06-06T01:16:46Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7jWZtf",
+      "title": "refactor(lifeops): split plugin-lifeops into focused plugins + plugin-personal-assistant",
+      "author": "lalalune",
+      "number": 8277,
+      "body": "## Summary\n\nDecomposes the ~7.5K-LOC `plugin-lifeops` monolith into a slim orchestrator (`plugin-personal-assistant`) plus 6 new focused plugins, with the `/lifeops` dashboard view removed in favor of per-domain plugin views. Existing domain plugins (todos, health, calendar, documents, phone) gain the owner-facing actions and views they should have owned all along. Stub future homes for runtime primitives (owner-state, scheduled-task, registries, dispatch) are scaffolded in `@elizaos/core` and `@elizaos/app-core` to mark where the still-in-PA implementations will eventually migrate.\n\nNo backwards-compat shims — `@elizaos/plugin-lifeops` is gone, not aliased.\n\n## What changed\n\n### New plugins (Phase 1)\n- **plugin-relationships** — entity/relationship graph (`ENTITY` action + Drizzle `app_relationships` schema). Absorbs lifeops `entities/`, `relationships/`, voice-observer bridge.\n- **plugin-inbox** — cross-channel inbox (`INBOX` action + triage + Drizzle `app_inbox` + `/inbox` view). Distinct from plugin-messages (which stays Android-SMS-only).\n- **plugin-goals** — life goals + self-care (`OWNER_GOALS`/`ROUTINES`/`REMINDERS`/`ALARMS` + `CheckinService` + Drizzle `app_goals` + `/goals` view).\n- **plugin-blocker** — focus/distraction control (`BLOCK` action + website + app blocker services + `/focus` view).\n- **plugin-finances** — owner finances (`OWNER_FINANCES` + Drizzle `app_finances` + `/finances` view).\n- **plugin-remote-desktop** — `REMOTE_DESKTOP` action.\n\n### Extended plugins (Phase 2)\n- **plugin-todos** — `+ /todos` view (Today/Upcoming/Someday lanes); doc-block folds `OWNER_TODOS`.\n- **plugin-health** — `+ OWNER_HEALTH`, `OWNER_SCREENTIME` actions; `+ /health` view (Sleep/Circadian/Screen-time/Activity/Connectors).\n- **plugin-calendar** — `+ CALENDAR` (8 ops), `CONFLICT_DETECT` actions; `+ /calendar` view.\n- **plugin-documents** — `+ OWNER_DOCUMENTS` action; `+ /documents` view.\n- **plugin-phone** — `+ VOICE_CALL` (Twilio) action.\n\n### Rename + view kill (Phase 3)\n- `plugin-lifeops` → `plugin-personal-assistant` (727+50 file renames, 299 cross-workspace updates, zero remaining `@elizaos/plugin-lifeops` references).\n- Internal exports renamed (`appLifeOpsPlugin` → `personalAssistantPlugin` etc.).\n- `packages/shared/src/contracts/lifeops.ts` → `personal-assistant.ts`.\n- App registry entry `apps/lifeops.json` → `apps/personal-assistant.json`.\n- `/lifeops` view deleted (LifeOpsPageView, LifeOpsTuiView, XR variant, `lifeops.overview` widget). PA no longer ships a view — domain plugins do.\n- `.github/workflows/lifeops-bench*.yml` filenames kept (benchmark-suite identifier, not the plugin name) — required-check refs would break.\n\n### Core foundations (Phase 3, structural only)\nScaffold-only future homes; code still lives in `plugin-personal-assistant` until the next migration pass:\n- `packages/core/src/owner-state/` — OwnerFactsStore, HandoffStore, GlobalPauseStore, FirstRunService, PendingPromptsStore interfaces.\n- `packages/core/src/registries/` — Anchor, Gate, EventKind, EscalationLadder, Family, Blocker registry interfaces.\n- `packages/core/src/scheduled-task/` — ScheduledTask types extending core's existing task-scheduler with gates/escalation/completionCheck/anchors.\n- `packages/app-core/src/dispatch/` — ConnectorRegistry, ChannelRegistry, ApprovalQueue, send-policy interfaces.\nEach module has a README with `TODO(migrate:)` pointing back to the still-canonical source.\n\n### What stayed in `plugin-personal-assistant`\nThe cross-domain orchestration role:\n- `BRIEF`, `PRIORITIZE`, `PERSONAL_ASSISTANT`, `SCHEDULED_TASKS`, `RESOLVE_REQUEST` actions.\n- Default-pack composition (daily-rhythm, morning-brief, followup-starter, habit-starters, executive-assistant).\n- The entity/relationship store, scheduled-task runner, owner-state, registries, connector/channel registries — all still here, will migrate into core/app-core in follow-up passes once the new homes exist.\n\n## Test plan\n\n- [x] `bun run lint` — exit 0\n- [x] `bun run typecheck` — exit 0 workspace-wide\n- [x] `bun run build` — exit 0 workspace-wide\n- [ ] Manual smoke: load PA + the new domain plugins in dev-ui, confirm each registered view renders\n- [ ] Manual smoke: `BRIEF` action still composes calendar + inbox + todos + finances correctly\n- [ ] DB migration plan: new plugins introduce `app_relationships`, `app_inbox`, `app_goals`, `app_blocker`, `app_finances` schemas — verify their tables co-exist with PA's existing `app_lifeops` schema during the cut-over window\n\n## Follow-up\n\nThis PR establishes the structural decomposition. The remaining migration moves the implementations out of `plugin-personal-assistant` into the new homes:\n1. Move EntityStore + RelationshipStore + merge engine → plugin-relationships.\n2. Move INBOX action body + TriageRepository → plugin-inbox.\n3. Move OWNER_GOALS/ROUTINES/REMINDERS/ALARMS bodies + CheckinService + default-pack fragments → plugin-goals.\n4. Move BLOCK + website-blocker/ + app-blocker/ → plugin-blocker.\n5. Move OWNER_FINANCES body → plugin-finances.\n6. Move CALENDAR/CONFLICT_DETECT bodies + calendar-gate + travel-time → plugin-calendar.\n7. Move OWNER_DOCUMENTS body → plugin-documents.\n8. Move OWNER_HEALTH/SCREENTIME bodies + ActivityTracker + PresenceSignalBridge → plugin-health.\n9. Move ScheduledTaskRunner + Anchor/Gate/EventKind/EscalationLadder registries + OwnerState services → @elizaos/core.\n10. Move ConnectorRegistry + ChannelRegistry + ApprovalQueue + send-policy → @elizaos/app-core.\n11. After (1)-(10), PA becomes ~10% of its current size — pure BRIEF/PRIORITIZE/PA orchestration + default-pack composition.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-06T03:56:44Z",
+      "mergedAt": "2026-06-06T14:57:40Z",
+      "additions": 42135,
+      "deletions": 24987
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jV90-",
+      "title": "feat(orchestrator): wire the child→parent USE_SKILL parent-agent broker dispatcher",
+      "author": "2-A-M",
+      "number": 8275,
+      "body": "## What\n\nCloses the production gap that left the capped self-spend autonomy mechanism (merged in #8250) unreachable by a live agent. A `/economics` sub-agent can now autonomously drive the monetized-app loop through the parent-agent Cloud command broker.\n\n## Why\n\n`runParentAgentBroker` / `runCloudCommand` (the only emitter of `spend_auto_authorized`) had **no production caller**: nothing parsed a child's `USE_SKILL parent-agent {…}` request, `buildSkillsManifest({ virtualSkills })` was never called, and the autonomy was only proven via Vitest. See `plugins/plugin-agent-orchestrator/docs/economics-goal-runbook.md` (bundled/updated here).\n\n## How (the three gaps, closed)\n\n1. **Dispatch** — new `parent-agent-dispatch.ts`: a string/escape-aware extractor for `USE_SKILL parent-agent {json}` (handles streaming/partial JSON, braces inside strings, nested params, markdown backticks, malformed markers) + a dispatch helper that runs the directive through `runParentAgentBroker` and streams `result.text` back via `acp.sendToSession`. Wired into `SubAgentRouter.handleEvent`: accumulates the child's `message` chunks, dispatches the first complete directive, caps round-trips via `ACPX_SUB_AGENT_ROUND_TRIP_CAP`. **Marker-guarded** — only acts on text containing `USE_SKILL parent-agent`, which ordinary coding tasks never emit, so the session-event hot path is inert for every other flow.\n2. **Advertise** — `spawnAgentForTask` writes a `SKILLS.md` for `capabilityProfile === \"economics\"` tasks via `buildSkillsManifest(..., { recommendedSlugs: [\"build-monetized-app\",\"eliza-cloud\"], virtualSkills: [PARENT_AGENT_BROKER_MANIFEST_ENTRY] })` so the child learns the slug + arg contract. Best-effort (never fatal).\n3. **Estimate** — the broker's unknown-cost stall now returns an *actionable* instruction (fetch a quote with `domains.check`, retry with `params.spendEstimateUsd`) instead of a human-only yes/no, and the manifest guidance advertises the same pattern — so `domains.buy` self-authorizes within the cap without a human turn.\n\n## Verification\n\n- New `parent-agent-dispatch.test.ts` (11 cases): extractor edge cases + the broker→`sendToSession` bridge end to end via the network-free `list-cloud-commands` mode.\n- Existing `parent-agent-broker.test.ts` + `skill-manifest.test.ts` still green (no regression from the preview/guidance change).\n- Plugin typecheck clean; biome clean.\n- End-to-end (a real `spend_auto_authorized` on `domains.buy`/`containers.create`) still needs a live ACP backend — the runbook documents the exact steps.\n\n## Safety\n\nThe hot-path hook is a no-op unless the child emits the literal `USE_SKILL parent-agent` marker. Paid/mutating commands remain gated by the existing capped spend allowance (`ELIZA_AGENT_SPEND_CAP_USD`, default 0 = confirm everything); destructive commands always require a human.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-06T03:11:44Z",
+      "mergedAt": null,
+      "additions": 798,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jW9GE",
+      "title": "fix: mobile cloud onboarding",
+      "author": "Dexploarer",
+      "number": 8278,
+      "body": "## Summary\n\n- fixes Cloud OAuth login from mobile/CLI auth by keeping Steward's `redirect_uri` on the bare allowlisted `/login` callback and storing the post-login return target in session storage\n- simplifies the iOS first-run surface for Cloud v1: orange background, orb + transparent `Connect`, no local runtime choice on the compact mobile screen\n- waits for native Cloud login completion before provisioning the Cloud agent, then persists the provisioned agent runtime URL/id separately\n- adds cloud simulator/device build and sideload helper commands plus focused mobile/cloud onboarding coverage\n\n## Root Cause\n\nThe iOS app opens `https://www.elizacloud.ai/auth/cli-login?...` for native Cloud auth. The deployed login page preserved `returnTo` by putting the query string on the Steward OAuth `redirect_uri`, producing `/login?returnTo=...`. Steward's production tenant allowlist accepts `https://www.elizacloud.ai/login` but rejects the query-bearing callback, so the in-app browser landed on a white JSON `redirect_uri is not allowed` error before Google auth.\n\n## Validation\n\n- `bun run --cwd packages/cloud-frontend test src/pages/login/steward-oauth-url.test.ts src/pages/login/login-return-to.test.ts src/pages/login/steward-login-section.test.tsx`\n- `bun run --cwd packages/ui test src/first-run/use-first-run-controller.test.tsx src/first-run/CompactOnboarding.test.tsx src/api/client-cloud-direct-auth.test.ts src/first-run/first-run.test.ts src/state/persistence-cloud-active-server.test.ts`\n- `bun run --cwd packages/shared typecheck`\n- `bun run --cwd packages/cloud-frontend typecheck`\n- `bun run --cwd packages/ui typecheck`\n- `bun run --cwd packages/cloud-frontend build:client`\n- `bunx @biomejs/biome check ...` on the touched Cloud/shared/UI/app files\n- `bun run --cwd packages/cloud-frontend audit:cloud` produced `116 passed`\n- `ELIZA_IOS_DERIVED_DATA_PATH=/Users/home/Documents/eliza/.eliza-local/DerivedData/ios-cloud-sim LANG=en_US.UTF-8 bun run --cwd packages/app build:ios:cloud:sim` succeeded\n\n## Live Verification Notes\n\nBefore this PR is deployed to production, live `www.elizacloud.ai` still serves the old bundle and reproduces the mobile login failure. A direct live probe confirms the backend contract:\n\n- query-bearing callback: `400 redirect_uri is not allowed for this tenant`\n- bare `/login` callback: `302` to Google OAuth\n\nAfter this lands and Cloudflare Pages production deploy completes, retest the iOS simulator Cloud login/provisioning path.\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n* **New Features**\n  * iOS cloud runtime support—cloud API requests bypass local agent transport\n  * Cloud agent provisioning and persistent storage\n  * OAuth return-to preservation across login redirects\n  * PKCE authentication support\n\n* **Bug Fixes**\n  * Prevent concurrent cloud login race conditions\n  * Standardized OAuth redirect handling\n\n* **Tests**\n  * Added CompactOnboarding component test coverage\n  * Added first-run controller hook tests\n  * Updated onboarding UI tests\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-06T04:46:36Z",
+      "mergedAt": "2026-06-06T06:55:33Z",
+      "additions": 720,
+      "deletions": 113
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jVqvX",
+      "title": "fix(cloud-api): make container billing idempotent per period (no double-debit on cron re-run)",
+      "author": "2-A-M",
+      "number": 8273,
+      "body": "## What\n\nHardens the daily container-billing cron so a re-run (manual trigger, overlapping CF cron, retry) can never double-debit. Defense in depth across three layers, plus a billing reconciliation fix.\n\n**Stacks on #8269** (the free-hosting fix). Until that merges, the diff here includes its single commit; afterward this shrinks to just the four new commits.\n\n## Why\n\nThe cron had no idempotency: `convertToCredits` re-debited earnings on every call, `listBillableContainers` ignored the (written-but-never-read) `next_billing_at`, there was no app-level lock (CF cron provides none), and `credit_transactions` recorded `-dailyCost` while `credit_balance` only moved by `-fromCredits` — so the ledger overstated the credit debit by the earnings portion (which is already on the earnings ledger), breaking `credit_balance == sum(credit_transactions)`.\n\n## How\n\n- **Deterministic period.** `computeContainerBillingPeriod(now)` normalizes the run to its UTC day, so the period (and the key derived from it) is stable across same-day re-runs.\n- **Earnings idempotency.** `convertToCredits` takes an optional `idempotencyKey` (`container:<id>:<utc-day>`); under the per-user advisory lock it returns the prior `credit_conversion` ledger entry instead of debiting again. Backed by a partial unique index on `redeemable_earnings_ledger((metadata->>'idempotency_key'))`.\n- **Query gate.** `listBillableContainers(now)` skips containers whose `next_billing_at` is still in the future (already paid this period).\n- **Row-lock guard.** `recordSuccessfulDailyBilling` locks the container row and no-ops if the period is already billed — closing the read→write race between listing and charging. Backed by a partial unique index on `container_billing_records(container_id, billing_period_start) WHERE status='success'`.\n- **Reconciliation.** The `credit_transaction` now records `-fromCredits` (the actual credit-balance movement); `dailyCost` and the earnings/credits split stay in metadata.\n\n## Migration (0139)\n\nAdds both partial unique indexes and **dedupes any pre-existing duplicate `success` rows first** (keep earliest by `created_at,id`) so the index can be created on existing prod data — confirmed duplicates can exist today since nothing guarded against them. The ledger index is partial on a non-null key, so existing conversions (which carry no key) are unaffected.\n\n## Verification\n\n- `db:migrate` applies all 140 migrations from scratch incl. 0139 against the real cumulative schema — clean.\n- New PGlite-backed suite (`container-billing-idempotency.test.ts`) exercises the real SQL (`FOR UPDATE`, the JSONB-keyed lookup, both partial unique indexes): earnings debit once per key, gate by `next_billing_at`, `-fromCredits` recorded, row-lock no-op on re-run.\n- `cloud-shared` + `cloud-api` typecheck clean; biome clean; `db:check-migrations` passes.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-06T02:45:26Z",
+      "mergedAt": null,
+      "additions": 548,
+      "deletions": 41
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jWSqq",
+      "title": "Improve views/apps screen",
+      "author": "binkyfishai",
+      "number": 8276,
+      "body": "views page improvements because felt it needed a brush up, feel free to toss",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-06T03:46:06Z",
+      "mergedAt": null,
+      "additions": 470,
+      "deletions": 131
+    }
+  ],
+  "codeChanges": {
+    "additions": 4278,
+    "deletions": 1802,
+    "files": 100,
+    "commitCount": 125
+  },
+  "completedItems": [
+    {
+      "title": "feat(registry): add @madeonsol/plugin-madeonsol third-party entry",
+      "prNumber": 8260,
+      "type": "feature",
+      "body": "## What\n\nAdds a third-party registry entry for [`@madeonsol/plugin-madeonsol`](https://www.npmjs.com/package/@madeonsol/plugin-madeonsol) per the process in `packages/registry/README.md`:\n\n- `entries/third-party/madeonsol__plugin-madeonsol.",
+      "files": [
+        "packages/registry/entries/third-party/madeonsol__plugin-madeonsol.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "test(cloud-e2e): smoke test for the monetized-app loop on cloud:mock",
+      "prNumber": 8249,
+      "type": "tests",
+      "body": "## What\n\nAdds an end-to-end smoke test that drives the monetized-app money path against\na live `cloud:mock` stack, plus the Cloudflare-registrar stub needed to run it\noffline.\n\nFlow proven: seed org (1000 credits) → `apps.create` →\n`apps.mo",
+      "files": [
+        "packages/scripts/cloud/admin/dev/cloud-api-dev.mjs",
+        "packages/test/cloud-e2e/scripts/monetized-app-loop-smoke.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): sign /api/auth/steward-refresh upstream call to Steward",
+      "prNumber": 8287,
+      "type": "bugfix",
+      "body": "## Why\n\nAfter yesterday's #8282 (staging SPA → api-staging) deployed, the magic-link return-leg gets further than before — `POST /steward/auth/email/verify` now returns 200 with the freshly-issued tokens — but it still kicks the user back t",
+      "files": [
+        "packages/cloud-api/auth/steward-refresh/route.ts"
+      ]
+    },
+    {
+      "title": "ci(cloud-cf-deploy): remove broken 'verify generated agent wildcard route' step",
+      "prNumber": 8283,
+      "type": "other",
+      "body": "## Why\n\n\\`cloud-cf-deploy.yml\\` line 184 had:\n\\`\\`\\`yaml\n- name: Verify generated agent wildcard route\n  if: ... && deploy_environment == 'production'\n  run: |\n    node ... fetch('https://00000000-0000-0000-0000-000000000000.elizacloud.ai/'",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): staging SPA hits staging Worker for Steward auth (tenant isolation)",
+      "prNumber": 8282,
+      "type": "bugfix",
+      "body": "## Why\n\nThe Magic Link return-leg silently sends users back to /login on staging.elizacloud.ai. Reproducible with Playwright: open /login#code=… and the SPA POSTs to `https://api.elizacloud.ai/api/auth/steward-nonce-exchange` (the prod Work",
+      "files": [
+        "packages/cloud-frontend/src/lib/steward-session.test.ts",
+        "packages/cloud-frontend/src/lib/steward-session.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): hydrate Steward cookie refresh sessions",
+      "prNumber": 8280,
+      "type": "bugfix",
+      "body": "## Summary\n- return the refreshed Steward access token from `/api/auth/steward-refresh` for trusted Cloud origins\n- hydrate the SPA localStorage token mirror from cookie refresh so valid HttpOnly-cookie sessions do not bounce back to `/logi",
+      "files": [
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-frontend/src/lib/steward-session.ts",
+        "packages/cloud-frontend/src/pages/login/steward-login-section.test.tsx",
+        "packages/cloud-frontend/src/pages/login/steward-login-section.tsx",
+        "packages/cloud-frontend/src/providers/StewardProviderRuntime.tsx",
+        "packages/shared/src/steward-session-client/index.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): stabilize Steward OAuth redirect URI",
+      "prNumber": 8279,
+      "type": "bugfix",
+      "body": "## Summary\n- keep Steward OAuth redirect_uri pinned to the allowlisted /login URL\n- preserve deep-link returnTo targets in sanitized sessionStorage instead of embedding them in redirect_uri\n- reuse the same stable redirect_uri during nonce ",
+      "files": [
+        "packages/cloud-frontend/src/pages/login/login-return-to.test.ts",
+        "packages/cloud-frontend/src/pages/login/login-return-to.ts",
+        "packages/cloud-frontend/src/pages/login/steward-login-section.tsx",
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.test.ts",
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.ts"
+      ]
+    },
+    {
+      "title": "fix: mobile cloud onboarding",
+      "prNumber": 8278,
+      "type": "bugfix",
+      "body": "## Summary\n\n- fixes Cloud OAuth login from mobile/CLI auth by keeping Steward's `redirect_uri` on the bare allowlisted `/login` callback and storing the post-login return target in session storage\n- simplifies the iOS first-run surface for ",
+      "files": [
+        "packages/app-core/src/api/ios-local-agent-transport.test.ts",
+        "packages/app-core/src/api/ios-local-agent-transport.ts",
+        "packages/app/package.json",
+        "packages/app/scripts/ios-sideload-helper.mjs",
+        "packages/app/scripts/mobile-local-chat-smoke.mjs",
+        "packages/app/test/ui-smoke/computer-use.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-lifecycle.spec.ts",
+        "packages/app/test/ui-smoke/runtime-configurability.spec.ts",
+        "packages/cloud-frontend/tsconfig.json",
+        "packages/shared/src/steward-session-client/index.ts",
+        "packages/ui/src/api/ios-local-agent-transport.ts",
+        "packages/ui/src/components/shell/StartupShell.tsx",
+        "packages/ui/src/first-run/CompactOnboarding.test.tsx",
+        "packages/ui/src/first-run/CompactOnboarding.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/state/persistence-cloud-active-server.test.ts",
+        "packages/ui/src/state/persistence.ts",
+        "packages/ui/src/state/useCloudState.ts",
+        "packages/ui/src/state/useFirstRunCallbacks.ts"
+      ]
+    },
+    {
+      "title": "refactor(lifeops): split plugin-lifeops into focused plugins + plugin-personal-assistant",
+      "prNumber": 8277,
+      "type": "refactor",
+      "body": "## Summary\n\nDecomposes the ~7.5K-LOC `plugin-lifeops` monolith into a slim orchestrator (`plugin-personal-assistant`) plus 6 new focused plugins, with the `/lifeops` dashboard view removed in favor of per-domain plugin views. Existing domai",
+      "files": [
+        ".github/workflows/cache-key-stability.yml",
+        ".github/workflows/lifeops-bench-manifest.yml",
+        ".github/workflows/lifeops-bench-python.yml",
+        ".github/workflows/lifeops-bench.yml",
+        ".github/workflows/scenario-matrix.yml",
+        ".github/workflows/windows-ci.yml",
+        ".gitignore",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "PLACEHOLDER_AUDIT.md",
+        "WINDOWS.md",
+        "biome.json",
+        "bun.lock",
+        "knip.json",
+        "package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/scripts/mobile-stubs/react-dom.cjs",
+        "packages/agent/scripts/mobile-stubs/react.cjs",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-bundle-lifecycle.test.ts",
+        "packages/agent/src/api/binance-skill-helpers.ts",
+        "packages/agent/src/api/permissions-routes.ts",
+        "packages/agent/src/bin.ts",
+        "packages/agent/src/runtime/core-plugins.test.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/agent/src/runtime/plugin-resolver.test.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/tsconfig.json",
+        "packages/app-core/packaging/snap/snapcraft.yaml",
+        "packages/app-core/platforms/electrobun/docs/convergence-audit.json",
+        "packages/app-core/platforms/electrobun/docs/convergence-audit.md",
+        "packages/app-core/platforms/electrobun/scripts/generate-convergence-audit.ts",
+        "packages/app-core/platforms/electrobun/src/application-menu.ts",
+        "packages/app-core/scripts/collect-docker-runtime-deps.mjs",
+        "packages/app-core/scripts/docker-entrypoint.test.ts",
+        "packages/app-core/scripts/lifeops-prompt-benchmark.ts",
+        "packages/app-core/scripts/link-docker-local-app-packages.mjs",
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "packages/app-core/scripts/run-local-plugin-live-smoke.mjs",
+        "packages/app-core/scripts/startup-integration-script-drift.test.ts",
+        "packages/app-core/src/ambient-modules.d.ts",
+        "packages/app-core/src/api/internal-routes.test.ts",
+        "packages/app-core/src/dispatch/README.md",
+        "packages/app-core/src/dispatch/approval-queue.ts",
+        "packages/app-core/src/dispatch/channel-registry.ts",
+        "packages/app-core/src/dispatch/connector-registry.ts",
+        "packages/app-core/src/dispatch/index.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): handle @stwd/sdk 0.10 auth result types",
+      "prNumber": 8271,
+      "type": "bugfix",
+      "body": "## Summary\n- handle @stwd/sdk 0.10 MFA-required auth results before reading tokens\n- add the new required twitter provider flag to cloud login provider defaults\n- force the Steward SDK dependency graph to resolve to 0.10.1 so @stwd/react an",
+      "files": [
+        "bun.lock",
+        "packages/app/test/fixtures/plugin-view-visual-review.md",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/assistant-home-flow.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/view-interaction-coverage.test.ts",
+        "packages/cloud-api/__tests__/pairing-token-bridge-url.test.ts",
+        "packages/cloud-api/v1/eliza/agents/[agentId]/pairing-token/route.ts",
+        "packages/cloud-frontend/src/pages/auth/callback/email/page.tsx",
+        "packages/cloud-frontend/src/pages/login/steward-login-section.tsx",
+        "packages/cloud-frontend/src/providers/StewardProvider.tsx",
+        "packages/cloud-frontend/src/providers/StewardProviderRuntime.tsx",
+        "packages/feed/apps/web/src/app/auth/callback/email/page.tsx",
+        "packages/feed/apps/web/src/components/auth/LoginModal.tsx",
+        "packages/test/cloud-e2e/tests/dashboard.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): bump @stwd/sdk to 0.10.1 (passkey challengeId login fix)",
+      "prNumber": 8267,
+      "type": "bugfix",
+      "body": "Prod passkey login fails with 'challengeId is required'. cloud-frontend bundled @stwd/sdk@0.8.1 whose published dist doesn't forward the passkey challengeId to /auth/passkey/login/verify. 0.10.1 (just published) adds it. Bumped cloud-fronte",
+      "files": [
+        "bun.lock",
+        "packages/cloud-frontend/package.json",
+        "packages/cloud-shared/package.json",
+        "packages/os-homepage/package.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 220.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 220.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 178.85251768143291,
+      "prScore": 178.85251768143291,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 162.38108276075053,
+      "prScore": 162.38108276075053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 104.07004985753056,
+      "prScore": 104.07004985753056,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 91.37380181968504,
+      "prScore": 91.03380181968504,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 63.08116701179374,
+      "prScore": 63.08116701179374,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 59.9817738965761,
+      "prScore": 59.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "binkyfishai",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/172897890?u=13dcfbbffef5a3f90ae60741795eaf47cc93a244&v=4",
+      "totalScore": 13.828386167963231,
+      "prScore": 13.828386167963231,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 24,
+  "mergedPRs": 11,
+  "newIssues": 0,
+  "closedIssues": 2,
+  "activeContributors": 12
+}
