@@ -82,6 +82,18 @@
       "deletions": 17
     },
     {
+      "id": "PR_kwDOMT5cIs7jRW_q",
+      "title": "Keep local first-run selection local",
+      "author": "odilitime",
+      "number": 8263,
+      "body": "## Summary\n- reset stale `cloud-inference` first-run state when the Local runtime card is selected\n- add a regression test covering the Local card state reset\n- suppress duplicate `Entity connected` debug log spam by logging only when room participants are newly created\n\n## Verification\n- `bunx @biomejs/biome check packages/ui/src/components/shell/FirstRunShell.tsx packages/ui/src/components/shell/__tests__/FirstRunShell.test.tsx`\n- `bunx @biomejs/biome check packages/core/src/connection.ts packages/core/src/connection.d.ts packages/core/src/runtime.ts`\n\nFocused Vitest was not run in this checkout because dependency linking is currently incomplete for nested `eliza` (`adze` is not linked from node_modules), and local Bun 1.3.9 cannot use the newer nested lockfile with `--frozen-lockfile`.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-05T21:29:49Z",
+      "mergedAt": null,
+      "additions": 1283,
+      "deletions": 921
+    },
+    {
       "id": "PR_kwDOMT5cIs7jJg-V",
       "title": "feat(orchestrator): let /goal autonomously drive the monetized-app loop (capped self-spend + economics capabilities)",
       "author": "2-A-M",
@@ -92,18 +104,6 @@
       "mergedAt": "2026-06-05T17:33:28Z",
       "additions": 894,
       "deletions": 14
-    },
-    {
-      "id": "PR_kwDOMT5cIs7jOZTf",
-      "title": "fix(cloud): send PKCE on Steward OAuth + sign the nonce-exchange call",
-      "author": "NubsCarson",
-      "number": 8259,
-      "body": "## What\n\nMake the Eliza Cloud login send **PKCE** on the Steward OAuth flow, and have the\nnonce-exchange route **sign** its direct upstream call — the two client-side\ngaps that broke \"Sign in with Eliza Cloud\" after Steward's auth hardening.\n\nRefs #8257.\n\n## Why (root cause — verified against prod `api.elizacloud.ai`)\n\nSteward was hardened on 2026-05-28 (`3faf518`) to require, on `/auth/*`:\n1. a PKCE `code_challenge` (S256) on `GET /auth/oauth/:provider/authorize` for\n   `response_type=code`, and\n2. an HMAC request signature (`X-Steward-Signature: v1=<hex>`) + freshness\n   header on mutating routes.\n\nThe Eliza Cloud client never sent either, so live reproduction shows:\n\n```\nGET  /steward/auth/oauth/google/authorize?...&response_type=code\n  → 400 {\"error\":\"code_challenge is required for response_type=code\"}\nPOST /steward/auth/oauth/exchange   (and /auth/email/send)\n  → 401 {\"error\":\"X-Steward-Signature header required\"}\n```\n\nThe **signing** half of the proxy path was already fixed in #8256\n(`embeddedStewardHandler`). This PR closes the remaining client gaps:\n\n- **PKCE** is not sent anywhere by the SPA.\n- The **nonce-exchange route bypasses the `/steward/*` signing proxy** (it calls\n  upstream Steward directly to pin the tenant), so its `/auth/oauth/exchange`\n  POST is unsigned and 401s even after #8256 ships.\n\n## Changes\n\n**Frontend PKCE (`packages/cloud-frontend`)**\n- `pages/login/steward-oauth-url.ts`: add `createStewardPkcePair` /\n  `createStewardPkceChallenge` / `generateStewardPkceVerifier` (S256, RFC 7636)\n  and `store`/`consumeStewardPkceVerifier` (sessionStorage, single-use); add a\n  `codeChallenge` option on `buildStewardOAuthAuthorizeUrl`.\n- `pages/login/steward-login-section.tsx`: mint + stash the verifier before the\n  `/authorize` redirect; replay it on the callback into the exchange.\n- `lib/steward-session.ts`: forward `codeVerifier` to the nonce-exchange route.\n\n**Exchange signing (`packages/cloud-api`)**\n- `src/steward/sign.ts` (new): `buildStewardCanonicalRequest` +\n  `signStewardMutatingRequest` — a faithful, **lockstep** copy of the proxy\n  signer in `src/steward/embedded.ts` (and Steward's\n  `authorization-signature.ts`). Same 15-field canonical, same `v1=` HMAC.\n- `auth/steward-nonce-exchange/route.ts`: forward `code_verifier` to Steward and\n  sign the upstream `/auth/oauth/exchange` POST when\n  `STEWARD_REQUEST_SIGNING_SECRET` is set (unsigned otherwise — same posture as\n  the proxy).\n\n## Backward compatibility\n\n- Wallet (SIWE/SIWS), email/magic-link, and passkey flows are untouched.\n- The exchange still works with **no** verifier and/or **no** signing secret\n  (both forwarded only when present); legacy pre-PKCE callbacks degrade to\n  Steward's own error rather than crashing.\n- Accepts both `codeVerifier` and `code_verifier` body shapes.\n\n## Testing\n\n- `packages/cloud-frontend/.../steward-oauth-url.test.ts` — PKCE S256 locked to\n  the RFC 7636 Appendix B vector (`dBjf… → E9Me…`, identical to Steward's\n  `pkceChallengeForVerifier`), verifier charset/length, single-use store/consume,\n  and conditional `code_challenge` query params.\n- `packages/cloud-api/__tests__/steward-sign.test.ts` — canonical field order,\n  freshness + idempotency stamping, an **independently-recomputed signature that\n  verifies**, idempotency-key preservation, and body-tamper rejection.\n\n> Note: the full monorepo install/test run was done in CI (local install was not\n> possible in my environment). The PKCE crypto and the signer were additionally\n> proven against standalone references before commit.\n\n## NOT in this PR — required deploy/ops follow-ups for prod to go green\n\nThis PR is the client code. Prod login also needs (cannot be done in-repo):\n1. **Redeploy `cloud-api`** with #8256 **and set `STEWARD_REQUEST_SIGNING_SECRET`**\n   (matching the upstream Steward `STEWARD_REQUEST_SIGNING_SECRETS`) — unblocks\n   email/passkey/wallet immediately.\n2. **Configure the `elizacloud` tenant's OAuth redirect allowlist**\n   (`STEWARD_OAUTH_ALLOWED_REDIRECTS` or tenant `allowedRedirectUrls`,\n   e.g. `https://www.elizacloud.ai/login`, `https://staging.elizacloud.ai/login`)\n   — currently returns `\"OAuth redirect_uri allowlist is not configured for this\n   tenant\"`, the last gate for Google after PKCE.\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-05T18:58:56Z",
-      "mergedAt": "2026-06-05T22:06:59Z",
-      "additions": 489,
-      "deletions": 7
     }
   ],
   "codeChanges": {

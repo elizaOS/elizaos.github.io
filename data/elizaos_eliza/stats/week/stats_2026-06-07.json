@@ -1,0 +1,509 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-07T00:00:00.000Z",
+    "intervalEnd": "2026-06-14T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-07 to 2026-06-14, elizaos/eliza had 32 new PRs (27 merged), 1 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABErit7w",
+      "title": "Eliza Cloud Apps: scaling + ingress gaps before go-live (audit, evidenced)",
+      "author": "NubsCarson",
+      "number": 8321,
+      "repository": "elizaos/eliza",
+      "body": "## Eliza Cloud Apps (Product 2) — scaling + ingress gaps to close before go-live\n\nA code-level audit of the apps data plane (per-tenant DB + isolated container deploys). **The core design is sound and standard** — per-tenant `DATABASE`+`ROLE` with `REVOKE CONNECT` (real cross-tenant isolation), per-app `--internal` network + DB ambassador, `ClusterPool` sharding. This is *not* jank. But the current code's realistic ceiling is **~dozens of concurrently-running apps, not ~1000**, and the front-door router isn't installed yet. Filing the prioritized gaps (all evidenced) so they're tracked before flipping `APPS_DEPLOY_ENABLED` in prod.\n\nContext: terraform apply is also currently blocked on the staging Hetzner **server limit** (see #8318). Apply bugs (SSH-key 409, retired `cpx41`) are fixed in #8318.\n\n### 🔴 P0 — pre-launch blockers (serve ~0 reachable / isolation maybe inactive)\n1. **Ingress not installed.** `cloud-init/app-node.yaml.tftpl:62-63` leaves Caddy as a `STAN:` TODO — only squid is installed. No per-app `<id>.apps.elizacloud.ai` hostname routes to any container (nothing terminates TLS / reverse-proxies 80/443 → the random high host port). **Serves 0 reachable users until added.** (config)\n2. **Postgres connection ceiling.** `cloud-init/tenant-db.yaml.tftpl:12` leaves `max_connections` at the default 100, and there's **no pgbouncer** anywhere; each app's plugin-sql pool is `max:20 / min:2` (`plugins/plugin-sql/src/pg/manager.ts:16-17`). Exhausted at ~5 apps under load / ~50 idle — `ClusterPool` shards DB *count* (2000 cap), not connections. (config + a pooler)\n3. **Env-var contract unverified.** Orchestrator injects `DATABASE_URL` (`app-deploy-orchestrator.ts:82`) but plugin-sql's primary path reads `POSTGRES_URL`. The cloud eliza loaders *do* map `DATABASE_URL→POSTGRES_URL` (agent.ts:10, settings.ts:100, …), so it's satisfiable — but must be confirmed for the actual app image, else the isolated DB is provisioned and never used (silent PGlite fallback) → per-tenant isolation isn't even active. (code/verify)\n\n### 🟠 P1 — required before real scale (multi-node)\n4. **App placement is single-node.** `container-executor-deps.ts:42-52` always picks `seed.split(',')[0]` — every container piles on node 1; extra terraform app nodes get no placements. No `node_id`/`incrementAllocated` for app containers (`app-container-store.ts`). (code)\n5. **Docker network exhaustion.** One `--internal` bridge per app exhausts the default 172.x address pool at ~31 networks/node; `daemon.json` `default-address-pools` not set in cloud-init. Caps a node at a few dozen tenants regardless of CPU/RAM. (config)\n6. **Multi-node ingress LB.** Wildcard DNS hard-codes `app_node[\"1\"]` (`main.tf:184,190`); no `hcloud_load_balancer`. The moment `app_node_count>1`, apps on node 2+ are dark. (config)\n7. **Tenant-DB slot leak.** `tenant_db_clusters.database_count` only increments (`tenant-db-clusters.ts:44`); no `releaseSlot`/decrement, and `tenant-db-provisioner.deprovision()` (DROP DATABASE/ROLE) has **zero non-test callers** — `UserDatabaseService.cleanupDatabase` only deletes Neon. Under churn, slots ratchet up + orphan DBs accumulate. (code)\n8. **Host-port collisions.** `allocateHostPort()` is a blind random pick in 20000-39999 with no in-use check (`container-executor-deps.ts:86-90`), unlike the agent path's `getUsedDockerHostPorts`. Flakes docker-create at a few hundred containers/node. (code)\n9. **App-plane autoscaler.** `node-autoscaler.ts` is agent-image/platform hardcoded (lines 133,233,435); no autoscaler cron; app provisioning never registers allocation → app demand triggers nothing. Adding app capacity is manual. (code)\n10. **Billing cron at scale + idempotency.** `cron/container-billing/route.ts:391-440` is one serial Worker pass with an N+1 per-org prefetch + inline emails (presses Worker wall-time in the low thousands; can't resume a cut-off pass), and `recordSuccessfulDailyBilling` (`container-billing.ts:153-212`) has **no unique constraint on (container_id, billing_period)** → a duplicate cron fire / manual re-run double-bills. *(2AM-owned billing surface.)*\n11. **Defense-in-depth written but unused.** `buildAppNodeNftablesRules` (drops 169.254.169.254 metadata + RFC1918 pivots), per-app `buildSquidAllowlistConf`, `buildHetznerAppFirewallRules` have **zero non-test callers** — egress is one shared squid + static global allowlist, the metadata/lateral block is code-only, and `-p` binds `0.0.0.0` so app ports are world-exposed until the firewall's applied. (NB: reconcile the nftables RFC1918 drop with the ambassador's legit 10.30.x DB path.) (both)\n\n### 🟡 P2 — later / hardening\n12. Single Postgres superuser per cluster = shared fate (rotation + a non-superuser provisioning role); tighten `operator_ingress_cidrs` (SSH `0.0.0.0/0`); real tenant-DB TLS cert (hostssl vs the `sslmode=disable` fallback).\n13. Kernel sandboxing decision (gVisor/Kata/userns + seccomp) + per-app `--cpus` (only `--memory`/`--pids-limit` set today). Right-size `max_databases` (2000 is misleading until pooling exists). Tenant-DB-node scaling runbook.\n\n**Honest bottom line:** isolation + sharding are real and correct; the work to reach 1000 is *known* (the code is full of accurate `STAN TODO`s) but **not built**. Recommend **not** going live until at least P0 (and ideally #4/#6) are closed. Happy to take the additive, testable items (e.g. #3 set both env vars, #7 slot release, #8 collision-safe ports) as PRs — flag which you want vs. own.\n\ncc @standujar (data-plane) — billing items (#10) are 2AM's surface.\n",
+      "createdAt": "2026-06-07T23:25:37Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7jl2oZ",
+      "title": "feat(cloud): Eliza Cloud Apps (Product 2) — per-tenant-isolated container hosting",
+      "author": "NubsCarson",
+      "number": 8293,
+      "body": "## Eliza Cloud Apps (Product 2) — per-tenant-isolated container hosting\n\nLets users deploy arbitrary container apps with a **per-tenant database, sign-in, a per-app URL, and metered hosting billing**, isolated from the shared Eliza **agent** system. Layered onto 2AM's `/api/v1/containers` surface — never rebuilt.\n\n**Draft for review (nubs + Shaw). Not requesting merge yet.** All changes are additive and the agent plane is byte-for-byte untouched; the apps path is feature-gated off until its env/infra is configured.\n\n### What's here (all in `packages/cloud-shared`, additive)\n- **Per-tenant DB isolation** — `tenant_db_clusters` pool (race-safe `tryClaimSlot`), `SqlTenantDbProvisioner` + `DirectPgExecutor`, composer `makeTenantDbProvisioning`. Strategy: DATABASE+ROLE-per-tenant with `REVOKE CONNECT … FROM PUBLIC` (a hard auth-layer boundary), pluggable provider. Migration `0140` (journal-registered).\n- **Per-tenant network isolation** — `--internal` network + `--cap-drop=ALL`/`no-new-privileges`/`pids-limit`, default-deny egress proxy. Never `NET_ADMIN`/tun (those stay agent-only).\n- **Repo→image build pipeline** — pure ref/build-cmd builders + `AppImageBuilder` (over an injected SSH/exec seam).\n- **Deploy orchestration + adapters** — `AppDeployRunner` (ensure tenant DB → create container row carrying the per-tenant DSN → enqueue `CONTAINER_PROVISION` → link via `apps.metadata.containerId`), `AppContainerStore` (maps host placement into `containers.metadata`), `ContainerJobsWriter`.\n- **Per-app URL** — reuses the shared `derivePublicHostname` (ingress source of truth) to stamp `public_hostname`/`load_balancer_url` + `apps.production_url`.\n- **`APP_DEPLOY` trigger** — the Worker enqueues `APP_DEPLOY` (pg-free); the daemon claims it and runs the node runner, so `pg`/SSH never touch the workerd request path.\n\n### Verified for real (not mocks)\n- **Real Postgres 16:** cross-tenant connection rejected — `permission denied for database` (`REVOKE CONNECT`).\n- **Real Docker:** `scripts/verify-e2e-deploy.sh` 5/5 — build user image → provision per-tenant DB → run `--internal` isolated container with its DSN → reaches its own DB + serves its URL → rejected from other tenants' DBs → no egress.\n- **Real drizzle schema (PGlite):** `scripts/verify-deploy-db-writes.sh` 10/10 — adapter inserts, the per-tenant-DSN-in-`environment_vars` invariant, URL stamping.\n- **236 unit tests green, typecheck + biome clean.** Migration `0140` applies in the full real chain.\n\n### Remaining rollout (NOT in this PR — needs infra + review)\n1. Two boot one-liners during apps-infra rollout: cloud-api `configureAppsDeployTrigger()` + daemon `configureAppsDeployBackend({ registry, buildExec })`.\n2. Apps **data-plane infra** via terraform+CI: app docker node(s), the tenant Postgres cluster, image registry, egress proxy.\n3. VPS scratch kernel-validation (read-only / non-destructive).\n\n### Non-collision\nRebased-clean on `develop` (new files + appended enum keys / switch cases). Does not touch the agent path or 2AM's hot files (`v1/containers/route.ts`, `[id]/route.ts`, `cron/container-billing/route.ts`, `db/schemas/containers.ts`, `hetzner-client/client.ts`). Billing-field init (`next_billing_at`) is a coordination item with 2AM's #8273.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-07T08:23:45Z",
+      "mergedAt": "2026-06-07T17:20:33Z",
+      "additions": 5090,
+      "deletions": 11
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jjZWm",
+      "title": "fix(cloud): resolve unauthorized error in agent image provisioning",
+      "author": "Dexploarer",
+      "number": 8292,
+      "body": "## Summary\n- keep cloud-managed iOS builds on the cloud bridge instead of falling through to local model downloads\n- request proactive iOS contacts/reminders permissions and keep first-run progress counts aligned\n- personalize shell greetings from persisted owner, device, or cloud user identity and re-render when the name resolves\n- preserve the remote revert of the broader cloud control-plane changes while keeping the iOS first-run fixes\n\n## Verification\n- bun run --cwd packages/ui test src/first-run/proactive-ios-permissions.test.ts\n- bun run --cwd packages/ui typecheck\n- bun run --cwd packages/ui lint (passes with 3 existing story noArrayIndexKey warnings)\n- bun run --cwd packages/app test src/ios-runtime.test.ts\n- bun run --cwd packages/app typecheck\n\n## Notes\n- Existing PR branch was non-fast-forward; merged origin/codex/mobile-cloud-login-control-plane before pushing.\n- CI is running on head 39d6e7fd69c31fce625bdd2d5a7e9bd3aea71e17.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-07T02:15:31Z",
+      "mergedAt": null,
+      "additions": 1603,
+      "deletions": 123
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jiZ43",
+      "title": "feat(cloud-sdk): \"Sign in with Eliza Cloud\" app-auth SDK",
+      "author": "NubsCarson",
+      "number": 8289,
+      "body": "> **Draft / proposal.** Slice 1 of an \"Eliza Cloud Apps\" direction (turnkey building blocks for third-party/hosted apps). Self-contained, new sub-export only — **touches no server, data-plane, or agent code.**\n\n## What\n\nNew `@elizaos/cloud-sdk/app-auth` sub-export: a small, **dependency-free** client that lets any third-party app authenticate its users through Eliza Cloud — \"Sign in with Eliza Cloud.\" It wraps the **already-live** app-auth flow; no backend changes.\n\n## The flow it wraps (built against the real contract)\n\nNo PKCE — the consent step is gated by the user's existing Eliza Cloud session, and `redirect_uri` is validated against the app's registered allowed origins (`/api/v1/apps/:id/public`).\n\n1. **Authorize** — `buildAppAuthorizeUrl({ appId, redirectUri, state })` → `https://www.elizacloud.ai/app-auth/authorize?app_id=…&redirect_uri=…&state=…` (matches what the hosted `<AuthorizeContent>` consent page reads).\n2. **Callback** — Eliza redirects back: `<redirectUri>?code=eac_…&state=…` on success, or `?error=access_denied&error_description=…&state=…` on denial (matches `buildAppAuthorizeCompletionRedirect`).\n3. **Exchange** — `exchangeAppAuthorizeCode(code)` → `GET /api/v1/app-auth/session` with `Authorization: Bearer eac_…` → `{ user: { id, email, name, avatar, createdAt }, app }`. The `eac_` code is opaque, single-use, 5-min TTL (matches `app-auth-codes.ts` + the `session` route).\n\n## API\n\n```ts\nimport { ElizaCloudAppAuth } from \"@elizaos/cloud-sdk/app-auth\";\nconst auth = new ElizaCloudAppAuth({ appId, redirectUri });\nlocation.href = auth.authorizeUrl(state);                  // 1\nconst { user, app } = await auth.completeSignIn(req.url);  // 2 + 3 (server-side)\n```\n\nAlso exports the standalone `buildAppAuthorizeUrl`, `parseAppAuthorizeCallback`, `exchangeAppAuthorizeCode`, `looksLikeAppAuthCode`, `ElizaCloudAuthError`, and the `APP_AUTH_*` constants. All accept optional `fetchImpl` / `baseUrl` / `apiBaseUrl` for tests + custom origins. Defaults reuse the package's `DEFAULT_ELIZA_CLOUD_BASE_URL` / `DEFAULT_ELIZA_CLOUD_API_BASE_URL`.\n\n## Tests\n\n15 unit tests (mocked fetch): URL build (+ custom base, optional state, validation), callback parsing across input shapes (URL string / `URLSearchParams` / bare query / `Location`), code exchange with Bearer + `X-App-Id` assertions, custom `apiBaseUrl`, and error paths (non-`eac_` short-circuit, `401` → `ElizaCloudAuthError` with server code). biome + tsgo clean. Pure TS, zero new deps.\n\n## Why draft\n\nIt's a proposal for the Apps direction — happy to adjust the surface, the home (sub-export vs root barrel), or naming. Follows the existing `./cloud-setup-session` sub-export pattern. Documented in the package CLAUDE.md/AGENTS.md.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-07T00:08:29Z",
+      "mergedAt": null,
+      "additions": 667,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jqMDt",
+      "title": "infra(hetzner): apps data-plane terraform (Product 2) [DRAFT — Stan review]",
+      "author": "NubsCarson",
+      "number": 8296,
+      "body": "## Apps data-plane terraform (Product 2) — **REVIEW DRAFT for Stan**\n\nThe IaC half of \"Eliza Cloud Apps\" — stands up the **isolated apps data plane** the verified code in **#8293** targets. Sibling to `hetzner/control-plane`, same conventions (hcloud + cloudflare providers, R2 backend, env tfvars, cloud-init).\n\n**Not applied — draft for review.** Keeps apps isolated from agents (*agents share the data plane; apps get an isolated one*):\n- private `hcloud_network` (no overlap with the agent net)\n- **tenant Postgres node** (+ volume) — thousands of per-tenant `DATABASE`+`ROLE` (`REVOKE CONNECT`), reachable **only** on the private net\n- **app worker node(s)** for untrusted images (per-app `--internal` net + cap-drop + squid default-deny egress; daemon SSHes in)\n- firewalls (DB private-only; app node SSH+80/443), wildcard ingress DNS\n- outputs: admin DSN → seed `tenant_db_clusters`, app node IPs, base domain\n\n**Stan — harden before apply** (inline `STAN:` notes + README): SSH surface, untrusted-image hardening (gVisor/seccomp), TLS/backups, ingress LB, egress allowlist.\n\nPairs with #8293 (code). Rollout: apply → seed `tenant_db_clusters` → set apps env → wire the 2 gated boot one-liners → flip gate for allowlist → on-node kernel re-check.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-07T17:07:34Z",
+      "mergedAt": "2026-06-07T17:22:25Z",
+      "additions": 573,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ji7P4",
+      "title": "fix(core): bound the advanced-memory rolling-summary prompt and first-store offset",
+      "author": "NubsCarson",
+      "number": 8290,
+      "body": "## Summary\n\nThe advanced-memory `summaryEvaluator` (`packages/core/src/features/advanced-memory/evaluators/memory-items.ts`) has two coupled bugs that surface in busy rooms — the second was found while reviewing the fix for the first.\n\n### Bug 1 — unbounded first-summary prompt → permanent `context_length_exceeded` loop\n`prepareSummary()` caps the work window at `summaryMaxNewMessages` (default 50 / `MemoryService` config 20) and advances `lastMessageOffset` by that bounded `summarizationMessages` slice. But `prompt()` rendered the full `allDialogueMessages` (fetched with `limit: 1000`, unbounded by tokens) on the **no-existing-summary** branch:\n\n```ts\nconst recentMessages = prepared.existingSummary\n  ? prepared.summarizationMessages   // bounded (≤ maxNewMessages)\n  : prepared.allDialogueMessages;    // up to 1000 messages, unbounded by tokens\n```\n\nIn a high-traffic room the first summary therefore sends a request far over the model's context window (observed live: a ~3.1M-token request to a 131k-limit endpoint → `400 context_length_exceeded`). Because the request fails, the summary never stores, so `existingSummary` stays null and the **same oversized request retries forever**. It also double-counts messages on the next run (the offset only advanced by the bounded slice).\n\n### Bug 2 — first store jumps the offset past unsummarized messages (silent data loss)\nOn the first store (no existing summary), the offset was set to the whole backlog while only the bounded slice was summarized:\n\n```ts\nmessageCount: prepared.totalDialogueCount,      // e.g. 1000\nlastMessageOffset: prepared.totalDialogueCount, // e.g. 1000\n```\n\nSo after summarizing the first ≤20 messages, the offset jumps to 1000 and messages 20→1000 are **never summarized** on subsequent runs. (The existing-summary branch already does the right thing via `newOffset = lastOffset + summarizationMessages.length`.)\n\n## Fix\n- `prompt()` always uses the bounded `summarizationMessages` slice.\n- The first-store branch advances `lastMessageOffset`/`messageCount` by the summarized slice (`newOffset`), mirroring the existing-summary branch, so the rolling summary builds up **incrementally and bounded** instead of crashing or skipping.\n- Drop the now-unused `allDialogueMessages` field from `SummaryPrepared` (the local var stays — it still feeds `totalDialogueCount` and the slice). No external consumer reads the field.\n- Add regression tests: the prompt is bounded to `summarizationMessages` regardless of `existingSummary`, and the first store advances the offset by the slice (not the backlog).\n\n## Notes\n- Commit 1 is a **pure tabs→spaces biome reformat** of the file (no logic change — `git diff -w` is empty) so the logic change in commit 2 is a minimal, reviewable ~14-line diff. The file was tab-indented; `biome.json` enforces 2-space.\n- A pre-existing follow-up (left out of scope): the cap is by message **count**, not tokens, so pathologically large individual messages could still exceed context within the bounded slice — a token-budget cap would be a separate enhancement.\n\n## Test\n```\nbun run --cwd packages/core test -- --run memory-items   # 3 passed\nbun run --cwd packages/core typecheck                     # clean\n```\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-07T01:21:27Z",
+      "mergedAt": null,
+      "additions": 529,
+      "deletions": 397
+    }
+  ],
+  "codeChanges": {
+    "additions": 6529,
+    "deletions": 490,
+    "files": 107,
+    "commitCount": 102
+  },
+  "completedItems": [
+    {
+      "title": "feat(cloud-api): add container lifecycle verbs (PATCH/DELETE/scale)",
+      "prNumber": 8270,
+      "type": "feature",
+      "body": "Follow-up to #8258 (the `/api/v1/containers` deploy + read route). Adds the per-container mutation surface the survival loop needs — the only lifecycle exit today is the billing cron's auto-shutdown.\n\n`v1/containers/[id]/route.ts`:\n- **PATC",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/containers/[id]/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): bill containers when earnings conversion fails",
+      "prNumber": 8269,
+      "type": "bugfix",
+      "body": "## Problem\n\nIn the container-billing cron, `redeemableEarningsService.convertToCredits` **throws** on insufficient/contended earnings for a positive amount — it never returns `{ success: false }` (see `redeemable-earnings.ts` lines 769/774/",
+      "files": [
+        "packages/cloud-api/cron/container-billing/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-e2e): boot cloud-api via the wrangler dev launcher",
+      "prNumber": 8268,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe cloud-e2e stack fixture cannot boot cloud-api. Since #8112 it launches `cloud-api-e2e-server.mjs`, which `import()`s the cloud-api worker straight from TypeScript source (`packages/cloud-api/src/index.ts`). Neither runtime c",
+      "files": [
+        "packages/test/cloud-e2e/.gitignore",
+        "packages/test/cloud-e2e/src/fixtures/stack.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-sdk): add ElizaCloudClient.transcribeAudio() for voice/stt",
+      "prNumber": 8266,
+      "type": "feature",
+      "body": "## What\nAdds `ElizaCloudClient.transcribeAudio(request, options)` — a high-level helper for `POST /api/v1/voice/stt`, mirroring `createEmbeddings` / `generateImage`. Apps currently hand-roll the multipart POST (FormData + manual `Authorizat",
+      "files": [
+        "packages/cloud-sdk/src/client.test.ts",
+        "packages/cloud-sdk/src/client.ts",
+        "packages/cloud-sdk/src/types.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-agent): mount missing UI routes + bundle @lifi/sdk",
+      "prNumber": 8320,
+      "type": "bugfix",
+      "body": "SPA was hitting 404/500 on cloud agents — wallet 500 + i18n 404 + 3 mobile-optional 404s — this PR closes them.\n\nTest plan: open Open Web UI on staging, no 404/500 in console",
+      "files": [
+        "packages/agent/src/api/mobile-optional-routes.ts",
+        "packages/app-core/deploy/Dockerfile.cloud",
+        "packages/app-core/src/api/i18n-locale-routes.ts",
+        "packages/app-core/src/api/server.ts",
+        "packages/cloud-api/src/bootstrap-app.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/ui/src/api/i18n-locale-client.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): strip openrouter routing suffix from pricing lookup",
+      "prNumber": 8319,
+      "type": "bugfix",
+      "body": "Live error: [v5-runtime-failed] error=Pricing unavailable for language:input gpt-oss-120b:nitro. PR #8307 added gpt-oss-120b at priority -1 but lookup missed it because canonicalModelId treated : as forced-provider delimiter. Dashes-in-pref",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/dimensions.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): accept APPS_CLOUDFLARE_ZONE_ID as a secret OR a var (terraform apps)",
+      "prNumber": 8317,
+      "type": "bugfix",
+      "body": "Staging plan run failed preflight: `TF_VAR_cloudflare_zone_id` resolved empty because `APPS_CLOUDFLARE_ZONE_ID` was set as an **environment secret**, but the workflow read `vars.APPS_CLOUDFLARE_ZONE_ID`. Everything else (HCLOUD_TOKEN, R2 st",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-shared/scripts/verify-tenant-db-isolation.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): correct src import path in tenant-db isolation e2e",
+      "prNumber": 8315,
+      "type": "bugfix",
+      "body": "## What\n`scripts/verify-tenant-db-isolation.ts` imported `./src/lib/services/tenant-db/...`. Since the script lives in `scripts/`, `./src/...` resolves to the nonexistent `scripts/src/...`, so the script crashed with `Cannot find module ...",
+      "files": [
+        "packages/cloud-shared/scripts/verify-tenant-db-isolation.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-lifeops): drop calls to removed registerLifeOpsApp + LifeOps view exports",
+      "prNumber": 8314,
+      "type": "bugfix",
+      "body": "## Bug\nSPA boot crashed with `t.registerLifeOpsApp is not a function` — white-screen on every load.\n\nThe lifeops decomposition (`eef57bf53e`) renamed `@elizaos/plugin-lifeops` to `@elizaos/plugin-personal-assistant` and killed the `/lifeops",
+      "files": [
+        "packages/app/src/main.tsx",
+        "packages/app/src/plugin-loader.ts",
+        "packages/app/src/types/app-plugin-module-exports.d.ts",
+        "packages/app/src/types/app-plugin-modules.d.ts"
+      ]
+    },
+    {
+      "title": "fix(apps): per-app URL uses the apps domain, never the agent/milady domain",
+      "prNumber": 8313,
+      "type": "bugfix",
+      "body": "## Why\nFound while verifying a deploy on staging: the per-app URL came out as\n`<id>.milady.ai` — the **agent sandbox** domain — instead of an apps domain.\n\n`deriveAppPublicUrl` reused the shared `containersEnv.publicBaseDomain()`, which is\n",
+      "files": [
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-url.test.ts",
+        "packages/cloud-shared/src/lib/services/app-url.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): mount /accept-invitation alias for Steward invite emails",
+      "prNumber": 8311,
+      "type": "bugfix",
+      "body": "## Bug\nSteward invite emails link to `/accept-invitation?token=...`, but the cloud SPA only registered `/invite/accept`. Every invited user landed on a 404.\n\n## Fix\nMount the existing `InviteAcceptLayout` + `InviteAcceptPage` on `/accept-in",
+      "files": [
+        "packages/cloud-frontend/src/App.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): raise pair relay timeout to 15s",
+      "prNumber": 8310,
+      "type": "bugfix",
+      "body": "## Bug\n\nOn staging, the Web UI sign-in link occasionally surfaces \"Sign-in link expired\" even though the token is fresh. Root cause: Worker latency on `POST /api/auth/pair` sometimes exceeds the 5s `AbortController` deadline in the relay. T",
+      "files": [
+        "packages/app-core/src/api/cloud-pair-route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): accept ?token= on SSE GETs for EventSource auth",
+      "prNumber": 8309,
+      "type": "bugfix",
+      "body": "## Bug\n\nEventSource (the browser SSE client) cannot set request headers, so it has no way to send `Authorization: Bearer <ELIZA_API_TOKEN>`. The global auth gate in `server.ts` only inspects headers via `extractAuthToken(req)`, so every SSE",
+      "files": [
+        "packages/agent/src/api/server-helpers-auth.ts",
+        "packages/agent/test/api/server-helpers-auth.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): pass WS auth token via query param for staging handshake",
+      "prNumber": 8308,
+      "type": "bugfix",
+      "body": "## Bug\n\nThe SPA in `packages/ui/src/api/client-base.ts` opens `new WebSocket(ws://<host>/ws?clientId=...)` with no auth in the URL. Browsers can't set the `Authorization` header on `new WebSocket(url)`, so the only handshake-time channel is",
+      "files": [
+        "packages/agent/src/api/server-auth.ts",
+        "packages/agent/src/api/server-helpers-auth.ts",
+        "packages/ui/src/api/client-base.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): force-price openai/gpt-oss-120b in BitRouter catalog",
+      "prNumber": 8307,
+      "type": "bugfix",
+      "body": "## Bug\n\nThe cloud's default TEXT_SMALL model is hard-coded to `openai/gpt-oss-120b:nitro` (see `packages/core/src/contracts/service-routing.ts`, `packages/cloud-shared/src/lib/models/catalog.ts`), but BitRouter's catalog API is not returnin",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): drop hardcoded prod fallback in eliza.json provisioning",
+      "prNumber": 8306,
+      "type": "bugfix",
+      "body": "## Why\n`docker-sandbox-provider` wrote `eliza.json` with a hardcoded `https://www.elizacloud.ai/api/v1` baseUrl when `ELIZAOS_CLOUD_BASE_URL` was unset, silently routing staging containers to the prod cloud API.\n\n## What\nReplace the `||` fa",
+      "files": [
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): point staging R2 BLOB binding at eliza-cloud-blob-staging",
+      "prNumber": 8305,
+      "type": "bugfix",
+      "body": "## Why\nThe `[[env.staging.r2_buckets]]` BLOB binding was pointing at the prod bucket `eliza-cloud-blob`, so staging Worker uploads/reads were hitting prod data. Staging must be isolated from prod.\n\n## What\nSwitch staging BLOB binding to `el",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(apps): DB ambassador so isolated app containers can reach their tenant DB",
+      "prNumber": 8304,
+      "type": "bugfix",
+      "body": "## The gap (found by testing the full deploy on staging)\nApp containers run on a per-app `--internal` Docker network with **zero egress**\n(proven — a container on it can't even reach `8.8.8.8`). But that *also* blocks the\napp's **own tenant",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-provider.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-db-ambassador.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-db-ambassador.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): cap Steward agent-token expiresIn at 7d",
+      "prNumber": 8303,
+      "type": "bugfix",
+      "body": "## Why\n\nAfter #8301 (migration to Steward platform-key path), the daemon now hits `POST /platform/tenants/:id/agents/:id/token` which validates expiresIn against a 7d ceiling:\n\n```\n{\"ok\":false,\"error\":\"expiresIn must be a duration up to 7d ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): provision agents via Steward platform-key path",
+      "prNumber": 8301,
+      "type": "bugfix",
+      "body": "## Why\n\nThe provisioning daemon was hitting `POST /agents` (tenant-scoped) which Steward gates behind `requireTenantAdminSession`:\n\n```ts\nfunction requireTenantAdminSession(c) {\n  return c.get(\"authType\") === \"session-jwt\" && (role === \"own",
+      "files": [
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): wire OpenRouter as a real BYOK upstream (stop using BitRouter Cloud)",
+      "prNumber": 8300,
+      "type": "bugfix",
+      "body": "## The bug (shaw)\n> \"we have a bitrouter bug — it's trying to use their cloud not our local keys\" (≈1000x cost)\n\n## Root cause\nOur self-hosted BitRouter (`bitrouter-production.up.railway.app`) routes OSS models\n(`gpt-oss-120b`) to its **`op",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "feat(cloud-shared): env-sourced tenant cluster admin DSN (no SECRETS_MASTER_KEY)",
+      "prNumber": 8299,
+      "type": "feature",
+      "body": "## What\n\nAdds an **encryption-free** path for the Apps (Product 2) deploy backend so the\nprovisioning daemon can provision per-tenant databases **without a `SECRETS_MASTER_KEY`**.\n\nThe daemon runs `ELIZA_KMS_BACKEND=memory` with **no** `SEC",
+      "files": [
+        "packages/cloud-api/src/bootstrap-app.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-runner.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "ci(terraform): plan/apply workflow for apps data-plane (staging via develop)",
+      "prNumber": 8297,
+      "type": "other",
+      "body": "## What\n\nCI to plan/apply the **Apps (Product 2) data-plane** terraform module\n(`packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane`, merged in #8296).\n\n- **`pull_request`** touching the module → `terraform fmt -check` + `validate",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/backend-production.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/backend-staging.hcl"
+      ]
+    },
+    {
+      "title": "infra(hetzner): apps data-plane terraform (Product 2) [DRAFT — Stan review]",
+      "prNumber": 8296,
+      "type": "other",
+      "body": "## Apps data-plane terraform (Product 2) — **REVIEW DRAFT for Stan**\n\nThe IaC half of \"Eliza Cloud Apps\" — stands up the **isolated apps data plane** the verified code in **#8293** targets. Sibling to `hetzner/control-plane`, same conventio",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/app-node.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/tenant-db.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/versions.tf"
+      ]
+    },
+    {
+      "title": "fix(cloud): align Steward agent register/cleanup signing with shared helper",
+      "prNumber": 8295,
+      "type": "bugfix",
+      "body": "## Why\n\nToday we hit `\"Agent creation requires owner or admin session\"` (403) when the provisioning daemon tried to register a new Dedicated agent with Steward. Same shape as the 502 we just fixed on `/api/auth/steward-refresh` — Steward's ",
+      "files": [
+        "packages/cloud-api/__tests__/steward-sign.test.ts",
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/cloud-shared/src/lib/steward/sign.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): Eliza Cloud Apps (Product 2) — per-tenant-isolated container hosting",
+      "prNumber": 8293,
+      "type": "feature",
+      "body": "## Eliza Cloud Apps (Product 2) — per-tenant-isolated container hosting\n\nLets users deploy arbitrary container apps with a **per-tenant database, sign-in, a per-app URL, and metered hosting billing**, isolated from the shared Eliza **agent*",
+      "files": [
+        "packages/cloud-shared/scripts/_e2e-build.ts",
+        "packages/cloud-shared/scripts/_e2e-provision.ts",
+        "packages/cloud-shared/scripts/e2e-sample-app/Dockerfile",
+        "packages/cloud-shared/scripts/e2e-sample-app/server.sh",
+        "packages/cloud-shared/scripts/verify-deploy-db-writes.sh",
+        "packages/cloud-shared/scripts/verify-deploy-db-writes.ts",
+        "packages/cloud-shared/scripts/verify-e2e-container-db.sh",
+        "packages/cloud-shared/scripts/verify-e2e-deploy.sh",
+        "packages/cloud-shared/scripts/verify-tenant-db-isolation.ts",
+        "packages/cloud-shared/src/db/migrations/0140_tenant_db_clusters.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud-shared/src/db/repositories/tenant-db-clusters.ts",
+        "packages/cloud-shared/src/db/schemas/index.ts",
+        "packages/cloud-shared/src/db/schemas/tenant-db-clusters.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-build-cmd.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-provider.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-store.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-job-service.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-orchestrator.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-docker-cmd.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-firewall-utils.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-image-builder.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-image-ref.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-image-resolver.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-network-utils.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-url.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-service.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-types.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-jobs-data.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-provider-input.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/provisioning-job-types.test.ts",
+        "packages/cloud-shared/src/lib/services/app-build-cmd.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-container-store.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-job-service.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-runner.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments.ts",
+        "packages/cloud-shared/src/lib/services/app-docker-cmd.ts",
+        "packages/cloud-shared/src/lib/services/app-firewall-utils.ts",
+        "packages/cloud-shared/src/lib/services/app-image-builder.ts",
+        "packages/cloud-shared/src/lib/services/app-image-ref.ts",
+        "packages/cloud-shared/src/lib/services/app-image-resolver.ts",
+        "packages/cloud-shared/src/lib/services/app-network-utils.ts",
+        "packages/cloud-shared/src/lib/services/app-url.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts",
+        "packages/cloud-shared/src/lib/services/container-job-service.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): block the Cloudflare registrar dev stub in production",
+      "prNumber": 8291,
+      "type": "bugfix",
+      "body": "## Problem\n\n`domains/buy` charged a user's credits for a domain that was **never registered**. On a live run the buy returned `success: true` and debited **$14.95**, but no domain was registered: the returned zone was `stub-zone-<domain>`, ",
+      "files": [
+        "packages/cloud-shared/src/lib/config/deployment-environment.test.ts",
+        "packages/cloud-shared/src/lib/config/deployment-environment.ts",
+        "packages/cloud-shared/src/lib/services/cloudflare-dns.ts",
+        "packages/cloud-shared/src/lib/services/cloudflare-registrar.test.ts",
+        "packages/cloud-shared/src/lib/services/cloudflare-registrar.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 357.874389447861,
+      "prScore": 355.436389447861,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 332.8555803534761,
+      "prScore": 332.6555803534761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 193.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 193.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 80.46382696392536,
+      "prScore": 80.46382696392536,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 36.3997738965761,
+      "prScore": 36.3997738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "namixai",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/265293674?u=3da6fe3862bee24f2d6f53953fba34f5faa3f53a&v=4",
+      "totalScore": 12.48605126783455,
+      "prScore": 12.48605126783455,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bluetieroperations-create",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/270213615?v=4",
+      "totalScore": 11.365873864173311,
+      "prScore": 11.365873864173311,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 32,
+  "mergedPRs": 27,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 9
+}
