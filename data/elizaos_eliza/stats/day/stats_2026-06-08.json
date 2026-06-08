@@ -1,0 +1,304 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-08T00:00:00.000Z",
+    "intervalEnd": "2026-06-09T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-08 to 2026-06-09, elizaos/eliza had 21 new PRs (13 merged), 1 new issues, and 5 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABExJ5kw",
+      "title": "Apps (Product 2) billing: pre-go-live leak + correctness fixes (profitable on happy path, 4 leaks)",
+      "author": "NubsCarson",
+      "number": 8342,
+      "repository": "elizaos/eliza",
+      "body": "Evidence-based audit of the Apps (Product 2) hosting + per-tenant-DB billing. **Bottom line: profitable on the happy path, but 4 leaks must be fixed before go-live.** Nothing is bleeding *today* (the apps lane isn't armed/deployed yet) — these are pre-launch fixes.\n\n## ✅ Profitable on the happy path\n- **Hosting:** a default app bills ~**$1.17/day** ($0.67 base × 1.75 CPU multiplier from the schema default `cpu=1792`) vs **~$0.29–0.58/day** real Hetzner cost → **~2–4× gross margin**, break-even ~1 container/node. Apps **are** enrolled in billing (our deploy sets `billing_status='active'` by schema default → 2AM's `container-billing` cron picks them up like agents). Not hosting for free.\n- **Inference:** end user pays (`cost = provider_cost × 1.20`); platform never subsidizes; creator/affiliate markups stack **on top** of the user's bill. Always net-positive.\n\n## ⚠️ Leaks / correctness bugs (owner-tagged)\n\n### CRITICAL\n- [ ] **[ours] Suspended containers are never `docker stop`ped.** `suspendContainer()` only flips DB flags (`container-billing.ts:117-126`); the node container runs `--restart unless-stopped` (`client.ts:249`) and no reconciler stops `billing_status='suspended'` rows. After suspend the row drops out of `listBillableContainers` forever → a deadbeat's app **runs indefinitely on Hetzner, billed never** (~$210/yr, unbounded). *Fix:* on the shutdown branch, SSH `docker stop` (via our provider) + decrement node allocation, and add a reconciler. (Cross-ref: `suspendContainer` is 2AM's; the stop is ours.)\n- [ ] **[ours] Deleted isolated-DB apps never drop their Postgres + never release the cluster slot.** `SqlTenantDbProvisioner.deprovision` exists (`tenant-db-provisioner.ts:166`) but has **zero live callers**; there is no `releaseSlot` (only `tryClaimSlot` increments). `app-cleanup` drops domains/repo/secrets but not the DB; `cleanupDatabase` handles only the Neon path. → every deleted isolated app **strands a live DB we pay for + burns 1/2000 cluster slots permanently**. *Fix (focused lifecycle PR):* enqueue a deprovision **job** on app delete (DROP DATABASE/ROLE needs `pg` → daemon) + add `releaseSlot` (`database_count = GREATEST(0, database_count-1)`) + extend `cleanupDatabase` for the `direct_pg`/isolated path. **This is the missing half of #8338 (opt-in per-tenant DB).**\n- [ ] **[2AM] `container-billing` cron has no idempotency gate.** It writes `last_billed_at`/`next_billing_at` but never reads them (`container-billing.ts:57-81`); a Cloudflare retry or duplicate POST **re-debits every running container a full extra day** → over-charge → chargebacks. *Fix:* port the agent-billing rebill guard + a unique partial index on `(container_id, billing_period)`.\n\n### HIGH\n- [ ] **[design — nubs] Per-tenant DB / storage / bandwidth bill $0.** The ccx33 tenant-DB node (~$2.05/day incl. 200GB vol) has **no billing line**; an `isolated` app and a `none` app are billed identically. At low density the apps lane runs **negative** (break-even ~3 paying containers; 1 container = −$1.67/day). *Decision:* (a) add a per-isolated-DB daily line (amortized floor ~$0.035/DB, realistically $1–3/mo) gated on `databaseMode='isolated'`, **or** (b) fold DB cost into the container fee + set a minimum density before provisioning the dedicated ccx33.\n- [ ] **[design — nubs] Deploy takes no upfront charge / no balance precheck** (and bypasses the quota check). Grace-window hosting is free; repeatable spin-up/tear-down costs us. *Fix:* charge `DEPLOYMENT` ($0.50) at create, or require `credit_balance ≥ 1–2 days` before provisioning.\n\n### MEDIUM / LOW\n- [ ] **[2AM] `organizations.credit_balance` DEFAULTS to `$100`** (`organizations.ts:33-35`) — any future org-create that omits the field grants ~$100 free hosting. *Fix:* default `'0.00'`; grant starter credits explicitly.\n- [ ] **[2AM] Daily debit is a non-atomic JS read-modify-write** (absolute balance) → lost-update vs concurrent inference debits/top-ups. *Fix:* route through `creditsService.deductCredits` (relative decrement with a guard).\n- [ ] **[ours] No `--cpus` limit** — we bill a CPU tier (1792→1.75×) but enforce only `--memory`; and our app containers actually provision at `cpu:1/512MB` (`APP_CONTAINER_DEFAULTS`) while billing assumes 1792/1792. *Fix:* reconcile the provision defaults with the billed dimensions + add `--cpus`.\n- [ ] **[design] Copy says $0.67/day; real default is $1.17/day**; cost-basis constants are AWS references, not Hetzner. Reconcile copy / cost basis.\n\n## Numbers\n- Revenue: $0.67/day base ×1.75 (cpu=1792) = **$1.17/day**. Real Hetzner: ccx23 ~$0.79/day (app node), ccx33 ~$1.74/day + 200GB ~$0.31/day (tenant DB). Container margin ~2–4×; full-lane break-even ~3 containers.\n- Inference: `cost_to_user = provider_cost × 1.20`, always positive.\n\nAudit method: 6-agent read-only sweep of pricing constants, the container-billing cron + repo, the tenant-db provisioning/cluster code, the apps deploy path, and the inference billing path.",
+      "createdAt": "2026-06-08T17:05:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7kAL2a",
+      "title": "feat(cloud-frontend): implement interactive canvas Voice UX & default dashboard layout preference",
+      "author": "Dexploarer",
+      "number": 8339,
+      "body": "# Walkthrough — Voice UX & Default UI Preference Layout\n\nI have successfully implemented both the voice control system for the Interactive Canvas and the default dashboard interface toggle preference in the Eliza Cloud platform.\n\n---\n\n## 1. Default UI Interface & Layout Preference\n\n### Core Implementation\n- **State & Persistence:** Added `defaultUiMode` (`'canvas' | 'classic'`) state and the action `setDefaultUiMode(mode)` in the Zustand store [canvas-store.ts](file:///Users/home/Documents/eliza/packages/cloud-frontend/src/lib/stores/canvas-store.ts). This preference is persisted in the local storage config.\n- **Settings tab:** Added the **Default interface** configuration card inside the general settings page [general-tab.tsx](file:///Users/home/Documents/eliza/packages/cloud-frontend/src/dashboard/settings/_components/tabs/general-tab.tsx). Users can choose their startup layout using a drop-down selector.\n- **Layout switcher:** Integrated the conditional layout render inside the layout router [App.tsx](file:///Users/home/Documents/eliza/packages/cloud-frontend/src/App.tsx).\n  - If `canvasOpen` is true, `<CanvasLayout />` renders.\n  - If `canvasOpen` is false, `<DashboardLayout />` renders instead, unmounting the canvas to prevent page navigation from triggering unintended canvas events.\n  - While in `<DashboardLayout />`, the floating assistant pill [cloud-assistant-pill.tsx](file:///Users/home/Documents/eliza/packages/cloud-frontend/src/components/canvas/cloud-assistant-pill.tsx) remains overlayed in the bottom-center of the viewport, so pressing `cmd + k` or clicking the orb seamlessly slides back into the Interactive Canvas.\n\n---\n\n## 2. Voice-Driven Canvas Interaction UX\n\n### Core Features\n- **Unified Voice Hooks:** Integrated `useVoiceChat` and `useContinuousChat` from `@elizaos/ui/hooks` with a stabilized React Ref (`handleSendRef`) to avoid stale closure state during voice/speech callbacks.\n- **Dual-Mode UX State Flow:**\n  - **Text Mode:** Canvas is open with the text input bar expanded. A microphone button is available next to the close button to switch to voice mode.\n  - **Voice Mode:** Input bar collapses into a floating circular orb (56x56 px). centring states like recording (`Mic`), thinking (`Loader2`), or speaking (`Volume2` bounce animation). Real-time preview transcript is shown in a small card overlay.\n- **TTS Responses:** Automatically speaks out assistant responses on query execution success, along with helpful voice-guided prompts.\n\n---\n\n## Verification & Build Quality\n\n### 1. Build Verification\n- Verified compiling and typechecking of `packages/ui` package with zero TS errors:\n  ```bash\n  bunx tsc --noEmit -p tsconfig.json\n  ```\n- Verified the build pipeline in `packages/cloud-frontend` builds and finishes with zero warnings or errors:\n  ```bash\n  bun run verify\n  ```\n\n### 2. Biome Formatting\n- Checked and formatted modified files to align with the Biome rules:\n  ```bash\n  bunx @biomejs/biome check --write --unsafe\n  ```\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-08T16:50:36Z",
+      "mergedAt": null,
+      "additions": 20510,
+      "deletions": 10
+    },
+    {
+      "id": "PR_kwDOMT5cIs7kAXDt",
+      "title": "Feat/canvas voice preference",
+      "author": "Dexploarer",
+      "number": 8341,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n## Release Notes\n\n* **New Features**\n  * iOS app now proactively requests user permissions during onboarding (notifications, calendar, camera, microphone, speech, photos, health, location).\n  * Added canvas interface mode with AI assistant chat pill supporting slash commands and voice input.\n  * Dashboard now personalizes greetings with user names.\n  * Streaming GenUI spec generation with workspace management.\n\n* **Bug Fixes**\n  * Improved Docker image registry handling; now uses ghcr.io for reliable image pulls.\n  * Fixed registry login to gracefully handle missing credentials.\n\n* **Tests**\n  * Added provisioning agent default image validation tests.\n  * Added registry client tests.\n  * Added iOS permissions onboarding tests.\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-08T16:57:33Z",
+      "mergedAt": null,
+      "additions": 19348,
+      "deletions": 126
+    },
+    {
+      "id": "PR_kwDOMT5cIs7kAUyP",
+      "title": "fix: route dynamic view commands through VIEWS",
+      "author": "NubsCarson",
+      "number": 8340,
+      "body": "## Summary\n\nRoutes shell-level dynamic view commands through the registered `VIEWS` action more reliably, then cleans up workspace verification fallout so the monorepo verify path is green on latest `develop`.\n\n## What changed\n\n- Route generic view shell requests such as split, tile, pin, and new-window commands to `VIEWS` without stealing unrelated browser/plugin-doc requests.\n- Extract the actual `<user_request>` before view target parsing so contextual documents and planner hints cannot pollute split/tile targets.\n- Resolve existing registered views such as orchestrator, views manager, chat, and settings for layout/window/pin requests, independent of the simple notes/calendar test views.\n- Add regression coverage for existing view split/tile/window/pin routing, planner-pollution repair, and negative routing cases.\n- Keep trajectory timing/status normalization formatted and verified with the current workspace rules.\n- Add/normalize tsconfig path aliases required by current workspace typecheck, including health screen-time and task-coordinator imports.\n- Apply Biome formatting fixes produced by the full root verify run.\n\n## Validation\n\n- `bun run verify` passed locally: 479/479 tasks successful.\n- `bun run --cwd packages/core test src/__tests__/message-runtime-stage1.test.ts` passed: 67 tests.\n- `bun run --cwd plugins/plugin-app-control test src/actions/views-management.test.ts` passed: 32 tests.\n- `bun run --cwd plugins/plugin-app-control typecheck` passed.\n- `bun run --cwd plugins/plugin-app-control build` passed.\n- `bun run --cwd plugins/plugin-simple-views check` passed.\n- `bun run --cwd plugins/plugin-simple-views build` passed.\n- `git diff --check` passed.\n- Diff secret scan found no raw provider keys.\n\n## Live smoke\n\nVerified live prompts routed through `VIEWS` and wrote the expected trajectories/results:\n\n- `split orchestrator and views manager side by side`\n- `tile chat settings orchestrator and views manager`\n- `split notes and calendar side by side`\n- create sticky note\n- create calendar event\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-08T16:56:05Z",
+      "mergedAt": null,
+      "additions": 12082,
+      "deletions": 1700
+    },
+    {
+      "id": "PR_kwDOMT5cIs7j-4qe",
+      "title": "feat(plugin-sql): Electric Cloud sync integration with write-back service",
+      "author": "Dexploarer",
+      "number": 8336,
+      "body": "## Summary\n\nAdds Electric Sync (PGlite ↔ Electric Cloud) and a write-back service for bidirectional data synchronization.\n\n### What changed\n\n- **Electric Sync** — `PGliteClientManager` now registers `electricSync()` extension when `ELIZA_ELECTRIC_SYNC_URL` is set. Per-agent WHERE filtering (`agent_id = ${agentId}`) with literal SQL values (required by Electric Cloud v1.6.x). UUID validation prevents SQL injection.\n- **Write-Back Service** — New `WriteBackService` forwards local PGlite writes to the cloud API. `PgliteDatabaseAdapter` notifies the service after inserts/upserts/deletes on synced tables.\n- **Caddy Reverse Proxy** — `plugins/plugin-sql/caddy/electric-proxy.Caddyfile` forwards all requests to `api.electric-sql.cloud` with auth query params injected from env vars.\n- **Tests** — e2e write-back test against Electric Cloud (env-var gated, skips gracefully). Deferred sync startup tests. Live query tests. 14 write-back unit tests.\n- **Docs** — README updated with Electric Sync section and expanded env var table. `.env.example` created documenting all Electric Cloud and sync env vars.\n- **Config** — `.gitignore` tracks `.env.example`. Docker Compose for local Electric+Postgres test stack.\n\n### How to test\n\n```bash\n# Start Caddy proxy (one-time)\nexport ELECTRIC_CLOUD_SOURCE_ID=...\nexport ELECTRIC_CLOUD_SECRET=...\ncaddy run --config plugins/plugin-sql/caddy/electric-proxy.Caddyfile &\n\n# Run e2e test\ncd plugins/plugin-sql/src\nELECTRIC_CLOUD_SOURCE_ID=... ELECTRIC_CLOUD_SECRET=... npx vitest run __tests__/integration/electric-write-back.test.ts\n```\n\n### Checks\n- ✅ Typecheck clean\n- ✅ 47/47 tests pass (8 test files)\n- ✅ E2e test exits code 0 against Electric Cloud\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n\n## Summary by CodeRabbit\n\n## Release Notes\n\n* **New Features**\n  * Added Electric Sync integration for real-time data synchronization between local PGlite and Electric Cloud\n  * Added live query support for reactive, real-time data updates\n  * Added write-back functionality to sync local changes to cloud endpoints\n  * Added agent-level data isolation with per-agent row filtering\n\n* **Documentation**\n  * Updated documentation with Electric Sync configuration and local development setup instructions\n\n* **Tests**\n  * Added comprehensive integration and unit tests for Electric Sync, live queries, and write-back functionality\n\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-08T16:00:17Z",
+      "mergedAt": null,
+      "additions": 3591,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jvPFs",
+      "title": "fix(apps): collision-safe host-port allocation (#8321 item 8)",
+      "author": "NubsCarson",
+      "number": 8328,
+      "body": "Closes **#8321 item #8**. `allocateHostPort` was a blind random pick with no in-use check, so at a few hundred containers/node a `docker create` could collide on a host port. `provision()` now probes the node with `docker ps` (best-effort) and re-picks if the port is taken; falls back to the blind pick on probe failure. New pure `parseUsedHostPorts` + tests (parser, a collision case, existing suite made content-based). biome + typecheck clean. Additive. cc @standujar (#8321)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-08T03:02:30Z",
+      "mergedAt": "2026-06-08T14:55:21Z",
+      "additions": 668,
+      "deletions": 16
+    }
+  ],
+  "codeChanges": {
+    "additions": 1546,
+    "deletions": 492,
+    "files": 30,
+    "commitCount": 51
+  },
+  "completedItems": [
+    {
+      "title": "fix(infra): make apps data-plane terraform apply cleanly on fsn1",
+      "prNumber": 8318,
+      "type": "bugfix",
+      "body": "## What\nTwo fixes so the apps data-plane terraform (`terraform-apps-data-plane.yml`, staging) actually **applies** — the plan was green but apply hit two real errors:\n\n1. **`hcloud_ssh_key` 409 `uniqueness_error`** — the operator key alread",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "fix(ci/docker): hoist plugin-wallet transitive deps for runtime image",
+      "prNumber": 8333,
+      "type": "bugfix",
+      "body": "Followup to #8331. The previous fix added plugin-wallet to the per-plugin bun install loop but its @lifi/sdk transitive still does not resolve in the runtime image because the dep is not hoisted at the workspace-root level. plugin-elizaclou",
+      "files": [
+        "packages/app-core/scripts/collect-docker-runtime-deps.mjs",
+        "packages/app-core/scripts/link-docker-local-app-packages.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): force pricing for OpenAI text-embedding models",
+      "prNumber": 8332,
+      "type": "bugfix",
+      "body": "Embedding requests 5xx-ed because FORCED_BITROUTER_PRICING had zero embedding rows. Live-confirmed prereqs: bitrouter has no /v1/embeddings route (404 with valid token), and OPENAI_API_KEY is bound on staging Worker, so getTextEmbeddingMode",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): bundle plugin-wallet in agent image + drop dead Dockerfile.cloud",
+      "prNumber": 8331,
+      "type": "bugfix",
+      "body": "## Root cause\n`build-agent-image.yml` per-plugin install loop missed `plugin-wallet` → bun never fetched its transitives (`@lifi/sdk`, `viem`, `ethers` etc.) → container 500s on `/api/wallet/addresses` with `Cannot find package '@lifi/sdk'`",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "packages/app-core/deploy/Dockerfile.cloud",
+        "packages/app-core/deploy/Dockerfile.cloud.dockerignore",
+        "packages/app-core/deploy/README.md"
+      ]
+    },
+    {
+      "title": "fix(wrangler): revert prod BITROUTER_BASE_URL (hotfix #8329)",
+      "prNumber": 8330,
+      "type": "bugfix",
+      "body": "Hotfix for #8329: my sed grabbed all 3 BITROUTER_BASE_URL lines instead of just the staging one. Production must stay on bitrouter-production. Staging stays on bitrouter-staging (the new isolated env).",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(staging): isolate Worker staging -> bitrouter staging env",
+      "prNumber": 8329,
+      "type": "bugfix",
+      "body": "Followup to #8327. Created a staging env on the bitrouter Railway service (duplicated from production, same provider keys). Public URL: `https://bitrouter-staging.up.railway.app` (health 200, direct curl 200 via openrouter BYOK). This PR po",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(apps): collision-safe host-port allocation (#8321 item 8)",
+      "prNumber": 8328,
+      "type": "bugfix",
+      "body": "Closes **#8321 item #8**. `allocateHostPort` was a blind random pick with no in-use check, so at a few hundred containers/node a `docker create` could collide on a host port. `provision()` now probes the node with `docker ps` (best-effort) ",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/v1/apps-ingress/ask/route.ts",
+        "packages/cloud-shared/scripts/verify-apps-ingress-routing.sh",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-provider.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-provisioner.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-routes.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-container-store.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-provisioner.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-routes.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts"
+      ]
+    },
+    {
+      "title": "fix(wrangler): set BITROUTER_BASE_URL in [env.staging.vars]",
+      "prNumber": 8327,
+      "type": "bugfix",
+      "body": "Background: staging Worker was missing BITROUTER_BASE_URL under [env.staging.vars] because the top-level [vars] entry does not inherit into env-specific deploys per wrangler. That made all LLM gateway calls fall back to api.bitrouter.ai/v1 ",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): clean rewrite of yaml per canonical schema",
+      "prNumber": 8326,
+      "type": "bugfix",
+      "body": "Followup to #8323 #8324 — those experimented with config knobs and left the yaml tangled. Reverting to minimal canonical form: openrouter as built-in (empty body), cerebras custom, virtual model aliases for the 5 model ids the agent actuall",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/Dockerfile",
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "feat(apps): ingress — per-app Caddy routing client + deploy-flow wiring (#8321 P0 #1)",
+      "prNumber": 8325,
+      "type": "feature",
+      "body": "The **apps front door** — #8321 item **#1** (the P0 \"apps are unreachable\" blocker): makes\n`<shortid>.apps.elizacloud.ai` reverse-proxy to that app's container. Stock Caddy on the app node;\nper-app routes managed **live via Caddy's admin AP",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/v1/apps-ingress/ask/route.ts",
+        "packages/cloud-shared/scripts/verify-apps-ingress-routing.sh",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-provisioner.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-routes.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-container-store.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-provisioner.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-routes.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): inherit_defaults: false (BYOK only, no cloud re-injection)",
+      "prNumber": 8324,
+      "type": "bugfix",
+      "body": "Followup to #8323. Removed bitrouter cloud provider but inherit_defaults:true re-injected it via built-in catalog merge, so 402 persisted. Flipping to false. Test: bare openai/gpt-oss-120b should now route via openrouter BYOK.",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): switch to api-key mode (BYOK)",
+      "prNumber": 8323,
+      "type": "bugfix",
+      "body": "## Summary\n\nBitRouter Cloud (`api.bitrouter.ai/v1`) was rejecting all chat completion calls with HTTP 402 (no payment method on the cloud account). Switch the bitrouter config to api-key-only mode so requests for `openai/gpt-oss-120b` pass ",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "fix(apps): inject tenant DSN under both DATABASE_URL and POSTGRES_URL (#8321 P0)",
+      "prNumber": 8322,
+      "type": "bugfix",
+      "body": "Closes the **P0 isolation-contract gap** from the apps scaling audit (**#8321**, item 3).\n\n## Why\nThe deploy injected the per-tenant DSN under **only `DATABASE_URL`**. Eliza-based images map\n`DATABASE_URL → POSTGRES_URL`, so they're fine — ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-provider.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-orchestrator.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 294.6511825484666,
+      "prScore": 292.3111825484666,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 231.20839399176396,
+      "prScore": 231.00839399176397,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 153,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 153,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Dexploarer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
+      "totalScore": 126.6473216897283,
+      "prScore": 126.6473216897283,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 22.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 21,
+  "mergedPRs": 13,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 5
+}

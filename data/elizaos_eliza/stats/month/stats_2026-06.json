@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 194 new PRs (123 merged), 19 new issues, and 22 active contributors.",
+  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 216 new PRs (136 merged), 20 new issues, and 22 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABEGUTAg",
@@ -17,6 +17,18 @@
       "createdAt": "2026-06-02T09:02:59Z",
       "closedAt": "2026-06-04T00:23:03Z",
       "state": "CLOSED",
+      "commentCount": 4
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABErit7w",
+      "title": "Eliza Cloud Apps: scaling + ingress gaps before go-live (audit, evidenced)",
+      "author": "NubsCarson",
+      "number": 8321,
+      "repository": "elizaos/eliza",
+      "body": "## Eliza Cloud Apps (Product 2) — scaling + ingress gaps to close before go-live\n\nA code-level audit of the apps data plane (per-tenant DB + isolated container deploys). **The core design is sound and standard** — per-tenant `DATABASE`+`ROLE` with `REVOKE CONNECT` (real cross-tenant isolation), per-app `--internal` network + DB ambassador, `ClusterPool` sharding. This is *not* jank. But the current code's realistic ceiling is **~dozens of concurrently-running apps, not ~1000**, and the front-door router isn't installed yet. Filing the prioritized gaps (all evidenced) so they're tracked before flipping `APPS_DEPLOY_ENABLED` in prod.\n\nContext: terraform apply is also currently blocked on the staging Hetzner **server limit** (see #8318). Apply bugs (SSH-key 409, retired `cpx41`) are fixed in #8318.\n\n### 🔴 P0 — pre-launch blockers (serve ~0 reachable / isolation maybe inactive)\n1. **Ingress not installed.** `cloud-init/app-node.yaml.tftpl:62-63` leaves Caddy as a `STAN:` TODO — only squid is installed. No per-app `<id>.apps.elizacloud.ai` hostname routes to any container (nothing terminates TLS / reverse-proxies 80/443 → the random high host port). **Serves 0 reachable users until added.** (config)\n2. **Postgres connection ceiling.** `cloud-init/tenant-db.yaml.tftpl:12` leaves `max_connections` at the default 100, and there's **no pgbouncer** anywhere; each app's plugin-sql pool is `max:20 / min:2` (`plugins/plugin-sql/src/pg/manager.ts:16-17`). Exhausted at ~5 apps under load / ~50 idle — `ClusterPool` shards DB *count* (2000 cap), not connections. (config + a pooler)\n3. **Env-var contract unverified.** Orchestrator injects `DATABASE_URL` (`app-deploy-orchestrator.ts:82`) but plugin-sql's primary path reads `POSTGRES_URL`. The cloud eliza loaders *do* map `DATABASE_URL→POSTGRES_URL` (agent.ts:10, settings.ts:100, …), so it's satisfiable — but must be confirmed for the actual app image, else the isolated DB is provisioned and never used (silent PGlite fallback) → per-tenant isolation isn't even active. (code/verify)\n\n### 🟠 P1 — required before real scale (multi-node)\n4. **App placement is single-node.** `container-executor-deps.ts:42-52` always picks `seed.split(',')[0]` — every container piles on node 1; extra terraform app nodes get no placements. No `node_id`/`incrementAllocated` for app containers (`app-container-store.ts`). (code)\n5. **Docker network exhaustion.** One `--internal` bridge per app exhausts the default 172.x address pool at ~31 networks/node; `daemon.json` `default-address-pools` not set in cloud-init. Caps a node at a few dozen tenants regardless of CPU/RAM. (config)\n6. **Multi-node ingress LB.** Wildcard DNS hard-codes `app_node[\"1\"]` (`main.tf:184,190`); no `hcloud_load_balancer`. The moment `app_node_count>1`, apps on node 2+ are dark. (config)\n7. **Tenant-DB slot leak.** `tenant_db_clusters.database_count` only increments (`tenant-db-clusters.ts:44`); no `releaseSlot`/decrement, and `tenant-db-provisioner.deprovision()` (DROP DATABASE/ROLE) has **zero non-test callers** — `UserDatabaseService.cleanupDatabase` only deletes Neon. Under churn, slots ratchet up + orphan DBs accumulate. (code)\n8. **Host-port collisions.** `allocateHostPort()` is a blind random pick in 20000-39999 with no in-use check (`container-executor-deps.ts:86-90`), unlike the agent path's `getUsedDockerHostPorts`. Flakes docker-create at a few hundred containers/node. (code)\n9. **App-plane autoscaler.** `node-autoscaler.ts` is agent-image/platform hardcoded (lines 133,233,435); no autoscaler cron; app provisioning never registers allocation → app demand triggers nothing. Adding app capacity is manual. (code)\n10. **Billing cron at scale + idempotency.** `cron/container-billing/route.ts:391-440` is one serial Worker pass with an N+1 per-org prefetch + inline emails (presses Worker wall-time in the low thousands; can't resume a cut-off pass), and `recordSuccessfulDailyBilling` (`container-billing.ts:153-212`) has **no unique constraint on (container_id, billing_period)** → a duplicate cron fire / manual re-run double-bills. *(2AM-owned billing surface.)*\n11. **Defense-in-depth written but unused.** `buildAppNodeNftablesRules` (drops 169.254.169.254 metadata + RFC1918 pivots), per-app `buildSquidAllowlistConf`, `buildHetznerAppFirewallRules` have **zero non-test callers** — egress is one shared squid + static global allowlist, the metadata/lateral block is code-only, and `-p` binds `0.0.0.0` so app ports are world-exposed until the firewall's applied. (NB: reconcile the nftables RFC1918 drop with the ambassador's legit 10.30.x DB path.) (both)\n\n### 🟡 P2 — later / hardening\n12. Single Postgres superuser per cluster = shared fate (rotation + a non-superuser provisioning role); tighten `operator_ingress_cidrs` (SSH `0.0.0.0/0`); real tenant-DB TLS cert (hostssl vs the `sslmode=disable` fallback).\n13. Kernel sandboxing decision (gVisor/Kata/userns + seccomp) + per-app `--cpus` (only `--memory`/`--pids-limit` set today). Right-size `max_databases` (2000 is misleading until pooling exists). Tenant-DB-node scaling runbook.\n\n**Honest bottom line:** isolation + sharding are real and correct; the work to reach 1000 is *known* (the code is full of accurate `STAN TODO`s) but **not built**. Recommend **not** going live until at least P0 (and ideally #4/#6) are closed. Happy to take the additive, testable items (e.g. #3 set both env vars, #7 slot release, #8 collision-safe ports) as PRs — flag which you want vs. own.\n\ncc @standujar (data-plane) — billing items (#10) are 2AM's surface.\n",
+      "createdAt": "2026-06-07T23:25:37Z",
+      "closedAt": null,
+      "state": "OPEN",
       "commentCount": 4
     },
     {
@@ -52,18 +64,6 @@
       "body": "## Summary\n\nTwo release-orchestration workflows hit `startup_failure` on every tag push (most recently on `v2.0.3`):\n\n- [Release All Platforms](https://github.com/elizaOS/eliza/actions/runs/26156834072) — `.github/workflows/release-all.yml`, triggered by `push: tags: [v*.*.*]`\n- [elizaOS Full OS Release](https://github.com/elizaOS/eliza/actions/runs/26156833438) — `.github/workflows/elizaos-os-full-release.yml`, triggered by `release: types: [created]`\n\nBoth fail before any job runs (`This run likely failed because of a workflow file issue.`). YAML parses cleanly locally; all referenced reusable workflows exist at the tag.\n\n## Root cause\n\nBoth orchestrators call reusable workflows whose `secrets:` blocks declare `required: true` for repo secrets that don't exist in `elizaOS/eliza`. When `secrets: inherit` can't supply a `required: true` secret, GitHub fails the parent at startup.\n\nConfirmed via `gh secret list -R elizaOS/eliza` that these are missing:\n\n| Secret | Required by | Purpose |\n|---|---|---|\n| `DEBIAN_GPG_PRIVATE_KEY` | `publish-apt-repo.yml` | sign apt repo |\n| `DEBIAN_GPG_KEY_ID` | `publish-apt-repo.yml` | sign apt repo |\n| `DEBIAN_GPG_PASSPHRASE` | `publish-apt-repo.yml` | sign apt repo |\n| `CSC_LINK` | `release-electrobun.yml` (macOS sign) | Developer ID .p12 (base64) |\n| `CSC_KEY_PASSWORD` | `release-electrobun.yml` | .p12 password |\n| `APPLE_ID` | `release-electrobun.yml`, `apple-store-release.yml` | notarization Apple ID |\n| `APPLE_APP_SPECIFIC_PASSWORD` | `release-electrobun.yml`, `apple-store-release.yml` | notarization |\n| `APPLE_TEAM_ID` | `release-electrobun.yml`, `apple-store-release.yml` | Apple Developer Team ID |\n| `ITC_TEAM_ID` | `apple-store-release.yml` | App Store Connect team ID |\n| `APP_STORE_APP_ID` | `apple-store-release.yml` | numeric app ID |\n| `MATCH_PASSWORD` | `apple-store-release.yml` | Fastlane Match passphrase |\n| `MATCH_GIT_URL` | `apple-store-release.yml` | Fastlane Match repo |\n| `WINDOWS_SIGN_CERT_BASE64` | `windows-store-release.yml` | Windows code-signing cert |\n| `WINDOWS_SIGN_CERT_PASSWORD` | `windows-store-release.yml` | cert password |\n| `WINDOWS_SIGN_TIMESTAMP_URL` | `windows-store-release.yml` | RFC 3161 timestamp server |\n| `FLATHUB_TOKEN` | `flatpak-publish.yml` | declared `required: false`, not blocking |\n\nThe full secret list expected is documented in the header comment of `.github/workflows/release-all.yml`.\n\n## Why the other release workflows worked\n\n`NPM Release`, `Build Agent Image`, `Build elizaOS Linux ISO`, `Build elizaOS Debian Package` (build-only, not publish), `Release AOSP Flasher`, `Release Orchestrator`, `Snap Build & Test`, `Build & Release (Electrobun)`, `Release USB Installer` all started fine — their workflows don't `require: true` any missing secret. (USB Installer separately failed mid-run on a now-fixed `electrobun` PATH issue.)\n\n## Resolution options\n\n1. **Add the missing secrets** to `elizaOS/eliza` → Settings → Secrets and variables → Actions. This is the intended end state per the workflow header docs.\n2. **Downgrade `required: true` → `required: false`** in the reusable workflows for platforms we don't intend to ship yet (e.g. if Windows Store / Apple Store / signed apt repo aren't in scope for v2.0.x). The leaf workflows already self-guard most calls.\n3. **Stop calling unconfigured publish workflows** from `release-all.yml` until their secrets exist.\n\nProbably want a mix: add Debian GPG (lowest-risk, internal-only) and Apple signing (highest-value), and gate Windows Store + Flathub behind explicit opt-in until those credentials are arranged.\n\n## Context\n\n- Tag for `v2.0.3` is live on `main` (`fa240156ed`). All other release workflows (NPM, Linux ISO, Android, Snap, Electrobun, etc.) ran or are running normally.\n- Failed runs are also reproducible on the prior `v2.0.2` attempt — this is the pre-existing block, not a new regression.\n- I don't have admin rights to download the run logs, which would confirm the exact secret-validation error message. Anyone with admin can drop the snippet here for the record.",
       "createdAt": "2026-05-20T11:29:29Z",
       "closedAt": "2026-06-03T23:42:14Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABDWGTpw",
-      "title": "desktop-ffi: prewarm violates GGML_ASSERT(n_tokens_all <= cparams.n_batch) on eliza-1-0_8b after shim loads",
-      "author": "NubsCarson",
-      "number": 7991,
-      "repository": "elizaos/eliza",
-      "body": "## context\n\nafter #7988 lands the windows-x86_64 ffi build path, `libeliza-llama-shim.dll` loads into `bun:ffi` with all 39 symbols resolved. the very next layer — prewarm — crashes with a ggml batch-sizing assert on `eliza-1-0_8b` text bundle.\n\n## crash\n\n```\nGGML_ASSERT(n_tokens_all <= cparams.n_batch) failed\n```\n\nrepro: `~/.eliza` already has the `eliza-1-0_8b-128k.gguf` bundle staged; on first activation the prewarm batch builder asks the runtime to decode more tokens than the context's `n_batch` slot allows. fatal.\n\n## environment\n\n- platform: windows-x86_64\n- backend: cuda (cuda 12.4, msvc, ninja, llama.cpp pinned to the ref in `build-llama-cpp-desktop-dylib.mjs`)\n- shim: built from `eliza_llama_shim.c` with the stub set added in #7988\n- bundle: `bundles/0_8b/text/eliza-1-0_8b-128k.gguf` from default-user `~/.eliza/local-inference/`\n- runtime: `desktop-llama-adapter.ts` → `eliza_llama_decode_unified` path\n\n## what i think is going on\n\nthe prewarm path appears to construct a batch that targets the manifest's declared context window (128k tokens) without first clamping against the actual `cparams.n_batch` value the ffi context was created with. on linux/macos this might be masked by larger default `n_batch` or different prewarm sizing; on windows-cuda the assert fires.\n\ncandidates (i don't want to put words in anyone's mouth):\n\n1. prewarm should size the batch off `cparams.n_batch`, not `n_ctx`.\n2. context creation on the desktop adapter should set `n_batch >= prewarm_tokens` for the chosen bundle.\n3. the bundle manifest's recommended prewarm token count should be exposed and used as both inputs.\n\n## scope\n\n- not blocked by anything outstanding once #7988 lands.\n- separate from the build-time fixes in #7988 (which are infrastructure) — this is a runtime sizing bug one layer down.\n- related context PR: #7983 (local-inference dflash discovery + runtime router wiring).\n",
-      "createdAt": "2026-05-25T20:51:21Z",
-      "closedAt": "2026-06-02T01:14:46Z",
       "state": "CLOSED",
       "commentCount": 1
     }
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 37957,
-    "deletions": 9201,
-    "files": 687,
-    "commitCount": 1486
+    "additions": 39503,
+    "deletions": 9693,
+    "files": 695,
+    "commitCount": 1544
   },
   "completedItems": [
     {
@@ -1724,6 +1724,16 @@
       ]
     },
     {
+      "title": "fix(infra): make apps data-plane terraform apply cleanly on fsn1",
+      "prNumber": 8318,
+      "type": "bugfix",
+      "body": "## What\nTwo fixes so the apps data-plane terraform (`terraform-apps-data-plane.yml`, staging) actually **applies** — the plan was green but apply hit two real errors:\n\n1. **`hcloud_ssh_key` 409 `uniqueness_error`** — the operator key alread",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
       "title": "fix(ci): accept APPS_CLOUDFLARE_ZONE_ID as a secret OR a var (terraform apps)",
       "prNumber": 8317,
       "type": "bugfix",
@@ -1996,37 +2006,181 @@
         "packages/cloud-shared/src/lib/services/cloudflare-registrar.test.ts",
         "packages/cloud-shared/src/lib/services/cloudflare-registrar.ts"
       ]
+    },
+    {
+      "title": "fix(ci/docker): hoist plugin-wallet transitive deps for runtime image",
+      "prNumber": 8333,
+      "type": "bugfix",
+      "body": "Followup to #8331. The previous fix added plugin-wallet to the per-plugin bun install loop but its @lifi/sdk transitive still does not resolve in the runtime image because the dep is not hoisted at the workspace-root level. plugin-elizaclou",
+      "files": [
+        "packages/app-core/scripts/collect-docker-runtime-deps.mjs",
+        "packages/app-core/scripts/link-docker-local-app-packages.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): force pricing for OpenAI text-embedding models",
+      "prNumber": 8332,
+      "type": "bugfix",
+      "body": "Embedding requests 5xx-ed because FORCED_BITROUTER_PRICING had zero embedding rows. Live-confirmed prereqs: bitrouter has no /v1/embeddings route (404 with valid token), and OPENAI_API_KEY is bound on staging Worker, so getTextEmbeddingMode",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): bundle plugin-wallet in agent image + drop dead Dockerfile.cloud",
+      "prNumber": 8331,
+      "type": "bugfix",
+      "body": "## Root cause\n`build-agent-image.yml` per-plugin install loop missed `plugin-wallet` → bun never fetched its transitives (`@lifi/sdk`, `viem`, `ethers` etc.) → container 500s on `/api/wallet/addresses` with `Cannot find package '@lifi/sdk'`",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "packages/app-core/deploy/Dockerfile.cloud",
+        "packages/app-core/deploy/Dockerfile.cloud.dockerignore",
+        "packages/app-core/deploy/README.md"
+      ]
+    },
+    {
+      "title": "fix(wrangler): revert prod BITROUTER_BASE_URL (hotfix #8329)",
+      "prNumber": 8330,
+      "type": "bugfix",
+      "body": "Hotfix for #8329: my sed grabbed all 3 BITROUTER_BASE_URL lines instead of just the staging one. Production must stay on bitrouter-production. Staging stays on bitrouter-staging (the new isolated env).",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(staging): isolate Worker staging -> bitrouter staging env",
+      "prNumber": 8329,
+      "type": "bugfix",
+      "body": "Followup to #8327. Created a staging env on the bitrouter Railway service (duplicated from production, same provider keys). Public URL: `https://bitrouter-staging.up.railway.app` (health 200, direct curl 200 via openrouter BYOK). This PR po",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(apps): collision-safe host-port allocation (#8321 item 8)",
+      "prNumber": 8328,
+      "type": "bugfix",
+      "body": "Closes **#8321 item #8**. `allocateHostPort` was a blind random pick with no in-use check, so at a few hundred containers/node a `docker create` could collide on a host port. `provision()` now probes the node with `docker ps` (best-effort) ",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/v1/apps-ingress/ask/route.ts",
+        "packages/cloud-shared/scripts/verify-apps-ingress-routing.sh",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-provider.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-provisioner.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-routes.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-container-store.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-provisioner.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-routes.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts"
+      ]
+    },
+    {
+      "title": "fix(wrangler): set BITROUTER_BASE_URL in [env.staging.vars]",
+      "prNumber": 8327,
+      "type": "bugfix",
+      "body": "Background: staging Worker was missing BITROUTER_BASE_URL under [env.staging.vars] because the top-level [vars] entry does not inherit into env-specific deploys per wrangler. That made all LLM gateway calls fall back to api.bitrouter.ai/v1 ",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): clean rewrite of yaml per canonical schema",
+      "prNumber": 8326,
+      "type": "bugfix",
+      "body": "Followup to #8323 #8324 — those experimented with config knobs and left the yaml tangled. Reverting to minimal canonical form: openrouter as built-in (empty body), cerebras custom, virtual model aliases for the 5 model ids the agent actuall",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/Dockerfile",
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "feat(apps): ingress — per-app Caddy routing client + deploy-flow wiring (#8321 P0 #1)",
+      "prNumber": 8325,
+      "type": "feature",
+      "body": "The **apps front door** — #8321 item **#1** (the P0 \"apps are unreachable\" blocker): makes\n`<shortid>.apps.elizacloud.ai` reverse-proxy to that app's container. Stock Caddy on the app node;\nper-app routes managed **live via Caddy's admin AP",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/v1/apps-ingress/ask/route.ts",
+        "packages/cloud-shared/scripts/verify-apps-ingress-routing.sh",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-provisioner.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-routes.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-container-store.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-provisioner.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-routes.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): inherit_defaults: false (BYOK only, no cloud re-injection)",
+      "prNumber": 8324,
+      "type": "bugfix",
+      "body": "Followup to #8323. Removed bitrouter cloud provider but inherit_defaults:true re-injected it via built-in catalog merge, so 402 persisted. Flipping to false. Test: bare openai/gpt-oss-120b should now route via openrouter BYOK.",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "fix(bitrouter): switch to api-key mode (BYOK)",
+      "prNumber": 8323,
+      "type": "bugfix",
+      "body": "## Summary\n\nBitRouter Cloud (`api.bitrouter.ai/v1`) was rejecting all chat completion calls with HTTP 402 (no payment method on the cloud account). Switch the bitrouter config to api-key-only mode so requests for `openai/gpt-oss-120b` pass ",
+      "files": [
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml"
+      ]
+    },
+    {
+      "title": "fix(apps): inject tenant DSN under both DATABASE_URL and POSTGRES_URL (#8321 P0)",
+      "prNumber": 8322,
+      "type": "bugfix",
+      "body": "Closes the **P0 isolation-contract gap** from the apps scaling audit (**#8321**, item 3).\n\n## Why\nThe deploy injected the per-tenant DSN under **only `DATABASE_URL`**. Eliza-based images map\n`DATABASE_URL → POSTGRES_URL`, so they're fine — ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-container-provider.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-orchestrator.test.ts",
+        "packages/cloud-shared/src/lib/services/app-container-provider.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 1750.0454616587144,
-      "prScore": 1710.2774616587144,
-      "issueScore": 36.8,
+      "totalScore": 2044.696644207181,
+      "prScore": 2002.588644207181,
+      "issueScore": 38.8,
       "reviewScore": 0,
-      "commentScore": 2.9679999999999995,
+      "commentScore": 3.308,
       "summary": "NubsCarson: Drove significant architectural and feature advancements for the Eliza Cloud platform and orchestrator, most notably implementing the per-tenant-isolated Eliza Cloud Apps data-plane in PR #8293 and introducing the Odysseus workbench for operator inspection in PR #8231. They demonstrated high technical impact by resolving critical race conditions and security vulnerabilities, such as the TOCTOU race in the orchestrator (#8161) and PKCE authentication flows for Steward OAuth (#8259). Through 33 merged pull requests, they balanced complex infrastructure deployments with UI enhancements, including the continuous-chat overlay and Storybook documentation. Their work this month was primarily focused on bug fixes (51%) and feature development (24%) across the core, cloud, and UI modules."
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 1273.5,
+      "totalScore": 1426.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 1273.5,
+      "reviewScore": 1426.5,
       "commentScore": 0,
       "summary": "greptile-apps: No activity this month."
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 977.2771229090246,
-      "prScore": 976.4391229090246,
+      "totalScore": 1208.4855169007885,
+      "prScore": 1207.4475169007885,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.838,
+      "commentScore": 1.038,
       "summary": "standujar: Led critical infrastructure and cloud platform development for elizaos/eliza, successfully executing a major release sync (#8116) and stabilizing the cloud-api through significant security and authentication fixes, such as pinning Steward tenant headers (#8179) and implementing HMAC signing for proxy requests (#8256). They improved the cloud user experience by enabling the agent web UI by default (#8167) and enhancing the wizard to expose shared versus dedicated execution modes (#8261). Their work was primarily focused on bugfixes (72%) and infrastructure configuration, ensuring robust deployment and authentication flows across the cloud ecosystem."
     },
     {
@@ -2052,8 +2206,8 @@
     {
       "username": "Dexploarer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/211557447?u=21a243d61cc1f87574328ae07fc64d7d7577b53d&v=4",
-      "totalScore": 442.9617634493094,
-      "prScore": 442.5237634493094,
+      "totalScore": 569.6090851390377,
+      "prScore": 569.1710851390377,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
@@ -2098,6 +2252,16 @@
       "reviewScore": 0,
       "commentScore": 0.54,
       "summary": "SYMBaiEX: Focused on enhancing cloud infrastructure and agent runtime stability, currently driving three open pull requests in elizaos/eliza (#8107, #8152, #8149) to address CI agent bootstrapping, network routing, and plugin response handling. Their work involved significant technical effort, modifying 401 files with over 4,600 lines of code changes to resolve complex provisioning and runtime issues. This month’s contributions were primarily dedicated to bugfix work, with a strong emphasis on testing and core code improvements."
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 31.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0,
+      "summary": "github-code-quality: No activity this month."
     },
     {
       "username": "redbotster",
@@ -2160,16 +2324,6 @@
       "summary": "bluetieroperations-create: Focused on expanding the plugin ecosystem by opening PR #8302 in elizaos/eliza to integrate the blackwall-eliza-guardrail into the registry. This effort involved 4 commits and modifications to 4 configuration files, totaling 62 additions and 2 deletions. Their work this month was primarily centered on configuration-based feature development."
     },
     {
-      "username": "github-code-quality",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
-      "totalScore": 9,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
-      "summary": "github-code-quality: No activity this month."
-    },
-    {
       "username": "chopmob-cloud",
       "avatarUrl": "https://avatars.githubusercontent.com/u/250041792?u=cdfc875d5bdb6918e23dc9e19bf679633ded6fa1&v=4",
       "totalScore": 4,
@@ -2180,9 +2334,9 @@
       "summary": "chopmob-cloud: Focused on maintaining project documentation and community resources, successfully resolving a broken link in the community plugin registry via issue #8173 in elizaos/eliza. This effort contributed to the overall accessibility of the project's ecosystem."
     }
   ],
-  "newPRs": 194,
-  "mergedPRs": 123,
-  "newIssues": 19,
+  "newPRs": 216,
+  "mergedPRs": 136,
+  "newIssues": 20,
   "closedIssues": 27,
   "activeContributors": 22
 }
