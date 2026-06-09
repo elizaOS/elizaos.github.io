@@ -5,8 +5,20 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 216 new PRs (136 merged), 20 new issues, and 22 active contributors.",
+  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 231 new PRs (150 merged), 21 new issues, and 25 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABErit7w",
+      "title": "Eliza Cloud Apps: scaling + ingress gaps before go-live (audit, evidenced)",
+      "author": "NubsCarson",
+      "number": 8321,
+      "repository": "elizaos/eliza",
+      "body": "## Eliza Cloud Apps (Product 2) — scaling + ingress gaps to close before go-live\n\nA code-level audit of the apps data plane (per-tenant DB + isolated container deploys). **The core design is sound and standard** — per-tenant `DATABASE`+`ROLE` with `REVOKE CONNECT` (real cross-tenant isolation), per-app `--internal` network + DB ambassador, `ClusterPool` sharding. This is *not* jank. But the current code's realistic ceiling is **~dozens of concurrently-running apps, not ~1000**, and the front-door router isn't installed yet. Filing the prioritized gaps (all evidenced) so they're tracked before flipping `APPS_DEPLOY_ENABLED` in prod.\n\nContext: terraform apply is also currently blocked on the staging Hetzner **server limit** (see #8318). Apply bugs (SSH-key 409, retired `cpx41`) are fixed in #8318.\n\n### 🔴 P0 — pre-launch blockers (serve ~0 reachable / isolation maybe inactive)\n1. **Ingress not installed.** `cloud-init/app-node.yaml.tftpl:62-63` leaves Caddy as a `STAN:` TODO — only squid is installed. No per-app `<id>.apps.elizacloud.ai` hostname routes to any container (nothing terminates TLS / reverse-proxies 80/443 → the random high host port). **Serves 0 reachable users until added.** (config)\n2. **Postgres connection ceiling.** `cloud-init/tenant-db.yaml.tftpl:12` leaves `max_connections` at the default 100, and there's **no pgbouncer** anywhere; each app's plugin-sql pool is `max:20 / min:2` (`plugins/plugin-sql/src/pg/manager.ts:16-17`). Exhausted at ~5 apps under load / ~50 idle — `ClusterPool` shards DB *count* (2000 cap), not connections. (config + a pooler)\n3. **Env-var contract unverified.** Orchestrator injects `DATABASE_URL` (`app-deploy-orchestrator.ts:82`) but plugin-sql's primary path reads `POSTGRES_URL`. The cloud eliza loaders *do* map `DATABASE_URL→POSTGRES_URL` (agent.ts:10, settings.ts:100, …), so it's satisfiable — but must be confirmed for the actual app image, else the isolated DB is provisioned and never used (silent PGlite fallback) → per-tenant isolation isn't even active. (code/verify)\n\n### 🟠 P1 — required before real scale (multi-node)\n4. **App placement is single-node.** `container-executor-deps.ts:42-52` always picks `seed.split(',')[0]` — every container piles on node 1; extra terraform app nodes get no placements. No `node_id`/`incrementAllocated` for app containers (`app-container-store.ts`). (code)\n5. **Docker network exhaustion.** One `--internal` bridge per app exhausts the default 172.x address pool at ~31 networks/node; `daemon.json` `default-address-pools` not set in cloud-init. Caps a node at a few dozen tenants regardless of CPU/RAM. (config)\n6. **Multi-node ingress LB.** Wildcard DNS hard-codes `app_node[\"1\"]` (`main.tf:184,190`); no `hcloud_load_balancer`. The moment `app_node_count>1`, apps on node 2+ are dark. (config)\n7. **Tenant-DB slot leak.** `tenant_db_clusters.database_count` only increments (`tenant-db-clusters.ts:44`); no `releaseSlot`/decrement, and `tenant-db-provisioner.deprovision()` (DROP DATABASE/ROLE) has **zero non-test callers** — `UserDatabaseService.cleanupDatabase` only deletes Neon. Under churn, slots ratchet up + orphan DBs accumulate. (code)\n8. **Host-port collisions.** `allocateHostPort()` is a blind random pick in 20000-39999 with no in-use check (`container-executor-deps.ts:86-90`), unlike the agent path's `getUsedDockerHostPorts`. Flakes docker-create at a few hundred containers/node. (code)\n9. **App-plane autoscaler.** `node-autoscaler.ts` is agent-image/platform hardcoded (lines 133,233,435); no autoscaler cron; app provisioning never registers allocation → app demand triggers nothing. Adding app capacity is manual. (code)\n10. **Billing cron at scale + idempotency.** `cron/container-billing/route.ts:391-440` is one serial Worker pass with an N+1 per-org prefetch + inline emails (presses Worker wall-time in the low thousands; can't resume a cut-off pass), and `recordSuccessfulDailyBilling` (`container-billing.ts:153-212`) has **no unique constraint on (container_id, billing_period)** → a duplicate cron fire / manual re-run double-bills. *(2AM-owned billing surface.)*\n11. **Defense-in-depth written but unused.** `buildAppNodeNftablesRules` (drops 169.254.169.254 metadata + RFC1918 pivots), per-app `buildSquidAllowlistConf`, `buildHetznerAppFirewallRules` have **zero non-test callers** — egress is one shared squid + static global allowlist, the metadata/lateral block is code-only, and `-p` binds `0.0.0.0` so app ports are world-exposed until the firewall's applied. (NB: reconcile the nftables RFC1918 drop with the ambassador's legit 10.30.x DB path.) (both)\n\n### 🟡 P2 — later / hardening\n12. Single Postgres superuser per cluster = shared fate (rotation + a non-superuser provisioning role); tighten `operator_ingress_cidrs` (SSH `0.0.0.0/0`); real tenant-DB TLS cert (hostssl vs the `sslmode=disable` fallback).\n13. Kernel sandboxing decision (gVisor/Kata/userns + seccomp) + per-app `--cpus` (only `--memory`/`--pids-limit` set today). Right-size `max_databases` (2000 is misleading until pooling exists). Tenant-DB-node scaling runbook.\n\n**Honest bottom line:** isolation + sharding are real and correct; the work to reach 1000 is *known* (the code is full of accurate `STAN TODO`s) but **not built**. Recommend **not** going live until at least P0 (and ideally #4/#6) are closed. Happy to take the additive, testable items (e.g. #3 set both env vars, #7 slot release, #8 collision-safe ports) as PRs — flag which you want vs. own.\n\ncc @standujar (data-plane) — billing items (#10) are 2AM's surface.\n",
+      "createdAt": "2026-06-07T23:25:37Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 6
+    },
     {
       "id": "I_kwDOMT5cIs8AAAABEGUTAg",
       "title": "orchestrator: sub-agent completion narration drops/garbles the deliverable (narration-envelope)",
@@ -20,18 +32,6 @@
       "commentCount": 4
     },
     {
-      "id": "I_kwDOMT5cIs8AAAABErit7w",
-      "title": "Eliza Cloud Apps: scaling + ingress gaps before go-live (audit, evidenced)",
-      "author": "NubsCarson",
-      "number": 8321,
-      "repository": "elizaos/eliza",
-      "body": "## Eliza Cloud Apps (Product 2) — scaling + ingress gaps to close before go-live\n\nA code-level audit of the apps data plane (per-tenant DB + isolated container deploys). **The core design is sound and standard** — per-tenant `DATABASE`+`ROLE` with `REVOKE CONNECT` (real cross-tenant isolation), per-app `--internal` network + DB ambassador, `ClusterPool` sharding. This is *not* jank. But the current code's realistic ceiling is **~dozens of concurrently-running apps, not ~1000**, and the front-door router isn't installed yet. Filing the prioritized gaps (all evidenced) so they're tracked before flipping `APPS_DEPLOY_ENABLED` in prod.\n\nContext: terraform apply is also currently blocked on the staging Hetzner **server limit** (see #8318). Apply bugs (SSH-key 409, retired `cpx41`) are fixed in #8318.\n\n### 🔴 P0 — pre-launch blockers (serve ~0 reachable / isolation maybe inactive)\n1. **Ingress not installed.** `cloud-init/app-node.yaml.tftpl:62-63` leaves Caddy as a `STAN:` TODO — only squid is installed. No per-app `<id>.apps.elizacloud.ai` hostname routes to any container (nothing terminates TLS / reverse-proxies 80/443 → the random high host port). **Serves 0 reachable users until added.** (config)\n2. **Postgres connection ceiling.** `cloud-init/tenant-db.yaml.tftpl:12` leaves `max_connections` at the default 100, and there's **no pgbouncer** anywhere; each app's plugin-sql pool is `max:20 / min:2` (`plugins/plugin-sql/src/pg/manager.ts:16-17`). Exhausted at ~5 apps under load / ~50 idle — `ClusterPool` shards DB *count* (2000 cap), not connections. (config + a pooler)\n3. **Env-var contract unverified.** Orchestrator injects `DATABASE_URL` (`app-deploy-orchestrator.ts:82`) but plugin-sql's primary path reads `POSTGRES_URL`. The cloud eliza loaders *do* map `DATABASE_URL→POSTGRES_URL` (agent.ts:10, settings.ts:100, …), so it's satisfiable — but must be confirmed for the actual app image, else the isolated DB is provisioned and never used (silent PGlite fallback) → per-tenant isolation isn't even active. (code/verify)\n\n### 🟠 P1 — required before real scale (multi-node)\n4. **App placement is single-node.** `container-executor-deps.ts:42-52` always picks `seed.split(',')[0]` — every container piles on node 1; extra terraform app nodes get no placements. No `node_id`/`incrementAllocated` for app containers (`app-container-store.ts`). (code)\n5. **Docker network exhaustion.** One `--internal` bridge per app exhausts the default 172.x address pool at ~31 networks/node; `daemon.json` `default-address-pools` not set in cloud-init. Caps a node at a few dozen tenants regardless of CPU/RAM. (config)\n6. **Multi-node ingress LB.** Wildcard DNS hard-codes `app_node[\"1\"]` (`main.tf:184,190`); no `hcloud_load_balancer`. The moment `app_node_count>1`, apps on node 2+ are dark. (config)\n7. **Tenant-DB slot leak.** `tenant_db_clusters.database_count` only increments (`tenant-db-clusters.ts:44`); no `releaseSlot`/decrement, and `tenant-db-provisioner.deprovision()` (DROP DATABASE/ROLE) has **zero non-test callers** — `UserDatabaseService.cleanupDatabase` only deletes Neon. Under churn, slots ratchet up + orphan DBs accumulate. (code)\n8. **Host-port collisions.** `allocateHostPort()` is a blind random pick in 20000-39999 with no in-use check (`container-executor-deps.ts:86-90`), unlike the agent path's `getUsedDockerHostPorts`. Flakes docker-create at a few hundred containers/node. (code)\n9. **App-plane autoscaler.** `node-autoscaler.ts` is agent-image/platform hardcoded (lines 133,233,435); no autoscaler cron; app provisioning never registers allocation → app demand triggers nothing. Adding app capacity is manual. (code)\n10. **Billing cron at scale + idempotency.** `cron/container-billing/route.ts:391-440` is one serial Worker pass with an N+1 per-org prefetch + inline emails (presses Worker wall-time in the low thousands; can't resume a cut-off pass), and `recordSuccessfulDailyBilling` (`container-billing.ts:153-212`) has **no unique constraint on (container_id, billing_period)** → a duplicate cron fire / manual re-run double-bills. *(2AM-owned billing surface.)*\n11. **Defense-in-depth written but unused.** `buildAppNodeNftablesRules` (drops 169.254.169.254 metadata + RFC1918 pivots), per-app `buildSquidAllowlistConf`, `buildHetznerAppFirewallRules` have **zero non-test callers** — egress is one shared squid + static global allowlist, the metadata/lateral block is code-only, and `-p` binds `0.0.0.0` so app ports are world-exposed until the firewall's applied. (NB: reconcile the nftables RFC1918 drop with the ambassador's legit 10.30.x DB path.) (both)\n\n### 🟡 P2 — later / hardening\n12. Single Postgres superuser per cluster = shared fate (rotation + a non-superuser provisioning role); tighten `operator_ingress_cidrs` (SSH `0.0.0.0/0`); real tenant-DB TLS cert (hostssl vs the `sslmode=disable` fallback).\n13. Kernel sandboxing decision (gVisor/Kata/userns + seccomp) + per-app `--cpus` (only `--memory`/`--pids-limit` set today). Right-size `max_databases` (2000 is misleading until pooling exists). Tenant-DB-node scaling runbook.\n\n**Honest bottom line:** isolation + sharding are real and correct; the work to reach 1000 is *known* (the code is full of accurate `STAN TODO`s) but **not built**. Recommend **not** going live until at least P0 (and ideally #4/#6) are closed. Happy to take the additive, testable items (e.g. #3 set both env vars, #7 slot release, #8 collision-safe ports) as PRs — flag which you want vs. own.\n\ncc @standujar (data-plane) — billing items (#10) are 2AM's surface.\n",
-      "createdAt": "2026-06-07T23:25:37Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 4
-    },
-    {
       "id": "I_kwDOMT5cIs8AAAABEhtd5g",
       "title": "Steward login broken in prod: OAuth authorize 400 (code_challenge) + email/send 400 — blocks all Sign in with Eliza Cloud",
       "author": "NubsCarson",
@@ -41,7 +41,7 @@
       "createdAt": "2026-06-05T17:18:26Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 3
+      "commentCount": 4
     },
     {
       "id": "I_kwDOMT5cIs8AAAABEDmEnQ",
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 39503,
-    "deletions": 9693,
-    "files": 695,
-    "commitCount": 1544
+    "additions": 40880,
+    "deletions": 9803,
+    "files": 719,
+    "commitCount": 1595
   },
   "completedItems": [
     {
@@ -2008,6 +2008,82 @@
       ]
     },
     {
+      "title": "feat(infra): make the dedicated tenant-DB node optional (default off)",
+      "prNumber": 8344,
+      "type": "feature",
+      "body": "## Why\nA dedicated ccx33 tenant-DB node (~$53/mo) is **pure unrecovered fixed cost at low density** — the apps lane runs *negative* below ~3 paying containers (#8342). For beta we want **app-node-only** and co-locate the first few tenant DB",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "feat(apps): tenant-DB teardown — deprovision + release slot on cleanup",
+      "prNumber": 8343,
+      "type": "feature",
+      "body": "Closes the **isolated-DB leak** half of #8342.\n\n## Problem\nDeleting an app with its own per-tenant Postgres **never DROPped** the DATABASE/ROLE and **never released** the cluster slot — `SqlTenantDbProvisioner.deprovision` had zero callers,",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/tenant-db-clusters.ts",
+        "packages/cloud-shared/src/lib/services/tenant-db/__tests__/tenant-db-deprovision.test.ts",
+        "packages/cloud-shared/src/lib/services/tenant-db/__tests__/tenant-db-provisioning.test.ts",
+        "packages/cloud-shared/src/lib/services/tenant-db/make-tenant-db-provisioning.ts",
+        "packages/cloud-shared/src/lib/services/tenant-db/tenant-db-deprovision.ts",
+        "packages/cloud-shared/src/lib/services/tenant-db/tenant-db-provisioning.ts",
+        "packages/cloud-shared/src/lib/services/user-database.ts"
+      ]
+    },
+    {
+      "title": "feat(apps): make the per-tenant database opt-in (mode none|isolated)",
+      "prNumber": 8338,
+      "type": "feature",
+      "body": "## What\nThe deploy orchestrator provisioned an isolated per-tenant Postgres for **every** app and injected `DATABASE_URL`/`POSTGRES_URL` unconditionally. That forces a database (and a tenant-DB cluster) on apps that don't need one — e.g. a ",
+      "files": [
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/v1/apps/[id]/database/route.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-database-mode.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-orchestrator.test.ts",
+        "packages/cloud-shared/src/lib/services/app-database-mode.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-runner.ts"
+      ]
+    },
+    {
+      "title": "fix(infra): retire cpx41 in apps data-plane tfvars examples",
+      "prNumber": 8337,
+      "type": "bugfix",
+      "body": "The `app_node_server_type` default was already fixed cpx41→ccx23 (839bb81799 — cpx41 is retired/unorderable in fsn1), but the staging + production `tfvars.example` files still showed `cpx41`. Copying them would reproduce the \"Server Type cp",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example"
+      ]
+    },
+    {
+      "title": "feat(apps): serve verified custom domains through the apps ingress",
+      "prNumber": 8335,
+      "type": "feature",
+      "body": "## What\n\nBridges the **already-existing** custom-domain stack into the Product-2 Caddy apps ingress (#8325), so a user's own verified domain (e.g. `elocute.fun`) actually **serves their app** — not just CORS + a DNS target.\n\n### Why this is",
+      "files": [
+        "packages/cloud-api/v1/apps-ingress/ask/route.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/apps-ingress-routes.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/apps-ingress-routes.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-sdk): repair route-coverage audit tool (wrong path + stale regex)",
+      "prNumber": 8334,
+      "type": "bugfix",
+      "body": "## What\n\n`packages/cloud-sdk/scripts/audit-api-routes.mjs` — the tool that verifies every public Cloud API route has a generated SDK wrapper — was **double-broken and silently non-functional**:\n\n1. **Wrong package path.** It read the genera",
+      "files": [
+        "packages/cloud-sdk/scripts/audit-api-routes.mjs"
+      ]
+    },
+    {
       "title": "fix(ci/docker): hoist plugin-wallet transitive deps for runtime image",
       "prNumber": 8333,
       "type": "bugfix",
@@ -2150,34 +2226,136 @@
         "packages/cloud-shared/src/lib/services/app-container-provider.ts",
         "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts"
       ]
+    },
+    {
+      "title": "fix(infra): control-plane default server type cpx21 -> cpx32 (cpx21 retired in fsn1)",
+      "prNumber": 8360,
+      "type": "bugfix",
+      "body": "## Why\n\nYesterday's apply of \\`terraform-control-plane.yml\\` on the new \\`eliza-staging\\` Hetzner project failed:\n\n\\`\\`\\`\nError: Server Type \"cpx21\" is unavailable in \"fsn1\" and can no longer be ordered\n  with hcloud_server.control_plane[\"1",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "chore(infra): TF pre-apply hardening (variables fail-closed + CP firewall + state lock)",
+      "prNumber": 8359,
+      "type": "other",
+      "body": "Bundles the **2 remaining BLOCKERS** the pre-apply audit (workflow \\`wuo1ecea7\\`) confirmed. Apply on the new per-env Hetzner projects (\\`eliza-staging\\`, \\`eliza-prod\\`) is blocked on this PR.\n\nOriginally bundled 3 blockers. Per Stan: \"on ",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-control-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/.gitignore",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/.terraform.lock.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/backend-production.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/backend-staging.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/versions.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/.gitignore",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/.terraform.lock.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/backend-production.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/backend-staging.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/versions.tf"
+      ]
+    },
+    {
+      "title": "ci: terraform-control-plane.yml workflow (plan/apply control-plane per env)",
+      "prNumber": 8358,
+      "type": "other",
+      "body": "## Why\n\nThe Hetzner control-plane TF module (`packages/cloud-infra/cloud/terraform/hetzner/control-plane/`) had no GHA workflow. That left the prod + staging control-plane VMs (\\`eliza-1\\`, \\`eliza-staging-1\\`) outside TF state — they were ",
+      "files": [
+        ".github/workflows/terraform-control-plane.yml"
+      ]
+    },
+    {
+      "title": "chore(cloud): autoscale minFreeSlotsBuffer default 4 -> 2 (iso prod/staging)",
+      "prNumber": 8357,
+      "type": "other",
+      "body": "## Why\n\nAfter #8353 made `CONTAINERS_AUTOSCALE_MIN_FREE_SLOTS_BUFFER` env-configurable, staging was overridden to `2` to collapse to 1 node when idle, but prod kept the code default `4`. Same daemon code, different scaling shape — silent en",
+      "files": [
+        "packages/cloud-shared/src/lib/config/containers-env.ts"
+      ]
+    },
+    {
+      "title": "feat(infra): multi-project Hetzner pattern (per-env project token + docs)",
+      "prNumber": 8354,
+      "type": "feature",
+      "body": "## Why\nCurrently both staging and prod live in the SAME Hetzner Cloud Project, sharing a 5-server quota. Hitting the cap blocks any new apply (e.g. apps-data-plane staging needs server #6 → 422 limit_exceeded).\n\n## What\n- Add explicit `hclo",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "fix(autoscaler): env-overridable minFreeSlotsBuffer + minHotAvailableSlots",
+      "prNumber": 8353,
+      "type": "bugfix",
+      "body": "Hardcoded buffer=4 forces 2 nodes minimum when any agent is allocated on a 4-capacity node. Right for prod, wasteful for staging.\n\n## Change\nAdds env vars + helpers (containers-env.ts), wires into DEFAULT_AUTOSCALE_POLICY:\n- `CONTAINERS_AUT",
+      "files": [
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/containers/node-autoscaler.ts"
+      ]
+    },
+    {
+      "title": "fix(infra): add name to ignore_changes for apps-data-plane VMs",
+      "prNumber": 8349,
+      "type": "bugfix",
+      "body": "Drift guard, matches control-plane convention. Lets operator rename via Hetzner Console without next TF plan wanting to revert.",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf"
+      ]
+    },
+    {
+      "title": "fix(autoscaler): emit environment + tier labels on provision",
+      "prNumber": 8348,
+      "type": "bugfix",
+      "body": "## Summary\n\nHetzner servers provisioned by the node autoscaler only carried `managed-by` + `node-id`, so every API-discovered node looked identical across environments. A staging node ended up tagged `environment=production` from a hand-fix",
+      "files": [
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/containers/node-autoscaler.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/node-autoscaler.ts"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 2044.696644207181,
+      "totalScore": 2044.896644207181,
       "prScore": 2002.588644207181,
       "issueScore": 38.8,
       "reviewScore": 0,
-      "commentScore": 3.308,
+      "commentScore": 3.5079999999999996,
       "summary": "NubsCarson: Drove significant architectural and feature advancements for the Eliza Cloud platform and orchestrator, most notably implementing the per-tenant-isolated Eliza Cloud Apps data-plane in PR #8293 and introducing the Odysseus workbench for operator inspection in PR #8231. They demonstrated high technical impact by resolving critical race conditions and security vulnerabilities, such as the TOCTOU race in the orchestrator (#8161) and PKCE authentication flows for Steward OAuth (#8259). Through 33 merged pull requests, they balanced complex infrastructure deployments with UI enhancements, including the continuous-chat overlay and Storybook documentation. Their work this month was primarily focused on bug fixes (51%) and feature development (24%) across the core, cloud, and UI modules."
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 1426.5,
+      "totalScore": 1530,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 1426.5,
+      "reviewScore": 1530,
       "commentScore": 0,
       "summary": "greptile-apps: No activity this month."
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 1208.4855169007885,
-      "prScore": 1207.4475169007885,
+      "totalScore": 1483.6257212446542,
+      "prScore": 1482.5877212446544,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 1.038,
@@ -2224,6 +2402,16 @@
       "summary": "0xSolace: Focused on stabilizing and enhancing cloud infrastructure for the elizaos/eliza repository, merging 8 PRs that prioritized critical bug fixes and service integration. They delivered significant feature work, notably implementing waifu service-key provisioning and patron chat functionality in PR #8150, while ensuring system reliability through response-token budget guarantees in PR #8189. Their efforts were primarily concentrated on bugfix work, which accounted for 72% of their contributions, alongside targeted feature development and testing."
     },
     {
+      "username": "dutchiono",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
+      "totalScore": 169.1128724526423,
+      "prScore": 168.67487245264232,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
       "username": "binkyfishai",
       "avatarUrl": "https://avatars.githubusercontent.com/u/172897890?u=13dcfbbffef5a3f90ae60741795eaf47cc93a244&v=4",
       "totalScore": 100.22171602565182,
@@ -2256,10 +2444,10 @@
     {
       "username": "github-code-quality",
       "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
-      "totalScore": 31.5,
+      "totalScore": 40.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 31.5,
+      "reviewScore": 40.5,
       "commentScore": 0,
       "summary": "github-code-quality: No activity this month."
     },
@@ -2282,6 +2470,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "Vincent1-p: Focused on expanding ecosystem capabilities by initiating the development of a new Monad chain plugin in elizaos/eliza (#8119). This feature work involved 4 commits and 694 additions across configuration, code, and documentation files. Their efforts this month were dedicated entirely to this new feature implementation."
+    },
+    {
+      "username": "xavier-arosemena",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/212006378?u=51d17beade4934c79b0113de803fc1ef713b0c89&v=4",
+      "totalScore": 17.25353563213355,
+      "prScore": 17.25353563213355,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "Oxygen56",
@@ -2332,11 +2530,21 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "chopmob-cloud: Focused on maintaining project documentation and community resources, successfully resolving a broken link in the community plugin registry via issue #8173 in elizaos/eliza. This effort contributed to the overall accessibility of the project's ecosystem."
+    },
+    {
+      "username": "Nexussyn",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/210243486?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 216,
-  "mergedPRs": 136,
-  "newIssues": 20,
+  "newPRs": 231,
+  "mergedPRs": 150,
+  "newIssues": 21,
   "closedIssues": 27,
-  "activeContributors": 22
+  "activeContributors": 25
 }
