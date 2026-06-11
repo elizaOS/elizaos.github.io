@@ -1,0 +1,328 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-10T00:00:00.000Z",
+    "intervalEnd": "2026-06-11T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-10 to 2026-06-11, elizaos/eliza had 26 new PRs (12 merged), 1 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABFE93VQ",
+      "title": "android: clean-tree builds ship web-less APKs — cap sync and gradle operate on different projects (since 7ac0e1fb96)",
+      "author": "NubsCarson",
+      "number": 8387,
+      "repository": "elizaos/eliza",
+      "body": "## Symptom\n`bun run --cwd packages/app build:android` from a clean tree produces an APK with `assets/agent` but **zero `assets/public`, no `capacitor.config.json`** → on device the WebView shows `https://localhost/ net::ERR_CONNECTION_REFUSED` forever (no Capacitor `errorPath` is configured, so there's no retry). Verified on a Solana Seeker tonight.\n\n## Root cause\n`7ac0e1fb96` (fix(rv64-pipeline), May 20) moved `androidDir` in `packages/app-core/scripts/run-mobile-build.mjs:89` from `packages/app/android` → `packages/app-core/platforms/android` (gradle, native patches, agent staging) — but `runCapacitor([\"sync\",\"android\"])` still runs with cwd `packages/app` and `capacitor.config.ts` has **no `android.path`**, so the Capacitor CLI keeps delivering the web layer to `packages/app/android`. Nothing bridges the two trees: `capacitor-platform-templates.mjs:27-43` explicitly skips `assets/public`, `assets/agent`, and the generated capacitor JSONs when materializing templates.\n\nEvidence it used to be one project: the tracked `packages/app-core/platforms/android/capacitor.settings.gradle` projectDirs (`../../../app/node_modules/…`) are only producible with the platform dir at `app-core/platforms/android` — i.e. an `android.path` override existed and was lost. A pre-May-20 develop worktree (`bb69a3642e`) has all five asset trees together under `packages/app/android`. Same asymmetry: `iosDir` lives in the host app (`packages/app/ios/App`), android was left behind.\n\n## Why CI doesn't catch it\n- `build-android.yml` / `mobile-build-smoke.yml` only assert the APK **file exists** (smoke: lines 255-262); the artifact audits (`auditAndroidCloudArtifact`) check banned entries only, never that `assets/public/index.html` is present.\n- No workflow boots the app; `mobile-local-chat-smoke.mjs` isn't wired into any workflow.\n- Builds on machines with stale untracked `assets/public` leftovers in the platforms tree appear to work — clean checkouts never do.\n\n## Verified workaround (tonight, on-device confirmed)\nAfter `build:android`: copy `packages/app/android/app/src/main/assets/{public,capacitor.config.json,capacitor.plugins.json}` + `res/xml/config.xml` into `packages/app-core/platforms/android/app/src/main/...`, re-run `./gradlew :app:assembleDebug` there → complete APK (282→336MB), app boots to onboarding on a real device. Caveat: the tracked canonical `capacitor.settings.gradle` lags the synced one (missing background-runner, barcode-scanner, browser, device, haptics, network plugin projects → runtime \"plugin not implemented\" degradation).\n\n## Proposed fix (either)\n1. Restore the lost wiring: `android: { path: \"../app-core/platforms/android\" }` in `packages/app/capacitor.config.ts` (and teach `ensure-capacitor-platform.mjs`/`isCapacitorPlatformReady` to probe that dir), so sync/copy/update land directly in the gradle tree; or\n2. Add a `stageAndroidWebAssets()` step after every `runCapacitor([\"sync\",\"android\"])` call (4 android targets) copying the web payload + regenerated capacitor gradle files (with path rewrite) into `androidDir`.\n\nPlus, regardless: a **positive APK audit** for sideload targets (assert `assets/public/index.html` + `assets/capacitor.config.json` + `assets/agent/` via `jar tf`) and the same one-liner in CI after assembleDebug, so a web-less APK can never ship silently again.\n\nFound while device-testing the PR #8340 APK; happy to PR whichever shape you prefer — flagging first since the mobile pipeline is active WIP.",
+      "createdAt": "2026-06-10T23:10:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7lEOxS",
+      "title": "refactor(infra): split apps-data-plane → apps-shared + per-env workers",
+      "author": "standujar",
+      "number": 8386,
+      "body": "## Why\n\nThe tenant Postgres + private network are physically a single shared piece of\ninfra across staging + production app workers, but they were being modelled\nper-env inside `apps-data-plane/`. That meant a staging vs prod apply could in\ntheory rebuild the tenant DB out from under the other env, and the two state\nfiles each thought they owned the same Hetzner-side network. Splitting the\nmodule pins the truth in TF.\n\n## What changed\n\n### New `apps-shared/` module — single shared backend\n\nOwns the resources that are physically one thing:\n\n- `hcloud_network.apps` + `hcloud_network_subnet.apps` (`10.30.0.0/16` → `10.30.1.0/24`)\n- `hcloud_firewall.tenant_db` (port 22 from operator CIDRs)\n- `hcloud_volume.tenant_db_data` (200 GB default)\n- `hcloud_server.tenant_db` (`cpx42` default, **named `eliza-app-tenant`** — no env suffix because the resource is shared)\n- `hcloud_server_network.tenant_db` (`10.30.1.10` private IP, stable)\n- `hcloud_volume_attachment.tenant_db_data`\n- `random_password.tenant_db_admin`\n- `cloud-init/tenant-db.yaml.tftpl` (copied verbatim from apps-data-plane — latest fixed version with the bootcmd + systemd-oneshot ordering)\n- `versions.tf` / `providers.tf` / `variables.tf` / `outputs.tf`\n- `backend.hcl` (single shared backend file → `hetzner/apps-shared/shared.tfstate`)\n- `tfvars/shared.tfvars.example`\n\nOutputs: `apps_network_id`, `apps_subnet_id`, `apps_subnet_cidr`, `tenant_db_private_ip` (10.30.1.10), `tenant_db_public_ip`, `tenant_db_admin_dsn` (sensitive).\n\nNote: I didn't move the `app_node` firewall into shared — it's per-env (its name carries the env suffix and the operator CIDR list could legitimately diverge between staging and prod), so the split stays clean: shared = the actual shared infra, per-env = everything env-scoped.\n\n### Updated `apps-data-plane/` — slimmer, per-env\n\n- Drops every tenant_db resource + the network/subnet.\n- Adds `data \"terraform_remote_state\" \"apps_shared\"` pointing at the shared R2 state file.\n- `hcloud_server_network.app_node` attaches to `data.terraform_remote_state.apps_shared.outputs.apps_network_id`.\n- `cloud-init/app-node.yaml.tftpl` keeps its `tenant_db_host` template var, now sourced from the remote state output.\n- Outputs no longer include any `tenant_db_*` field.\n- Dropped the `random` provider (no longer used) so `.terraform.lock.hcl` shrinks.\n\n### Workflows\n\n- **NEW** `.github/workflows/terraform-apps-shared.yml` — `pull_request` (fmt + validate) + `workflow_dispatch` with `action` (plan/apply) and optional `replace` input. **No environment input** — module owns one set of resources. Uses repo-level vars `APPS_SHARED_OPERATOR_SSH_KEY` + `APPS_SHARED_OPERATOR_INGRESS_CIDRS`.\n- **UPDATED** `.github/workflows/terraform-apps-data-plane.yml` — same per-env dispatch shape; header explains tenant_db lives elsewhere now; `replace` notice mentions `hcloud_server.tenant_db` is a no-op here (use the apps-shared workflow). R2 state creds still cover both this module's state AND the apps-shared remote-state read.\n\n### Misc\n\n- ARCHITECTURE.md updated: tree shows `eliza-app-tenant` shared once, the per-env list only carries app_node servers.\n- `apps-data-plane/README.md` rewritten around the split + the apply order.\n\n## State migration plan — operator runs ONCE, manually\n\nThere's existing state in `hetzner/apps-data-plane/staging.tfstate` (the tenant DB was deployed on staging before this refactor). Move it to the new shared backend before any new apply.\n\nOrder of operations:\n\n1. **Pause both workflows on develop** so nobody apply-races the move:\n   ```\n   gh workflow disable terraform-apps-data-plane.yml\n   gh workflow disable terraform-apps-shared.yml\n   ```\n\n2. **Pull both state files locally**:\n   ```bash\n   export AWS_ACCESS_KEY_ID=...    # R2_STATE_ACCESS_KEY_ID\n   export AWS_SECRET_ACCESS_KEY=...\n   export HCLOUD_TOKEN=...         # HCLOUD_APPS_TOKEN\n\n   # source: staging apps-data-plane (pre-refactor layout)\n   cd packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane\n   git checkout develop  # the OLD code path, with tenant_db in this module\n   terraform init -backend-config=backend-staging.hcl\n   terraform state pull > /tmp/staging-old.tfstate\n\n   # destination: brand-new apps-shared backend (empty)\n   cd ../apps-shared\n   git checkout refactor/apps-shared-module\n   terraform init -backend-config=backend.hcl\n   ```\n\n3. **Move the tenant DB + deps from the old staging state into the new shared state**. Run these from the `apps-shared/` working directory (`-state` reads source from disk, `-state-out` writes destination):\n   ```bash\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_network.apps                   hcloud_network.apps\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_network_subnet.apps            hcloud_network_subnet.apps\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_firewall.tenant_db             hcloud_firewall.tenant_db\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_volume.tenant_db_data          hcloud_volume.tenant_db_data\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_server.tenant_db               hcloud_server.tenant_db\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_server_network.tenant_db       hcloud_server_network.tenant_db\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     hcloud_volume_attachment.tenant_db_data hcloud_volume_attachment.tenant_db_data\n   terraform state mv -state=/tmp/staging-old.tfstate -state-out=/tmp/shared-new.tfstate \\\n     random_password.tenant_db_admin       random_password.tenant_db_admin\n   ```\n\n4. **Push both updated state files**:\n   ```bash\n   # write the new shared state\n   cd packages/cloud-infra/cloud/terraform/hetzner/apps-shared\n   terraform state push /tmp/shared-new.tfstate\n\n   # write the slimmed-down staging state back\n   cd ../apps-data-plane\n   terraform state push /tmp/staging-old.tfstate\n   ```\n\n5. **Verify both modules plan against reality**:\n   ```bash\n   cd ../apps-shared && terraform plan -var-file=shared.tfvars\n   # EXPECTED (apply this — these are the intended renames + label updates):\n   #   ~ hcloud_network.apps        — labels: tier \"apps-data-plane\" -> \"apps-shared\",\n   #                                  drop environment key (NAME rename suppressed via\n   #                                  lifecycle.ignore_changes=[name])\n   #   ~ hcloud_volume.tenant_db_data   — same labels diff; name rename suppressed\n   #   ~ hcloud_firewall.tenant_db      — same labels diff; name rename suppressed\n   #   ~ hcloud_server.tenant_db        — same labels diff; name + user_data +\n   #                                       image + ssh_keys all suppressed\n   # All four diffs are IN-PLACE (Hetzner PATCH on labels), no destroy, volume +\n   # data + private IP all stable. Run `terraform apply` once to converge.\n   #\n   # NOT EXPECTED (abort + rollback if you see any of these):\n   #   - hcloud_server.tenant_db destroyed / replaced\n   #   - hcloud_volume.tenant_db_data destroyed / replaced\n   #   - any \"+ -> destroy\" line\n\n   cd ../apps-data-plane && terraform plan -var-file=staging.tfvars\n   # expected: no changes — app_node + firewall + DNS already in this state,\n   # the new data source just reads the (now shared) network id.\n   ```\n\n6. **Re-enable workflows**:\n   ```\n   gh workflow enable terraform-apps-data-plane.yml\n   gh workflow enable terraform-apps-shared.yml\n   ```\n\n7. **Done.** Future applies of `apps-data-plane` for staging and production both consume the same shared state.\n\n### About the Hetzner-side name (`eliza-apps-tenantdb-staging` → `eliza-app-tenant`)\n\nThe existing tenant DB Hetzner server is named `eliza-apps-tenantdb-staging`. After the state move, TF wants the resource called `eliza-app-tenant` — but `hcloud_server.tenant_db.lifecycle.ignore_changes` already includes `name`, so **TF will NOT rename the server Hetzner-side**. The operator can rename it via the Hetzner Console (cosmetic only — labels, IPs, volumes are all stable).\n\n## Rollback plan\n\nIf anything goes wrong after the state move but before reality changes:\n\n1. Revert this PR (`git revert` on develop).\n2. Restore the staging state from the R2 versioned bucket (R2 keeps prior object versions — the pre-move tfstate is still there as the previous version).\n3. Or push `/tmp/staging-old.tfstate.bak` back (`terraform state push -force` from the backup we kept locally before step 4).\n\nThe tenant DB itself is never destroyed during this migration — `terraform state mv` only edits the state graph, no apply runs against the cloud. Worst case after a botched revert is \"state thinks the tenant DB is in one module, reality has it; next apply tries to recreate it\" → operator rolls back state instead, no DB loss.\n\n## Test plan\n\n- [x] `terraform fmt -check -recursive` clean in both modules\n- [x] `terraform init -backend=false && terraform validate` succeeds in both modules\n- [x] Both workflows parse as valid YAML\n- [ ] PR CI: validate job passes for both `terraform-apps-shared.yml` and `terraform-apps-data-plane.yml`\n- [ ] Operator runs the state migration plan above on staging\n- [ ] `apps-shared` `plan` returns no changes after the state move\n- [ ] `apps-data-plane` staging `plan` returns no changes after the state move\n- [ ] Then `apps-data-plane` production `plan` (first apply against this module for prod) shows only the **new** app_node + firewall + DNS for production, no tenant_db touch\n\n## Notes\n\n- No flag toggles — `apps-data-plane` no longer has a `provision_tenant_db` knob, the split is hard.\n- No legacy fallback path — the old per-env tenant_db code is gone from `apps-data-plane/`. The state move is the only path forward.\n- `app_node` firewall stayed in `apps-data-plane` (per-env), only the tenant_db firewall moved to shared. If we ever want the app_node firewall shared too it's a separate refactor.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-10T22:26:25Z",
+      "mergedAt": "2026-06-10T23:13:22Z",
+      "additions": 726,
+      "deletions": 250
+    },
+    {
+      "id": "PR_kwDOMT5cIs7lADk-",
+      "title": "feat(cloud): add Atlas Cloud image provider (drop-in, OpenAI-compatible)",
+      "author": "0xSolace",
+      "number": 8380,
+      "body": "## Why\nThe deployed cloud worker routes image models (gpt-image-2, gemini-image) through **BitRouter**, but BitRouter serves **no image models** — its `/v1/models` catalog is 100% text-output. So `generate-image` 500s. **Atlas Cloud** does serve `gpt-image-2` + the gemini image models, with native (un-marked-up) pricing and $0 per-request fees.\n\nThis adds Atlas as a **one-file-style provider** using the image-provider abstraction from #8064 — so **Shaw just drops in `ATLASCLOUD_API_KEY` and it works**, and we can test with our key now.\n\n## Changes\n- **`providers/image/atlascloud-image-generation.ts`** (new): OpenAI-compatible chat-completions executor. Mirrors the proven BitRouter image-via-chat shape (`modalities:[\"image\",\"text\"]`, extracts `choices[0].message.images[0].image_url`). Base URL defaults to `https://api.atlascloud.ai/v1` (override `ATLASCLOUD_BASE_URL`); key from `ATLASCLOUD_API_KEY`.\n- **`providers/image/registry.ts`**: register `atlasCloudImageProvider`.\n- **`ai-pricing-definitions.ts`**: add `\"atlascloud\"` to `PricingBillingSource` + two **Atlas-only** `SUPPORTED_IMAGE_MODELS` (`openai/gpt-image-2`, `google/gemini-3.1-flash-image`) — new modelIds, no collision with existing BitRouter entries.\n- **`ai-pricing/providers/atlascloud.ts` + `gateway.ts`**: per-image pricing seed (conservative manual estimates, flagged to refine with account-specific pricing).\n- **`generate-image` routes** (app + non-app): thread `ATLASCLOUD_API_KEY`/`ATLASCLOUD_BASE_URL` into `apiKeys` + add the 503-on-missing-key gate, mirroring bitrouter/fal.\n- **`cloud-worker-env.ts`**: optional `ATLASCLOUD_API_KEY` / `ATLASCLOUD_BASE_URL`.\n\n## Drop-in\nSet **`ATLASCLOUD_API_KEY`** and Atlas image models work. Everything else has sane defaults. Existing BitRouter/fal entries are untouched.\n\n## Notes / follow-ups\n- The exact Atlas image-request payload mirrors BitRouter's proven OpenAI-image-via-chat shape (Atlas exposes the same surface). Live image generation should be smoke-tested once the Atlas account is funded; text completions are confirmed working.\n- Pricing rows are conservative seeds — refine with account-specific Atlas pricing before relying on exact margins.\n- Separately: this provider abstraction (#8064) + this PR need to actually be **deployed** to the prod cloud worker (the live bundle still has the old hardcoded BitRouter path).\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-10T19:06:59Z",
+      "mergedAt": "2026-06-10T20:24:56Z",
+      "additions": 329,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs7lCXXR",
+      "title": "fix(infra): tenant-db cloud-init -> systemd oneshot (idempotent, survives rescale)",
+      "author": "standujar",
+      "number": 8384,
+      "body": "## Summary\n\nWraps the tenant-DB cluster setup in a systemd oneshot service installed via\n`write_files`. The service runs on **every boot** (not just the first one),\nevery step is grep- or path-guarded so it's a no-op when there's nothing to\ndo.\n\n## Why\n\nAfter the cpx41/cpx42 rescale this morning (PR #8379), tenant_db came up with\npostgres dead. The volume mounted fine but PGDATA never existed:\n\n| Check | Observed |\n|---|---|\n| `systemctl is-active postgresql@16-main` | `inactive (dead)` |\n| `pg_lsclusters` | empty |\n| `df -h /mnt/tenant-pgdata` | 32K used (freshly formatted) |\n| `ls /mnt/tenant-pgdata/16/main/` | no such file or directory |\n| Cloud-init log on rescaled boot | finished in <1s, runcmd absent |\n\nRoot cause: cloud-init `runcmd` is per-instance (first boot only). Hetzner\nrescale = stop → change type → start, same instance id, so runcmd never\nfires again.\n\n## Fixes inside the migration\n\nA few latent bugs in the old `runcmd` script that this version closes:\n\n- fstab append wasn't grep-guarded → duplicate lines on every re-run\n- `pg_hba` `hostssl` / `host` lines weren't grep-guarded → same\n- `postgresql.conf` seds only matched the commented form (`^#listen_addresses`)\n  → silently failed on re-runs after the first sed had uncommented them\n- PGDATA check used `! -d` → true for an empty directory left behind by a\n  half-finished initdb. Now checks `! -f $PGDATA/PG_VERSION`\n- `mkfs.ext4 -F` removed → the `blkid` gate is the only protection; `-F`\n  would silently nuke a real fs if `blkid` ever lied\n- ALTER USER postgres now waits for `pg_isready` before firing (was racing)\n- Script `set -euo pipefail` so partial failures don't masquerade as success\n\n## Workflow input\n\nAdds an optional `replace` input to `terraform-apps-data-plane.yml` —\ncomma-separated TF resource addresses, threaded as `-replace=<addr>` flags.\n\nReason: `user_data` lives in `hcloud_server.tenant_db.lifecycle.ignore_changes`\n(matches the control-plane convention, `ARCHITECTURE.md` calls this out\nexplicitly). So a normal apply won't replace the existing tenant_db to pick\nup the fixed cloud-init. The `replace` input scratches that itch without\nhaving to taint via local terraform CLI access.\n\nReusable: any future \"rebuild this resource cleanly\" follows the same path —\ndispatch with `replace=\"hcloud_server.foo\"`, no taint gymnastics.\n\n## Test plan\n\n- [x] `terraform fmt -recursive` clean\n- [x] `terraform validate` green\n- [ ] CI: PR validate job green\n- [ ] After merge, dispatch with `environment=staging action=apply replace=hcloud_server.tenant_db`\n- [ ] Verify the new tenant_db comes up with `systemctl is-active postgresql` = `active`, `pg_lsclusters` shows the 16/main cluster, port 5432 listening on the private net\n- [ ] Then load the 2 user DBs from the OLD CP dump (separate, manual `psql -f`)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-10T20:52:59Z",
+      "mergedAt": "2026-06-10T20:54:25Z",
+      "additions": 152,
+      "deletions": 26
+    },
+    {
+      "id": "PR_kwDOMT5cIs7k6DaE",
+      "title": "feat(infra): cloud-init bakes nginx vhost + self-signed cert + CF proxied=true",
+      "author": "standujar",
+      "number": 8374,
+      "body": "## Why\n\nStaging migration today landed a TF-spawned control-plane VM that was unroutable for agent traffic:\n\n- nginx ran the default Ubuntu vhost on :80 (no proxy_pass to agent-router on \\`127.0.0.1:3458\\`)\n- :443 had no listener at all\n- CF DNS record \\`eliza-staging-1.elizacloud.ai\\` was \\`proxied=false\\` (grey cloud), so CF Workers fetching it went direct → got 521 on missing :443\n\nRepaired manually on the live VM. This PR bakes the same setup into the TF module so the next apply (prod, or any re-spawn) lands a routable VM out of the box.\n\n## What\n\n**cloud-init/bootstrap.yaml.tftpl**:\n- New \\`/etc/nginx/sites-available/eliza-agent-router\\` vhost (mirrors prod CP setup) — \\`*.elizacloud.ai → 127.0.0.1:3458\\` on :80 + :443\n- Generate self-signed \\`*.elizacloud.ai\\` cert at boot via \\`openssl req -x509\\` → \\`/etc/nginx/ssl/eliza-agent-router.{crt,key}\\`\n- Drop the default vhost + enable the new one + reload nginx\n- Git clone retries 3× with 5s sleep — silent race with apt-installed \\`git\\` left /opt/eliza empty on a slow image\n\n**main.tf**:\n- \\`cloudflare_dns_record.control_plane.proxied = true\\` + \\`ttl = 1\\` (CF API requires Auto TTL when proxied)\n- Comment explains why direct origin fetch fails on self-signed cert\n\n## Why self-signed is fine\n\nZone SSL on \\`elizacloud.ai\\` is set to \"Full\" (not \"Full (Strict)\"). CF accepts any cert on origin when terminating TLS with the visitor. The self-signed cert is regenerated on every boot — no expiry to manage, no key rotation.\n\n## Side effect\n\nSSH to \\`eliza-${env}-N.elizacloud.ai\\` now resolves to CF IPs (proxied A record blocks the origin from DNS). Ops must SSH by **public IP** from terraform output \\`control_plane_vms.<idx>.ipv4\\`, not by hostname. Same pattern prod \\`eliza-1\\` already uses since it's also proxied in the live CF zone.\n\n## Test plan\n\n- [ ] CI PR validation passes (\\`validate\\` job runs \\`terraform fmt -check\\` + \\`terraform validate\\`)\n- [ ] After merge: \\`terraform apply\\` on a fresh project boots a VM where:\n  - \\`systemctl is-active nginx\\` returns active\n  - \\`curl -I https://<vm-ip>/\\` returns 404 (= reaches agent-router which 404s on non-agent Host) — not 521 / connection refused\n  - \\`/etc/nginx/sites-enabled/eliza-agent-router\\` exists, \\`/etc/nginx/sites-enabled/default\\` is gone\n  - DNS record \\`eliza-<env>-1.elizacloud.ai\\` is proxied=true in Cloudflare",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-10T14:51:35Z",
+      "mergedAt": "2026-06-10T15:06:00Z",
+      "additions": 144,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDOMT5cIs7k6r1S",
+      "title": "feat(infra): apps-data-plane uses HCLOUD_APPS_TOKEN (shared Hetzner project)",
+      "author": "standujar",
+      "number": 8376,
+      "body": "## Why\n\nApps Product 2 now lives in a **dedicated Hetzner project** \\`apps\\`, separate from the per-env agent control-plane projects (\\`eliza-staging\\`, \\`eliza-prod\\`). One shared project hosts both staging + production Apps resources — Apps is still alpha, operator overhead of two more projects (apps-staging + apps-prod) isn't worth it until there's real prod traffic to isolate.\n\n## What\n\n| File | Change |\n|------|--------|\n| \\`.github/workflows/terraform-apps-data-plane.yml\\` | \\`HCLOUD_TOKEN\\` now sourced from \\`secrets.HCLOUD_APPS_TOKEN\\` (repo-level) instead of env-scoped \\`HCLOUD_TOKEN\\`. Header + preflight error msg updated. |\n| \\`packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf\\` | Comment on the absent \\`hcloud_ssh_key\\` resource now explains the shared-project rationale (race + 409 between env applies). |\n| \\`packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md\\` | Multi-project diagram shows 3 projects (\\`eliza-prod\\`, \\`eliza-staging\\`, \\`apps\\`). Token-plumbing table adds \\`HCLOUD_APPS_TOKEN\\` row. |\n\n## Topology after merge\n\n\\`\\`\\`\neliza-prod      env-scoped HCLOUD_TOKEN  control-plane + agents prod\neliza-staging   env-scoped HCLOUD_TOKEN  control-plane + agents staging\napps            repo-level HCLOUD_APPS_TOKEN  Apps Product 2 staging + prod (shared)\ndefault         <legacy, to drain + delete in phase 5>\n\\`\\`\\`\n\n## Pre-merge state\n\n- \\`HCLOUD_APPS_TOKEN\\` repo secret is set (verified \\`gh secret list\\`)\n- Operator pubkey already registered in the \\`apps\\` Hetzner project via Console\n- \\`apps\\` project is empty (0 servers) — first apply will create everything\n\n## Test plan\n\n- [ ] CI \\`validate\\` job passes (terraform fmt + validate)\n- [ ] After merge: \\`gh workflow run terraform-apps-data-plane.yml --ref develop -f environment=staging -f action=plan\\`\n- [ ] Plan should show ~9 adds in \\`apps\\` project (network, subnet, 2 firewalls, server, server_network, volume, DNS, + tenant_db resources if provision_tenant_db=true)\n- [ ] If clean: \\`-f action=apply\\`\n- [ ] Followup (not in this PR): \\`pg_dumpall\\` the staging tenant DB on OLD CP → restore onto the new \\`eliza-apps-tenantdb-staging\\` node → update DSN refs for the 2 live user apps\n\n## Followup (separate)\n\nWhen Apps Product 2 ships to prod with real traffic, split into \\`apps-staging\\` + \\`apps-prod\\` projects (= rename existing + create second + state file split). Resource recreation not needed; it's a token-and-state-key swap.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-10T15:16:42Z",
+      "mergedAt": "2026-06-10T15:31:55Z",
+      "additions": 96,
+      "deletions": 34
+    }
+  ],
+  "codeChanges": {
+    "additions": 1567,
+    "deletions": 391,
+    "files": 41,
+    "commitCount": 46
+  },
+  "completedItems": [
+    {
+      "title": "refactor(infra): split apps-data-plane → apps-shared + per-env workers",
+      "prNumber": 8386,
+      "type": "refactor",
+      "body": "## Why\n\nThe tenant Postgres + private network are physically a single shared piece of\ninfra across staging + production app workers, but they were being modelled\nper-env inside `apps-data-plane/`. That meant a staging vs prod apply could in",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-apps-shared.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/.terraform.lock.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/versions.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/.gitignore",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/.terraform.lock.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/backend.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/cloud-init/tenant-db.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/tfvars/shared.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/versions.tf"
+      ]
+    },
+    {
+      "title": "fix(infra): tenant-db cloud-init resilience (apt + sudo + ordering)",
+      "prNumber": 8385,
+      "type": "bugfix",
+      "body": "## Summary\n\nThree latent failures the previous tenant-db cloud-init template hits the moment a fresh server boots — all caught the hard way during the staging apply this evening. PR #8384 baked the systemd-oneshot approach; this PR makes th",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/tenant-db.yaml.tftpl"
+      ]
+    },
+    {
+      "title": "fix(infra): tenant-db cloud-init -> systemd oneshot (idempotent, survives rescale)",
+      "prNumber": 8384,
+      "type": "bugfix",
+      "body": "## Summary\n\nWraps the tenant-DB cluster setup in a systemd oneshot service installed via\n`write_files`. The service runs on **every boot** (not just the first one),\nevery step is grep- or path-guarded so it's a no-op when there's nothing to",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/tenant-db.yaml.tftpl"
+      ]
+    },
+    {
+      "title": "fix(cloud): Atlas edit models take images[] + size WIDTHxHEIGHT",
+      "prNumber": 8383,
+      "type": "bugfix",
+      "body": "Follow-up to #8380. Per the Atlas image API reference:\n- edit / image-to-image models take a source `images: [...]` array (not a singular `image`)\n- `size` uses `WIDTH*HEIGHT` form (e.g. `2048*2048`)\n\nNormalise a `WxH` size to that, send so",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/image/atlascloud-image-generation.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): add Atlas Cloud image provider (drop-in, OpenAI-compatible)",
+      "prNumber": 8380,
+      "type": "feature",
+      "body": "## Why\nThe deployed cloud worker routes image models (gpt-image-2, gemini-image) through **BitRouter**, but BitRouter serves **no image models** — its `/v1/models` catalog is 100% text-output. So `generate-image` 500s. **Atlas Cloud** does ",
+      "files": [
+        "packages/cloud-api/v1/apps/[id]/generate-image/route.ts",
+        "packages/cloud-api/v1/generate-image/route.ts",
+        "packages/cloud-shared/src/lib/providers/image/atlascloud-image-generation.ts",
+        "packages/cloud-shared/src/lib/providers/image/registry.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-definitions.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/atlascloud.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "refactor(infra): default tenant_db to cpx41 (shared CPU, no dedicated quota)",
+      "prNumber": 8379,
+      "type": "refactor",
+      "body": "## Summary\n\nDefault `tenant_db_server_type` in the `apps-data-plane` Hetzner module flips from `ccx33` (dedicated 8 vCPU / 32 GB) to `cpx41` (shared 8 vCPU / 16 GB).\n\nWhy:\n- ccx33 burns 8 dedicated cores from a Hetzner account-wide quota th",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "refactor(infra): drop provision_tenant_db toggle, always provision the node",
+      "prNumber": 8378,
+      "type": "refactor",
+      "body": "## Summary\n\nReverts the bool toggle from #8377. Apps data-plane always provisions the\ntenant_db ccx33 — no flag, no off mode.\n\n- Dropped `var.provision_tenant_db` + the 3 `count = … ? 1 : 0` gates on\n  `hcloud_server.tenant_db` / `hcloud_se",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "feat(infra): wire TF_VAR_provision_tenant_db in apps-data-plane workflow",
+      "prNumber": 8377,
+      "type": "feature",
+      "body": "## Why\n\napps-data-plane TF has a \\`provision_tenant_db\\` bool variable that gates the dedicated ccx33 tenant Postgres node. Default \\`false\\` (Apps Product 2 is alpha — unrecovered cost at low density). The workflow never threaded the varia",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml"
+      ]
+    },
+    {
+      "title": "feat(infra): apps-data-plane uses HCLOUD_APPS_TOKEN (shared Hetzner project)",
+      "prNumber": 8376,
+      "type": "feature",
+      "body": "## Why\n\nApps Product 2 now lives in a **dedicated Hetzner project** \\`apps\\`, separate from the per-env agent control-plane projects (\\`eliza-staging\\`, \\`eliza-prod\\`). One shared project hosts both staging + production Apps resources — Ap",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "chore(cloud-shared): consolidate Hetzner token env to HCLOUD_TOKEN only",
+      "prNumber": 8375,
+      "type": "other",
+      "body": "## Why\n\nDuring the staging multi-project Hetzner migration we hit a 30-minute debug session because the daemon's \\`.env.local\\` had BOTH \\`HCLOUD_TOKEN\\` AND \\`HETZNER_CLOUD_API_KEY\\` set (paranoia copies of the same value from an older boo",
+      "files": [
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-services/container-control-plane/README.md",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/containers/compute-provider-characterization.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/hetzner-cloud-api.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts",
+        "packages/scripts/cloud/admin/bootstrap-provisioning-worker-host.mjs"
+      ]
+    },
+    {
+      "title": "feat(infra): cloud-init bakes nginx vhost + self-signed cert + CF proxied=true",
+      "prNumber": 8374,
+      "type": "feature",
+      "body": "## Why\n\nStaging migration today landed a TF-spawned control-plane VM that was unroutable for agent traffic:\n\n- nginx ran the default Ubuntu vhost on :80 (no proxy_pass to agent-router on \\`127.0.0.1:3458\\`)\n- :443 had no listener at all\n- C",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): set AGENT_ROUTER_ORIGIN_HOST for staging (was hitting prod CP silently)",
+      "prNumber": 8361,
+      "type": "bugfix",
+      "body": "## Why\n\nAfter the control-plane TF apply migrated the staging CP to \\`167.233.105.184\\` (new eliza-staging Hetzner project), the e2e validation workflow (\\`w4va6b87i\\`) flagged that the staging Worker was still routing agent traffic to the ",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 380.68077623780266,
+      "prScore": 380.68077623780266,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 171,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 171,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 78.76207219233933,
+      "prScore": 78.76207219233933,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tdnupe3",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25161668?u=94680b6bcbcfce954c7a9dd09d667a3919953041&v=4",
+      "totalScore": 29.75829254649702,
+      "prScore": 29.75829254649702,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ColonistOne",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/271974769?u=af6b52db284d4ebb9209e436a1fb003ff9ccf2e4&v=4",
+      "totalScore": 13.084134726391532,
+      "prScore": 13.084134726391532,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 2.1,
+      "prScore": 0,
+      "issueScore": 2.1,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 26,
+  "mergedPRs": 12,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 8
+}

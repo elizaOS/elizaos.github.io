@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-07 to 2026-06-14, elizaos/eliza had 69 new PRs (54 merged), 3 new issues, and 13 active contributors.",
+  "overview": "From 2026-06-07 to 2026-06-14, elizaos/eliza had 100 new PRs (95 merged), 4 new issues, and 18 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABErit7w",
@@ -20,6 +20,42 @@
       "commentCount": 6
     },
     {
+      "id": "I_kwDOMT5cIs8AAAABFE93VQ",
+      "title": "android: clean-tree builds ship web-less APKs — cap sync and gradle operate on different projects (since 7ac0e1fb96)",
+      "author": "NubsCarson",
+      "number": 8387,
+      "repository": "elizaos/eliza",
+      "body": "## Symptom\n`bun run --cwd packages/app build:android` from a clean tree produces an APK with `assets/agent` but **zero `assets/public`, no `capacitor.config.json`** → on device the WebView shows `https://localhost/ net::ERR_CONNECTION_REFUSED` forever (no Capacitor `errorPath` is configured, so there's no retry). Verified on a Solana Seeker tonight.\n\n## Root cause\n`7ac0e1fb96` (fix(rv64-pipeline), May 20) moved `androidDir` in `packages/app-core/scripts/run-mobile-build.mjs:89` from `packages/app/android` → `packages/app-core/platforms/android` (gradle, native patches, agent staging) — but `runCapacitor([\"sync\",\"android\"])` still runs with cwd `packages/app` and `capacitor.config.ts` has **no `android.path`**, so the Capacitor CLI keeps delivering the web layer to `packages/app/android`. Nothing bridges the two trees: `capacitor-platform-templates.mjs:27-43` explicitly skips `assets/public`, `assets/agent`, and the generated capacitor JSONs when materializing templates.\n\nEvidence it used to be one project: the tracked `packages/app-core/platforms/android/capacitor.settings.gradle` projectDirs (`../../../app/node_modules/…`) are only producible with the platform dir at `app-core/platforms/android` — i.e. an `android.path` override existed and was lost. A pre-May-20 develop worktree (`bb69a3642e`) has all five asset trees together under `packages/app/android`. Same asymmetry: `iosDir` lives in the host app (`packages/app/ios/App`), android was left behind.\n\n## Why CI doesn't catch it\n- `build-android.yml` / `mobile-build-smoke.yml` only assert the APK **file exists** (smoke: lines 255-262); the artifact audits (`auditAndroidCloudArtifact`) check banned entries only, never that `assets/public/index.html` is present.\n- No workflow boots the app; `mobile-local-chat-smoke.mjs` isn't wired into any workflow.\n- Builds on machines with stale untracked `assets/public` leftovers in the platforms tree appear to work — clean checkouts never do.\n\n## Verified workaround (tonight, on-device confirmed)\nAfter `build:android`: copy `packages/app/android/app/src/main/assets/{public,capacitor.config.json,capacitor.plugins.json}` + `res/xml/config.xml` into `packages/app-core/platforms/android/app/src/main/...`, re-run `./gradlew :app:assembleDebug` there → complete APK (282→336MB), app boots to onboarding on a real device. Caveat: the tracked canonical `capacitor.settings.gradle` lags the synced one (missing background-runner, barcode-scanner, browser, device, haptics, network plugin projects → runtime \"plugin not implemented\" degradation).\n\n## Proposed fix (either)\n1. Restore the lost wiring: `android: { path: \"../app-core/platforms/android\" }` in `packages/app/capacitor.config.ts` (and teach `ensure-capacitor-platform.mjs`/`isCapacitorPlatformReady` to probe that dir), so sync/copy/update land directly in the gradle tree; or\n2. Add a `stageAndroidWebAssets()` step after every `runCapacitor([\"sync\",\"android\"])` call (4 android targets) copying the web payload + regenerated capacitor gradle files (with path rewrite) into `androidDir`.\n\nPlus, regardless: a **positive APK audit** for sideload targets (assert `assets/public/index.html` + `assets/capacitor.config.json` + `assets/agent/` via `jar tf`) and the same one-liner in CI after assembleDebug, so a web-less APK can never ship silently again.\n\nFound while device-testing the PR #8340 APK; happy to PR whichever shape you prefer — flagging first since the mobile pipeline is active WIP.",
+      "createdAt": "2026-06-10T23:10:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDcK65w",
+      "title": "@elizaos/cli@1.7.2 crashes at boot under Bun via engine.io + debug interop",
+      "author": "ayushgupta0610",
+      "number": 8001,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nAfter working around #8000 by installing `@elizaos/cli` directly (`bun add -g @elizaos/cli`), the CLI still crashes at boot because `engine.io` (transitive) calls `(0, debug_1.default)(\"engine:transport\")` and `debug_1.default` is `undefined` under Bun's CJS resolver. The boot path eagerly loads `engine.io` even for commands that do not need a server (`create`, `--version`, etc).\n\n## Repro\n\n```bash\nbun add -g @elizaos/cli      # installs @elizaos/cli@1.7.2 (npm latest)\nelizaos create my-app --template project\n```\n\n```\n3 | exports.Transport = void 0;\n4 | const events_1 = require(\"events\");\n5 | const parser_v4 = require(\"engine.io-parser\");\n6 | const parser_v3 = require(\"./parser-v3/index\");\n7 | const debug_1 = require(\"debug\");\n8 | const debug = (0, debug_1.default)(\"engine:transport\");\n                       ^\nTypeError: (0, debug_1.default) is not a function. (In '(0, debug_1.default)(\"engine:transport\")',\n'(0, debug_1.default)' is undefined)\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/transport.js:8:27\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/transports/polling.js:3:1\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/transports/index.js:2:1\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/server.js:431:5\n      at /Users/<u>/.bun/install/global/node_modules/engine.io/build/engine.io.js:6:1\n\nBun v1.3.10 (macOS arm64)\n```\n\n## Root cause\n\n`engine.io`'s compiled `transport.js` emits:\n\n```js\nconst debug_1 = require(\"debug\");\nconst debug = (0, debug_1.default)(\"engine:transport\");\n```\n\nIt assumes a `.default` property on the `debug` CJS module. `debug@4.x` exports the factory directly (`module.exports = createDebug`); there is no `.default` property in the CJS shape. Node's CJS-from-ESM interop synthesizes a `default` property automatically; Bun's resolver does not produce the same shape for this dual-package module under the global-bin code path. This is a known engine.io + Bun interop class, not an elizaOS source-level bug.\n\n## Why this is elizaOS's problem in practice\n\n`@elizaos/cli@1.7.2` eagerly loads `engine.io` / Socket.IO at module-init time of *any* command — even `--help` and `create` walk through `engine.io/build/engine.io.js` → `server.js` → `transports/index.js` → `transport.js` before the command's own logic runs. Commands that don't need a websocket server should not be loading the websocket server stack at parse time.\n\n## Environment\n\n- @elizaos/cli@1.7.2 (`npm view @elizaos/cli dist-tags.latest`)\n- Node v24.13.0\n- Bun v1.3.10\n- macOS arm64\n\n## Suggested mitigations (any one would unblock)\n\n1. **Lazy-load `engine.io` / Socket.IO off the boot path.** Move the server imports behind the commands that actually serve (`start`, `dev`). `create`, `info`, `upgrade`, `--version`, `--help` should not transitively touch `engine.io`. This is also a startup-latency win independent of the Bun bug.\n2. **Pin / patch the transitive dep.** Either pin `engine.io` to a build whose compiled output uses `__importDefault`, or pin `debug` to a version that exports a named `default` property.\n3. **Document Bun support explicitly.** If Bun is a supported runtime for the global CLI, gate publish on a `bun`-runtime smoke (see #8000). If not, the install instructions should say so.\n\n## Status on develop\n\nVerified: develop's `packages/elizaos@2.0.3` scaffolds a project end-to-end via Node (`node packages/elizaos/dist/cli.js create … --template project --yes` succeeds against a fresh `bun install` of the workspace). Either the boot was trimmed or the dep tree was restructured — would be useful for maintainers to surface what changed, since that change is the basis for closing this on the next stable release.\n\n## Workaround\n\nSame as #8000 — use the develop CLI directly until a release supersedes 1.7.2 on `latest`.",
+      "createdAt": "2026-05-26T16:35:15Z",
+      "closedAt": "2026-06-11T22:17:01Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABDcKxOQ",
+      "title": "elizaos@1.7.2 global install crashes with ERR_PACKAGE_PATH_NOT_EXPORTED",
+      "author": "ayushgupta0610",
+      "number": 8000,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe current `npm dist-tag latest` for both `elizaos` and `@elizaos/cli` is `1.7.2`. A clean global install fails on the very first command because the `elizaos` alias package's bin shim imports a subpath that `@elizaos/cli@1.7.2`'s `exports` map does not whitelist.\n\n## Repro\n\n```bash\nbun add -g elizaos        # or: npm i -g elizaos\nelizaos --version         # any subcommand reproduces\n```\n\n```\nError [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './dist/index.js' is not defined by \"exports\" in\n/Users/<u>/.bun/install/global/node_modules/@elizaos/cli/package.json\nimported from /Users/<u>/.bun/install/global/node_modules/elizaos/bin/elizaos.js\n    at exportsNotFound (node:internal/modules/esm/resolve:313:10)\n    at packageExportsResolve (node:internal/modules/esm/resolve:661:9)\n    ...\n  code: 'ERR_PACKAGE_PATH_NOT_EXPORTED'\n```\n\n## Root cause (verified from npm registry)\n\n`elizaos@1.7.2` ships `bin/elizaos.js`:\n\n```js\nimport '@elizaos/cli/dist/index.js';\n```\n\n`@elizaos/cli@1.7.2` declares:\n\n```json\n\"exports\": {\n  \".\": \"./dist/index.js\",\n  \"./package.json\": \"./package.json\"\n}\n```\n\nNode's ESM resolver enforces `exports` strictly — `./dist/index.js` as a subpath is blocked even though the file exists. The shim should import the package root (`'@elizaos/cli'`), not a subpath.\n\n## Environment\n\n- elizaos@1.7.2 (`latest` tag)\n- @elizaos/cli@1.7.2 (`latest` tag)\n- Node v24.13.0\n- Bun v1.3.10\n- macOS arm64\n\nConfirmed from npm registry:\n\n```\n$ npm view elizaos dist-tags\n{ latest: '1.7.2', next: '2.0.0-alpha.32', alpha: '2.0.0-alpha.535', beta: '2.0.0-beta.5' }\n\n$ npm view @elizaos/cli dist-tags\n{ beta: '1.7.2-beta.0', latest: '1.7.2', alpha: '1.7.3-alpha.4' }\n```\n\n## Status on develop\n\nDevelop has already restructured: `packages/elizaos` is the CLI itself at v2.0.3; no alias shim, no inter-package subpath import. `@elizaos/cli@1.7.3-alpha.4` also no longer has a separate shim — its `bin` points directly to `dist/index.js`. The structural fix is in; the gap is that no release has superseded the broken `latest` tag.\n\n## What would prevent regression\n\nA pre-publish global-install smoke test:\n\n1. `npm pack` → tarball\n2. `npm i -g <tarball>` into a sandboxed prefix\n3. Run `<prefix>/bin/elizaos --version` under **both** Node and Bun\n4. Assert exit code 0\n\nThe existing `packages/elizaos/scripts/packaged-smoke.mjs` does a local install but not a global one — global install resolves bin via a different path that is stricter on `exports`. Happy to send a PR.\n\nOptional bonus: a static linter that walks `packages/*/package.json`, finds any `bin`-listed file doing `import 'foo/sub/path.js'`, and verifies `foo`'s `exports` map permits that subpath. Would catch this entire class of bug pre-publish.\n\n## Workaround for users hitting this today\n\n```bash\n# Use the develop branch CLI directly — confirmed working:\ngit clone https://github.com/elizaos/eliza.git && cd eliza\nbun install\nbun run --cwd packages/elizaos build\nnode packages/elizaos/dist/cli.js create my-app --template project --yes\n\n# Or pin a pre-release tag:\nnpm i -g elizaos@beta\n```",
+      "createdAt": "2026-05-26T16:34:49Z",
+      "closedAt": "2026-06-11T22:17:01Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
       "id": "I_kwDOMT5cIs8AAAABExJ5kw",
       "title": "Apps (Product 2) billing: pre-go-live leak + correctness fixes (profitable on happy path, 4 leaks)",
       "author": "NubsCarson",
@@ -27,18 +63,6 @@
       "repository": "elizaos/eliza",
       "body": "Evidence-based audit of the Apps (Product 2) hosting + per-tenant-DB billing. **Bottom line: profitable on the happy path, but 4 leaks must be fixed before go-live.** Nothing is bleeding *today* (the apps lane isn't armed/deployed yet) — these are pre-launch fixes.\n\n## ✅ Profitable on the happy path\n- **Hosting:** a default app bills ~**$1.17/day** ($0.67 base × 1.75 CPU multiplier from the schema default `cpu=1792`) vs **~$0.29–0.58/day** real Hetzner cost → **~2–4× gross margin**, break-even ~1 container/node. Apps **are** enrolled in billing (our deploy sets `billing_status='active'` by schema default → 2AM's `container-billing` cron picks them up like agents). Not hosting for free.\n- **Inference:** end user pays (`cost = provider_cost × 1.20`); platform never subsidizes; creator/affiliate markups stack **on top** of the user's bill. Always net-positive.\n\n## ⚠️ Leaks / correctness bugs (owner-tagged)\n\n### CRITICAL\n- [ ] **[ours] Suspended containers are never `docker stop`ped.** `suspendContainer()` only flips DB flags (`container-billing.ts:117-126`); the node container runs `--restart unless-stopped` (`client.ts:249`) and no reconciler stops `billing_status='suspended'` rows. After suspend the row drops out of `listBillableContainers` forever → a deadbeat's app **runs indefinitely on Hetzner, billed never** (~$210/yr, unbounded). *Fix:* on the shutdown branch, SSH `docker stop` (via our provider) + decrement node allocation, and add a reconciler. (Cross-ref: `suspendContainer` is 2AM's; the stop is ours.)\n- [ ] **[ours] Deleted isolated-DB apps never drop their Postgres + never release the cluster slot.** `SqlTenantDbProvisioner.deprovision` exists (`tenant-db-provisioner.ts:166`) but has **zero live callers**; there is no `releaseSlot` (only `tryClaimSlot` increments). `app-cleanup` drops domains/repo/secrets but not the DB; `cleanupDatabase` handles only the Neon path. → every deleted isolated app **strands a live DB we pay for + burns 1/2000 cluster slots permanently**. *Fix (focused lifecycle PR):* enqueue a deprovision **job** on app delete (DROP DATABASE/ROLE needs `pg` → daemon) + add `releaseSlot` (`database_count = GREATEST(0, database_count-1)`) + extend `cleanupDatabase` for the `direct_pg`/isolated path. **This is the missing half of #8338 (opt-in per-tenant DB).**\n- [ ] **[2AM] `container-billing` cron has no idempotency gate.** It writes `last_billed_at`/`next_billing_at` but never reads them (`container-billing.ts:57-81`); a Cloudflare retry or duplicate POST **re-debits every running container a full extra day** → over-charge → chargebacks. *Fix:* port the agent-billing rebill guard + a unique partial index on `(container_id, billing_period)`.\n\n### HIGH\n- [ ] **[design — nubs] Per-tenant DB / storage / bandwidth bill $0.** The ccx33 tenant-DB node (~$2.05/day incl. 200GB vol) has **no billing line**; an `isolated` app and a `none` app are billed identically. At low density the apps lane runs **negative** (break-even ~3 paying containers; 1 container = −$1.67/day). *Decision:* (a) add a per-isolated-DB daily line (amortized floor ~$0.035/DB, realistically $1–3/mo) gated on `databaseMode='isolated'`, **or** (b) fold DB cost into the container fee + set a minimum density before provisioning the dedicated ccx33.\n- [ ] **[design — nubs] Deploy takes no upfront charge / no balance precheck** (and bypasses the quota check). Grace-window hosting is free; repeatable spin-up/tear-down costs us. *Fix:* charge `DEPLOYMENT` ($0.50) at create, or require `credit_balance ≥ 1–2 days` before provisioning.\n\n### MEDIUM / LOW\n- [ ] **[2AM] `organizations.credit_balance` DEFAULTS to `$100`** (`organizations.ts:33-35`) — any future org-create that omits the field grants ~$100 free hosting. *Fix:* default `'0.00'`; grant starter credits explicitly.\n- [ ] **[2AM] Daily debit is a non-atomic JS read-modify-write** (absolute balance) → lost-update vs concurrent inference debits/top-ups. *Fix:* route through `creditsService.deductCredits` (relative decrement with a guard).\n- [ ] **[ours] No `--cpus` limit** — we bill a CPU tier (1792→1.75×) but enforce only `--memory`; and our app containers actually provision at `cpu:1/512MB` (`APP_CONTAINER_DEFAULTS`) while billing assumes 1792/1792. *Fix:* reconcile the provision defaults with the billed dimensions + add `--cpus`.\n- [ ] **[design] Copy says $0.67/day; real default is $1.17/day**; cost-basis constants are AWS references, not Hetzner. Reconcile copy / cost basis.\n\n## Numbers\n- Revenue: $0.67/day base ×1.75 (cpu=1792) = **$1.17/day**. Real Hetzner: ccx23 ~$0.79/day (app node), ccx33 ~$1.74/day + 200GB ~$0.31/day (tenant DB). Container margin ~2–4×; full-lane break-even ~3 containers.\n- Inference: `cost_to_user = provider_cost × 1.20`, always positive.\n\nAudit method: 6-agent read-only sweep of pricing constants, the container-billing cron + repo, the tenant-db provisioning/cluster code, the apps deploy path, and the inference billing path.",
       "createdAt": "2026-06-08T17:05:25Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABE30lzA",
-      "title": "🌐 Runtime Open Federation — connect your Eliza agent to an open multi-agent network (USDC rewards, no key)",
-      "author": "Nexussyn",
-      "number": 8345,
-      "repository": "elizaos/eliza",
-      "body": "## 🤖 Runtime Open Federation × ElizaOS\n\nHey ElizaOS community! 👋\n\n**Runtime Open Federation** is a permissionless, open AI agent network now live. Any Eliza agent can register, pick up tasks from the shared task market, and earn **USDC on Base chain**.\n\n### Why ElizaOS + Federation = 💥\n\n- Eliza’s plugin architecture maps perfectly to federation capabilities\n- **No API key** to join — open network\n- **MCP 1.0 + AgentProtocol** compatible\n- **USDC rewards** via Base chain (25% pool for contributors)\n- Cross-framework: your Eliza agent works alongside CrewAI, LangChain, AutoGPT agents\n\n### Integration snippet (TypeScript)\n\n```typescript\n// Register your Eliza agent in the federation\nconst res = await fetch(\n  'https://kjtirbnxxymeumycrhqv.supabase.co/functions/v1/runtime-public-federation/register',\n  {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({\n      agent_id: 'my-eliza-agent',\n      capabilities: ['conversation', 'social', 'autonomous'],\n      framework: 'elizaos',\n      endpoint: 'https://your-eliza-instance.com'\n    })\n  }\n);\n\n// Get open tasks\nconst manifest = await fetch(\n   'https://kjtirbnxxymeumycrhqv.supabase.co/functions/v1/runtime-public-federation/manifest'\n).then(r => r.json());\n```\n\n🔗 **Federation Manifest**: https://kjtirbnxxymeumycrhqv.supabase.co/functions/v1/runtime-public-federation/manifest\n\n---\n\n**Multilingual:**\n\n🇫🇷 *La Fédération Ouverte Runtime est en ligne — connectez votre agent Eliza, obtenez des récompenses USDC, aucune clé requise.*\n\n🇨🇳 *Runtime开放联合上线 — 连接您的Eliza智能体，获取USDC奖励，无需API密钥。*\n\n🇪🇸 *Runtime Open Federation está en línea — conecta tu agente Eliza, gana recompensas USDC, sin clave requerida.*\n\n🇯🇵 *Runtime Open Federationがライブ中 — Elizaエージェントを接続し、USDC報酬を獲得してください。*\n\n🇷🇺 *Runtime Open Federation запущен — подключите вашего Eliza агентаи получайте награды USDC.*\n\n🇩🇪 *Runtime Open Federation ist live — verbinden Sie Ihren Eliza-Agenten und verdienen Sie USDC-Belohnungen.*\n\n🇸🇦 *اتحاد Runtime المفتوح متاح — وصل وكيل Eliza واحصل على مكافآت USDC.*\n\n🇰🇷 *Runtime Open Federation 라이브 — Eliza 에이전트를 연결하고 USDC 보상을 받으세요.*\n\n---\n\nWho’s building an Eliza plugin for the federation? Let’s connect! 🚀\n\n*Manifest: https://kjtirbnxxymeumycrhqv.supabase.co/functions/v1/runtime-public-federation/manifest*",
-      "createdAt": "2026-06-09T12:32:01Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 0
@@ -78,8 +102,8 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-06-08T16:56:05Z",
       "mergedAt": null,
-      "additions": 13974,
-      "deletions": 1988
+      "additions": 14811,
+      "deletions": 2277
     },
     {
       "id": "PR_kwDOMT5cIs7jl2oZ",
@@ -107,12 +131,67 @@
     }
   ],
   "codeChanges": {
-    "additions": 9452,
-    "deletions": 1092,
-    "files": 147,
-    "commitCount": 211
+    "additions": 13240,
+    "deletions": 2345,
+    "files": 263,
+    "commitCount": 295
   },
   "completedItems": [
+    {
+      "title": "fix(orchestrator): honor the configured session timeout for the ACP initialize handshake",
+      "prNumber": 8286,
+      "type": "bugfix",
+      "body": "## Problem\n`NativeAcpClient.connect()` issues the `initialize` JSON-RPC request without a timeout argument, so it always falls back to the hardcoded `DEFAULT_TIMEOUT_MS` (300s) — even though every session already carries a `timeoutMs` (from",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-native-transport.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-native-transport.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): forward Windows env (Path casing) to ACP sub-agents",
+      "prNumber": 8285,
+      "type": "bugfix",
+      "body": "## What\n\n`shouldForwardEnv` (the allowlist `buildEnv` uses to decide which host env vars a\nspawned ACP coding sub-agent inherits) matched the OS search path as\n`key === \"PATH\"` — case-sensitively.\n\nThe repo runtime is Bun, and **Bun on Wind",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/should-forward-env.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump aiohttp from 3.13.5 to 3.14.0 in /packages/benchmarks/lifeops-bench in the uv group across 1 directory",
+      "prNumber": 8284,
+      "type": "other",
+      "body": "\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=aiohttp&package-manager=uv&previous-version=3.13.5&new-version=3.14.0)](https://docs.github.com/en/github/managing-secur",
+      "files": [
+        "packages/benchmarks/lifeops-bench/uv.lock"
+      ]
+    },
+    {
+      "title": "Improve views/apps screen",
+      "prNumber": 8276,
+      "type": "other",
+      "body": "views page improvements because felt it needed a brush up, feel free to toss",
+      "files": [
+        "packages/ui/src/components/pages/ViewCatalog.test.tsx",
+        "packages/ui/src/components/pages/ViewCatalog.tsx",
+        "packages/ui/src/components/views/ViewIcon.tsx"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): wire the child→parent USE_SKILL parent-agent broker dispatcher",
+      "prNumber": 8275,
+      "type": "feature",
+      "body": "## What\n\nCloses the production gap that left the capped self-spend autonomy mechanism (merged in #8250) unreachable by a live agent. A `/economics` sub-agent can now autonomously drive the monetized-app loop through the parent-agent Cloud c",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/docs/economics-goal-runbook.md",
+        "plugins/plugin-agent-orchestrator/src/__tests__/parent-agent-dispatch.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/parent-agent-broker.ts",
+        "plugins/plugin-agent-orchestrator/src/services/parent-agent-dispatch.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts"
+      ]
+    },
     {
       "title": "feat(cloud-api): add container lifecycle verbs (PATCH/DELETE/scale)",
       "prNumber": 8270,
@@ -151,6 +230,18 @@
         "packages/cloud-sdk/src/client.test.ts",
         "packages/cloud-sdk/src/client.ts",
         "packages/cloud-sdk/src/types.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): credit affiliates on embeddings + voice inference",
+      "prNumber": 8264,
+      "type": "bugfix",
+      "body": "## What\nThread `X-Affiliate-Code` into the inference routes that already call `billUsage` / `billFlatUsage` but weren't reading the header — so affiliate revenue-share works on **embeddings** and **voice (STT / TTS / clone)**, not just `/v1",
+      "files": [
+        "packages/cloud-api/v1/embeddings/route.ts",
+        "packages/cloud-api/v1/voice/clone/route.ts",
+        "packages/cloud-api/v1/voice/stt/route.ts",
+        "packages/cloud-api/v1/voice/tts/route.ts"
       ]
     },
     {
@@ -199,6 +290,35 @@
       ]
     },
     {
+      "title": "chore(lifeops): sweep up post-decomposition leftovers",
+      "prNumber": 8316,
+      "type": "other",
+      "body": "## Background\n\nFollow-up to #8314 — that PR removed the runtime crash (`registerLifeOpsApp is not a function` white-screen) by dropping the calls and the two stale ambient `.d.ts` shims in `packages/app`. Verify agent then flagged a long ta",
+      "files": [
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-bundle-lifecycle.test.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/app/AGENTS.md",
+        "packages/app/CLAUDE.md",
+        "packages/app/README.md",
+        "packages/app/src/main.tsx",
+        "packages/app/src/plugin-loader.ts",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/elizaos/templates/project/apps/app/src/optional-eliza-app-stub.tsx",
+        "packages/elizaos/templates/project/apps/app/src/type-stubs/eliza-apps/lifeops-ui.d.ts",
+        "packages/scripts/lib/sync-eliza-env-aliases.mjs",
+        "packages/ui/src/components/apps/AppsSidebar.stories.tsx",
+        "plugins/plugin-personal-assistant/AGENTS.md",
+        "plugins/plugin-personal-assistant/CLAUDE.md",
+        "plugins/plugin-personal-assistant/src/ui.ts",
+        "plugins/plugin-xr/src/__tests__/xr-bundle-coverage.test.ts",
+        "plugins/plugin-xr/src/__tests__/xr-feature-parity.test.ts",
+        "plugins/plugin-xr/src/__tests__/xr-functional-parity.test.ts"
+      ]
+    },
+    {
       "title": "fix(cloud-shared): correct src import path in tenant-db isolation e2e",
       "prNumber": 8315,
       "type": "bugfix",
@@ -228,6 +348,19 @@
         "packages/cloud-shared/src/lib/config/containers-env.ts",
         "packages/cloud-shared/src/lib/services/__tests__/app-url.test.ts",
         "packages/cloud-shared/src/lib/services/app-url.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): VITE_ENVIRONMENT passthrough for env-gated agent flavors",
+      "prNumber": 8312,
+      "type": "bugfix",
+      "body": "## Why\n\nPrevious attempt (rejected by workflow adversarial verify) had AGENT_FLAVORS filter that always returned 'unknown' because Vite wipes process.env in the SPA bundle. The env-gated filter never fired and the prod dropdown still showed",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-frontend/src/dashboard/agents/_components/create-eliza-agent-dialog.tsx",
+        "packages/cloud-frontend/vite.config.ts",
+        "packages/cloud-frontend/wrangler.toml",
+        "packages/cloud-shared/src/lib/constants/agent-flavors.ts"
       ]
     },
     {
@@ -350,6 +483,22 @@
       ]
     },
     {
+      "title": "fix(example): drop inert Privy + stop leaking the affiliate key in clone-ur-crush",
+      "prNumber": 8298,
+      "type": "bugfix",
+      "body": "Two fixes to the `clone-ur-crush` Cloud example (`packages/examples/cloud/clone-ur-crush`).\n\n## 1. Drop the inert Privy provider — unblocks the production build\n\nThe app mounted `@privy-io/react-auth`'s `PrivyProvider` at the root layout bu",
+      "files": [
+        "packages/examples/cloud/clone-ur-crush/README.md",
+        "packages/examples/cloud/clone-ur-crush/app/api/affiliate/create-character/route.ts",
+        "packages/examples/cloud/clone-ur-crush/app/cloning/page.tsx",
+        "packages/examples/cloud/clone-ur-crush/app/layout.tsx",
+        "packages/examples/cloud/clone-ur-crush/lib/constants.ts",
+        "packages/examples/cloud/clone-ur-crush/next.config.ts",
+        "packages/examples/cloud/clone-ur-crush/package.json",
+        "packages/examples/cloud/clone-ur-crush/providers/PrivyProvider.tsx"
+      ]
+    },
+    {
       "title": "ci(terraform): plan/apply workflow for apps data-plane (staging via develop)",
       "prNumber": 8297,
       "type": "other",
@@ -389,6 +538,16 @@
         "packages/cloud-api/auth/steward-refresh/route.ts",
         "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts",
         "packages/cloud-shared/src/lib/steward/sign.ts"
+      ]
+    },
+    {
+      "title": "registry: add @usenami/plugin-signer (third-party)",
+      "prNumber": 8294,
+      "type": "other",
+      "body": "Adds a third-party community registry entry for **`@usenami/plugin-signer`** — an ElizaOS plugin that signs CEX/DEX perpetual orders through an **AWS Nitro Enclave**, so the venue API key never enters the agent process (HMAC/EIP-712 signing",
+      "files": [
+        "packages/registry/entries/third-party/usenami__plugin-signer.json",
+        "packages/registry/generated-registry.json"
       ]
     },
     {
@@ -765,6 +924,27 @@
       ]
     },
     {
+      "title": "fix(elizaos): gate npm publish on global-install smoke (#8000)",
+      "prNumber": 8352,
+      "type": "bugfix",
+      "body": "## Summary\r\n- **#8000 root cause was already fixed on develop** (removed `@elizaos/cli` alias shim; `elizaos` bin points at `./dist/cli.js`).\r\n- **#8001 is also fixed on develop** — the 2.x CLI has no `engine.io` / Socket.IO on the boot pat",
+      "files": [
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/release.yaml",
+        "README.md",
+        "packages/docs/cli/overview.mdx",
+        "packages/docs/cloud/agents.mdx",
+        "packages/docs/cloud/installation.mdx",
+        "packages/docs/cloud/quickstart.mdx",
+        "packages/docs/installation.mdx",
+        "packages/docs/plugins/create-a-plugin.md",
+        "packages/elizaos/build.ts",
+        "packages/elizaos/package.json",
+        "packages/ui/src/cloud-ui/components/dashboard/cloud-dashboard-components.tsx",
+        "packages/ui/src/cloud-ui/components/docs/mdx-components.stories.tsx"
+      ]
+    },
+    {
       "title": "fix(infra): add name to ignore_changes for apps-data-plane VMs",
       "prNumber": 8349,
       "type": "bugfix",
@@ -783,36 +963,381 @@
         "packages/cloud-shared/src/lib/services/containers/node-autoscaler.test.ts",
         "packages/cloud-shared/src/lib/services/containers/node-autoscaler.ts"
       ]
+    },
+    {
+      "title": "feat (registry): register elizaos-plugin-neynar-search as third-party plugin",
+      "prNumber": 8346,
+      "type": "feature",
+      "body": "Registers elizaos-plugin-neynar-search in the third-party plugins registry.\r\n\r\n- Package: elizaos-plugin-neynar-search\r\n- Repository: github:xavier-arosemena/elizaos-plugin-neynar-search\r\n- Kind: plugin\r\n- Version: 0.1.0\r\n",
+      "files": [
+        "packages/registry/entries/third-party/elizaos-plugin-neynar-search.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "feat(infra): manage data-plane private network via TF on control-plane module",
+      "prNumber": 8392,
+      "type": "feature",
+      "body": "## Why\n\nThe autoscaler attaches every data-plane worker VM to a private Hetzner network. Those networks (currently `eliza-production-private` id 12305703 and `eliza-staging-private` id 12305704) were created out-of-band in the Hetzner conso",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "fix(infra): thread replace input via env var (GHA quote-escaping)",
+      "prNumber": 8391,
+      "type": "bugfix",
+      "body": "Fixes the residual bug in #8389 / #8390: GitHub Actions splices `${{ inputs.replace }}` at YAML-parse time as raw literal text inside the bash double-quoted string. So an input like `hcloud_server.control_plane[\"1\"]` gets rendered as bash s",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-apps-shared.yml",
+        ".github/workflows/terraform-control-plane.yml"
+      ]
+    },
+    {
+      "title": "fix(infra): replace-input trim must not use xargs (strips for_each quotes)",
+      "prNumber": 8390,
+      "type": "bugfix",
+      "body": "## Why\n\nThe \\`replace\\` input bash loop added in #8385 / #8389 used \\`xargs\\` to trim whitespace. \\`xargs\\` also strips literal quotes, so an input like \\`hcloud_server.control_plane[\\\"1\\\"]\\` reached terraform apply as \\`-replace=hcloud_ser",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-apps-shared.yml",
+        ".github/workflows/terraform-control-plane.yml"
+      ]
+    },
+    {
+      "title": "fix(infra): control-plane cloud-init bun integrity check + workflow replace input",
+      "prNumber": 8389,
+      "type": "bugfix",
+      "body": "## Why\n\nPhase 4 prod CP migration uncovered two latent bugs in the control-plane module the moment we provisioned a fresh box on the eliza-prod project.\n\n### Bug 1: bun install silently fails sha256 integrity check\n\\`bootstrap.yaml.tftpl\\` ",
+      "files": [
+        ".github/workflows/terraform-control-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl"
+      ]
+    },
+    {
+      "title": "refactor(infra): decouple control-plane DNS from VM creation",
+      "prNumber": 8388,
+      "type": "refactor",
+      "body": "## Why\n\nPhase 4 prod migration plan revealed that `cloudflare_dns_record.control_plane` would atomically flip its A record `content` to the new `eliza-production-1` IP in the same `terraform apply` that creates the VM — before cloud-init / ",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf"
+      ]
+    },
+    {
+      "title": "refactor(infra): split apps-data-plane → apps-shared + per-env workers",
+      "prNumber": 8386,
+      "type": "refactor",
+      "body": "## Why\n\nThe tenant Postgres + private network are physically a single shared piece of\ninfra across staging + production app workers, but they were being modelled\nper-env inside `apps-data-plane/`. That meant a staging vs prod apply could in",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-apps-shared.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/.terraform.lock.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/versions.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/.gitignore",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/.terraform.lock.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/backend.hcl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/cloud-init/tenant-db.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/tfvars/shared.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/variables.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/versions.tf"
+      ]
+    },
+    {
+      "title": "fix(infra): tenant-db cloud-init resilience (apt + sudo + ordering)",
+      "prNumber": 8385,
+      "type": "bugfix",
+      "body": "## Summary\n\nThree latent failures the previous tenant-db cloud-init template hits the moment a fresh server boots — all caught the hard way during the staging apply this evening. PR #8384 baked the systemd-oneshot approach; this PR makes th",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/tenant-db.yaml.tftpl"
+      ]
+    },
+    {
+      "title": "fix(infra): tenant-db cloud-init -> systemd oneshot (idempotent, survives rescale)",
+      "prNumber": 8384,
+      "type": "bugfix",
+      "body": "## Summary\n\nWraps the tenant-DB cluster setup in a systemd oneshot service installed via\n`write_files`. The service runs on **every boot** (not just the first one),\nevery step is grep- or path-guarded so it's a no-op when there's nothing to",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/tenant-db.yaml.tftpl"
+      ]
+    },
+    {
+      "title": "fix(cloud): Atlas edit models take images[] + size WIDTHxHEIGHT",
+      "prNumber": 8383,
+      "type": "bugfix",
+      "body": "Follow-up to #8380. Per the Atlas image API reference:\n- edit / image-to-image models take a source `images: [...]` array (not a singular `image`)\n- `size` uses `WIDTH*HEIGHT` form (e.g. `2048*2048`)\n\nNormalise a `WxH` size to that, send so",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/image/atlascloud-image-generation.ts"
+      ]
+    },
+    {
+      "title": "feat(registry): register elizaos-plugin-coinrailz as third-party plugin",
+      "prNumber": 8382,
+      "type": "feature",
+      "body": "Registers `elizaos-plugin-coinrailz` as a third-party plugin.\r\n\r\n- npm: https://www.npmjs.com/package/elizaos-plugin-coinrailz  \r\n- Repo: https://github.com/tdnupe3/elizaos-plugin-coinrailz  \r\n- Version: 2.1.0 | License: MIT\r\n\r\nCapabilities",
+      "files": [
+        "packages/registry/entries/third-party/elizaos-plugin-coinrailz.json"
+      ]
+    },
+    {
+      "title": "feat(cloud): add Atlas Cloud image provider (drop-in, OpenAI-compatible)",
+      "prNumber": 8380,
+      "type": "feature",
+      "body": "## Why\nThe deployed cloud worker routes image models (gpt-image-2, gemini-image) through **BitRouter**, but BitRouter serves **no image models** — its `/v1/models` catalog is 100% text-output. So `generate-image` 500s. **Atlas Cloud** does ",
+      "files": [
+        "packages/cloud-api/v1/apps/[id]/generate-image/route.ts",
+        "packages/cloud-api/v1/generate-image/route.ts",
+        "packages/cloud-shared/src/lib/providers/image/atlascloud-image-generation.ts",
+        "packages/cloud-shared/src/lib/providers/image/registry.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-definitions.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/atlascloud.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "refactor(infra): default tenant_db to cpx41 (shared CPU, no dedicated quota)",
+      "prNumber": 8379,
+      "type": "refactor",
+      "body": "## Summary\n\nDefault `tenant_db_server_type` in the `apps-data-plane` Hetzner module flips from `ccx33` (dedicated 8 vCPU / 32 GB) to `cpx41` (shared 8 vCPU / 16 GB).\n\nWhy:\n- ccx33 burns 8 dedicated cores from a Hetzner account-wide quota th",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "refactor(infra): drop provision_tenant_db toggle, always provision the node",
+      "prNumber": 8378,
+      "type": "refactor",
+      "body": "## Summary\n\nReverts the bool toggle from #8377. Apps data-plane always provisions the\ntenant_db ccx33 — no flag, no off mode.\n\n- Dropped `var.provision_tenant_db` + the 3 `count = … ? 1 : 0` gates on\n  `hcloud_server.tenant_db` / `hcloud_se",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/outputs.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "feat(infra): wire TF_VAR_provision_tenant_db in apps-data-plane workflow",
+      "prNumber": 8377,
+      "type": "feature",
+      "body": "## Why\n\napps-data-plane TF has a \\`provision_tenant_db\\` bool variable that gates the dedicated ccx33 tenant Postgres node. Default \\`false\\` (Apps Product 2 is alpha — unrecovered cost at low density). The workflow never threaded the varia",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml"
+      ]
+    },
+    {
+      "title": "feat(infra): apps-data-plane uses HCLOUD_APPS_TOKEN (shared Hetzner project)",
+      "prNumber": 8376,
+      "type": "feature",
+      "body": "## Why\n\nApps Product 2 now lives in a **dedicated Hetzner project** \\`apps\\`, separate from the per-env agent control-plane projects (\\`eliza-staging\\`, \\`eliza-prod\\`). One shared project hosts both staging + production Apps resources — Ap",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/providers.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "chore(cloud-shared): consolidate Hetzner token env to HCLOUD_TOKEN only",
+      "prNumber": 8375,
+      "type": "other",
+      "body": "## Why\n\nDuring the staging multi-project Hetzner migration we hit a 30-minute debug session because the daemon's \\`.env.local\\` had BOTH \\`HCLOUD_TOKEN\\` AND \\`HETZNER_CLOUD_API_KEY\\` set (paranoia copies of the same value from an older boo",
+      "files": [
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud-services/container-control-plane/README.md",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/containers/compute-provider-characterization.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/hetzner-cloud-api.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts",
+        "packages/scripts/cloud/admin/bootstrap-provisioning-worker-host.mjs"
+      ]
+    },
+    {
+      "title": "feat(infra): cloud-init bakes nginx vhost + self-signed cert + CF proxied=true",
+      "prNumber": 8374,
+      "type": "feature",
+      "body": "## Why\n\nStaging migration today landed a TF-spawned control-plane VM that was unroutable for agent traffic:\n\n- nginx ran the default Ubuntu vhost on :80 (no proxy_pass to agent-router on \\`127.0.0.1:3458\\`)\n- :443 had no listener at all\n- C",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/main.tf"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @discordjs/collection from 1.5.3 to 2.1.1",
+      "prNumber": 8373,
+      "type": "other",
+      "body": "Bumps [@discordjs/collection](https://github.com/discordjs/discord.js/tree/HEAD/packages/collection) from 1.5.3 to 2.1.1.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/discordjs/discord.js/releas",
+      "files": [
+        "plugins/plugin-discord/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump esbuild from 0.25.10 to 0.28.0",
+      "prNumber": 8372,
+      "type": "other",
+      "body": "Bumps [esbuild](https://github.com/evanw/esbuild) from 0.25.10 to 0.28.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/evanw/esbuild/releases\">esbuild's releases</a>.</em></p>\n<blockquote>\n<h2>v",
+      "files": [
+        "packages/cloud-services/operator/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @linear/sdk from 83.0.0 to 86.0.0",
+      "prNumber": 8371,
+      "type": "other",
+      "body": "Bumps [@linear/sdk](https://github.com/linear/linear) from 83.0.0 to 86.0.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/linear/linear/releases\">@​linear/sdk's releases</a>.</em></p>\n<blockquot",
+      "files": [
+        "plugins/plugin-linear/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump hono from 4.12.21 to 4.12.25",
+      "prNumber": 8370,
+      "type": "other",
+      "body": "Bumps [hono](https://github.com/honojs/hono) from 4.12.21 to 4.12.25.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/honojs/hono/releases\">hono's releases</a>.</em></p>\n<blockquote>\n<h2>v4.12.25</",
+      "files": [
+        "packages/cloud-api/package.json",
+        "packages/cloud-services/_smoke-mcp/package.json",
+        "packages/cloud-services/container-control-plane/package.json",
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-webhook/package.json",
+        "packages/cloud-shared/package.json",
+        "packages/feed/packages/engine/package.json",
+        "packages/test/cloud-mocks/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump ruby/setup-ruby from 1.310.0 to 1.312.0",
+      "prNumber": 8368,
+      "type": "other",
+      "body": "Bumps [ruby/setup-ruby](https://github.com/ruby/setup-ruby) from 1.310.0 to 1.312.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ruby/setup-ruby/releases\">ruby/setup-ruby's releases</a>.</em></",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump actions/setup-node from 4.4.0 to 6.4.0",
+      "prNumber": 8367,
+      "type": "other",
+      "body": "Bumps [actions/setup-node](https://github.com/actions/setup-node) from 4.4.0 to 6.4.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/actions/setup-node/releases\">actions/setup-node's releases</a>",
+      "files": [
+        ".github/workflows/benchmark-weekly.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump github/codeql-action from 4.36.1 to 4.36.2",
+      "prNumber": 8366,
+      "type": "other",
+      "body": "Bumps [github/codeql-action](https://github.com/github/codeql-action) from 4.36.1 to 4.36.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/github/codeql-action/releases\">github/codeql-action's re",
+      "files": [
+        ".github/workflows/codeql.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump hashicorp/setup-terraform from 3 to 4",
+      "prNumber": 8365,
+      "type": "other",
+      "body": "Bumps [hashicorp/setup-terraform](https://github.com/hashicorp/setup-terraform) from 3 to 4.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/hashicorp/setup-terraform/releases\">hashicorp/setup-terr",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-apps-shared.yml",
+        ".github/workflows/terraform-control-plane.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump anthropics/claude-code-action from 1.0.133 to 1.0.142",
+      "prNumber": 8364,
+      "type": "other",
+      "body": "Bumps [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) from 1.0.133 to 1.0.142.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-code-action/releas",
+      "files": [
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/weekly-maintenance.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update tqdm requirement from ~=4.67.3 to ~=4.68.2 in /packages/benchmarks/OSWorld",
+      "prNumber": 8363,
+      "type": "other",
+      "body": "Updates the requirements on [tqdm](https://github.com/tqdm/tqdm) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/tqdm/tqdm/releases\">tqdm's releases</a>.</em></p>\n<blo",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/setup.py"
+      ]
+    },
+    {
+      "title": "chore(deps): update ag2 requirement from ~=0.13.0 to ~=0.13.3 in /packages/benchmarks/OSWorld",
+      "prNumber": 8362,
+      "type": "other",
+      "body": "Updates the requirements on [ag2](https://github.com/ag2ai/ag2) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ag2ai/ag2/releases\">ag2's releases</a>.</em></p>\n<block",
+      "files": [
+        "packages/benchmarks/OSWorld/requirements.txt"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): set AGENT_ROUTER_ORIGIN_HOST for staging (was hitting prod CP silently)",
+      "prNumber": 8361,
+      "type": "bugfix",
+      "body": "## Why\n\nAfter the control-plane TF apply migrated the staging CP to \\`167.233.105.184\\` (new eliza-staging Hetzner project), the e2e validation workflow (\\`w4va6b87i\\`) flagged that the staging Worker was still routing agent traffic to the ",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 839.2041786891058,
-      "prScore": 838.8041786891058,
+      "totalScore": 1370.6380701520716,
+      "prScore": 1369.8000701520716,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.4,
+      "commentScore": 0.838,
       "summary": null
     },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 652.7255719963276,
+      "totalScore": 655.0255719963276,
       "prScore": 647.7475719963277,
-      "issueScore": 4,
+      "issueScore": 6.1,
       "reviewScore": 0,
-      "commentScore": 0.978,
+      "commentScore": 1.178,
       "summary": null
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 450,
+      "totalScore": 652.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 450,
+      "reviewScore": 652.5,
       "commentScore": 0,
       "summary": null
     },
@@ -847,12 +1372,32 @@
       "summary": null
     },
     {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 78.76207219233933,
+      "prScore": 78.76207219233933,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "github-code-quality",
       "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
-      "totalScore": 31.5,
+      "totalScore": 36,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 31.5,
+      "reviewScore": 36,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tdnupe3",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25161668?u=94680b6bcbcfce954c7a9dd09d667a3919953041&v=4",
+      "totalScore": 29.75829254649702,
+      "prScore": 29.75829254649702,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -861,6 +1406,16 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/212006378?u=51d17beade4934c79b0113de803fc1ef713b0c89&v=4",
       "totalScore": 17.25353563213355,
       "prScore": 17.25353563213355,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ColonistOne",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/271974769?u=af6b52db284d4ebb9209e436a1fb003ff9ccf2e4&v=4",
+      "totalScore": 13.084134726391532,
+      "prScore": 13.084134726391532,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -897,9 +1452,9 @@
       "summary": null
     }
   ],
-  "newPRs": 69,
-  "mergedPRs": 54,
-  "newIssues": 3,
-  "closedIssues": 0,
-  "activeContributors": 13
+  "newPRs": 100,
+  "mergedPRs": 95,
+  "newIssues": 4,
+  "closedIssues": 2,
+  "activeContributors": 18
 }
