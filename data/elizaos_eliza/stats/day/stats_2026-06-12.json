@@ -1,0 +1,181 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-12T00:00:00.000Z",
+    "intervalEnd": "2026-06-13T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-12 to 2026-06-13, elizaos/eliza had 8 new PRs (2 merged), 0 new issues, and 10 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7l6Xts",
+      "title": "chore(scripts): idempotent apps-daemon arming script (IaC, not hand-editing)",
+      "author": "NubsCarson",
+      "number": 8397,
+      "body": "## Why\nThe provisioning-worker already calls `configureAppsDeployBackend()` on boot, but the apps deploy backend only activates once the `APPS_*`/`CONTAINERS_*` env is present in `/opt/eliza/cloud/.env.local`. That env was being hand-set on the box — exactly the manual step to eliminate (@standujar's \"always think IaC / avoid manual\"). This replaces it with a re-runnable script.\n\n## What\n`node packages/scripts/cloud/admin/arm-apps-daemon.mjs --host <cp> --ssh-key <key> --app-node <id:ip:cap> --base-domain apps-staging.elizacloud.ai --caddy-admin http://<node>:2019 --tenant-admin-dsn '<dsn>' --node-ssh-key-path <key-the-node-accepts>`\n\n- **Idempotent upsert**: deletes-then-appends each key, every other line untouched, so it's safe to re-run and never clobbers the agent/coding-fleet config. Backs up the env file once.\n- Restarts `eliza-provisioning-worker.service` and prints status + last log lines (secrets redacted in all output).\n- **`--dry-run`** prints the exact remote script without touching anything.\n- Mirrors `bootstrap-provisioning-worker-host.mjs` (operator SSH). Values come from flags fed by the `apps-shared` + per-env terraform outputs, so re-running after an infra change re-converges the box.\n\nPairs with #8394 (Caddy front door). Verified: `node --check` clean, biome clean, dry-run renders a correct idempotent remote script. Inert until run with a real `--host`/`--ssh-key`.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-12T20:16:09Z",
+      "mergedAt": null,
+      "additions": 159,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7l4u_w",
+      "title": "Add EvoLink support to plugin-openai",
+      "author": "EvoLinkAI",
+      "number": 8395,
+      "body": "## Summary\n- allow @elizaos/plugin-openai to auto-enable with EVOLINK_API_KEY\n- resolve EvoLink's OpenAI-compatible base URL and default text model when only EvoLink settings are present\n- document EvoLink env vars and expose them in pluginParameters\n\n## Validation\n- bun install --no-save\n- bun run --cwd packages/core build\n- bunx vitest run --config vitest.config.ts __tests__/cerebras-config.shape.test.ts __tests__/auto-enable.test.ts (from plugins/plugin-openai) => 2 files / 17 tests passed\n- bun run --cwd plugins/plugin-openai typecheck\n- bunx @biomejs/biome check plugins/plugin-openai/README.md plugins/plugin-openai/auto-enable.ts plugins/plugin-openai/index.ts plugins/plugin-openai/utils/config.ts plugins/plugin-openai/__tests__/cerebras-config.shape.test.ts plugins/plugin-openai/__tests__/auto-enable.test.ts\n- bun run --cwd plugins/plugin-openai build\n- git diff --check\n- rg \"evolink/auto|api\\.evolink\\.ai/v1|api\\.evolink\\.ai\" plugins/plugin-openai (no matches)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-12T18:54:33Z",
+      "mergedAt": null,
+      "additions": 145,
+      "deletions": 6
+    },
+    {
+      "id": "PR_kwDOMT5cIs7l7MI8",
+      "title": "ci(infra): dispatchable workflow to arm the apps daemon (no operator SSH needed)",
+      "author": "NubsCarson",
+      "number": 8398,
+      "body": "## Why\nArming the apps (Product 2) deploy backend meant **hand-SSHing the control plane** to set the `APPS_*`/`CONTAINERS_*` env in `cloud/.env.local`. @standujar's directive is \"always think IaC / avoid manual\" — and there's a second benefit: this needs **no operator SSH key added to any box**, because it reuses the **same `ELIZA_PROVISIONING_SSH_KEY`/`HOST` secrets the deploy workflow already uses**.\n\n## What\n`workflow_dispatch` → SSHes the env's provisioning host → **idempotent upsert** of the apps env (delete-then-append per key, every other line untouched, so the agent/coding-fleet config is never clobbered) → restarts `eliza-provisioning-worker.service` → prints status (secrets redacted).\n\nInputs: `environment`, `app_node` (`id:ip:capacity`), optional `tenant_admin_dsn` (empty → daemon uses the seeded encrypted `tenant_db_clusters` row), optional `egress_proxy`. Base domain from `vars.APPS_BASE_DOMAIN`; Caddy admin URL derived from the app-node IP.\n\nMirrors `packages/scripts/cloud/admin/arm-apps-daemon.mjs` (#8397) so a local run and a CI run produce the same box state. Completes the go-live trio with #8394 (Caddy front door).\n\n## Net\nAfter this + #8394 + a node replace, the full apps go-live is **all dispatchable** (terraform apply → arm → deploy) with zero manual SSH — anyone with repo access can run it, nothing hand-typed on a box.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-12T20:57:38Z",
+      "mergedAt": null,
+      "additions": 124,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7l8Q3G",
+      "title": "ci(infra): one-shot workflow to remove an orphaned apps-data-plane state entry",
+      "author": "NubsCarson",
+      "number": 8400,
+      "body": "## Why\nThe #8386 split moved `random_password.tenant_db_admin` from `apps-data-plane` → `apps-shared`, but the **per-env state still lists it**, so every `terraform init -lockfile=readonly` (plan/apply) fails with *\"provider dependency changes detected\"* — the apps-data-plane apply is fully blocked until the orphan is removed (details: #8321).\n\n## What\nA `workflow_dispatch` that runs a **state-only `terraform state rm`** — it never touches real infrastructure (no plan, no apply). Defaults to that exact orphan + `staging`, double-guarded (`confirm` must be the word `remove`), shares the `terraform-apps-hetzner` concurrency group so it can't race an apply, and checks the address is actually in state first (warns + skips if already gone). Inits **without** `-lockfile=readonly` here (only here) so terraform can load a state that references a now-dropped provider. Reusable for any future module-split orphan.\n\n## After this merges\nDispatch it for staging (+ production) → the orphan clears → `terraform-apps-data-plane` plan/apply reconciles → I drive the rest of go-live by dispatch (apply `-replace=app_node[1]` so it boots with the merged Caddy → arm via #8398 → sample deploy). cc @standujar — this is the IaC version of the `state rm` from #8321; equivalent to running it by hand, just reviewable + repeatable.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-12T22:02:46Z",
+      "mergedAt": null,
+      "additions": 96,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7l4uqh",
+      "title": "feat(infra): install Caddy front door in app-node cloud-init (last apps-lane TODO)",
+      "author": "NubsCarson",
+      "number": 8394,
+      "body": "## What\nReplaces the final `STAN:` TODO in the app-node cloud-init with the real ingress front door. Verified live: the staging app node (`167.233.112.155`, behind `*.apps-staging.elizacloud.ai`) currently answers **nothing on :80/:443** — ports open, no listener — so no per-app URL can serve until this lands + the node is replaced.\n\nMatches the contract the **merged** runtime code already targets:\n- **on-demand TLS** gated by cloud-api's ask endpoint (`/api/v1/apps-ingress/ask`) — **live-verified answering fail-closed on both `api-staging` and `api` prod** — so certs are only minted for a running container's shortid host or a verified+active managed custom domain (#8325/#8335);\n- **admin API on `:2019`** for the deploy flow's live route add/remove (`apps-ingress-provisioner`: idempotent POST by `@id`, DELETE on teardown) — exposed **only to `operator_ingress_cidrs`** via a new firewall rule (same tight allowlist as SSH, never public);\n- **`import /etc/caddy/apps.d/*.caddy`** so snapshot/reconcile tooling (the admin ingress-map emitter; #8351's client) composes additively;\n- deliberately **no terminal catch-all** in the base server — the deploy flow APPENDS routes, and a terminal handler would shadow every appended route (non-terminal routes pass through; unmatched hosts never pass the ask gate so they never get a cert anyway).\n\n## Config plumbing\n- New required var **`cloud_api_origin`** (validated `https://` origin, no default — staging pointing at prod's ask would mint certs against the wrong environment's state). Threaded through the workflow as `vars.APPS_CLOUD_API_ORIGIN` + preflight check. **Already set on both GH environments** (`https://api-staging.elizacloud.ai` / `https://api.elizacloud.ai`); tfvars examples updated.\n- Caddy from the official Cloudsmith repo (distro package lags); config written before install so first start picks it up; `apps.d/` pre-created with a placeholder so the import validates.\n\n## Rollout\nNew nodes boot serving-ready. The **existing staging node** picks this up via the workflow's `replace` input (`user_data` is `ignore_changes` by design) — it runs no apps yet, so replacement is free. After replace: cert issuance + per-app routes work end-to-end with the merged deploy flow.\n\ncc @standujar — this is the missing leg of \"apps up, start working on that again\"; with it merged + a node replace, the staging apps lane serves real URLs.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-12T18:54:20Z",
+      "mergedAt": "2026-06-12T20:58:50Z",
+      "additions": 95,
+      "deletions": 2
+    }
+  ],
+  "codeChanges": {
+    "additions": 138,
+    "deletions": 2,
+    "files": 8,
+    "commitCount": 21
+  },
+  "completedItems": [
+    {
+      "title": "feat(infra): install Caddy front door in app-node cloud-init (last apps-lane TODO)",
+      "prNumber": 8394,
+      "type": "feature",
+      "body": "## What\nReplaces the final `STAN:` TODO in the app-node cloud-init with the real ingress front door. Verified live: the staging app node (`167.233.112.155`, behind `*.apps-staging.elizacloud.ai`) currently answers **nothing on :80/:443** — ",
+      "files": [
+        ".github/workflows/terraform-apps-data-plane.yml",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/cloud-init/app-node.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/production.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/tfvars/staging.tfvars.example",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-data-plane/variables.tf"
+      ]
+    },
+    {
+      "title": "fix(infra): install headscale in control-plane cloud-init",
+      "prNumber": 8393,
+      "type": "bugfix",
+      "body": "Last cloud-init gap from tonight's prod CP migration. We had to install headscale by hand on the new CP (curl deb + dpkg -i + chown state dir). Now the package install + systemd unit + state dir come from cloud-init's `packages:` list. The ",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 82.92300170153148,
+      "prScore": 82.48500170153147,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 58.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 58.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "EvoLinkAI",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253253881?u=2824dc86ac92eb07afc48ac43213a31cba6432e6&v=4",
+      "totalScore": 29.523581822961965,
+      "prScore": 29.523581822961965,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 29.21718963391826,
+      "prScore": 29.21718963391826,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "2-A-M",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96268540?u=39ce724443b5cd500fc28905812cdba16e3181a7&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "xavier-arosemena",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/212006378?u=51d17beade4934c79b0113de803fc1ef713b0c89&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "bluetieroperations-create",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/270213615?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 8,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 10
+}
