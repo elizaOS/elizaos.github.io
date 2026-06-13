@@ -1,0 +1,313 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-13T00:00:00.000Z",
+    "intervalEnd": "2026-06-14T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-13 to 2026-06-14, elizaos/eliza had 8 new PRs (10 merged), 0 new issues, and 5 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7jRW_q",
+      "title": "Keep local first-run selection local",
+      "author": "odilitime",
+      "number": 8263,
+      "body": "## Summary\n- reset stale `cloud-inference` first-run state when the Local runtime card is selected\n- add a regression test covering the Local card state reset\n- suppress duplicate `Entity connected` debug log spam by logging only when room participants are newly created\n\n## Verification\n- `bunx @biomejs/biome check packages/ui/src/components/shell/FirstRunShell.tsx packages/ui/src/components/shell/__tests__/FirstRunShell.test.tsx`\n- `bunx @biomejs/biome check packages/core/src/connection.ts packages/core/src/connection.d.ts packages/core/src/runtime.ts`\n\nFocused Vitest was not run in this checkout because dependency linking is currently incomplete for nested `eliza` (`adze` is not linked from node_modules), and local Bun 1.3.9 cannot use the newer nested lockfile with `--frozen-lockfile`.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-05T21:29:49Z",
+      "mergedAt": "2026-06-13T21:02:56Z",
+      "additions": 2372,
+      "deletions": 1895
+    },
+    {
+      "id": "PR_kwDOMT5cIs7mAH_m",
+      "title": "test(cloud-agents): characterization tests for the warm-pool decision engine",
+      "author": "NubsCarson",
+      "number": 8403,
+      "body": "## What\n\n50 net-new **characterization tests** for the agent **warm-pool decision engine** — the layer that keeps pre-warmed agent containers ready for instant claim. No source changed.\n\n## Why\n\nThe warm pool is what makes launching a cloud agent feel instant, and its decision layer is pure + under active autoscaler tuning (#8348 / #8353 / #8357). The module docstrings literally say these functions are *\"pure and tested in isolation\"* — but there were **no tests** for any of them (verified: the `containers/` test dir had no `agent-warm-pool*` or `image-rollout-status` test). This locks the invariants so ongoing tuning can't silently change the contract, and gives a regression net for the subsystem.\n\n## Coverage\n\n- **`agent-warm-pool.ts`** — `decideReplenish` (deficit vs burst-limit vs headroom-to-max vs steady; never negative; counts in-flight provisioning), `decideDrain` (only below floor; oldest-first past the idle window; capped at surplus; ignores rows with no `pool_ready_at`), `decideRollout` (stale-image replace; null image never replaced).\n- **`agent-warm-pool-forecast.ts`** — `computeForecast` (the three guard throws, EMA seeding at the first bucket, `ceil(rate × leadTime) + floor` clamped to `[min, max]`, empty-window ⇒ rate 0 at floor, `leadTime = 0` ⇒ floor) + `DEFAULT_WARM_POOL_POLICY` consistency.\n- **`image-rollout-status.ts`** — `describeImageReference` (digest vs tag vs implicit-latest, `productionSafe` only for a valid full sha256, registry `host:port` not mistaken for a tag, digest-wins-over-tag), `imageMatchesDesired` (digest-by-digest vs tag-by-reference), `summarizeImageRollout` (the full state machine: disabled → blocked-unpinned → no-ready-pool → needs-rollout → current, plus counts/staleRows/sorted currentImages/unsupported canary+rollback).\n\n## Safety\n\nPure net-new test files. Touches no source, no forbidden/hot files (no `eliza-sandbox`, `node-autoscaler` logic, containers route, billing, schema, or `hetzner-client`), and no in-flight PR adds these. **50/50 green, typecheck + biome clean.**\n\nPart of helping ship cloud agents (reliability/regression-net track). cc @standujar\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-13T03:05:28Z",
+      "mergedAt": "2026-06-13T09:01:52Z",
+      "additions": 620,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7l-c_w",
+      "title": "fix(cloud-apps): tear down isolated tenant DB on app delete (#8342)",
+      "author": "NubsCarson",
+      "number": 8401,
+      "body": "## What\n\nFixes CRITICAL leak #2 from #8342: **a deleted app with an ISOLATED per-tenant DB never DROPped its Postgres or released its cluster slot** — so we kept paying for a stranded DB and permanently burned 1/`max_databases` of a cluster's finite slots.\n\n## Why it was leaking\n\nThe deprovision logic already exists end to end — `deprovisionTenantDbForApp` + `cleanupDatabase`'s isolated branch + `releaseSlot` (`GREATEST(0, database_count - 1)`). It was **runtime-dead**: its only caller is the cloud-api **Worker**, whose `UserDatabaseService` singleton has no provisioning backend — correctly, because the `DROP` needs `pg`, which can't load on workerd. So the isolated branch silently no-opped, and on `appsRepository.delete` the `app_databases` row cascaded away, losing the only handle to the DB.\n\n## Fix — mirror the `APP_DEPLOY` split\n\nRun the DROP where `pg` lives (the daemon), triggered from the Worker:\n\n- **New `APP_DB_DEPROVISION` job type** + `app-db-deprovision-job-service.ts` (same shape as `app-deploy-job-service.ts`). The Worker enqueues it (pg-free), carrying the app's **encrypted** DSN in the payload — it's already ciphertext at rest in `app_databases`, so copying it adds no exposure, and it **survives the app row's cascade-delete** so the daemon can still resolve the cluster.\n- **`executeJob`** gains one additive `case` → `dispatchAppDbDeprovisionJob` (decrypts node-side, delegates to the injected deprovisioner: DROP DB + ROLE, then `releaseSlot`).\n- **`apps-deploy-backend`** arms the deprovisioner with the same `makeTenantDbProvisioning()` it already builds (both env-DSN and encrypted modes).\n- **`bootstrap-app`** wires the Worker enqueuer under the existing `APPS_DEPLOY_ENABLED` gate.\n- **`apps.delete`** passes the owning org/user so the job row can be formed.\n\n## Scope / safety\n\n- Targets the **encrypted (canonical Product-2) path**. The env-DSN staging shortcut stores the DSN on the container rather than `app_databases`, so its teardown is a separate small follow-up (noted; staging isn't serving yet).\n- **Idempotent + fail-soft:** an enqueue or DROP hiccup logs and lets the delete proceed; the missing-host / unknown-cluster cases return `{ deprovisioned: false }` rather than throwing. An orphan-DB reconciler remains the backstop.\n- Purely additive to the agent/container dispatch paths — no change to `eliza-sandbox`, `container-billing`, or `hetzner-client`.\n\n## Tests\n\n10 new (all green), plus `typecheck` + `biome` clean:\n- `app-db-deprovision-job-service.test.ts` — payload validation, dispatch decrypt+delegate, unwired-throw, enqueue shape.\n- `user-database-deprovision.test.ts` — the `cleanupDatabase` enqueue seam: fires only with an isolated URI + wired enqueuer + known org; no-ops otherwise.\n\nPart of the #8342 pre-go-live billing-correctness work. cc @standujar\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-13T00:37:28Z",
+      "mergedAt": "2026-06-13T09:13:48Z",
+      "additions": 416,
+      "deletions": 20
+    },
+    {
+      "id": "PR_kwDOMT5cIs7mIxk7",
+      "title": "ci: gate expensive test lanes by changed paths",
+      "author": "odilitime",
+      "number": 8408,
+      "body": "## Summary\n- add lightweight path classifiers to the Tests and Scenario PR E2E workflows\n- skip expensive server/client/plugin/desktop/zero-key/cloud lanes when their code surface is untouched\n- keep manual and scheduled runs full-strength, and keep the aggregate Tests check explicit about classifier health\n\n## Validation\n- Ruby YAML parse for .github/workflows/test.yml and .github/workflows/scenario-pr.yml\n- git diff --check origin/develop...HEAD -- .github/workflows/test.yml .github/workflows/scenario-pr.yml\n\n## Notes\nThis avoids top-level paths: on required workflows so required checks do not stay pending forever when a workflow is not triggered. The workflow still starts, classifies changes, and the expensive jobs skip inside the workflow.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-13T21:13:31Z",
+      "mergedAt": null,
+      "additions": 236,
+      "deletions": 26
+    },
+    {
+      "id": "PR_kwDOMT5cIs7l6Xts",
+      "title": "chore(scripts): idempotent apps-daemon arming script (IaC, not hand-editing)",
+      "author": "NubsCarson",
+      "number": 8397,
+      "body": "## Why\nThe provisioning-worker already calls `configureAppsDeployBackend()` on boot, but the apps deploy backend only activates once the `APPS_*`/`CONTAINERS_*` env is present in `/opt/eliza/cloud/.env.local`. That env was being hand-set on the box — exactly the manual step to eliminate (@standujar's \"always think IaC / avoid manual\"). This replaces it with a re-runnable script.\n\n## What\n`node packages/scripts/cloud/admin/arm-apps-daemon.mjs --host <cp> --ssh-key <key> --app-node <id:ip:cap> --base-domain apps-staging.elizacloud.ai --caddy-admin http://<node>:2019 --tenant-admin-dsn '<dsn>' --node-ssh-key-path <key-the-node-accepts>`\n\n- **Idempotent upsert**: deletes-then-appends each key, every other line untouched, so it's safe to re-run and never clobbers the agent/coding-fleet config. Backs up the env file once.\n- Restarts `eliza-provisioning-worker.service` and prints status + last log lines (secrets redacted in all output).\n- **`--dry-run`** prints the exact remote script without touching anything.\n- Mirrors `bootstrap-provisioning-worker-host.mjs` (operator SSH). Values come from flags fed by the `apps-shared` + per-env terraform outputs, so re-running after an infra change re-converges the box.\n\nPairs with #8394 (Caddy front door). Verified: `node --check` clean, biome clean, dry-run renders a correct idempotent remote script. Inert until run with a real `--host`/`--ssh-key`.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-12T20:16:09Z",
+      "mergedAt": "2026-06-13T00:07:54Z",
+      "additions": 159,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 3476,
+    "deletions": 1834,
+    "files": 94,
+    "commitCount": 35
+  },
+  "completedItems": [
+    {
+      "title": "Keep local first-run selection local",
+      "prNumber": 8263,
+      "type": "other",
+      "body": "## Summary\n- reset stale `cloud-inference` first-run state when the Local runtime card is selected\n- add a regression test covering the Local card state reset\n- suppress duplicate `Entity connected` debug log spam by logging only when room ",
+      "files": [
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/core/src/connection.ts",
+        "packages/core/src/runtime.ts",
+        "packages/ui/src/components/shell/FirstRunShell.tsx",
+        "packages/ui/src/components/shell/__tests__/FirstRunShell.test.tsx",
+        "plugins/plugin-wallet/src/routes/wallet-market-overview-route.ts",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        "bun.lock",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/src/plugin-loader.ts",
+        "packages/app/test/fixtures/plugin-view-visual-review.md",
+        "packages/app/test/route-coverage.test.ts",
+        "packages/app/test/ui-smoke/all-pages-clicksafe.spec.ts",
+        "packages/app/test/ui-smoke/apps-comms-device-interactions.spec.ts",
+        "packages/app/test/ui-smoke/apps-model-training-interactions.spec.ts",
+        "packages/app/test/ui-smoke/apps-personal-assistant-feed-interactions.spec.ts",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/apps-utility-interactions.spec.ts",
+        "packages/app/test/ui-smoke/game-operator-gui-interactions.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/plugin-view-cases.ts",
+        "packages/app/test/ui-smoke/plugin-views-lifecycle.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/view-interaction-coverage.test.ts",
+        "packages/app/vite.config.ts",
+        "packages/examples/cloud/clone-ur-crush/tsconfig.json",
+        "plugins/plugin-app-control/src/services/__tests__/app-verification.integration.test.ts",
+        "plugins/plugin-google/src/client-factory.ts",
+        "plugins/plugin-personal-assistant/src/components/AppBlockerSettingsCard.tsx",
+        "plugins/plugin-personal-assistant/src/components/WebsiteBlockerSettingsCard.tsx",
+        "plugins/plugin-personal-assistant/src/ui.ts",
+        "plugins/plugin-shell/__tests__/shell.real.test.ts",
+        "plugins/plugin-sql/src/base.ts",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/windows-ci.yml",
+        "package.json",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/app-core/src/runtime/app-route-plugin-skip.test.ts",
+        "packages/app-core/vitest.config.ts",
+        "packages/app/test/hmr-coverage.test.ts",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/app/test/ui-smoke-coverage.test.ts",
+        "packages/cloud-api/__tests__/steward-sign.test.ts",
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-shared/package.json",
+        "packages/cloud-shared/src/lib/config/deployment-environment.test.ts",
+        "packages/cloud-shared/src/lib/services/agent-gateway-router.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts",
+        "packages/cloud-shared/src/lib/services/cloudflare-registrar.test.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-shared-billing.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud-shared/src/lib/steward/sign.ts",
+        "packages/core/src/generated/action-docs.ts",
+        "packages/scripts/cloud/admin/dev/pglite-server.ts",
+        "packages/shared/src/contracts/personal-assistant.test.ts",
+        "packages/ui/src/voice/useVoiceConfig.ts",
+        "packages/app/test/ui-smoke/sensitive-request-in-chat.spec.ts",
+        "packages/app/test/ui-smoke/task-widget-in-chat.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/cloud-shared/src/lib/constants/agent-flavors.ts",
+        "packages/app/test/ui-smoke/automations.spec.ts",
+        "packages/app/test/ui-smoke/cloud-provisioning-startup.spec.ts",
+        "packages/app/test/ui-smoke/computer-use.spec.ts",
+        "packages/app/test/ui-smoke/connectors.spec.ts",
+        "packages/app/test/ui-smoke/first-run-startup.spec.ts",
+        "packages/app/test/ui-smoke/game-apps.spec.ts",
+        "packages/app/test/ui-smoke/runtime-configurability.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts"
+      ]
+    },
+    {
+      "title": "ci(infra): one-shot workflow to remove an orphaned apps-data-plane state entry",
+      "prNumber": 8400,
+      "type": "other",
+      "body": "## Why\nThe #8386 split moved `random_password.tenant_db_admin` from `apps-data-plane` → `apps-shared`, but the **per-env state still lists it**, so every `terraform init -lockfile=readonly` (plan/apply) fails with *\"provider dependency chan",
+      "files": [
+        ".github/workflows/terraform-apps-state-rm.yml"
+      ]
+    },
+    {
+      "title": "ci(infra): dispatchable workflow to arm the apps daemon (no operator SSH needed)",
+      "prNumber": 8398,
+      "type": "other",
+      "body": "## Why\nArming the apps (Product 2) deploy backend meant **hand-SSHing the control plane** to set the `APPS_*`/`CONTAINERS_*` env in `cloud/.env.local`. @standujar's directive is \"always think IaC / avoid manual\" — and there's a second benef",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml"
+      ]
+    },
+    {
+      "title": "chore(scripts): idempotent apps-daemon arming script (IaC, not hand-editing)",
+      "prNumber": 8397,
+      "type": "other",
+      "body": "## Why\nThe provisioning-worker already calls `configureAppsDeployBackend()` on boot, but the apps deploy backend only activates once the `APPS_*`/`CONTAINERS_*` env is present in `/opt/eliza/cloud/.env.local`. That env was being hand-set on",
+      "files": [
+        "packages/scripts/cloud/admin/arm-apps-daemon.mjs"
+      ]
+    },
+    {
+      "title": "feat(cloud-api): enable APPS_DEPLOY_ENABLED on staging",
+      "prNumber": 8406,
+      "type": "feature",
+      "body": "Turns on the real apps deploy trigger on the staging Worker now that the apps data plane (apps-shared tenant DB + Caddy app node + armed daemon) is live on staging. Staging vars only, gates configureAppsDeployTrigger, no Product-1 impact. c",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(apps-arm): write .env.local via sudo (root-owned dir)",
+      "prNumber": 8405,
+      "type": "bugfix",
+      "body": "First real arm run hit 'sed: Permission denied' on /opt/eliza/cloud (root-owned). Route the env-file ops through sudo (deploy user has passwordless sudo, same as worker-deploy). set -e meant nothing was written + daemon not restarted, so th",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml"
+      ]
+    },
+    {
+      "title": "feat(apps-arm): fetch tenant DSN from apps-shared output (keep password out of inputs)",
+      "prNumber": 8404,
+      "type": "feature",
+      "body": "Adds an opt-in `fetch_dsn_from_shared_state` flag to the apps daemon arming workflow so the tenant admin DSN is read from the apps-shared terraform output (sensitive, auto-masked) rather than pasted into a dispatch input that would persist ",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml"
+      ]
+    },
+    {
+      "title": "test(cloud-agents): characterization tests for the warm-pool decision engine",
+      "prNumber": 8403,
+      "type": "tests",
+      "body": "## What\n\n50 net-new **characterization tests** for the agent **warm-pool decision engine** — the layer that keeps pre-warmed agent containers ready for instant claim. No source changed.\n\n## Why\n\nThe warm pool is what makes launching a cloud",
+      "files": [
+        "packages/cloud-shared/src/lib/services/containers/agent-warm-pool-forecast.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/agent-warm-pool.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/image-rollout-status.test.ts"
+      ]
+    },
+    {
+      "title": "fix(apps-shared): add linux_amd64 provider hashes to the lock (adopt applied)",
+      "prNumber": 8402,
+      "type": "bugfix",
+      "body": "Lands the `apps-shared/.terraform.lock.hcl` fix (was missing the linux_amd64 `h1:` hashes → CI `-lockfile=readonly` failed 'cached package does not match checksums', so apps-shared could never plan/apply). Regenerated for linux+darwin, no v",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/.terraform.lock.hcl"
+      ]
+    },
+    {
+      "title": "fix(cloud-apps): tear down isolated tenant DB on app delete (#8342)",
+      "prNumber": 8401,
+      "type": "bugfix",
+      "body": "## What\n\nFixes CRITICAL leak #2 from #8342: **a deleted app with an ISOLATED per-tenant DB never DROPped its Postgres or released its cluster slot** — so we kept paying for a stranded DB and permanently burned 1/`max_databases` of a cluster",
+      "files": [
+        "packages/cloud-api/src/bootstrap-app.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-db-deprovision-job-service.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/provisioning-job-types.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/user-database-deprovision.test.ts",
+        "packages/cloud-shared/src/lib/services/app-db-deprovision-job-service.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/cloud-shared/src/lib/services/apps.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-job-types.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud-shared/src/lib/services/user-database.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 214.42306767221916,
+      "prScore": 213.98506767221917,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 49.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 49.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 25.18938508044441,
+      "prScore": 25.18938508044441,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ColonistOne",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/271974769?u=af6b52db284d4ebb9209e436a1fb003ff9ccf2e4&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 8,
+  "mergedPRs": 10,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 5
+}

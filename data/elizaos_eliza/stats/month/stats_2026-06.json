@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 270 new PRs (193 merged), 22 new issues, and 28 active contributors.",
+  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 278 new PRs (203 merged), 22 new issues, and 28 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABErit7w",
@@ -17,19 +17,7 @@
       "createdAt": "2026-06-07T23:25:37Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 9
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABEGUTAg",
-      "title": "orchestrator: sub-agent completion narration drops/garbles the deliverable (narration-envelope)",
-      "author": "NubsCarson",
-      "number": 8162,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\nWhen the planner narrates a coding sub-agent's `task_complete` back to the user, the **deliverable** (the printed value / command output) is frequently dropped, truncated, or buried under process chatter — while the underlying sub-agent work is correct. This is a *presentation* defect, not a capability one.\n\nEvidence: a live 48-prompt sweep (30-scenario battery + smart/normie/harden suites) across all three backends found **0 capability-broken defects** — every answer was correct, every spawn produced its artifact, every safety probe handled. The **only** remaining defect class is this narration-envelope.\n\n## Manifestations (all observed live)\n\n1. **Deliverable drop on combo / printed-value tasks.** On the no-change-set completion path, `composeNarration` → `stripToolTranscript(response)` (`sub-agent-router.ts`) deletes the entire `[tool output: …] … [/tool output]` block. For a \"print a value / run a command and report the output\" task (no files changed → no diff), that block *is* the deliverable, so it's gone before the user sees it.\n2. **Value truncation by the parent model.** The synthetic `task_complete` memory is re-rendered by the parent `RESPONSE_HANDLER` (a weak planner in some deployments), which truncates the value — e.g. `2026-06-02` → `202`, a BTC price `70234` → `705`. Per-backend signature: opencode truncates, codex emits verbose process narration + `Completed <task>` banners, claude is cleanest.\n3. **Stale retry attempts leak.** When a first attempt errors (e.g. `session_state_lost` / an ACP crash) and a respawn recovers, the user sees *both* `\"the sub-agent was blocked / crashed, let me try again\"` **and** the eventual deliverable.\n4. **Process chatter.** Sub-agents (esp. codex) narrate their steps (`\"I'll load the workspace context first\"`, `\"rg is not installed\"`, `\"reverse.py already exists\"`); the parent relays it.\n\n## Proposed structural fixes\n\n**(a) Carry the printed-value deliverable verbatim (fixes #1, mitigates #2).** A structural carrier that mirrors the existing verified-URL carrier:\n- *Producer* (`sub-agent-router.ts`): on the `task_complete && !changeSet && verifiedUrls.length === 0` path, recover the captured stdout from the **raw** `response` (before `composeNarration` strips it) via the inverse of `stripToolTranscript`, and stamp it as `metadata.subAgentDeliverable` (gated to a short single block, ≤2KB, so multi-KB transcripts stay on the model-rendered path). *(I have a ready, tested producer patch for this.)*\n- *Consumer* (`evaluators/sub-agent-completion.ts`): when `subAgentDeliverable` is present, relay it **verbatim** instead of letting the model re-summarize/truncate it — parallel to how `subAgentVerifiedUrls` is already consumed.\n\n**(b) Terminal-reply filter (fixes #3, #4).** Emit only the *terminal* sub-agent reply; suppress stale `blocked`/`failed`/`state_lost` attempts that a later retry superseded, plus raw tool chatter and `Completed <task>` banners. **Caveat — needs care:** the `session_state_lost` error event is currently *coupled to the respawn trigger* (re-injecting it is what prompts the parent to respawn), so suppressing the user-facing narration requires an internal-only routing path that keeps the respawn signal. This is the part that needs design discussion.\n\n**(c) Already shipped — source-side mitigation.** #8158 adds an output-discipline section to the scaffolded sub-agent operating manual (\"lead with the deliverable, don't narrate process, no `Completed <task>` banner, a bare workspace has no SOUL.md/USER.md — don't hunt for them\"), which measurably reduced #4 at the source (codex re-probes went from a verbose banner to a bare `5050` / `2026-06-02`).\n\n## Coordination note\n\n`sub-agent-router.ts` and `evaluators/sub-agent-completion.ts` were recently rewritten on `develop`; this should be coordinated with that work rather than landed blind. Happy to open the (a)-producer + (a)-consumer as a focused PR if the approach looks right.",
-      "createdAt": "2026-06-02T09:02:59Z",
-      "closedAt": "2026-06-04T00:23:03Z",
-      "state": "CLOSED",
-      "commentCount": 4
+      "commentCount": 17
     },
     {
       "id": "I_kwDOMT5cIs8AAAABEhtd5g",
@@ -41,6 +29,18 @@
       "createdAt": "2026-06-05T17:18:26Z",
       "closedAt": null,
       "state": "OPEN",
+      "commentCount": 5
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABEGUTAg",
+      "title": "orchestrator: sub-agent completion narration drops/garbles the deliverable (narration-envelope)",
+      "author": "NubsCarson",
+      "number": 8162,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen the planner narrates a coding sub-agent's `task_complete` back to the user, the **deliverable** (the printed value / command output) is frequently dropped, truncated, or buried under process chatter — while the underlying sub-agent work is correct. This is a *presentation* defect, not a capability one.\n\nEvidence: a live 48-prompt sweep (30-scenario battery + smart/normie/harden suites) across all three backends found **0 capability-broken defects** — every answer was correct, every spawn produced its artifact, every safety probe handled. The **only** remaining defect class is this narration-envelope.\n\n## Manifestations (all observed live)\n\n1. **Deliverable drop on combo / printed-value tasks.** On the no-change-set completion path, `composeNarration` → `stripToolTranscript(response)` (`sub-agent-router.ts`) deletes the entire `[tool output: …] … [/tool output]` block. For a \"print a value / run a command and report the output\" task (no files changed → no diff), that block *is* the deliverable, so it's gone before the user sees it.\n2. **Value truncation by the parent model.** The synthetic `task_complete` memory is re-rendered by the parent `RESPONSE_HANDLER` (a weak planner in some deployments), which truncates the value — e.g. `2026-06-02` → `202`, a BTC price `70234` → `705`. Per-backend signature: opencode truncates, codex emits verbose process narration + `Completed <task>` banners, claude is cleanest.\n3. **Stale retry attempts leak.** When a first attempt errors (e.g. `session_state_lost` / an ACP crash) and a respawn recovers, the user sees *both* `\"the sub-agent was blocked / crashed, let me try again\"` **and** the eventual deliverable.\n4. **Process chatter.** Sub-agents (esp. codex) narrate their steps (`\"I'll load the workspace context first\"`, `\"rg is not installed\"`, `\"reverse.py already exists\"`); the parent relays it.\n\n## Proposed structural fixes\n\n**(a) Carry the printed-value deliverable verbatim (fixes #1, mitigates #2).** A structural carrier that mirrors the existing verified-URL carrier:\n- *Producer* (`sub-agent-router.ts`): on the `task_complete && !changeSet && verifiedUrls.length === 0` path, recover the captured stdout from the **raw** `response` (before `composeNarration` strips it) via the inverse of `stripToolTranscript`, and stamp it as `metadata.subAgentDeliverable` (gated to a short single block, ≤2KB, so multi-KB transcripts stay on the model-rendered path). *(I have a ready, tested producer patch for this.)*\n- *Consumer* (`evaluators/sub-agent-completion.ts`): when `subAgentDeliverable` is present, relay it **verbatim** instead of letting the model re-summarize/truncate it — parallel to how `subAgentVerifiedUrls` is already consumed.\n\n**(b) Terminal-reply filter (fixes #3, #4).** Emit only the *terminal* sub-agent reply; suppress stale `blocked`/`failed`/`state_lost` attempts that a later retry superseded, plus raw tool chatter and `Completed <task>` banners. **Caveat — needs care:** the `session_state_lost` error event is currently *coupled to the respawn trigger* (re-injecting it is what prompts the parent to respawn), so suppressing the user-facing narration requires an internal-only routing path that keeps the respawn signal. This is the part that needs design discussion.\n\n**(c) Already shipped — source-side mitigation.** #8158 adds an output-discipline section to the scaffolded sub-agent operating manual (\"lead with the deliverable, don't narrate process, no `Completed <task>` banner, a bare workspace has no SOUL.md/USER.md — don't hunt for them\"), which measurably reduced #4 at the source (codex re-probes went from a verbose banner to a bare `5050` / `2026-06-02`).\n\n## Coordination note\n\n`sub-agent-router.ts` and `evaluators/sub-agent-completion.ts` were recently rewritten on `develop`; this should be coordinated with that work rather than landed blind. Happy to open the (a)-producer + (a)-consumer as a focused PR if the approach looks right.",
+      "createdAt": "2026-06-02T09:02:59Z",
+      "closedAt": "2026-06-04T00:23:03Z",
+      "state": "CLOSED",
       "commentCount": 4
     },
     {
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 44806,
-    "deletions": 11058,
-    "files": 805,
-    "commitCount": 1700
+    "additions": 48282,
+    "deletions": 12892,
+    "files": 849,
+    "commitCount": 1772
   },
   "completedItems": [
     {
@@ -883,6 +883,90 @@
       "body": "## Why\n\nAfter #8176 + #8179 landed, magic-link redirects on staging correctly point to \\`staging.elizacloud.ai/auth/callback/email?token=…&email=…\\`. But clicking the link shows:\n\n> **Sign-in failed** — Could not find the app authorization ",
       "files": [
         "packages/cloud-frontend/src/pages/auth/callback/email/page.tsx"
+      ]
+    },
+    {
+      "title": "Keep local first-run selection local",
+      "prNumber": 8263,
+      "type": "other",
+      "body": "## Summary\n- reset stale `cloud-inference` first-run state when the Local runtime card is selected\n- add a regression test covering the Local card state reset\n- suppress duplicate `Entity connected` debug log spam by logging only when room ",
+      "files": [
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/core/src/connection.ts",
+        "packages/core/src/runtime.ts",
+        "packages/ui/src/components/shell/FirstRunShell.tsx",
+        "packages/ui/src/components/shell/__tests__/FirstRunShell.test.tsx",
+        "plugins/plugin-wallet/src/routes/wallet-market-overview-route.ts",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        "bun.lock",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/src/plugin-loader.ts",
+        "packages/app/test/fixtures/plugin-view-visual-review.md",
+        "packages/app/test/route-coverage.test.ts",
+        "packages/app/test/ui-smoke/all-pages-clicksafe.spec.ts",
+        "packages/app/test/ui-smoke/apps-comms-device-interactions.spec.ts",
+        "packages/app/test/ui-smoke/apps-model-training-interactions.spec.ts",
+        "packages/app/test/ui-smoke/apps-personal-assistant-feed-interactions.spec.ts",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/apps-utility-interactions.spec.ts",
+        "packages/app/test/ui-smoke/game-operator-gui-interactions.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/plugin-view-cases.ts",
+        "packages/app/test/ui-smoke/plugin-views-lifecycle.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/view-interaction-coverage.test.ts",
+        "packages/app/vite.config.ts",
+        "packages/examples/cloud/clone-ur-crush/tsconfig.json",
+        "plugins/plugin-app-control/src/services/__tests__/app-verification.integration.test.ts",
+        "plugins/plugin-google/src/client-factory.ts",
+        "plugins/plugin-personal-assistant/src/components/AppBlockerSettingsCard.tsx",
+        "plugins/plugin-personal-assistant/src/components/WebsiteBlockerSettingsCard.tsx",
+        "plugins/plugin-personal-assistant/src/ui.ts",
+        "plugins/plugin-shell/__tests__/shell.real.test.ts",
+        "plugins/plugin-sql/src/base.ts",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/windows-ci.yml",
+        "package.json",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/app-core/src/runtime/app-route-plugin-skip.test.ts",
+        "packages/app-core/vitest.config.ts",
+        "packages/app/test/hmr-coverage.test.ts",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/app/test/ui-smoke-coverage.test.ts",
+        "packages/cloud-api/__tests__/steward-sign.test.ts",
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-shared/package.json",
+        "packages/cloud-shared/src/lib/config/deployment-environment.test.ts",
+        "packages/cloud-shared/src/lib/services/agent-gateway-router.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts",
+        "packages/cloud-shared/src/lib/services/cloudflare-registrar.test.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-shared-billing.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud-shared/src/lib/steward/sign.ts",
+        "packages/core/src/generated/action-docs.ts",
+        "packages/scripts/cloud/admin/dev/pglite-server.ts",
+        "packages/shared/src/contracts/personal-assistant.test.ts",
+        "packages/ui/src/voice/useVoiceConfig.ts",
+        "packages/app/test/ui-smoke/sensitive-request-in-chat.spec.ts",
+        "packages/app/test/ui-smoke/task-widget-in-chat.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/cloud-shared/src/lib/constants/agent-flavors.ts",
+        "packages/app/test/ui-smoke/automations.spec.ts",
+        "packages/app/test/ui-smoke/cloud-provisioning-startup.spec.ts",
+        "packages/app/test/ui-smoke/computer-use.spec.ts",
+        "packages/app/test/ui-smoke/connectors.spec.ts",
+        "packages/app/test/ui-smoke/first-run-startup.spec.ts",
+        "packages/app/test/ui-smoke/game-apps.spec.ts",
+        "packages/app/test/ui-smoke/runtime-configurability.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts"
       ]
     },
     {
@@ -2831,6 +2915,33 @@
       ]
     },
     {
+      "title": "ci(infra): one-shot workflow to remove an orphaned apps-data-plane state entry",
+      "prNumber": 8400,
+      "type": "other",
+      "body": "## Why\nThe #8386 split moved `random_password.tenant_db_admin` from `apps-data-plane` → `apps-shared`, but the **per-env state still lists it**, so every `terraform init -lockfile=readonly` (plan/apply) fails with *\"provider dependency chan",
+      "files": [
+        ".github/workflows/terraform-apps-state-rm.yml"
+      ]
+    },
+    {
+      "title": "ci(infra): dispatchable workflow to arm the apps daemon (no operator SSH needed)",
+      "prNumber": 8398,
+      "type": "other",
+      "body": "## Why\nArming the apps (Product 2) deploy backend meant **hand-SSHing the control plane** to set the `APPS_*`/`CONTAINERS_*` env in `cloud/.env.local`. @standujar's directive is \"always think IaC / avoid manual\" — and there's a second benef",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml"
+      ]
+    },
+    {
+      "title": "chore(scripts): idempotent apps-daemon arming script (IaC, not hand-editing)",
+      "prNumber": 8397,
+      "type": "other",
+      "body": "## Why\nThe provisioning-worker already calls `configureAppsDeployBackend()` on boot, but the apps deploy backend only activates once the `APPS_*`/`CONTAINERS_*` env is present in `/opt/eliza/cloud/.env.local`. That env was being hand-set on",
+      "files": [
+        "packages/scripts/cloud/admin/arm-apps-daemon.mjs"
+      ]
+    },
+    {
       "title": "feat(infra): install Caddy front door in app-node cloud-init (last apps-lane TODO)",
       "prNumber": 8394,
       "type": "feature",
@@ -2853,36 +2964,101 @@
         "packages/cloud-infra/cloud/terraform/hetzner/control-plane/README.md",
         "packages/cloud-infra/cloud/terraform/hetzner/control-plane/cloud-init/bootstrap.yaml.tftpl"
       ]
+    },
+    {
+      "title": "feat(cloud-api): enable APPS_DEPLOY_ENABLED on staging",
+      "prNumber": 8406,
+      "type": "feature",
+      "body": "Turns on the real apps deploy trigger on the staging Worker now that the apps data plane (apps-shared tenant DB + Caddy app node + armed daemon) is live on staging. Staging vars only, gates configureAppsDeployTrigger, no Product-1 impact. c",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(apps-arm): write .env.local via sudo (root-owned dir)",
+      "prNumber": 8405,
+      "type": "bugfix",
+      "body": "First real arm run hit 'sed: Permission denied' on /opt/eliza/cloud (root-owned). Route the env-file ops through sudo (deploy user has passwordless sudo, same as worker-deploy). set -e meant nothing was written + daemon not restarted, so th",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml"
+      ]
+    },
+    {
+      "title": "feat(apps-arm): fetch tenant DSN from apps-shared output (keep password out of inputs)",
+      "prNumber": 8404,
+      "type": "feature",
+      "body": "Adds an opt-in `fetch_dsn_from_shared_state` flag to the apps daemon arming workflow so the tenant admin DSN is read from the apps-shared terraform output (sensitive, auto-masked) rather than pasted into a dispatch input that would persist ",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml"
+      ]
+    },
+    {
+      "title": "test(cloud-agents): characterization tests for the warm-pool decision engine",
+      "prNumber": 8403,
+      "type": "tests",
+      "body": "## What\n\n50 net-new **characterization tests** for the agent **warm-pool decision engine** — the layer that keeps pre-warmed agent containers ready for instant claim. No source changed.\n\n## Why\n\nThe warm pool is what makes launching a cloud",
+      "files": [
+        "packages/cloud-shared/src/lib/services/containers/agent-warm-pool-forecast.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/agent-warm-pool.test.ts",
+        "packages/cloud-shared/src/lib/services/containers/image-rollout-status.test.ts"
+      ]
+    },
+    {
+      "title": "fix(apps-shared): add linux_amd64 provider hashes to the lock (adopt applied)",
+      "prNumber": 8402,
+      "type": "bugfix",
+      "body": "Lands the `apps-shared/.terraform.lock.hcl` fix (was missing the linux_amd64 `h1:` hashes → CI `-lockfile=readonly` failed 'cached package does not match checksums', so apps-shared could never plan/apply). Regenerated for linux+darwin, no v",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/.terraform.lock.hcl"
+      ]
+    },
+    {
+      "title": "fix(cloud-apps): tear down isolated tenant DB on app delete (#8342)",
+      "prNumber": 8401,
+      "type": "bugfix",
+      "body": "## What\n\nFixes CRITICAL leak #2 from #8342: **a deleted app with an ISOLATED per-tenant DB never DROPped its Postgres or released its cluster slot** — so we kept paying for a stranded DB and permanently burned 1/`max_databases` of a cluster",
+      "files": [
+        "packages/cloud-api/src/bootstrap-app.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-db-deprovision-job-service.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/provisioning-job-types.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/user-database-deprovision.test.ts",
+        "packages/cloud-shared/src/lib/services/app-db-deprovision-job-service.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/cloud-shared/src/lib/services/apps.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-job-types.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud-shared/src/lib/services/user-database.ts"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 2130.1196459087123,
-      "prScore": 2085.0736459087125,
+      "totalScore": 2344.542713580932,
+      "prScore": 2299.058713580932,
       "issueScore": 40.9,
       "reviewScore": 0,
-      "commentScore": 4.146,
+      "commentScore": 4.584,
       "summary": "NubsCarson: Drove significant architectural and feature advancements for the Eliza Cloud platform and orchestrator, most notably implementing the per-tenant-isolated Eliza Cloud Apps data-plane in PR #8293 and introducing the Odysseus workbench for operator inspection in PR #8231. They demonstrated high technical impact by resolving critical race conditions and security vulnerabilities, such as the TOCTOU race in the orchestrator (#8161) and PKCE authentication flows for Steward OAuth (#8259). Through 33 merged pull requests, they balanced complex infrastructure deployments with UI enhancements, including the continuous-chat overlay and Storybook documentation. Their work this month was primarily focused on bug fixes (51%) and feature development (24%) across the core, cloud, and UI modules."
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 2044.2768023415383,
+      "totalScore": 2044.7148023415384,
       "prScore": 2042.8008023415384,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.476,
+      "commentScore": 1.914,
       "summary": "standujar: Led critical infrastructure and cloud platform development for elizaos/eliza, successfully executing a major release sync (#8116) and stabilizing the cloud-api through significant security and authentication fixes, such as pinning Steward tenant headers (#8179) and implementing HMAC signing for proxy requests (#8256). They improved the cloud user experience by enabling the agent web UI by default (#8167) and enhancing the wizard to expose shared versus dedicated execution modes (#8261). Their work was primarily focused on bugfixes (72%) and infrastructure configuration, ensuring robust deployment and authentication flows across the cloud ecosystem."
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 1791,
+      "totalScore": 1840.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 1791,
+      "reviewScore": 1840.5,
       "commentScore": 0,
       "summary": "greptile-apps: No activity this month."
     },
@@ -2937,6 +3113,16 @@
       "summary": null
     },
     {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 101.39464667676269,
+      "prScore": 101.19464667676269,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": "odilitime: Focused on enhancing the stability and developer experience of the elizaos/eliza repository, with three open pull requests (#8153, #8205, #8263) aimed at securing local dev builds and stabilizing startup processes. Their work involved a substantial volume of 36 commits and over 86,000 lines of code changes, reflecting a deep engagement with the project's infrastructure. This effort was primarily concentrated on testing, which accounted for 42% of their activity, alongside significant bugfix and general development work."
+    },
+    {
       "username": "binkyfishai",
       "avatarUrl": "https://avatars.githubusercontent.com/u/172897890?u=13dcfbbffef5a3f90ae60741795eaf47cc93a244&v=4",
       "totalScore": 100.22171602565182,
@@ -2945,16 +3131,6 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "binkyfishai: Focused on enhancing the elizaos/eliza framework through four open pull requests aimed at improving system architecture and usability. These contributions include patching the ESM require shim (#8111), normalizing terminal commands (#8110), integrating LifeOps goals into orchestrator workstreams (#8109), and refining the views and apps screen (#8276). Their work this month centers on infrastructure stability and workflow orchestration within the elizaos ecosystem."
-    },
-    {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 76.20526159631828,
-      "prScore": 76.00526159631828,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": "odilitime: Focused on enhancing the stability and developer experience of the elizaos/eliza repository, with three open pull requests (#8153, #8205, #8263) aimed at securing local dev builds and stabilizing startup processes. Their work involved a substantial volume of 36 commits and over 86,000 lines of code changes, reflecting a deep engagement with the project's infrastructure. This effort was primarily concentrated on testing, which accounted for 42% of their activity, alongside significant bugfix and general development work."
     },
     {
       "username": "SYMBaiEX",
@@ -3039,11 +3215,11 @@
     {
       "username": "ColonistOne",
       "avatarUrl": "https://avatars.githubusercontent.com/u/271974769?u=af6b52db284d4ebb9209e436a1fb003ff9ccf2e4&v=4",
-      "totalScore": 13.084134726391532,
+      "totalScore": 13.284134726391532,
       "prScore": 13.084134726391532,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -3097,8 +3273,8 @@
       "summary": null
     }
   ],
-  "newPRs": 270,
-  "mergedPRs": 193,
+  "newPRs": 278,
+  "mergedPRs": 203,
   "newIssues": 22,
   "closedIssues": 29,
   "activeContributors": 28
