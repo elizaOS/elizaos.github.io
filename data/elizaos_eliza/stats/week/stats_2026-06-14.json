@@ -5,8 +5,45 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-14 to 2026-06-21, elizaos/eliza had 8 new PRs (1 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-06-14 to 2026-06-21, elizaos/eliza had 24 new PRs (14 merged), 2 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABEhtd5g",
+      "title": "Steward login broken in prod: OAuth authorize 400 (code_challenge) + email/send 400 — blocks all Sign in with Eliza Cloud",
+      "author": "NubsCarson",
+      "number": 8257,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nSteward login is broken in production — **both** email and Google OAuth fail with 400 — which blocks \"Sign in with Eliza Cloud\" for **every** app (the cli-login flow bounces all third-party apps + the dashboard through this same login).\n\nReproduces with plain `curl` (no browser, no extensions), so it's a server-side prod issue, not a client environment.\n\n## Symptoms (prod, `api.elizacloud.ai`)\n**Google/OAuth** — `GET /steward/auth/oauth/google/authorize?...&response_type=code`:\n```\n{\"ok\":false,\"error\":\"code_challenge is required for response_type=code\"}\n```\nAdding `code_challenge` + `code_challenge_method=S256` still returns **400**.\n\n**Email** — `POST /steward/auth/email/send` → **400 Bad Request** (from `steward-login-section.tsx` → `signInWithEmail`).\n\n## Root cause (the OAuth half)\nThe Steward `/authorize` endpoint now **requires PKCE** (`code_challenge`), but:\n- `packages/cloud-frontend/src/pages/login/steward-oauth-url.ts` → `buildStewardOAuthAuthorizeUrl()` builds the URL with `response_type: \"code\"` and **no** `code_challenge` / `code_challenge_method`.\n- The exchange flow is **nonce-based with no verifier**: `packages/cloud-api/auth/steward-nonce-exchange/route.ts` documents *\"The Steward API authenticates the exchange purely by possession of the one-time `code` — there is no client [verifier].\"*\n\nSo the authorize service (PKCE-required) and the cloud login flow (nonce-based, no PKCE) are out of sync — and even a hand-added `code_challenge` still 400s, suggesting a deeper Steward auth misconfig/regression in prod.\n\n## Impact\nNo one can sign in via Eliza Cloud right now — dashboard, edad, and every third-party app using the cli-login \"Sign in with Eliza Cloud\" bounce here and dead-end at this login.\n\n## Fix options\n- **A (restore parity):** make Steward `/authorize` accept the nonce flow **without** `code_challenge` (matches the existing nonce-exchange contract). Simplest if PKCE was enabled unintentionally.\n- **B (full PKCE):** frontend generates a `code_verifier` + S256 `code_challenge`, sends `code_challenge` at `/authorize` and stores the verifier; `steward-nonce-exchange` forwards `code_verifier` to `/auth/oauth/exchange`.\n\nThe `email/send` 400 handler isn't in this monorepo (Steward service) — flag for that team too; it may share the same prod regression.\n\nFound via the cli-login flow from a third-party browser app.\n",
+      "createdAt": "2026-06-05T17:18:26Z",
+      "closedAt": "2026-06-15T14:26:07Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABFlJRfQ",
+      "title": "Cloud 10-user launch — tracker",
+      "author": "NubsCarson",
+      "number": 8434,
+      "repository": "elizaos/eliza",
+      "body": "Single tracker for the cloud 10-user launch. **Core works + verified; the launch is gated on staging-green → prod cutover.** Detailed writeup: #8321 (comment).\n\n## ✅ Done — verified live on prod\n- [x] SDK provisions cloud agents (shaw's launch gate) — `/api/v1/eliza/agents` + `/provisioning-agent` → 200\n- [x] Monetized money path — elocute + council both earn real $ (live test)\n- [x] Profits-pay-hosting loop wired + verified\n- [x] #8422 — arm `APPS_DEPLOY_ENABLED` (apps-stuck-`building` root cause) — merged\n- [x] #8426 — recommend healthy Cerebras defaults, drop flaky `:nitro` — merged\n- [x] #8427 — new orgs default `$0` not `$100` (footgun) — merged\n\n## 🟢 PRs open — review / merge\n- [ ] #8430 — wire the apps deploy + tenant-DB E2E into CI (no manual; self-validating)\n- [ ] #8433 — edad gets a per-tenant DB → the single all-features test app\n- [ ] #8425 — enable `APPS_DEPLOY_ENABLED` on **prod** (DRAFT — merge **only** once staging is green)\n\n## 🛠️ Needs an owner\n- [ ] #8428 — release pipeline: grant `NPM_TOKEN` publish access to `@elizaos/*` (lerna E404) — @lalalune\n- [ ] bitrouter#572 — `:nitro` 503 (their hosted gateway). Unblocked via Cerebras-direct meanwhile.\n\n## ⏳ Staging → prod cutover — @standujar's lane\n- [ ] staging green — headscale up ✅; remaining: cert + `AGENT_TOKEN_PRIVATE_KEY_PEM` + `ELIZA_LOCAL_ROOT_KEY` + `KV_REST_API_URL/TOKEN`\n- [ ] terraform prod data plane (`terraform-apps-shared` + `terraform-apps-data-plane`, `environment=production`)\n- [ ] merge develop→main (ships #8425's prod flag)\n- [ ] arm prod daemon (`arm-apps-daemon.yml -f environment=production` — now includes `APPS_DEPLOY_ENABLED` via #8422)\n- [ ] reset stuck app `council` (status=building)\n- [ ] deploy edad → loads at `edad.apps.elizacloud.ai` + exercises the whole platform\n\n## Test apps\n**edad-chat (#8433)** = the single all-features subject (monetized inference + deploy + per-tenant DB + per-app auth + custom domain). elocute (earns), council (deploy), SupaKan (db) are extras.\n\ncc @standujar @lalalune\n",
+      "createdAt": "2026-06-15T22:41:56Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABFktDdg",
+      "title": "Release pipeline broken: NPM_TOKEN lacks @elizaos/* publish access (lerna E404 on @elizaos/agent)",
+      "author": "NubsCarson",
+      "number": 8428,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`release.yaml` has failed on **every** recent run (5/5 on `develop`). `lerna publish` aborts at the first package — `@elizaos/agent` → **`E404 Not found`** — which kills the whole release, so nothing publishes. Result: npm packages are stale (e.g. `@elizaos/cloud-sdk` is `2.0.0-beta.1` on npm vs `2.0.3-beta.13` in the repo).\n\n## Root cause — it's the token, not provenance\n\n`@elizaos/agent` already exists on npm at `0.25.9` (prior owner/era). npm returns **E404** on publish when the authenticated token lacks publish/maintainer rights to an existing scoped package (it masks `403` as `404` to avoid leaking existence). The package itself is fine: `publishConfig.access: \"public\"`, not private; the workflow already has `id-token: write` + provenance configured.\n\n➡️ **The release `NPM_TOKEN` secret does not have publish access to the `@elizaos` scope** (or to `@elizaos/agent` specifically).\n\n## Evidence\n\n```\nlerna verb publish @elizaos/agent\nlerna WARN notice Package failed to publish: @elizaos/agent\nlerna ERR! E404 Not found\n❌ Error: Failed to publish to NPM\n```\n- npm registry: `@elizaos/agent` → `0.25.9`, `@elizaos/core` → `1.7.2`, `@elizaos/cloud-sdk` → `2.0.0-beta.1`\n- repo: all at `2.0.3-beta.13`\n- Failing runs: release.yaml on develop, 2026-06-15 (×3) + 2026-06-06 (×2)\n\n## Fix (ops — needs the npm org owner)\n\n@lalalune (or whoever owns the `@elizaos` npm org): grant the automation token behind the `NPM_TOKEN` actions secret **publish/maintainer** access to `@elizaos/*` (whole scope), or rotate `NPM_TOKEN` to one that has it. No code change needed — verified the package.json + workflow permissions are correct.\n\n## Impact / priority\n\n**Not a launch blocker** — the already-published SDK still provisions agents, and #8426 points eliza's default model at Cerebras-direct. But partners installing `@elizaos/cloud-sdk` from npm (e.g. waifu) get the stale `2.0.0-beta.1`. Worth fixing so fresh SDKs ship to integrators.\n",
+      "createdAt": "2026-06-15T21:21:07Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOMT5cIs7mKu90",
@@ -16,9 +53,45 @@
       "body": "## Summary\n- add a shared `packages/scripts/ci-path-gate.mjs` classifier for PR path gates\n- replace inline bash classifiers in `test.yml` and `scenario-pr.yml` with the shared classifier and richer job summaries\n- add lightweight classifier jobs for Docker, mobile, dev smoke, and Windows desktop smoke workflows so expensive jobs can skip with an explanation\n- split the long deterministic zero-key E2E jobs into parallel named slices with the existing `Zero-Key Deterministic E2E` checks preserved as aggregate gates\n- add force labels for maintainers: `ci:full`, `ci:e2e`, `ci:zero-key`, `ci:server`, `ci:client`, `ci:plugins`, `ci:cloud`, `ci:docker`, `ci:mobile`, `ci:ios`, `ci:android`, `ci:desktop`, `ci:windows`, `ci:dev-smoke`\n- document the PR path-gate contract in `.github/workflows/README.md`\n- add CI workflow changelog and roadmap docs with the WHYs behind path gates, parallel slices, force labels, and future long-pole work\n- self-test the shared classifier in CI before workflow decisions consume it\n\n## Validation\n- `bunx @biomejs/biome check packages/scripts/ci-path-gate.mjs packages/scripts/ci-path-gate.self-test.mjs`\n- `node --check packages/scripts/ci-path-gate.mjs`\n- `node packages/scripts/ci-path-gate.self-test.mjs`\n- YAML parse for touched workflow files via Ruby `YAML.load_file`\n- `git diff --cached --check`\n- `git diff --check`\n- staged-tree classifier samples for `test`, `mobile`, and `docker`, including empty labels and `ci:android` label forcing\n- YAML parse after splitting the `Tests` and `Scenario PR E2E` deterministic lanes\n\n## Notes\n- Push, scheduled, and manual runs keep broad/default behavior.\n- PR label events now trigger the gated workflows so maintainers can force lanes without pushing a no-op commit.\n- The visible deterministic E2E checks are now aggregate status jobs over parallel slices, so reviewers can inspect the failing surface directly instead of opening one giant serial log.\n",
       "repository": "elizaos/eliza",
       "createdAt": "2026-06-14T02:08:35Z",
-      "mergedAt": null,
-      "additions": 1431,
+      "mergedAt": "2026-06-15T22:48:13Z",
+      "additions": 1433,
       "deletions": 201
+    },
+    {
+      "id": "PR_kwDOMT5cIs7kfPLn",
+      "title": "fix(auth): Steward OAuth PKCE for all login surfaces (#8257)",
+      "author": "dutchiono",
+      "number": 8350,
+      "body": "## Summary\r\n- Extract PKCE helpers into `@elizaos/shared/steward-session-client` so every Steward OAuth entrypoint sends `code_challenge` at `/authorize` and replays `code_verifier` at exchange.\r\n- **cloud-frontend** login + **os-homepage** checkout OAuth surfaces\r\n- **Feed** `LoginModal` + `/auth/callback/[provider]` via shared module + `POST /api/auth/steward/oauth/exchange` server route\r\n\r\nFixes the OAuth half of #8257 across all monorepo login surfaces.\r\n\r\n## Test plan\r\n- [x] `bun run --cwd packages/shared test -- steward-oauth-pkce`\r\n- [ ] GitHub CI after maintainer fork-workflow approval\r\n- [ ] Manual: cloud login, os-homepage checkout, Feed OAuth providers\r\n\r\nFixes #8257 (OAuth half — email/send 400 remains Steward service)\r\n\r\n**Note:** Supersedes #8355 (Feed PKCE folded into this PR).\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-09T17:33:39Z",
+      "mergedAt": "2026-06-15T14:26:06Z",
+      "additions": 697,
+      "deletions": 184
+    },
+    {
+      "id": "PR_kwDOMT5cIs7muZ-Y",
+      "title": "chore(deps): bump the uv group across 8 directories with 5 updates",
+      "author": "dependabot",
+      "number": 8424,
+      "body": "\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore <dependency name> major version` will close this group update PR and stop Dependabot creating any more for the specific dependency's major version (unless you unignore this specific dependency's major version or upgrade to it yourself)\n- `@dependabot ignore <dependency name> minor version` will close this group update PR and stop Dependabot creating any more for the specific dependency's minor version (unless you unignore this specific dependency's minor version or upgrade to it yourself)\n- `@dependabot ignore <dependency name>` will close this group update PR and stop Dependabot creating any more for the specific dependency (unless you unignore this specific dependency or upgrade to it yourself)\n- `@dependabot unignore <dependency name>` will remove all of the ignore conditions of the specified dependency\n- `@dependabot unignore <dependency name> <ignore condition>` will remove the ignore condition of the specified dependency and ignore conditions\nYou can disable automated security fix PRs for this repo from the [Security Alerts page](https://github.com/elizaOS/eliza/network/alerts).\n\n</details>",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-15T20:40:38Z",
+      "mergedAt": "2026-06-15T21:13:40Z",
+      "additions": 650,
+      "deletions": 650
+    },
+    {
+      "id": "PR_kwDOMT5cIs7jVqvX",
+      "title": "fix(cloud-api): make container billing idempotent per period (no double-debit on cron re-run)",
+      "author": "2-A-M",
+      "number": 8273,
+      "body": "## What\n\nHardens the daily container-billing cron so a re-run (manual trigger, overlapping CF cron, retry) can never double-debit. Defense in depth across three layers, plus a billing reconciliation fix.\n\n**Stacks on #8269** (the free-hosting fix). Until that merges, the diff here includes its single commit; afterward this shrinks to just the four new commits.\n\n## Why\n\nThe cron had no idempotency: `convertToCredits` re-debited earnings on every call, `listBillableContainers` ignored the (written-but-never-read) `next_billing_at`, there was no app-level lock (CF cron provides none), and `credit_transactions` recorded `-dailyCost` while `credit_balance` only moved by `-fromCredits` — so the ledger overstated the credit debit by the earnings portion (which is already on the earnings ledger), breaking `credit_balance == sum(credit_transactions)`.\n\n## How\n\n- **Deterministic period.** `computeContainerBillingPeriod(now)` normalizes the run to its UTC day, so the period (and the key derived from it) is stable across same-day re-runs.\n- **Earnings idempotency.** `convertToCredits` takes an optional `idempotencyKey` (`container:<id>:<utc-day>`); under the per-user advisory lock it returns the prior `credit_conversion` ledger entry instead of debiting again. Backed by a partial unique index on `redeemable_earnings_ledger((metadata->>'idempotency_key'))`.\n- **Query gate.** `listBillableContainers(now)` skips containers whose `next_billing_at` is still in the future (already paid this period).\n- **Row-lock guard.** `recordSuccessfulDailyBilling` locks the container row and no-ops if the period is already billed — closing the read→write race between listing and charging. Backed by a partial unique index on `container_billing_records(container_id, billing_period_start) WHERE status='success'`.\n- **Reconciliation.** The `credit_transaction` now records `-fromCredits` (the actual credit-balance movement); `dailyCost` and the earnings/credits split stay in metadata.\n\n## Migration (0139)\n\nAdds both partial unique indexes and **dedupes any pre-existing duplicate `success` rows first** (keep earliest by `created_at,id`) so the index can be created on existing prod data — confirmed duplicates can exist today since nothing guarded against them. The ledger index is partial on a non-null key, so existing conversions (which carry no key) are unaffected.\n\n## Verification\n\n- `db:migrate` applies all 140 migrations from scratch incl. 0139 against the real cumulative schema — clean.\n- New PGlite-backed suite (`container-billing-idempotency.test.ts`) exercises the real SQL (`FOR UPDATE`, the JSONB-keyed lookup, both partial unique indexes): earnings debit once per key, gate by `next_billing_at`, `-fromCredits` recorded, row-lock no-op on re-run.\n- `cloud-shared` + `cloud-api` typecheck clean; biome clean; `db:check-migrations` passes.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-06T02:45:26Z",
+      "mergedAt": "2026-06-15T14:14:43Z",
+      "additions": 513,
+      "deletions": 25
     },
     {
       "id": "PR_kwDOMT5cIs7mKIkz",
@@ -31,51 +104,75 @@
       "mergedAt": null,
       "additions": 504,
       "deletions": 2
-    },
-    {
-      "id": "PR_kwDOMT5cIs7mUMSO",
-      "title": "feat(plugin-agent-orchestrator): add ack progress mode + dedupe spawn acks",
-      "author": "NubsCarson",
-      "number": 8416,
-      "body": "## What\n\nAdds an `ack` sub-agent progress mode for chat surfaces (Discord, etc.): post **one** clean spawn acknowledgment, never edit it in place, and let the completion evaluator's synthesis be the separate final message. Fixes the \"the agent keeps editing its message\" UX and the back-to-back double-ack.\n\n## Changes\n\n- **env fallback for progress settings** — `runtime.getSetting()` reads character settings only, so an env-only `ACPX_PROGRESS_MODE` was silently ignored; fall back to `process.env`.\n- **`ack` progress mode** — `SubAgentProgressMode` gains `\"ack\"`: one spawn ack, never edited. The completion post is suppressed in `ack`/`silent` mode so it can't compete with the synthesis (the un-edited ack keeps its single ✅ completion reaction).\n- **reliable ack** — post the ack on the first session event of any kind, not on the first narration flush, so fast backends that reach `task_complete` before any narration still ack. `ack` mode forces `delayMs=0` (the progress debounce would otherwise drop the one-shot ack on sub-`delayMs` tasks).\n- **no duplicate / no missing acks** — a synchronous in-flight claim for concurrent events, plus a per-session `acked` marker that survives trailing post-`task_complete` events (some sub-agents emit `message` events after completion).\n- **planner dedupe** — `plannerAlreadyAckedSpawn` (unit-tested): if the planner already replied in the spawn turn, stay silent instead of posting a second ack.\n\n## Test\n\n`bun run --cwd plugins/plugin-agent-orchestrator test:unit` — 647 green, including new `plannerAlreadyAckedSpawn` and `delayMs=0` coverage. Verified live across codex, claude, and gpt-oss backends: each build = one ack + one synthesis, zero in-place edits.\n\n## Reviewer note\n\n`lastPlannerReplyAtByRoom` is updated for all user-facing sends (including a task's synthesis). A new spawn within `PLANNER_ACK_LOOKBACK_MS` (8s) of a previous task's synthesis could suppress the new ack — bounded, rare (requires a back-to-back build within 8s), and costs only one ack. Flagging for awareness; happy to tighten if preferred.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-14T21:49:01Z",
-      "mergedAt": null,
-      "additions": 307,
-      "deletions": 34
-    },
-    {
-      "id": "PR_kwDOMT5cIs7mIxk7",
-      "title": "ci: gate expensive test lanes by changed paths",
-      "author": "odilitime",
-      "number": 8408,
-      "body": "## Summary\n- add lightweight path classifiers to the Tests and Scenario PR E2E workflows\n- skip expensive server/client/plugin/desktop/zero-key/cloud lanes when their code surface is untouched\n- keep manual and scheduled runs full-strength, and keep the aggregate Tests check explicit about classifier health\n\n## Validation\n- Ruby YAML parse for .github/workflows/test.yml and .github/workflows/scenario-pr.yml\n- git diff --check origin/develop...HEAD -- .github/workflows/test.yml .github/workflows/scenario-pr.yml\n\n## Notes\nThis avoids top-level paths: on required workflows so required checks do not stay pending forever when a workflow is not triggered. The workflow still starts, classifies changes, and the expensive jobs skip inside the workflow.",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-13T21:13:31Z",
-      "mergedAt": "2026-06-14T01:56:43Z",
-      "additions": 237,
-      "deletions": 27
-    },
-    {
-      "id": "PR_kwDOMT5cIs7mKG5x",
-      "title": "fix(plugin-agent-orchestrator): route app-build spawns on the originating user request, not the planner's terse task",
-      "author": "NubsCarson",
-      "number": 8410,
-      "body": "A terse planner can leave `content.text` empty at spawn time, so workdir-route matching saw no keywords and picked the wrong workdir. `resolveOriginatingRequestText` recovers the genuine user request from synchronously-available sources (currentMessageText, the state-composed conversation window) with a bounded getMemories fallback, and feeds it to routing in both `runCreate` and `runSpawnAgent`. +11 tests incl. a fail-on-old regression.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-14T00:34:05Z",
-      "mergedAt": null,
-      "additions": 204,
-      "deletions": 35
     }
   ],
   "codeChanges": {
-    "additions": 237,
-    "deletions": 27,
-    "files": 5,
-    "commitCount": 11
+    "additions": 4182,
+    "deletions": 1222,
+    "files": 97,
+    "commitCount": 51
   },
   "completedItems": [
+    {
+      "title": "fix(cloud-api): make container billing idempotent per period (no double-debit on cron re-run)",
+      "prNumber": 8273,
+      "type": "bugfix",
+      "body": "## What\n\nHardens the daily container-billing cron so a re-run (manual trigger, overlapping CF cron, retry) can never double-debit. Defense in depth across three layers, plus a billing reconciliation fix.\n\n**Stacks on #8269** (the free-hosti",
+      "files": [
+        "packages/cloud-api/cron/container-billing/route.ts",
+        "packages/cloud-shared/src/db/migrations/0139_container_billing_idempotency.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud-shared/src/db/repositories/container-billing.ts",
+        "packages/cloud-shared/src/db/schemas/containers.ts",
+        "packages/cloud-shared/src/db/schemas/redeemable-earnings.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-billing-idempotency.test.ts",
+        "packages/cloud-shared/src/lib/services/container-billing-policy.ts",
+        "packages/cloud-shared/src/lib/services/redeemable-earnings.ts",
+        "packages/cloud-shared/src/db/migrations/0142_container_billing_idempotency.sql"
+      ]
+    },
+    {
+      "title": "Add blackwall-eliza-guardrail to the plugin registry",
+      "prNumber": 8302,
+      "type": "other",
+      "body": "## What\n\nAdds a third-party registry entry for [`blackwall-eliza-guardrail`](https://www.npmjs.com/package/blackwall-eliza-guardrail) (published, v0.2.1) — a **pre-action risk guardrail** for elizaOS agents.\n\nIt wraps every registered actio",
+      "files": [
+        "packages/registry/entries/third-party/blackwall-eliza-guardrail.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "fix(auth): Steward OAuth PKCE for all login surfaces (#8257)",
+      "prNumber": 8350,
+      "type": "bugfix",
+      "body": "## Summary\r\n- Extract PKCE helpers into `@elizaos/shared/steward-session-client` so every Steward OAuth entrypoint sends `code_challenge` at `/authorize` and replays `code_verifier` at exchange.\r\n- **cloud-frontend** login + **os-homepage**",
+      "files": [
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.ts",
+        "packages/feed/.env.example",
+        "packages/feed/apps/web/next.config.ts",
+        "packages/feed/apps/web/package.json",
+        "packages/feed/apps/web/src/app/api/auth/steward/oauth/exchange/route.ts",
+        "packages/feed/apps/web/src/app/auth/callback/[provider]/page.tsx",
+        "packages/feed/apps/web/src/components/auth/LoginModal.tsx",
+        "packages/feed/apps/web/src/lib/auth/steward-request-sign.ts",
+        "packages/os-homepage/src/CheckoutPage.tsx",
+        "packages/os-homepage/src/index.css",
+        "packages/os-homepage/tests/homepage.spec.ts",
+        "packages/shared/src/steward-session-client/index.ts",
+        "packages/shared/src/steward-session-client/steward-oauth-pkce.test.ts",
+        "packages/shared/src/steward-session-client/steward-oauth-pkce.ts"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump esbuild from 0.28.0 to 0.28.1 in /packages/cloud-services/operator in the npm_and_yarn group across 1 directory",
+      "prNumber": 8399,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/cloud-services/operator directory: [esbuild](https://github.com/evanw/esbuild).\n\nUpdates `esbuild` from 0.28.0 to 0.28.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced f",
+      "files": [
+        "packages/cloud-services/operator/package.json",
+        "bun.lock"
+      ]
+    },
     {
       "title": "ci: gate expensive test lanes by changed paths",
       "prNumber": 8408,
@@ -88,43 +185,195 @@
         "packages/app/test/ui-smoke/all-pages-clicksafe.spec.ts",
         "packages/app/test/ui-smoke/first-run-startup.spec.ts"
       ]
+    },
+    {
+      "title": "feat(cloud-apps): arm build-from-repo on the daemon (the Vercel-like path)",
+      "prNumber": 8407,
+      "type": "feature",
+      "body": "## What\n\nArms **build-from-repo** on the apps daemon — the \"Vercel-like\" path where the **platform builds the user's repo**, instead of requiring a manually pre-pushed image.\n\n## Why\n\nThe full pipeline (buildx-over-SSH → push → pull → deplo",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/node-builder-exec.test.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "ci: make expensive lanes label-gated and explainable",
+      "prNumber": 8414,
+      "type": "other",
+      "body": "## Summary\n- add a shared `packages/scripts/ci-path-gate.mjs` classifier for PR path gates\n- replace inline bash classifiers in `test.yml` and `scenario-pr.yml` with the shared classifier and richer job summaries\n- add lightweight classifie",
+      "files": [
+        ".github/workflows/CHANGELOG.md",
+        ".github/workflows/README.md",
+        ".github/workflows/ROADMAP.md",
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        "packages/scripts/ci-path-gate.mjs",
+        "packages/scripts/ci-path-gate.self-test.mjs"
+      ]
+    },
+    {
+      "title": "fix(billing): default org credit_balance to $0, not $100 (kill the give-away footgun)",
+      "prNumber": 8427,
+      "type": "bugfix",
+      "body": "## What\n`organizations.credit_balance` DB-defaults to **`100.000000`** (`organizations.ts:35`). Any org row created outside the signup path silently starts with **$100 of free credit**.\n\n## Why it's safe\nThe signup/auto-provision path (`ste",
+      "files": [
+        "packages/cloud-shared/src/db/migrations/0143_org_credit_balance_default_zero.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud-shared/src/db/schemas/organizations.ts"
+      ]
+    },
+    {
+      "title": "fix(models): recommend healthy Cerebras defaults, not the flaky :nitro",
+      "prNumber": 8426,
+      "type": "bugfix",
+      "body": "## What\nPer @shaw + @shad0w tonight: **small = `cerebras gpt-oss-120b`, large = `cerebras zai-glm-4.7`** — both Cerebras-native (the healthy path). The catalog flagged `openai/gpt-oss-120b:nitro` (BitRouter gateway) as `recommended`, but it",
+      "files": [
+        "packages/cloud-shared/src/lib/models/catalog.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 8 directories with 5 updates",
+      "prNumber": 8424,
+      "type": "other",
+      "body": "\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/lifeops-bench/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/pyproject.toml",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/benchmarks/vending-bench/pyproject.toml",
+        "packages/benchmarks/vending-bench/uv.lock",
+        "packages/benchmarks/visualwebbench/uv.lock",
+        "packages/feed/packages/examples/feed-langgraph-agent/uv.lock",
+        "packages/robot/uv.lock",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "feat(cloud-headscale): env-portable config + deploy CI/CD",
+      "prNumber": 8423,
+      "type": "feature",
+      "body": "## Why\nheadscale is the **one cloud service with no deploy automation**. It ships a Dockerfile + `railway.toml` + a manual `DEPLOY.md` runbook, but unlike the gateways (`cloud-gateway-*.yml`) there's no workflow. Consequence: the **staging ",
+      "files": [
+        ".github/workflows/cloud-headscale.yml",
+        "packages/cloud-services/headscale/DEPLOY.md",
+        "packages/cloud-services/headscale/Dockerfile",
+        "packages/cloud-services/headscale/entrypoint.sh",
+        "packages/cloud-services/headscale/railway.toml"
+      ]
+    },
+    {
+      "title": "fix(apps-arm): arm APPS_DEPLOY_ENABLED so the deploy runner activates",
+      "prNumber": 8422,
+      "type": "bugfix",
+      "body": "## What\nThe apps-daemon arm path (`arm-apps-daemon.yml` + its mirror `arm-apps-daemon.mjs`) upserts `APPS_CONTAINERS_ENABLED=1` (container executor) but **never** `APPS_DEPLOY_ENABLED=1`. So even after arming a CP node, the daemon's `armApp",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml",
+        "packages/scripts/cloud/admin/arm-apps-daemon.mjs"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the npm_and_yarn group across 4 directories with 2 updates",
+      "prNumber": 8420,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/examples/smartglasses directory: [vite](https://github.com/vitejs/vite/tree/HEAD/packages/vite).\nBumps the npm_and_yarn group with 1 update in the /packages/feed directory: [ws](ht",
+      "files": [
+        "packages/examples/smartglasses/package.json",
+        "packages/feed/package.json",
+        "plugins/plugin-elizacloud/package.json",
+        "plugins/plugin-facewear/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group across 1 directory with 9 updates",
+      "prNumber": 8417,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 9 updates in the / directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [@biomejs/biome](https://github.com/biomejs/biome/tree/HEAD/packages/@biomejs/biome) | `2.4.16` | `2.5.0` |\n| [@playwright/te",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/benchmarks/eliza-1/package.json",
+        "packages/benchmarks/eliza-1/vision-cua-e2e/package.json",
+        "packages/benchmarks/interrupt-bench/package.json",
+        "packages/benchmarks/lib/package.json",
+        "packages/benchmarks/three-agent-dialogue/package.json",
+        "packages/cloud-api/package.json",
+        "packages/cloud-frontend/package.json",
+        "packages/cloud-routing/package.json",
+        "packages/cloud-services/agent-server/package.json",
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-webhook/package.json",
+        "packages/cloud-services/operator/package.json",
+        "packages/cloud-shared/package.json",
+        "packages/feed/package.json",
+        "packages/feed/packages/examples/local-a2a-server/package.json",
+        "packages/feed/packages/testing/package.json",
+        "packages/feed/tools/chroma/package.json",
+        "packages/feed/tools/e2e/package.json",
+        "packages/sweagent/package.json",
+        "plugins/plugin-app-control/package.json",
+        "plugins/plugin-calendly/package.json",
+        "plugins/plugin-computeruse/package.json",
+        "plugins/plugin-github/package.json",
+        "plugins/plugin-local-storage/package.json",
+        "plugins/plugin-native-camera/package.json",
+        "plugins/plugin-web-search/package.json"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 119.78152259057278,
-      "prScore": 119.58152259057277,
-      "issueScore": 0,
+      "totalScore": 246.30556506945987,
+      "prScore": 241.76556506945985,
+      "issueScore": 4,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0.54,
       "summary": null
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 40.5,
+      "totalScore": 166.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 40.5,
+      "reviewScore": 166.5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "odilitime",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 39.3697738965761,
-      "prScore": 39.3697738965761,
+      "totalScore": 73.77205809610571,
+      "prScore": 73.77205809610571,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 72.11633262892963,
+      "prScore": 71.67833262892962,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
     }
   ],
-  "newPRs": 8,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "newPRs": 24,
+  "mergedPRs": 14,
+  "newIssues": 2,
+  "closedIssues": 1,
+  "activeContributors": 8
 }

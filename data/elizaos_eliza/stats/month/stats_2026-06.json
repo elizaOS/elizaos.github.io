@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 286 new PRs (204 merged), 22 new issues, and 28 active contributors.",
+  "overview": "From 2026-06-01 to 2026-07-01, elizaos/eliza had 302 new PRs (217 merged), 24 new issues, and 28 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABErit7w",
@@ -17,7 +17,7 @@
       "createdAt": "2026-06-07T23:25:37Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 17
+      "commentCount": 19
     },
     {
       "id": "I_kwDOMT5cIs8AAAABEhtd5g",
@@ -27,8 +27,8 @@
       "repository": "elizaos/eliza",
       "body": "## Summary\nSteward login is broken in production — **both** email and Google OAuth fail with 400 — which blocks \"Sign in with Eliza Cloud\" for **every** app (the cli-login flow bounces all third-party apps + the dashboard through this same login).\n\nReproduces with plain `curl` (no browser, no extensions), so it's a server-side prod issue, not a client environment.\n\n## Symptoms (prod, `api.elizacloud.ai`)\n**Google/OAuth** — `GET /steward/auth/oauth/google/authorize?...&response_type=code`:\n```\n{\"ok\":false,\"error\":\"code_challenge is required for response_type=code\"}\n```\nAdding `code_challenge` + `code_challenge_method=S256` still returns **400**.\n\n**Email** — `POST /steward/auth/email/send` → **400 Bad Request** (from `steward-login-section.tsx` → `signInWithEmail`).\n\n## Root cause (the OAuth half)\nThe Steward `/authorize` endpoint now **requires PKCE** (`code_challenge`), but:\n- `packages/cloud-frontend/src/pages/login/steward-oauth-url.ts` → `buildStewardOAuthAuthorizeUrl()` builds the URL with `response_type: \"code\"` and **no** `code_challenge` / `code_challenge_method`.\n- The exchange flow is **nonce-based with no verifier**: `packages/cloud-api/auth/steward-nonce-exchange/route.ts` documents *\"The Steward API authenticates the exchange purely by possession of the one-time `code` — there is no client [verifier].\"*\n\nSo the authorize service (PKCE-required) and the cloud login flow (nonce-based, no PKCE) are out of sync — and even a hand-added `code_challenge` still 400s, suggesting a deeper Steward auth misconfig/regression in prod.\n\n## Impact\nNo one can sign in via Eliza Cloud right now — dashboard, edad, and every third-party app using the cli-login \"Sign in with Eliza Cloud\" bounce here and dead-end at this login.\n\n## Fix options\n- **A (restore parity):** make Steward `/authorize` accept the nonce flow **without** `code_challenge` (matches the existing nonce-exchange contract). Simplest if PKCE was enabled unintentionally.\n- **B (full PKCE):** frontend generates a `code_verifier` + S256 `code_challenge`, sends `code_challenge` at `/authorize` and stores the verifier; `steward-nonce-exchange` forwards `code_verifier` to `/auth/oauth/exchange`.\n\nThe `email/send` 400 handler isn't in this monorepo (Steward service) — flag for that team too; it may share the same prod regression.\n\nFound via the cli-login flow from a third-party browser app.\n",
       "createdAt": "2026-06-05T17:18:26Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-06-15T14:26:07Z",
+      "state": "CLOSED",
       "commentCount": 5
     },
     {
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 48519,
-    "deletions": 12919,
-    "files": 850,
-    "commitCount": 1785
+    "additions": 52464,
+    "deletions": 14114,
+    "files": 900,
+    "commitCount": 1825
   },
   "completedItems": [
     {
@@ -1763,6 +1763,24 @@
       ]
     },
     {
+      "title": "fix(cloud-api): make container billing idempotent per period (no double-debit on cron re-run)",
+      "prNumber": 8273,
+      "type": "bugfix",
+      "body": "## What\n\nHardens the daily container-billing cron so a re-run (manual trigger, overlapping CF cron, retry) can never double-debit. Defense in depth across three layers, plus a billing reconciliation fix.\n\n**Stacks on #8269** (the free-hosti",
+      "files": [
+        "packages/cloud-api/cron/container-billing/route.ts",
+        "packages/cloud-shared/src/db/migrations/0139_container_billing_idempotency.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud-shared/src/db/repositories/container-billing.ts",
+        "packages/cloud-shared/src/db/schemas/containers.ts",
+        "packages/cloud-shared/src/db/schemas/redeemable-earnings.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-billing-idempotency.test.ts",
+        "packages/cloud-shared/src/lib/services/container-billing-policy.ts",
+        "packages/cloud-shared/src/lib/services/redeemable-earnings.ts",
+        "packages/cloud-shared/src/db/migrations/0142_container_billing_idempotency.sql"
+      ]
+    },
+    {
       "title": "fix(cloud): handle @stwd/sdk 0.10 auth result types",
       "prNumber": 8271,
       "type": "bugfix",
@@ -2055,6 +2073,16 @@
       "body": "## Why\n\nAfter #8301 (migration to Steward platform-key path), the daemon now hits `POST /platform/tenants/:id/agents/:id/token` which validates expiresIn against a 7d ceiling:\n\n```\n{\"ok\":false,\"error\":\"expiresIn must be a duration up to 7d ",
       "files": [
         "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "Add blackwall-eliza-guardrail to the plugin registry",
+      "prNumber": 8302,
+      "type": "other",
+      "body": "## What\n\nAdds a third-party registry entry for [`blackwall-eliza-guardrail`](https://www.npmjs.com/package/blackwall-eliza-guardrail) (published, v0.2.1) — a **pre-action risk guardrail** for elizaOS agents.\n\nIt wraps every registered actio",
+      "files": [
+        "packages/registry/entries/third-party/blackwall-eliza-guardrail.json",
+        "packages/registry/generated-registry.json"
       ]
     },
     {
@@ -2550,6 +2578,28 @@
       ]
     },
     {
+      "title": "fix(auth): Steward OAuth PKCE for all login surfaces (#8257)",
+      "prNumber": 8350,
+      "type": "bugfix",
+      "body": "## Summary\r\n- Extract PKCE helpers into `@elizaos/shared/steward-session-client` so every Steward OAuth entrypoint sends `code_challenge` at `/authorize` and replays `code_verifier` at exchange.\r\n- **cloud-frontend** login + **os-homepage**",
+      "files": [
+        "packages/cloud-frontend/src/pages/login/steward-oauth-url.ts",
+        "packages/feed/.env.example",
+        "packages/feed/apps/web/next.config.ts",
+        "packages/feed/apps/web/package.json",
+        "packages/feed/apps/web/src/app/api/auth/steward/oauth/exchange/route.ts",
+        "packages/feed/apps/web/src/app/auth/callback/[provider]/page.tsx",
+        "packages/feed/apps/web/src/components/auth/LoginModal.tsx",
+        "packages/feed/apps/web/src/lib/auth/steward-request-sign.ts",
+        "packages/os-homepage/src/CheckoutPage.tsx",
+        "packages/os-homepage/src/index.css",
+        "packages/os-homepage/tests/homepage.spec.ts",
+        "packages/shared/src/steward-session-client/index.ts",
+        "packages/shared/src/steward-session-client/steward-oauth-pkce.test.ts",
+        "packages/shared/src/steward-session-client/steward-oauth-pkce.ts"
+      ]
+    },
+    {
       "title": "fix(infra): add name to ignore_changes for apps-data-plane VMs",
       "prNumber": 8349,
       "type": "bugfix",
@@ -2924,6 +2974,16 @@
       ]
     },
     {
+      "title": "chore(deps-dev): bump esbuild from 0.28.0 to 0.28.1 in /packages/cloud-services/operator in the npm_and_yarn group across 1 directory",
+      "prNumber": 8399,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/cloud-services/operator directory: [esbuild](https://github.com/evanw/esbuild).\n\nUpdates `esbuild` from 0.28.0 to 0.28.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced f",
+      "files": [
+        "packages/cloud-services/operator/package.json",
+        "bun.lock"
+      ]
+    },
+    {
       "title": "ci(infra): dispatchable workflow to arm the apps daemon (no operator SSH needed)",
       "prNumber": 8398,
       "type": "other",
@@ -2976,6 +3036,18 @@
         "packages/app/test/ui-smoke/ai-qa-capture.spec.ts",
         "packages/app/test/ui-smoke/all-pages-clicksafe.spec.ts",
         "packages/app/test/ui-smoke/first-run-startup.spec.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud-apps): arm build-from-repo on the daemon (the Vercel-like path)",
+      "prNumber": 8407,
+      "type": "feature",
+      "body": "## What\n\nArms **build-from-repo** on the apps daemon — the \"Vercel-like\" path where the **platform builds the user's repo**, instead of requiring a manually pre-pushed image.\n\n## Why\n\nThe full pipeline (buildx-over-SSH → push → pull → deplo",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/node-builder-exec.test.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
       ]
     },
     {
@@ -3042,36 +3114,166 @@
         "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
         "packages/cloud-shared/src/lib/services/user-database.ts"
       ]
+    },
+    {
+      "title": "ci: make expensive lanes label-gated and explainable",
+      "prNumber": 8414,
+      "type": "other",
+      "body": "## Summary\n- add a shared `packages/scripts/ci-path-gate.mjs` classifier for PR path gates\n- replace inline bash classifiers in `test.yml` and `scenario-pr.yml` with the shared classifier and richer job summaries\n- add lightweight classifie",
+      "files": [
+        ".github/workflows/CHANGELOG.md",
+        ".github/workflows/README.md",
+        ".github/workflows/ROADMAP.md",
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        "packages/scripts/ci-path-gate.mjs",
+        "packages/scripts/ci-path-gate.self-test.mjs"
+      ]
+    },
+    {
+      "title": "fix(billing): default org credit_balance to $0, not $100 (kill the give-away footgun)",
+      "prNumber": 8427,
+      "type": "bugfix",
+      "body": "## What\n`organizations.credit_balance` DB-defaults to **`100.000000`** (`organizations.ts:35`). Any org row created outside the signup path silently starts with **$100 of free credit**.\n\n## Why it's safe\nThe signup/auto-provision path (`ste",
+      "files": [
+        "packages/cloud-shared/src/db/migrations/0143_org_credit_balance_default_zero.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud-shared/src/db/schemas/organizations.ts"
+      ]
+    },
+    {
+      "title": "fix(models): recommend healthy Cerebras defaults, not the flaky :nitro",
+      "prNumber": 8426,
+      "type": "bugfix",
+      "body": "## What\nPer @shaw + @shad0w tonight: **small = `cerebras gpt-oss-120b`, large = `cerebras zai-glm-4.7`** — both Cerebras-native (the healthy path). The catalog flagged `openai/gpt-oss-120b:nitro` (BitRouter gateway) as `recommended`, but it",
+      "files": [
+        "packages/cloud-shared/src/lib/models/catalog.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 8 directories with 5 updates",
+      "prNumber": 8424,
+      "type": "other",
+      "body": "\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/lifeops-bench/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/pyproject.toml",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/benchmarks/vending-bench/pyproject.toml",
+        "packages/benchmarks/vending-bench/uv.lock",
+        "packages/benchmarks/visualwebbench/uv.lock",
+        "packages/feed/packages/examples/feed-langgraph-agent/uv.lock",
+        "packages/robot/uv.lock",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "feat(cloud-headscale): env-portable config + deploy CI/CD",
+      "prNumber": 8423,
+      "type": "feature",
+      "body": "## Why\nheadscale is the **one cloud service with no deploy automation**. It ships a Dockerfile + `railway.toml` + a manual `DEPLOY.md` runbook, but unlike the gateways (`cloud-gateway-*.yml`) there's no workflow. Consequence: the **staging ",
+      "files": [
+        ".github/workflows/cloud-headscale.yml",
+        "packages/cloud-services/headscale/DEPLOY.md",
+        "packages/cloud-services/headscale/Dockerfile",
+        "packages/cloud-services/headscale/entrypoint.sh",
+        "packages/cloud-services/headscale/railway.toml"
+      ]
+    },
+    {
+      "title": "fix(apps-arm): arm APPS_DEPLOY_ENABLED so the deploy runner activates",
+      "prNumber": 8422,
+      "type": "bugfix",
+      "body": "## What\nThe apps-daemon arm path (`arm-apps-daemon.yml` + its mirror `arm-apps-daemon.mjs`) upserts `APPS_CONTAINERS_ENABLED=1` (container executor) but **never** `APPS_DEPLOY_ENABLED=1`. So even after arming a CP node, the daemon's `armApp",
+      "files": [
+        ".github/workflows/arm-apps-daemon.yml",
+        "packages/scripts/cloud/admin/arm-apps-daemon.mjs"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the npm_and_yarn group across 4 directories with 2 updates",
+      "prNumber": 8420,
+      "type": "other",
+      "body": "Bumps the npm_and_yarn group with 1 update in the /packages/examples/smartglasses directory: [vite](https://github.com/vitejs/vite/tree/HEAD/packages/vite).\nBumps the npm_and_yarn group with 1 update in the /packages/feed directory: [ws](ht",
+      "files": [
+        "packages/examples/smartglasses/package.json",
+        "packages/feed/package.json",
+        "plugins/plugin-elizacloud/package.json",
+        "plugins/plugin-facewear/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group across 1 directory with 9 updates",
+      "prNumber": 8417,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 9 updates in the / directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [@biomejs/biome](https://github.com/biomejs/biome/tree/HEAD/packages/@biomejs/biome) | `2.4.16` | `2.5.0` |\n| [@playwright/te",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/benchmarks/eliza-1/package.json",
+        "packages/benchmarks/eliza-1/vision-cua-e2e/package.json",
+        "packages/benchmarks/interrupt-bench/package.json",
+        "packages/benchmarks/lib/package.json",
+        "packages/benchmarks/three-agent-dialogue/package.json",
+        "packages/cloud-api/package.json",
+        "packages/cloud-frontend/package.json",
+        "packages/cloud-routing/package.json",
+        "packages/cloud-services/agent-server/package.json",
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-webhook/package.json",
+        "packages/cloud-services/operator/package.json",
+        "packages/cloud-shared/package.json",
+        "packages/feed/package.json",
+        "packages/feed/packages/examples/local-a2a-server/package.json",
+        "packages/feed/packages/testing/package.json",
+        "packages/feed/tools/chroma/package.json",
+        "packages/feed/tools/e2e/package.json",
+        "packages/sweagent/package.json",
+        "plugins/plugin-app-control/package.json",
+        "plugins/plugin-calendly/package.json",
+        "plugins/plugin-computeruse/package.json",
+        "plugins/plugin-github/package.json",
+        "plugins/plugin-local-storage/package.json",
+        "plugins/plugin-native-camera/package.json",
+        "plugins/plugin-web-search/package.json"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 2464.3242361715043,
-      "prScore": 2418.6402361715045,
-      "issueScore": 40.9,
+      "totalScore": 2590.8482786503914,
+      "prScore": 2540.8242786503915,
+      "issueScore": 44.9,
       "reviewScore": 0,
-      "commentScore": 4.784,
+      "commentScore": 5.124,
       "summary": "NubsCarson: Drove significant architectural and feature advancements for the Eliza Cloud platform and orchestrator, most notably implementing the per-tenant-isolated Eliza Cloud Apps data-plane in PR #8293 and introducing the Odysseus workbench for operator inspection in PR #8231. They demonstrated high technical impact by resolving critical race conditions and security vulnerabilities, such as the TOCTOU race in the orchestrator (#8161) and PKCE authentication flows for Steward OAuth (#8259). Through 33 merged pull requests, they balanced complex infrastructure deployments with UI enhancements, including the continuous-chat overlay and Storybook documentation. Their work this month was primarily focused on bug fixes (51%) and feature development (24%) across the core, cloud, and UI modules."
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 2044.7148023415384,
-      "prScore": 2042.8008023415384,
+      "totalScore": 2116.831134970468,
+      "prScore": 2114.479134970468,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.914,
+      "commentScore": 2.352,
       "summary": "standujar: Led critical infrastructure and cloud platform development for elizaos/eliza, successfully executing a major release sync (#8116) and stabilizing the cloud-api through significant security and authentication fixes, such as pinning Steward tenant headers (#8179) and implementing HMAC signing for proxy requests (#8256). They improved the cloud user experience by enabling the agent web UI by default (#8167) and enhancing the wizard to expose shared versus dedicated execution modes (#8261). Their work was primarily focused on bugfixes (72%) and infrastructure configuration, ensuring robust deployment and authentication flows across the cloud ecosystem."
     },
     {
       "username": "greptile-apps",
       "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
-      "totalScore": 1881,
+      "totalScore": 2007,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 1881,
+      "reviewScore": 2007,
       "commentScore": 0,
       "summary": "greptile-apps: No activity this month."
     },
@@ -3116,6 +3318,16 @@
       "summary": "0xSolace: Focused on stabilizing and enhancing cloud infrastructure for the elizaos/eliza repository, merging 8 PRs that prioritized critical bug fixes and service integration. They delivered significant feature work, notably implementing waifu service-key provisioning and patron chat functionality in PR #8150, while ensuring system reliability through response-token budget guarantees in PR #8189. Their efforts were primarily concentrated on bugfix work, which accounted for 72% of their contributions, alongside targeted feature development and testing."
     },
     {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 175.1667047728684,
+      "prScore": 174.9667047728684,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": "odilitime: Focused on enhancing the stability and developer experience of the elizaos/eliza repository, with three open pull requests (#8153, #8205, #8263) aimed at securing local dev builds and stabilizing startup processes. Their work involved a substantial volume of 36 commits and over 86,000 lines of code changes, reflecting a deep engagement with the project's infrastructure. This effort was primarily concentrated on testing, which accounted for 42% of their activity, alongside significant bugfix and general development work."
+    },
+    {
       "username": "dutchiono",
       "avatarUrl": "https://avatars.githubusercontent.com/u/86275975?u=0d8badaa81aa47682651f87dc2d363837876de98&v=4",
       "totalScore": 169.1128724526423,
@@ -3124,16 +3336,6 @@
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
       "summary": "dutchiono: Focused exclusively on critical bug fixes and infrastructure stability within the elizaos/eliza repository, contributing 10 commits and modifying 111 files to address core system reliability. They successfully merged PR #8352 to gate npm publishing, while actively advancing four additional high-priority fixes for cloud infrastructure, billing, and OAuth PKCE authentication. Through 11 total comments across PRs and issues, they maintained a consistent focus on resolving complex technical debt and ensuring robust system performance."
-    },
-    {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 140.76442057333878,
-      "prScore": 140.5644205733388,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": "odilitime: Focused on enhancing the stability and developer experience of the elizaos/eliza repository, with three open pull requests (#8153, #8205, #8263) aimed at securing local dev builds and stabilizing startup processes. Their work involved a substantial volume of 36 commits and over 86,000 lines of code changes, reflecting a deep engagement with the project's infrastructure. This effort was primarily concentrated on testing, which accounted for 42% of their activity, alongside significant bugfix and general development work."
     },
     {
       "username": "binkyfishai",
@@ -3286,9 +3488,9 @@
       "summary": "Nexussyn: No activity this month."
     }
   ],
-  "newPRs": 286,
-  "mergedPRs": 204,
-  "newIssues": 22,
-  "closedIssues": 29,
+  "newPRs": 302,
+  "mergedPRs": 217,
+  "newIssues": 24,
+  "closedIssues": 30,
   "activeContributors": 28
 }
