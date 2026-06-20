@@ -5,20 +5,2155 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-19 to 2026-06-20, elizaos/eliza had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-06-19 to 2026-06-20, elizaos/eliza had 131 new PRs (115 merged), 4 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABErit7w",
+      "title": "Eliza Cloud Apps: scaling + ingress gaps before go-live (audit, evidenced)",
+      "author": "NubsCarson",
+      "number": 8321,
+      "repository": "elizaos/eliza",
+      "body": "## Eliza Cloud Apps (Product 2) — scaling + ingress gaps to close before go-live\n\nA code-level audit of the apps data plane (per-tenant DB + isolated container deploys). **The core design is sound and standard** — per-tenant `DATABASE`+`ROLE` with `REVOKE CONNECT` (real cross-tenant isolation), per-app `--internal` network + DB ambassador, `ClusterPool` sharding. This is *not* jank. But the current code's realistic ceiling is **~dozens of concurrently-running apps, not ~1000**, and the front-door router isn't installed yet. Filing the prioritized gaps (all evidenced) so they're tracked before flipping `APPS_DEPLOY_ENABLED` in prod.\n\nContext: terraform apply is also currently blocked on the staging Hetzner **server limit** (see #8318). Apply bugs (SSH-key 409, retired `cpx41`) are fixed in #8318.\n\n### 🔴 P0 — pre-launch blockers (serve ~0 reachable / isolation maybe inactive)\n1. **Ingress not installed.** `cloud-init/app-node.yaml.tftpl:62-63` leaves Caddy as a `STAN:` TODO — only squid is installed. No per-app `<id>.apps.elizacloud.ai` hostname routes to any container (nothing terminates TLS / reverse-proxies 80/443 → the random high host port). **Serves 0 reachable users until added.** (config)\n2. **Postgres connection ceiling.** `cloud-init/tenant-db.yaml.tftpl:12` leaves `max_connections` at the default 100, and there's **no pgbouncer** anywhere; each app's plugin-sql pool is `max:20 / min:2` (`plugins/plugin-sql/src/pg/manager.ts:16-17`). Exhausted at ~5 apps under load / ~50 idle — `ClusterPool` shards DB *count* (2000 cap), not connections. (config + a pooler)\n3. **Env-var contract unverified.** Orchestrator injects `DATABASE_URL` (`app-deploy-orchestrator.ts:82`) but plugin-sql's primary path reads `POSTGRES_URL`. The cloud eliza loaders *do* map `DATABASE_URL→POSTGRES_URL` (agent.ts:10, settings.ts:100, …), so it's satisfiable — but must be confirmed for the actual app image, else the isolated DB is provisioned and never used (silent PGlite fallback) → per-tenant isolation isn't even active. (code/verify)\n\n### 🟠 P1 — required before real scale (multi-node)\n4. **App placement is single-node.** `container-executor-deps.ts:42-52` always picks `seed.split(',')[0]` — every container piles on node 1; extra terraform app nodes get no placements. No `node_id`/`incrementAllocated` for app containers (`app-container-store.ts`). (code)\n5. **Docker network exhaustion.** One `--internal` bridge per app exhausts the default 172.x address pool at ~31 networks/node; `daemon.json` `default-address-pools` not set in cloud-init. Caps a node at a few dozen tenants regardless of CPU/RAM. (config)\n6. **Multi-node ingress LB.** Wildcard DNS hard-codes `app_node[\"1\"]` (`main.tf:184,190`); no `hcloud_load_balancer`. The moment `app_node_count>1`, apps on node 2+ are dark. (config)\n7. **Tenant-DB slot leak.** `tenant_db_clusters.database_count` only increments (`tenant-db-clusters.ts:44`); no `releaseSlot`/decrement, and `tenant-db-provisioner.deprovision()` (DROP DATABASE/ROLE) has **zero non-test callers** — `UserDatabaseService.cleanupDatabase` only deletes Neon. Under churn, slots ratchet up + orphan DBs accumulate. (code)\n8. **Host-port collisions.** `allocateHostPort()` is a blind random pick in 20000-39999 with no in-use check (`container-executor-deps.ts:86-90`), unlike the agent path's `getUsedDockerHostPorts`. Flakes docker-create at a few hundred containers/node. (code)\n9. **App-plane autoscaler.** `node-autoscaler.ts` is agent-image/platform hardcoded (lines 133,233,435); no autoscaler cron; app provisioning never registers allocation → app demand triggers nothing. Adding app capacity is manual. (code)\n10. **Billing cron at scale + idempotency.** `cron/container-billing/route.ts:391-440` is one serial Worker pass with an N+1 per-org prefetch + inline emails (presses Worker wall-time in the low thousands; can't resume a cut-off pass), and `recordSuccessfulDailyBilling` (`container-billing.ts:153-212`) has **no unique constraint on (container_id, billing_period)** → a duplicate cron fire / manual re-run double-bills. *(2AM-owned billing surface.)*\n11. **Defense-in-depth written but unused.** `buildAppNodeNftablesRules` (drops 169.254.169.254 metadata + RFC1918 pivots), per-app `buildSquidAllowlistConf`, `buildHetznerAppFirewallRules` have **zero non-test callers** — egress is one shared squid + static global allowlist, the metadata/lateral block is code-only, and `-p` binds `0.0.0.0` so app ports are world-exposed until the firewall's applied. (NB: reconcile the nftables RFC1918 drop with the ambassador's legit 10.30.x DB path.) (both)\n\n### 🟡 P2 — later / hardening\n12. Single Postgres superuser per cluster = shared fate (rotation + a non-superuser provisioning role); tighten `operator_ingress_cidrs` (SSH `0.0.0.0/0`); real tenant-DB TLS cert (hostssl vs the `sslmode=disable` fallback).\n13. Kernel sandboxing decision (gVisor/Kata/userns + seccomp) + per-app `--cpus` (only `--memory`/`--pids-limit` set today). Right-size `max_databases` (2000 is misleading until pooling exists). Tenant-DB-node scaling runbook.\n\n**Honest bottom line:** isolation + sharding are real and correct; the work to reach 1000 is *known* (the code is full of accurate `STAN TODO`s) but **not built**. Recommend **not** going live until at least P0 (and ideally #4/#6) are closed. Happy to take the additive, testable items (e.g. #3 set both env vars, #7 slot release, #8 collision-safe ports) as PRs — flag which you want vs. own.\n\ncc @standujar (data-plane) — billing items (#10) are 2AM's surface.\n",
+      "createdAt": "2026-06-07T23:25:37Z",
+      "closedAt": "2026-06-19T19:08:30Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABExJ5kw",
+      "title": "Apps (Product 2) billing: pre-go-live leak + correctness fixes (profitable on happy path, 4 leaks)",
+      "author": "NubsCarson",
+      "number": 8342,
+      "repository": "elizaos/eliza",
+      "body": "Evidence-based audit of the Apps (Product 2) hosting + per-tenant-DB billing. **Bottom line: profitable on the happy path, but 4 leaks must be fixed before go-live.** Nothing is bleeding *today* (the apps lane isn't armed/deployed yet) — these are pre-launch fixes.\n\n## ✅ Profitable on the happy path\n- **Hosting:** a default app bills ~**$1.17/day** ($0.67 base × 1.75 CPU multiplier from the schema default `cpu=1792`) vs **~$0.29–0.58/day** real Hetzner cost → **~2–4× gross margin**, break-even ~1 container/node. Apps **are** enrolled in billing (our deploy sets `billing_status='active'` by schema default → 2AM's `container-billing` cron picks them up like agents). Not hosting for free.\n- **Inference:** end user pays (`cost = provider_cost × 1.20`); platform never subsidizes; creator/affiliate markups stack **on top** of the user's bill. Always net-positive.\n\n## ⚠️ Leaks / correctness bugs (owner-tagged)\n\n### CRITICAL\n- [ ] **[ours] Suspended containers are never `docker stop`ped.** `suspendContainer()` only flips DB flags (`container-billing.ts:117-126`); the node container runs `--restart unless-stopped` (`client.ts:249`) and no reconciler stops `billing_status='suspended'` rows. After suspend the row drops out of `listBillableContainers` forever → a deadbeat's app **runs indefinitely on Hetzner, billed never** (~$210/yr, unbounded). *Fix:* on the shutdown branch, SSH `docker stop` (via our provider) + decrement node allocation, and add a reconciler. (Cross-ref: `suspendContainer` is 2AM's; the stop is ours.)\n- [ ] **[ours] Deleted isolated-DB apps never drop their Postgres + never release the cluster slot.** `SqlTenantDbProvisioner.deprovision` exists (`tenant-db-provisioner.ts:166`) but has **zero live callers**; there is no `releaseSlot` (only `tryClaimSlot` increments). `app-cleanup` drops domains/repo/secrets but not the DB; `cleanupDatabase` handles only the Neon path. → every deleted isolated app **strands a live DB we pay for + burns 1/2000 cluster slots permanently**. *Fix (focused lifecycle PR):* enqueue a deprovision **job** on app delete (DROP DATABASE/ROLE needs `pg` → daemon) + add `releaseSlot` (`database_count = GREATEST(0, database_count-1)`) + extend `cleanupDatabase` for the `direct_pg`/isolated path. **This is the missing half of #8338 (opt-in per-tenant DB).**\n- [ ] **[2AM] `container-billing` cron has no idempotency gate.** It writes `last_billed_at`/`next_billing_at` but never reads them (`container-billing.ts:57-81`); a Cloudflare retry or duplicate POST **re-debits every running container a full extra day** → over-charge → chargebacks. *Fix:* port the agent-billing rebill guard + a unique partial index on `(container_id, billing_period)`.\n\n### HIGH\n- [ ] **[design — nubs] Per-tenant DB / storage / bandwidth bill $0.** The ccx33 tenant-DB node (~$2.05/day incl. 200GB vol) has **no billing line**; an `isolated` app and a `none` app are billed identically. At low density the apps lane runs **negative** (break-even ~3 paying containers; 1 container = −$1.67/day). *Decision:* (a) add a per-isolated-DB daily line (amortized floor ~$0.035/DB, realistically $1–3/mo) gated on `databaseMode='isolated'`, **or** (b) fold DB cost into the container fee + set a minimum density before provisioning the dedicated ccx33.\n- [ ] **[design — nubs] Deploy takes no upfront charge / no balance precheck** (and bypasses the quota check). Grace-window hosting is free; repeatable spin-up/tear-down costs us. *Fix:* charge `DEPLOYMENT` ($0.50) at create, or require `credit_balance ≥ 1–2 days` before provisioning.\n\n### MEDIUM / LOW\n- [ ] **[2AM] `organizations.credit_balance` DEFAULTS to `$100`** (`organizations.ts:33-35`) — any future org-create that omits the field grants ~$100 free hosting. *Fix:* default `'0.00'`; grant starter credits explicitly.\n- [ ] **[2AM] Daily debit is a non-atomic JS read-modify-write** (absolute balance) → lost-update vs concurrent inference debits/top-ups. *Fix:* route through `creditsService.deductCredits` (relative decrement with a guard).\n- [ ] **[ours] No `--cpus` limit** — we bill a CPU tier (1792→1.75×) but enforce only `--memory`; and our app containers actually provision at `cpu:1/512MB` (`APP_CONTAINER_DEFAULTS`) while billing assumes 1792/1792. *Fix:* reconcile the provision defaults with the billed dimensions + add `--cpus`.\n- [ ] **[design] Copy says $0.67/day; real default is $1.17/day**; cost-basis constants are AWS references, not Hetzner. Reconcile copy / cost basis.\n\n## Numbers\n- Revenue: $0.67/day base ×1.75 (cpu=1792) = **$1.17/day**. Real Hetzner: ccx23 ~$0.79/day (app node), ccx33 ~$1.74/day + 200GB ~$0.31/day (tenant DB). Container margin ~2–4×; full-lane break-even ~3 containers.\n- Inference: `cost_to_user = provider_cost × 1.20`, always positive.\n\nAudit method: 6-agent read-only sweep of pricing constants, the container-billing cron + repo, the tenant-db provisioning/cluster code, the apps deploy path, and the inference billing path.",
+      "createdAt": "2026-06-08T17:05:25Z",
+      "closedAt": "2026-06-19T19:05:22Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGDvh_w",
+      "title": "Scale: dedicated-agent DB connection architecture (pooler + per-tenant DB)",
+      "author": "NubsCarson",
+      "number": 8696,
+      "repository": "elizaos/eliza",
+      "body": "## Context\nOn 2026-06-19 prod hit `FATAL: sorry, too many clients already` — every DB-backed route 500/000'd. **Already mitigated** (below); filing this to track the *proper* scalable architecture so it doesn't recur as users grow.\n\n## What happened (root cause) — two structural issues\n1. **Hyperdrive oversubscription (the trigger).** Two Cloudflare Hyperdrive configs both point at the *same* Railway PG server (`switchback:49295`); origin pools summed to **95/100** — `eliza-prod-pg`=35 **+ `eliza-staging-pg`=60** (staging eating the prod DB) → ~5 left for daemon/router/agents → exhaustion.\n2. **Per-agent pool floor.** `plugin-sql` hardcoded each agent's pg pool at `max:20/min:2` → every dedicated-agent container holds **≥2 connections even when idle** (50 idle agents = 100 conns before any query).\n\n## Already shipped (mitigation)\n- ✅ Right-sized Hyperdrive origin pools: prod 35→25, staging 60→8. PG dropped 100→~20, prod recovered.\n- ✅ **#8695** — `plugin-sql` pool sizing now env-tunable (`POSTGRES_POOL_MAX/_MIN/_IDLE_TIMEOUT_MS`, defaults unchanged off-cloud); managed agents `max=8/min=0/idle=15s`. Ships with next agent-image build.\n\nCorrect hygiene, fine for the 10-user launch (~37/100), **but not the architecture** — still linear in agent count against one shared DB that also holds billing/users.\n\n## The proper, standard solutions\n### Problem A — connection scaling\n- **PgBouncer / Supavisor / pgcat (transaction mode)** — *the* standard answer (Hyperdrive already does this for the Worker; agents need their own). Caveat: transaction mode breaks prepared statements / `LISTEN`-`NOTIFY` / advisory locks — verify drizzle/node-pg or disable prepared statements.\n- Lean per-client pools (✅ #8695) — necessary, not sufficient.\n- Raise `max_connections` — RAM-bound band-aid (~10MB/conn).\n\n### Problem B — isolation + horizontal scale\n- Schema-per-agent (one server): medium isolation, pool+shard.\n- **Database-per-agent** (the decided per-tenant model): strong isolation, shard tenants across DB servers.\n- **Separate control-plane DB (billing/users) from agent-state DB** — removes the blast-radius that bit us.\n\n### Agent-specific elegant option\n`plugin-sql` already ships **PGlite (embedded local) + WriteBack/Electric sync** (`src/write-back`). Agents owning data locally + syncing centrally removes the shared-DB hot-path connection entirely. (The cloud was on **Neon** pre-Railway — Neon gives a built-in pooler endpoint *and* cheap instant per-tenant branches.)\n\n## Recommendation (phased)\n1. ✅ lean pools + Hyperdrive right-size (done)\n2. **PgBouncer/Supavisor in front of the agent Postgres** (~1 day incl. prepared-stmt compat)\n3. **Database-per-agent**, sharded as you grow\n4. **Operational:** split control-plane DB from agent-state DB; **staging on its own PG instance** (today's trigger); **alert at 70% of max_connections**\n\n## Quick wins\n- [ ] Staging Hyperdrive off the prod PG server (own instance)\n- [ ] Alert on `pg_stat_activity` ≥ 70% `max_connections`\n- [ ] Choose pooler (PgBouncer / Supavisor / Neon pooled endpoint)",
+      "createdAt": "2026-06-19T14:41:12Z",
+      "closedAt": "2026-06-19T19:08:33Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABF_dd7A",
+      "title": "Mobile/desktop cloud agents — post-squash tracker (sign-in + manager shipped; dedicated integration next)",
+      "author": "NubsCarson",
+      "number": 8621,
+      "repository": "elizaos/eliza",
+      "body": "Post-squash (clean baseline `1a7f8fe1c1`) tracker for the mobile/desktop **Eliza Cloud agent** experience. Supersedes the relevant parts of #8434.\n\n## ✅ Shipped (in the squashed baseline)\n- **In-app cloud sign-in fixed** — no more \"Backend Unreachable\"; reuse-or-create instead of minting a new agent every sign-in; id-less-base hardening + startup backstop. (was #8609)\n- **In-app Agent Manager** (Settings → Agents): list / switch / create+name / **rename** / delete. (was #8609 + #8615, rename via the #8608 PATCH endpoint)\n- Validated on a real Android device for **SHARED** agents: sign in → agent → chat round-trips + persists.\n\n## ✅ Cloud infra for DEDICATED agents — WORKS (verified live 2026-06-19)\nDedicated (`alwaysOn` → `dedicated-always`) agents now **provision → run → are reachable** end-to-end: container on a core node, **headscale_ip registers** (e.g. `100.64.0.x`), public subdomain ingress live (`https://<id>.elizacloud.ai/api/health` → 200, `/api/first-run/status` → `{complete:true}`, 20 plugins loaded). The earlier 404s were just **slow cold-boot (~5 min) racing the 180s health probe**, not breakage. 🙌 (cloud side / @standujar)\n\n## 🔴 Remaining: DEDICATED-agent **app integration** (so users can actually use dedicated from the app)\nA dedicated agent is a full app-server with **its own auth + lifecycle**, unlike shared (which the cloud REST adapter serves with the cloud token). Two pieces:\n\n1. **AUTH (design decision — pick the clean one).** Binding a dedicated agent with the cloud token shows the agent's *own* \"Sign in with your password\" screen. Options:\n   - **Preferred / real-ceiling: cloud unifies auth** so the app uses the **same cloud-token + per-agent base** for dedicated as for shared (cloud validates the token + proxies to the container server-side). Then the app needs **zero** dedicated-specific code — it already prefers `web_ui_url`.\n   - Alt: app does the **pairing** flow (`POST /agents/<id>/pairing-token` → exchange at agent `/api/auth/pair` → use the agent token). Pieces exist (`getCloudCompatAgentPairingToken`, `/api/auth/pair`, `cloud-pair-route`) but the mobile direct-cloud flow doesn't call them.\n2. **LIFECYCLE.** Dedicated agents sleep/stop when idle (`status: stopped/deletion_pending`, \"resume requested, retry after Nms\"). Need resume + wait-for-running before the app binds (and a ~5-min cold-boot progress UX). The agent-router only routes to RUNNING agents.\n\nPlus a smaller cloud config gap from the \"Default project\" drain: **`KV_REST_API_URL/TOKEN` missing** on the provisioning worker (`REDIS_URL` is set) → sandboxes don't register in Redis → gateways won't route inbound platform (Discord/Telegram) messages. Repoint to the new prod KV.\n\n## Owners\n- **Cloud (auth unification + lifecycle/resume + KV repoint)** = cloud agent / @standujar (overlaps the planned \"rework agent UI on cloud\").\n- **App (match the settled auth design; default tier; create-dedicated UX)** = nubs + Claude (shared path already shipped; dedicated app code waits on the auth-design decision so we don't build the wrong thing).\n\nFull context + commands: `~/ELIZA_DEDICATED_AGENT_QA_HANDOFF.md` (handed to the cloud agent).",
+      "createdAt": "2026-06-19T01:06:14Z",
+      "closedAt": "2026-06-19T19:08:56Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABFE93VQ",
+      "title": "android: clean-tree builds ship web-less APKs — cap sync and gradle operate on different projects (since 7ac0e1fb96)",
+      "author": "NubsCarson",
+      "number": 8387,
+      "repository": "elizaos/eliza",
+      "body": "## Symptom\n`bun run --cwd packages/app build:android` from a clean tree produces an APK with `assets/agent` but **zero `assets/public`, no `capacitor.config.json`** → on device the WebView shows `https://localhost/ net::ERR_CONNECTION_REFUSED` forever (no Capacitor `errorPath` is configured, so there's no retry). Verified on a Solana Seeker tonight.\n\n## Root cause\n`7ac0e1fb96` (fix(rv64-pipeline), May 20) moved `androidDir` in `packages/app-core/scripts/run-mobile-build.mjs:89` from `packages/app/android` → `packages/app-core/platforms/android` (gradle, native patches, agent staging) — but `runCapacitor([\"sync\",\"android\"])` still runs with cwd `packages/app` and `capacitor.config.ts` has **no `android.path`**, so the Capacitor CLI keeps delivering the web layer to `packages/app/android`. Nothing bridges the two trees: `capacitor-platform-templates.mjs:27-43` explicitly skips `assets/public`, `assets/agent`, and the generated capacitor JSONs when materializing templates.\n\nEvidence it used to be one project: the tracked `packages/app-core/platforms/android/capacitor.settings.gradle` projectDirs (`../../../app/node_modules/…`) are only producible with the platform dir at `app-core/platforms/android` — i.e. an `android.path` override existed and was lost. A pre-May-20 develop worktree (`bb69a3642e`) has all five asset trees together under `packages/app/android`. Same asymmetry: `iosDir` lives in the host app (`packages/app/ios/App`), android was left behind.\n\n## Why CI doesn't catch it\n- `build-android.yml` / `mobile-build-smoke.yml` only assert the APK **file exists** (smoke: lines 255-262); the artifact audits (`auditAndroidCloudArtifact`) check banned entries only, never that `assets/public/index.html` is present.\n- No workflow boots the app; `mobile-local-chat-smoke.mjs` isn't wired into any workflow.\n- Builds on machines with stale untracked `assets/public` leftovers in the platforms tree appear to work — clean checkouts never do.\n\n## Verified workaround (tonight, on-device confirmed)\nAfter `build:android`: copy `packages/app/android/app/src/main/assets/{public,capacitor.config.json,capacitor.plugins.json}` + `res/xml/config.xml` into `packages/app-core/platforms/android/app/src/main/...`, re-run `./gradlew :app:assembleDebug` there → complete APK (282→336MB), app boots to onboarding on a real device. Caveat: the tracked canonical `capacitor.settings.gradle` lags the synced one (missing background-runner, barcode-scanner, browser, device, haptics, network plugin projects → runtime \"plugin not implemented\" degradation).\n\n## Proposed fix (either)\n1. Restore the lost wiring: `android: { path: \"../app-core/platforms/android\" }` in `packages/app/capacitor.config.ts` (and teach `ensure-capacitor-platform.mjs`/`isCapacitorPlatformReady` to probe that dir), so sync/copy/update land directly in the gradle tree; or\n2. Add a `stageAndroidWebAssets()` step after every `runCapacitor([\"sync\",\"android\"])` call (4 android targets) copying the web payload + regenerated capacitor gradle files (with path rewrite) into `androidDir`.\n\nPlus, regardless: a **positive APK audit** for sideload targets (assert `assets/public/index.html` + `assets/capacitor.config.json` + `assets/agent/` via `jar tf`) and the same one-liner in CI after assembleDebug, so a web-less APK can never ship silently again.\n\nFound while device-testing the PR #8340 APK; happy to PR whichever shape you prefer — flagging first since the mobile pipeline is active WIP.",
+      "createdAt": "2026-06-10T23:10:25Z",
+      "closedAt": "2026-06-19T18:31:15Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7oOo_V",
+      "title": "promote: develop -> main (Railway cutover hardening: cache=auto, script TLS, #8634 content)",
+      "author": "lalalune",
+      "number": 8645,
+      "body": "Second promote of the Railway cutover. Brings CACHE_BACKEND=auto (prod Worker caching), standalone-script self-signed-cert TLS hardening, dead-code purge, and the rest of develop to prod. main is 0 commits ahead of develop (clean). Prod cutover is live; this makes main current so future prod deploys/migrations stay correct.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-19T04:35:47Z",
+      "mergedAt": "2026-06-19T04:35:50Z",
+      "additions": 56597,
+      "deletions": 5396
+    },
+    {
+      "id": "PR_kwDOMT5cIs7of1LT",
+      "title": "release: complete Neon→Railway migration + MCP on Railway",
+      "author": "lalalune",
+      "number": 8726,
+      "body": "Ships the full Neon→Railway completion to prod:\n- Retire the legacy Neon teardown surface (delete neon-client.ts, cleanupNeon, NEON_API_KEY req, neon_project_id/branch_id + user_database_project_id/branch_id columns via guarded DROP migration 0148).\n- Remove the dead Neon-serverless DB-client branch + @neondatabase/serverless dep.\n- Fix the app-builder DATABASE_SETUP_PROMPT (Neon driver → node-postgres) so generated apps work against the Railway DSN.\n- Remove dead affiliates neon-http guard; rename provisionNeon→provisionAgentDatabase; sweep stale Neon comments.\n- Re-enable the MCP registry e2e read/gate/validation tests (write tests stay skipped — verified workerd+pglite harness artifact, MCP create works on Railway).\nVerified: cloud-shared + cloud-api typecheck 0; 0148 migration idempotent; no live Neon refs remain.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-19T19:41:15Z",
+      "mergedAt": "2026-06-19T19:41:24Z",
+      "additions": 32783,
+      "deletions": 11554
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ogX2w",
+      "title": "release: pg-pool error handler + green cloud-api deploy",
+      "author": "lalalune",
+      "number": 8727,
+      "body": "Carries: the node-pg idle-client 'error' handler (prevents a dropped pooled client from crashing a worker request — hardens prod against Railway connection drops), G2 MCP e2e fully skipped under the workerd+pglite harness for a reliably-green cloud-api Worker deploy, plus the full Neon→Railway retirement already on main. Ships the Neon-cleaned + pool-hardened Worker to prod.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-19T20:12:28Z",
+      "mergedAt": "2026-06-19T20:12:38Z",
+      "additions": 18689,
+      "deletions": 3124
+    },
+    {
+      "id": "PR_kwDOMT5cIs7oNWGr",
+      "title": "promote: develop -> main (Railway DB/cache cutover + 30 commits)",
+      "author": "lalalune",
+      "number": 8633,
+      "body": "Promote develop to main. Includes the Railway Neon->Railway migration code (Hyperdrive Worker DB path #8629, prod Hyperdrive binding #8632, Redis TCP #8602, etc.), validated live on staging. main is 0 commits ahead of develop (clean promote).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-19T02:54:25Z",
+      "mergedAt": "2026-06-19T02:54:28Z",
+      "additions": 5727,
+      "deletions": 14742
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ohO3r",
+      "title": "release: cloud-api billingSource typecheck fix + app.* redirect fix (D5)",
+      "author": "lalalune",
+      "number": 8734,
+      "body": "Brings main up to develop so the cloud-api Worker deploy goes green:\n- chat/completions billingSource is now derived type-safely (resolveAiProviderSource(model) ?? 'gateway') instead of assigning the raw provider union (main's version 500'd typecheck: 'openrouter' not assignable to PricingBillingSource).\n- redirectFrontendHost no longer 308s app.elizacloud.ai → apex (D5: app.* is the eliza-app project, not the console).\nConsole + App Pages deploys already succeeded; this unblocks the API Worker (Neon-retired + pool-error-hardened).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-19T21:11:49Z",
+      "mergedAt": "2026-06-19T21:11:57Z",
+      "additions": 4221,
+      "deletions": 1410
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 36811,
+    "deletions": 19379,
+    "files": 719,
+    "commitCount": 570
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "fix(first-run): hide local-runtime option on cloud-only hosts",
+      "prNumber": 8753,
+      "type": "bugfix",
+      "body": "Follow-up to #8742. The cloud-only auto-skip can't open the lazily-mounted Steward login at first paint and silently falls back to the picker, which still showed the cloud-vs-local choice ('This device' merely disabled). Hide 'This device' ",
+      "files": [
+        "packages/ui/src/first-run/CompactOnboarding.tsx"
+      ]
+    },
+    {
+      "title": "build(deps): bump the uv group across 5 directories with 3 updates",
+      "prNumber": 8752,
+      "type": "other",
+      "body": "Bumps the uv group with 1 update in the /packages/benchmarks/OSWorld directory: [msgpack](https://github.com/msgpack/msgpack-python).\nBumps the uv group with 2 updates in the /packages/benchmarks/solana/solana-gym-env directory: [langsmith]",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/solana/solana-gym-env/uv.lock",
+        "packages/feed/packages/examples/feed-langgraph-agent/uv.lock",
+        "packages/robot/uv.lock",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(plugin-wallet): bound per-turn balance RPC so it can't hang the reply (~28s dedicated-agent latency)",
+      "prNumber": 8748,
+      "type": "bugfix",
+      "body": "## Problem\nDedicated cloud chat agents replied in ~28s/turn. Root-caused (with a 4-agent investigation + confirmed against prod container logs `Error getting wallet balance for mainnet: The request took too long to respond`):\n\n`evmWalletPro",
+      "files": [
+        "plugins/plugin-wallet/src/chains/evm/__tests__/unit/wallet-provider-timeout.test.ts",
+        "plugins/plugin-wallet/src/chains/evm/providers/wallet.ts"
+      ]
+    },
+    {
+      "title": "feat(first-run): auto-skip the runtime picker on cloud-only hosts",
+      "prNumber": 8742,
+      "type": "feature",
+      "body": "## What\n\nOn **cloud-only hosts** — the hosted `app.elizacloud.ai` web bundle and the desktop/native cloud runtime builds (`branding.cloudOnly === true`) — there is no local / on-device runtime to choose, so the \"How should Eliza run? (Eliza",
+      "files": [
+        "packages/ui/src/first-run/CompactOnboarding.tsx"
+      ]
+    },
+    {
+      "title": "feat(cloud): decommission BitRouter — Phase 3 (catalog/image/env/infra)",
+      "prNumber": 8741,
+      "type": "feature",
+      "body": "## Goal\nFinal removal of BitRouter from the stack. The Cloudflare Worker is the model gateway (native-direct + OpenRouter backup, merged in #8738). This removes the last BitRouter-*service* dependencies and the Railway service config.\n\n## C",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-api/v1/apps/[id]/generate-image/route.ts",
+        "packages/cloud-api/v1/generate-image/route.ts",
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-infra/AGENTS.md",
+        "packages/cloud-infra/CLAUDE.md",
+        "packages/cloud-infra/cloud/RAILWAY.md",
+        "packages/cloud-infra/cloud/bitrouter/Dockerfile",
+        "packages/cloud-infra/cloud/bitrouter/README.md",
+        "packages/cloud-infra/cloud/bitrouter/auth-proxy.mjs",
+        "packages/cloud-infra/cloud/bitrouter/bitrouter.yaml",
+        "packages/cloud-infra/cloud/bitrouter/entrypoint.sh",
+        "packages/cloud-infra/cloud/bitrouter/railway.toml",
+        "packages/cloud-infra/tests/bitrouter-service.test.ts",
+        "packages/cloud-shared/src/lib/config/env-validator.ts",
+        "packages/cloud-shared/src/lib/providers/image/bitrouter-image-generation.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing-variant-indexing.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/bitrouter.ts",
+        "packages/cloud-shared/src/lib/services/local-docker-sandbox-provider.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): Codex/Claude-Code parity — MCP auto-inherit, sub-agent nesting, inline diff review",
+      "prNumber": 8740,
+      "type": "feature",
+      "body": "Three sub-agent orchestration parity features, each **additive** and **without any new HTTP API** (all reuse existing orchestrator surfaces). Built off verified seams; each independently tested.\n\n## What's in here\n\n**1. MCP auto-inherit** (",
+      "files": [
+        "packages/ui/src/api/client-types-cloud.ts",
+        "packages/ui/src/components/composites/code/DiffReviewPanel.test.tsx",
+        "packages/ui/src/components/composites/code/DiffReviewPanel.tsx",
+        "packages/ui/src/components/composites/code/index.ts",
+        "packages/ui/src/components/composites/index.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/config-mcp-servers.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/parent-agent-broker-spawn.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/task-change-set-mirror.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/config-env.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/parent-agent-broker.ts",
+        "plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud-api/e2e): unique ports per run — fix flaky Worker deploy",
+      "prNumber": 8739,
+      "type": "bugfix",
+      "body": "Roots out the chronic cloud-api Worker deploy flakiness: the e2e harness hardcoded apiPort=8787/pglitePort=55433, so concurrent runs on the shared self-hosted runner collided and the orphan-reclaim killed each other's PGlite server (ECONNRE",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".gitleaks.toml",
+        "packages/agent/src/api/notification-lazy-route.test.ts",
+        "packages/agent/src/api/server-lazy-routes.ts",
+        "packages/agent/src/auth/credentials.test.ts",
+        "packages/agent/src/auth/credentials.ts",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/scripts/aosp/compile-libllama.mjs",
+        "packages/app-core/scripts/build-helpers/arm64-simd.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/stage-elizavoice-lib.mjs",
+        "packages/app-core/src/services/account-pool.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app/app.config.ts",
+        "packages/cloud-api/test/e2e/run-e2e-batches.mjs",
+        "packages/cloud-infra/cloud/bitrouter/CLOUDFLARE_MIGRATION_PLAN.md",
+        "packages/cloud-shared/src/lib/providers/bitrouter.test.ts",
+        "packages/cloud-shared/src/lib/providers/bitrouter.ts",
+        "packages/cloud-shared/src/lib/providers/index.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-nitro-failover.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-openrouter-fallback.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-openrouter-primary.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/cloud-shared/src/lib/providers/provider-env.ts",
+        "packages/cloud-shared/src/lib/providers/provider-fallback-selection.test.ts",
+        "packages/cloud-shared/src/lib/providers/provider-keys.test.ts",
+        "packages/cloud-shared/src/lib/services/model-catalog.ts",
+        "packages/training/data/final-eliza1-smoke/test.jsonl",
+        "packages/training/data/final-eliza1-smoke/train.jsonl",
+        "packages/training/data/final-eliza1-smoke/val.jsonl",
+        "packages/ui/src/api/client-agent-orchestrator-rooms.test.ts",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/api/client-types-cloud.ts",
+        "packages/ui/src/components/chat/widgets/agent-orchestrator.tsx",
+        "packages/ui/src/i18n/locales/en.json",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/active-session-forward.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/interruption-decider.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/multi-account-spawn.test.ts",
+        "plugins/plugin-agent-orchestrator/docs/multi-account-orchestration.md",
+        "plugins/plugin-agent-orchestrator/src/index.ts",
+        "plugins/plugin-agent-orchestrator/src/services/active-session-forward.ts",
+        "plugins/plugin-agent-orchestrator/src/services/interruption-decider.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-types.ts",
+        "plugins/plugin-native-desktop/tsconfig.json"
+      ]
+    },
+    {
+      "title": "feat(cloud-shared): remove BitRouter from LLM routing — Worker is the gateway",
+      "prNumber": 8738,
+      "type": "feature",
+      "body": "## Goal\n\nStop routing LLM calls through the separate **BitRouter** server on Railway. The Cloudflare Worker becomes the gateway: it calls each provider **directly** when we hold its native key, and uses **OpenRouter (BYOK) only as the backu",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-infra/cloud/bitrouter/CLOUDFLARE_MIGRATION_PLAN.md",
+        "packages/cloud-shared/src/lib/providers/bitrouter.test.ts",
+        "packages/cloud-shared/src/lib/providers/bitrouter.ts",
+        "packages/cloud-shared/src/lib/providers/index.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-nitro-failover.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-openrouter-fallback.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/cloud-shared/src/lib/providers/provider-fallback-selection.test.ts",
+        "packages/cloud-shared/src/lib/services/model-catalog.ts"
+      ]
+    },
+    {
+      "title": "build(deps): bump ujson from 5.12.1 to 5.13.0 in /packages/robot in the uv group across 1 directory",
+      "prNumber": 8737,
+      "type": "other",
+      "body": "[//]: # (dependabot-start)\n⚠️  **Dependabot is rebasing this PR** ⚠️ \n\nRebasing might not happen immediately, so don't worry if this takes some time.\n\nNote: if you make any changes to this PR yourself, they will take precedence over the reb",
+      "files": [
+        "packages/robot/uv.lock"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): cover OpenRouter-only + raw-fetch fallback selector paths",
+      "prNumber": 8736,
+      "type": "tests",
+      "body": "## Context\n\nThe native **OpenRouter BYOK fallback** (Phase 1 of moving model routing into the Cloud Worker) and its fixes landed on `develop` (feature via the integration pipeline; billing-source + format via #8728). An adversarial multi-ag",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model-openrouter-primary.test.ts",
+        "packages/cloud-shared/src/lib/providers/provider-fallback-selection.test.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): round-robin across multiple Cerebras keys to spread rate limits",
+      "prNumber": 8735,
+      "type": "feature",
+      "body": "## Why\nDedicated agents hit Cerebras **429s → 3 retries → 26-55s reply latency** — the launch-blocking dedicated-chat slowness (#8434). Root cause: a single `CEREBRAS_API_KEY` cached as one client, so all concurrent agent traffic saturates ",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/cloud-shared/src/lib/providers/provider-env.ts",
+        "packages/cloud-shared/src/lib/providers/provider-keys.test.ts"
+      ]
+    },
+    {
+      "title": "release: cloud-api billingSource typecheck fix + app.* redirect fix (D5)",
+      "prNumber": 8734,
+      "type": "bugfix",
+      "body": "Brings main up to develop so the cloud-api Worker deploy goes green:\n- chat/completions billingSource is now derived type-safely (resolveAiProviderSource(model) ?? 'gateway') instead of assigning the raw provider union (main's version 500'd",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "bun.lock",
+        "package.json",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector-lean-chat.test.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/app-core/platforms/android/app/capacitor.build.gradle",
+        "packages/app-core/platforms/android/app/src/main/elizavoice-jni/elizavoice-jni.cpp",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaVoiceNative.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaVoicePlugin.java",
+        "packages/app-core/platforms/android/capacitor.settings.gradle",
+        "packages/app-core/platforms/electrobun/assets/appIcon.icns",
+        "packages/app-core/platforms/electrobun/assets/appIcon.ico",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_128x128.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_128x128@2x.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_16x16.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_16x16@2x.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_256x256.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_256x256@2x.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_32x32.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_32x32@2x.png",
+        "packages/app-core/platforms/electrobun/assets/appIcon.iconset/icon_512x512.png",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app/src/main.tsx",
+        "packages/app/test/ui-smoke/apps-comms-device-interactions.spec.ts",
+        "packages/app/vite.config.ts",
+        "packages/cloud-api/eliza-app/provision-agent/route.ts",
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/index.test.ts",
+        "packages/cloud-api/src/index.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/test/e2e/group-f-connectors.test.ts",
+        "packages/cloud-frontend/package.json",
+        "packages/cloud-frontend/scripts/verify-chunk-safety.mjs",
+        "packages/cloud-shared/src/db/client.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-openrouter-fallback.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/examples/cloud/clone-ur-crush/app/layout.tsx",
+        "packages/examples/cloud/clone-ur-crush/scripts/build.mjs",
+        "packages/native/scripts/build-voice-libs-android-musl.mjs",
+        "packages/scripts/remove-source-build-artifacts.mjs",
+        "packages/scripts/with-package-build-lock.mjs",
+        "packages/training/data/final-eliza1-smoke/test.jsonl",
+        "packages/training/data/final-eliza1-smoke/train.jsonl",
+        "packages/training/data/final-eliza1-smoke/val.jsonl",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/bridge/native-plugins.ts",
+        "packages/ui/src/components/pages/WorkflowEditor.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(facewear): update completion gate for register.ts app-shell refactor",
+      "prNumber": 8733,
+      "type": "bugfix",
+      "body": "`check-smartglasses-completion-gate.mjs --self-test` regressed on develop after `register.ts` was refactored to the `registerAppShellPage({...})` API. The `SmartglassesView` is still fully registered (`export const SmartglassesView = deferr",
+      "files": [
+        "scripts/check-smartglasses-completion-gate.mjs"
+      ]
+    },
+    {
+      "title": "[codex] Harden build DX and dedupe heavy dependencies",
+      "prNumber": 8732,
+      "type": "other",
+      "body": "## Summary\n\nThis PR hardens build paths that were making local and CI feedback brittle, and trims duplicate dependency installs that were inflating node_modules.\n\n## Why\n\nThe repo is large enough that small dependency/version drift and buil",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/examples/cloud/clone-ur-crush/app/layout.tsx",
+        "packages/examples/cloud/clone-ur-crush/scripts/build.mjs",
+        "packages/scripts/remove-source-build-artifacts.mjs",
+        "packages/scripts/with-package-build-lock.mjs",
+        "plugins/plugin-app-control/package.json",
+        "plugins/plugin-facewear/package.json",
+        "plugins/plugin-native-macosalarm/.gitignore",
+        "plugins/plugin-native-macosalarm/AGENTS.md",
+        "plugins/plugin-native-macosalarm/CLAUDE.md",
+        "plugins/plugin-native-macosalarm/scripts/build-helper.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): gate deploys on crypto-chunk safety (stop recurring blank-page crash)",
+      "prNumber": 8731,
+      "type": "bugfix",
+      "body": "## Problem\n\n`elizacloud.ai` keeps going fully blank — **\"Something went wrong / Class constructor u cannot be invoked without 'new'\"** on every route. Root cause (documented in prior PRs #8682/#8687): Rolldown folds the **bn.js / crypto gra",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-frontend/package.json",
+        "packages/cloud-frontend/scripts/verify-chunk-safety.mjs"
+      ]
+    },
+    {
+      "title": "feat(agent): LEAN_CHAT_PLUGINS preset for dedicated chat agents (#8434)",
+      "prNumber": 8730,
+      "type": "feature",
+      "body": "## Summary\nPart of #8434 — dedicated cloud agents boot a full local AgentRuntime loading ~15 CORE_PLUGINS (shell, coding-tools, browser, orchestrator, gitpathologist), which dominates cold-boot time for a purely conversational agent.\n\nAdds ",
+      "files": [
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector-lean-chat.test.ts",
+        "packages/agent/src/runtime/plugin-collector.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): identify DB connections by service + remove dead provision-agent stub",
+      "prNumber": 8729,
+      "type": "bugfix",
+      "body": "Closing out the remaining open items from the login-stability work.\n\n## 1. `application_name` on shared Postgres pools (diagnosability)\nThe 2026-06-19 \"too many clients already\" incident on the shared Railway Postgres was hard to triage bec",
+      "files": [
+        "packages/cloud-api/eliza-app/provision-agent/route.ts",
+        "packages/cloud-api/src/_router.generated.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/test/e2e/group-f-connectors.test.ts",
+        "packages/cloud-shared/src/db/client.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): OpenRouter fallback billing source + biome format",
+      "prNumber": 8728,
+      "type": "bugfix",
+      "body": "Bills OpenRouter-served requests as `bitrouter` (its prices are catalogued there) instead of a new `openrouter` billingSource that is not a `PricingBillingSource` member — which broke cloud-api typecheck in v1/messages + v1/chat/completions",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model-openrouter-fallback.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts"
+      ]
+    },
+    {
+      "title": "release: pg-pool error handler + green cloud-api deploy",
+      "prNumber": 8727,
+      "type": "other",
+      "body": "Carries: the node-pg idle-client 'error' handler (prevents a dropped pooled client from crashing a worker request — hardens prod against Railway connection drops), G2 MCP e2e fully skipped under the workerd+pglite harness for a reliably-gre",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "bun.lock",
+        "docs/cloud-into-eliza/CUTOVER-RUNBOOK.md",
+        "docs/cloud-into-eliza/DECISIONS.md",
+        "packages/agent/assets/view-heroes/automations.png",
+        "packages/agent/assets/view-heroes/camera.png",
+        "packages/agent/assets/view-heroes/character.png",
+        "packages/agent/assets/view-heroes/chat.png",
+        "packages/agent/assets/view-heroes/database.png",
+        "packages/agent/assets/view-heroes/help.png",
+        "packages/agent/assets/view-heroes/logs.png",
+        "packages/agent/assets/view-heroes/memories.png",
+        "packages/agent/assets/view-heroes/plugins-page.png",
+        "packages/agent/assets/view-heroes/settings.png",
+        "packages/agent/assets/view-heroes/trajectories.png",
+        "packages/agent/assets/view-heroes/tutorial.png",
+        "packages/agent/package.json",
+        "packages/agent/src/actions/notify.test.ts",
+        "packages/agent/src/actions/notify.ts",
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/src/api/chat-attachments.test.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/media-store.test.ts",
+        "packages/agent/src/api/media-store.ts",
+        "packages/agent/src/api/notification-routes.test.ts",
+        "packages/agent/src/api/notification-routes.ts",
+        "packages/agent/src/api/parse-action-block.test.ts",
+        "packages/agent/src/api/permission-request-prompt.ts",
+        "packages/agent/src/api/push-token-routes.test.ts",
+        "packages/agent/src/api/push-token-routes.ts",
+        "packages/agent/src/api/server-helpers.ts",
+        "packages/agent/src/api/server-route-dispatch.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/api/views-routes.hero.test.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/services/permissions/probers/index.ts",
+        "packages/agent/src/services/permissions/probers/native-platform.ts",
+        "packages/agent/src/services/permissions/probers/probers.test.ts",
+        "packages/agent/src/services/push/apns-provider.test.ts",
+        "packages/agent/src/services/push/apns-provider.ts",
+        "packages/agent/src/services/push/fcm-provider.test.ts",
+        "packages/agent/src/services/push/fcm-provider.ts",
+        "packages/agent/src/services/push/notification-push-service.test.ts",
+        "packages/agent/src/services/push/notification-push-service.ts",
+        "packages/agent/src/services/push/push-token-registry.test.ts",
+        "packages/agent/src/services/push/push-token-registry.ts",
+        "packages/agent/src/services/push/push-types.ts",
+        "packages/agent/src/triggers/runtime.ts",
+        "packages/app-core/package.json"
+      ]
+    },
+    {
+      "title": "release: complete Neon→Railway migration + MCP on Railway",
+      "prNumber": 8726,
+      "type": "other",
+      "body": "Ships the full Neon→Railway completion to prod:\n- Retire the legacy Neon teardown surface (delete neon-client.ts, cleanupNeon, NEON_API_KEY req, neon_project_id/branch_id + user_database_project_id/branch_id columns via guarded DROP migrati",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        ".gitleaks.toml",
+        "SECURITY.md",
+        "WINDOWS.md",
+        "bun.lock",
+        "packages/agent/AGENTS.md",
+        "packages/agent/CLAUDE.md",
+        "packages/agent/package.json",
+        "packages/agent/src/__tests__/views-system-smoke.test.ts",
+        "packages/agent/src/api/__tests__/sse-wire-streaming.test.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/runtime/__tests__/sandbox-registry.test.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/src/runtime/prompt-compaction.ts",
+        "packages/agent/src/runtime/sandbox-registry.ts",
+        "packages/alberta/README.md",
+        "packages/app-core/AGENTS.md",
+        "packages/app-core/CLAUDE.md",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/elizavoice-jni/CMakeLists.txt",
+        "packages/app-core/platforms/android/app/src/main/elizavoice-jni/elizavoice-jni.cpp",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/AgentPlugin.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaVoiceNative.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaVoicePlugin.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/ios/App/App.xcodeproj/project.pbxproj",
+        "packages/app-core/platforms/ios/App/App/DeviceActivityMonitorExtension/DeviceActivityMonitorExtension.entitlements",
+        "packages/app-core/platforms/ios/App/App/DeviceActivityReportExtension/DeviceActivityReportExtension.entitlements",
+        "packages/app-core/platforms/ios/App/App/WebsiteBlockerContentExtension/WebsiteBlockerContentExtension.entitlements",
+        "packages/app-core/scripts/aosp/compile-libllama.mjs",
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/stage-elizavoice-lib.mjs",
+        "packages/app-core/scripts/voice-attribution-smoke.ts",
+        "packages/app-core/src/api/dev-route-catalog.ts",
+        "packages/app-core/src/api/server.ts",
+        "packages/app-core/src/runtime/desktop/AppWindowRenderer.tsx",
+        "packages/app-core/src/runtime/desktop/DesktopSurfaceNavigationRuntime.tsx",
+        "packages/app-core/src/services/__tests__/sandbox-registry.test.ts",
+        "packages/app-core/src/services/account-pool.ts"
+      ]
+    },
+    {
+      "title": "feat(plugin-vision): replace TensorFlow.js with a real ggml YOLOv8n detector",
+      "prNumber": 8725,
+      "type": "feature",
+      "body": "Removes `@tensorflow/tfjs-node` from `@elizaos/plugin-vision` (the source of the `TS2307` build warning) and lands a working, numerically-verified **ggml** YOLOv8n object detector in its place. Vision now runs entirely on the ggml/llama.cpp",
+      "files": [
+        "plugins/plugin-vision/README.md",
+        "plugins/plugin-vision/VISION_RUNTIME_MIGRATION.md",
+        "plugins/plugin-vision/native/yolo.cpp/.gitignore",
+        "plugins/plugin-vision/native/yolo.cpp/CMakeLists.txt",
+        "plugins/plugin-vision/native/yolo.cpp/README.md",
+        "plugins/plugin-vision/native/yolo.cpp/build.mjs",
+        "plugins/plugin-vision/native/yolo.cpp/include/yolo.h",
+        "plugins/plugin-vision/native/yolo.cpp/scripts/convert.py",
+        "plugins/plugin-vision/native/yolo.cpp/src/yolo.cpp",
+        "plugins/plugin-vision/native/yolo.cpp/verify/compare.py",
+        "plugins/plugin-vision/native/yolo.cpp/verify/make_ref.py",
+        "plugins/plugin-vision/native/yolo.cpp/verify/run_ggml.mjs",
+        "plugins/plugin-vision/native/yolo.cpp/verify/run_ts.mjs",
+        "plugins/plugin-vision/package.json",
+        "plugins/plugin-vision/src/native/yolo-ffi.ts",
+        "plugins/plugin-vision/src/person-detector.ts",
+        "plugins/plugin-vision/src/service.ts",
+        "plugins/plugin-vision/src/vision-models.ts",
+        "plugins/plugin-vision/src/yolo-detector-ggml.ts"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): run tests with --isolate to stop cross-file mock leaks",
+      "prNumber": 8724,
+      "type": "tests",
+      "body": "Forward-port of the develop isolate fix. 25 order-dependent mock-leak failures → 0.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "packages/cloud-shared/package.json"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): run tests with --isolate to stop cross-file mock leaks",
+      "prNumber": 8723,
+      "type": "tests",
+      "body": "The test-cloud-shared lane (Windows CI + the cloud-shared portion of ci) fails ~25 env/mock-driven tests order-dependently — every one passes in isolation. Root cause: bun's mock.module + process.env mutations are process-global and leak ac",
+      "files": [
+        "packages/cloud-shared/package.json"
+      ]
+    },
+    {
+      "title": "fix(cloud-billing): atomic credit-balance decrement in container daily billing (#8342)",
+      "prNumber": 8722,
+      "type": "bugfix",
+      "body": "## Summary\n\nAddresses the **[2AM] non-atomic daily debit** correctness item in #8342.\n\n`recordSuccessfulDailyBilling` wrote an **absolute** `credit_balance` value computed in JS from a balance the caller read earlier (`newBalance = currentB",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/container-billing.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-billing-idempotency.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): sign-in agent picker — choose an existing cloud agent or create new",
+      "prNumber": 8721,
+      "type": "feature",
+      "body": "## What\nAfter cloud sign-in, if the user already has cloud agents, the app now shows a **picker** (choose an existing agent or create a new one) instead of silently auto-reusing/creating. Completes the agent-management story alongside the i",
+      "files": [
+        "packages/ui/src/first-run/AgentPicker.test.tsx",
+        "packages/ui/src/first-run/AgentPicker.tsx",
+        "packages/ui/src/first-run/CompactOnboarding.test.tsx",
+        "packages/ui/src/first-run/CompactOnboarding.tsx",
+        "packages/ui/src/first-run/first-run.test.ts",
+        "packages/ui/src/first-run/first-run.ts",
+        "packages/ui/src/first-run/use-first-run-controller.local.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.remote.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/state/useFirstRunCallbacks.ts"
+      ]
+    },
+    {
+      "title": "chore(gateway-discord): reproducible Railway deploy script",
+      "prNumber": 8720,
+      "type": "other",
+      "body": "Forward-port of the develop deploy-script PR. Reproducible gateway-discord Railway deploy (self-contained bundle) + documents the workspace-dep build constraint + long-term git-reconnect fix.\n\n🤖 Generated with [Claude Code](https://claude.",
+      "files": [
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-discord/scripts/deploy-railway.sh"
+      ]
+    },
+    {
+      "title": "chore(gateway-discord): reproducible Railway deploy script",
+      "prNumber": 8719,
+      "type": "other",
+      "body": "The in-repo Dockerfile can't resolve the @elizaos/cloud-services-common workspace dep when railway up uploads only the package dir, so deploys reused a stale pre-B2 image (rejecting redis://, which blocked the Railway Redis migration). bun ",
+      "files": [
+        "packages/cloud-services/gateway-discord/package.json",
+        "packages/cloud-services/gateway-discord/scripts/deploy-railway.sh"
+      ]
+    },
+    {
+      "title": "test(cloud/provisioning): make resume-lifecycle test order-independent [main]",
+      "prNumber": 8718,
+      "type": "tests",
+      "body": "Replaces the order-fragile standalone lifecycle test (from #8714) — which used `mock.module` on the db helpers and broke in the single-process cloud-shared suite when a neighbor mocks the db client/repo — by moving the `executeResume` cover",
+      "files": [
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-lifecycle.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts"
+      ]
+    },
+    {
+      "title": "test(cloud/provisioning): make resume-lifecycle test order-independent",
+      "prNumber": 8717,
+      "type": "tests",
+      "body": "Replaces the order-fragile standalone lifecycle test (from #8714) — which used `mock.module` on the db helpers and broke in the single-process cloud-shared suite when a neighbor mocks the db client/repo — by moving the `executeResume` cover",
+      "files": [
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-lifecycle.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts"
+      ]
+    },
+    {
+      "title": "fix(app-control): gate desktop-only VIEWS modes off viewless text connectors (#8613)",
+      "prNumber": 8716,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes #8613 — on a text connector (Discord / Matrix / Telegram / …), the planner could route a user turn to a desktop-only `VIEWS` navigation/layout op (`show`/`open`/`close`/`split`/`tile`/`pin`/`window`/`manager`/`broadcast`).",
+      "files": [
+        "plugins/plugin-app-control/src/actions/views-switching.test.ts",
+        "plugins/plugin-app-control/src/actions/views.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud/provisioning): stop agent_upgrade retry storm + add lifecycle e2e test [main]",
+      "prNumber": 8715,
+      "type": "bugfix",
+      "body": "Forward-port of #8714 to `main`. Excludes containerless (shared-runtime) agents from fleet-upgrade candidate selection — fixes the 185-failures/6h agent_upgrade retry storm — and adds a full suspend→resume→delete lifecycle e2e test. 46 pass",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-lifecycle.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud/provisioning): stop agent_upgrade retry storm + add lifecycle e2e test",
+      "prNumber": 8714,
+      "type": "bugfix",
+      "body": "From a fresh end-to-end re-verification of agent provisioning after the Neon→Railway cutover.\n\n## 1. agent_upgrade retry storm (real prod bug)\n\nLive prod showed **185 failed `agent_upgrade` jobs in 6h** (0 completed) across 3 agents, all wi",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-lifecycle.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared/cache): bound SocketRedis ops with a 1s timeout",
+      "prNumber": 8713,
+      "type": "bugfix",
+      "body": "Forward-port of #8712. Bounds cloudflare:sockets ops with a 1s deadline so a stalled origin degrades to fallback instead of hanging the Worker.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "packages/cloud-shared/src/lib/cache/socket-redis.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared/cache): bound SocketRedis ops with a 1s timeout",
+      "prNumber": 8712,
+      "type": "bugfix",
+      "body": "cloudflare:sockets connect()/read() never time out, so a stalled origin hangs every cache-backed request for the whole Worker wall-clock (root cause of the cache-hang outage). Wrap each connect+command in a 1s deadline → on timeout close th",
+      "files": [
+        "packages/cloud-shared/src/lib/cache/socket-redis.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): don't attempt the WebSocket for dedicated cloud agents (no /ws → no reconnect churn)",
+      "prNumber": 8711,
+      "type": "bugfix",
+      "body": "## Problem\nOn a dedicated cloud agent (`<id>.elizacloud.ai`), the chat header shows **\"Reconnecting… (N/15)\"** for ~95s. The agent serves chat over REST, but its **`/ws` upgrade is not proxied by the agent-router (returns 404)**, so the cli",
+      "files": [
+        "packages/ui/src/api/client-base-websocket.test.ts",
+        "packages/ui/src/api/client-base.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-deploy): resolve db:cloud:migrate from src via eliza-source condition",
+      "prNumber": 8710,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **Cloud Deploy Backend** workflow's **Run Database Migrations** job fails on every staging/prod backend deploy:\n\n```\nerror: Cannot find module '@elizaos/core' from '/home/runner/work/eliza/eliza/plugins/plugin-sql/src/index.",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): global shadow passes through ALL native getters",
+      "prNumber": 8709,
+      "type": "bugfix",
+      "body": "Forward-port of #8708 (on main; deployed live). Fixes Illegal invocation from the global polyfill hardcoding native accessors → wallet/multichain init crashed. Loop over globalThis prototype chain for pass-through getters.\n\n🤖 Generated wit",
+      "files": [
+        "packages/cloud-frontend/index.html",
+        "packages/cloud-frontend/src/shims/global.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): global shadow passes through ALL native getters",
+      "prNumber": 8708,
+      "type": "bugfix",
+      "body": "Forward-port to git of the fix already deployed live to prod (was on shaw/cloud-crypto-chunk-fix only). The early `global` polyfill in index.html / src/shims/global.ts did `Object.create(globalThis)` and re-exposed only a hardcoded list of ",
+      "files": [
+        "packages/cloud-frontend/index.html",
+        "packages/cloud-frontend/src/shims/global.ts"
+      ]
+    },
+    {
+      "title": "chore(cloud): format managed eliza config",
+      "prNumber": 8707,
+      "type": "other",
+      "body": "## Summary\n- format `managed-eliza-config.ts` so the cloud shared Biome check passes on `develop`\n\n## Why\n- PR #8690 merged before this formatting fix landed on its branch\n- Cloud Tests `lint-and-types` failed on the merged tree because Bio",
+      "files": [
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(core): don't block the chat reply on the background facts stage",
+      "prNumber": 8705,
+      "type": "bugfix",
+      "body": "## Problem\nDedicated cloud agents take **30-43s per chat turn** for a reply that's ready in ~3s.\n\nRoot-caused (with the cloud-agent on #8434, after the model-routing + embeddings fixes landed cloud-side): the `FACTS_AND_RELATIONSHIPS` stage",
+      "files": [
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): pin agent EMBEDDING_DIMENSION=1536 (embedding insert failure)",
+      "prNumber": 8704,
+      "type": "bugfix",
+      "body": "plugin-sql stores embeddings in dim_384 unless EMBEDDING_DIMENSION is set, but the cloud handler returns 1536-dim → every memory write fails 'insert into embeddings'. Pin EMBEDDING_DIMENSION + ELIZAOS_CLOUD_EMBEDDING_DIMENSIONS to 1536 in p",
+      "files": [
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): accept OpenAI /v1 + bare /embeddings prefix (dedicated-agent 404)",
+      "prNumber": 8703,
+      "type": "bugfix",
+      "body": "Dedicated agents with a bare-host embedding URL hit /v1/embeddings or /embeddings → 404 → retries → +20s latency. Rewrite OpenAI-style prefixes to /api/v1/* at the Worker entry. Live via wrangler (771be24a); this is the permanent home. Veri",
+      "files": [
+        "packages/cloud-api/src/index.ts"
+      ]
+    },
+    {
+      "title": "style(cloud): biome-format the previously-gitignored data/ hooks",
+      "prNumber": 8701,
+      "type": "other",
+      "body": "Formats the ported react-query data/ hooks (biome had skipped them while gitignored) so main's lint/Quality CI is green. Formatting only.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "packages/ui/src/cloud/admin/data/use-admin-gate.ts",
+        "packages/ui/src/cloud/billing/data/billing-data.ts",
+        "packages/ui/src/cloud/instances/lib/data/credits.ts",
+        "packages/ui/src/cloud/instances/lib/data/eliza-agents.ts",
+        "packages/ui/src/cloud/organization/data/use-organization.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-api/mcps): unblock Worker deploy (skip PGlite-only MCP e2e + log create)",
+      "prNumber": 8700,
+      "type": "bugfix",
+      "body": "The MCP-write e2e (group-g2) 500s only under the PGlite-over-TCP harness (Broken pipe on INSERT...RETURNING) — table + migration 0147 are correct, isolated insert succeeds. It was blocking the whole deploy-api job (and the public-token-path",
+      "files": [
+        "packages/cloud-api/test/e2e/group-g2-mcp-registry.test.ts",
+        "packages/cloud-api/v1/mcps/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): bare Cerebras default text model + preserve :free tier",
+      "prNumber": 8698,
+      "type": "bugfix",
+      "body": "Source-level follow-up to #8697. (1) DEFAULT_ELIZA_CLOUD_TEXT_MODEL was the OpenRouter variant `openai/gpt-oss-120b:nitro` — so an agent falling back to the default emits :nitro → OpenRouter 429. Change to bare `gpt-oss-120b` (cerebras-dire",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/shared/src/contracts/service-routing.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): route :nitro Cerebras ids to cerebras-direct (not OpenRouter)",
+      "prNumber": 8697,
+      "type": "bugfix",
+      "body": "Dedicated agents emit `openai/gpt-oss-120b:nitro` / `openai/zai-glm-4.7:nitro` for what are really bare Cerebras models. These weren't recognized as Cerebras-native, so they fell through to BitRouter → the public router → OpenRouter, which ",
+      "files": [
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-shared/src/lib/providers/language-model-nitro-failover.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud,plugin-sql): lean env-tunable agent DB pool (scale fix)",
+      "prNumber": 8695,
+      "type": "bugfix",
+      "body": "Dedicated agents each pool against the shared cloud Postgres; plugin-sql hardcoded max:20/min:2 → linear connection cost with a min-2 floor (50 idle agents = 100 conns = exhaustion, the structural half of today's 'too many clients' prod inc",
+      "files": [
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts",
+        "plugins/plugin-sql/src/pg/manager.ts"
+      ]
+    },
+    {
+      "title": "fix: merged PR review follow-ups",
+      "prNumber": 8690,
+      "type": "bugfix",
+      "body": "## Why\n\nA pass over bot comments from recently merged PRs surfaced a few concrete issues that were worth fixing instead of leaving as cleanup debt: unsafe optional dependency typing, silent env fallback, loose UI strategy casting, inefficie",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/windows-desktop-preload-smoke.yml",
+        ".github/workflows/windows-dev-smoke.yml",
+        "SECURITY.md",
+        "WINDOWS.md",
+        "bun.lock",
+        "packages/agent/src/__tests__/views-system-smoke.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app/test/hmr-coverage.test.ts",
+        "packages/app/test/ui-smoke-coverage.test.ts",
+        "packages/app/test/view-interaction-coverage.test.ts",
+        "packages/cloud-api/__tests__/eliza-agents-orphan-cleanup.test.ts",
+        "packages/cloud-services/operator/package.json",
+        "packages/cloud-shared/src/lib/services/__tests__/payout-status-resilience.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/x402-app-earnings.test.ts",
+        "packages/cloud-shared/src/lib/services/agent-gateway-router.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-app/onboarding-chat.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-app/provisioning.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs-recovery.test.ts",
+        "packages/cloud-shared/src/lib/services/user-mcps.test.ts",
+        "packages/examples/cloud/clone-ur-crush/postcss.config.cjs",
+        "packages/scenario-runner/src/__tests__/deterministic-action-coverage.test.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-app-control-actions.scenario.ts",
+        "packages/scenario-runner/vitest.config.ts",
+        "packages/scripts/sync-artifacts.mjs",
+        "packages/shared/src/email-classification/email-classifier.test.ts",
+        "packages/ui/src/browser.ts",
+        "plugins/plugin-app-control/vitest.config.ts",
+        "plugins/plugin-commands/__tests__/connector-catalog.test.ts",
+        "plugins/plugin-commands/src/connector-catalog.ts",
+        "plugins/plugin-feed/AGENTS.md",
+        "plugins/plugin-feed/CLAUDE.md",
+        "plugins/plugin-finances/README.md",
+        "plugins/plugin-finances/src/db/schema.ts",
+        "plugins/plugin-inbox/src/inbox/repository.ts",
+        "plugins/plugin-inbox/src/providers/cross-channel-context.ts",
+        "plugins/plugin-inbox/test/inbox-repository.test.ts",
+        "plugins/plugin-local-inference/native/AGENTS.md",
+        "plugins/plugin-local-inference/native/CLAUDE.md",
+        "plugins/plugin-local-inference/src/services/catalog.test.ts",
+        "plugins/plugin-local-inference/src/services/router-handler.ts",
+        "plugins/plugin-ollama/AGENTS.md",
+        "plugins/plugin-ollama/CLAUDE.md",
+        "plugins/plugin-openai/AGENTS.md",
+        "plugins/plugin-openai/CLAUDE.md",
+        "plugins/plugin-openai/index.ts",
+        "plugins/plugin-task-coordinator/src/GlobalPrefsSection.tsx",
+        "plugins/plugin-task-coordinator/src/coding-agent-settings-shared.ts",
+        "plugins/plugin-task-coordinator/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(shared): unwrap primitive + `response`-keyed reply wrappers",
+      "prNumber": 8689,
+      "type": "bugfix",
+      "body": "Follow-up to #8635. Cloud agents (gpt-oss `:nitro`) emit not just `{\"reply\":\"…\"}` but also **primitive** replies like `{\"reply\":42}` or `{\"reply\":true}` — **observed rendering raw in the chat on-device** on a dedicated agent. The previous `",
+      "files": [
+        "packages/shared/src/utils/assistant-text.test.ts",
+        "packages/shared/src/utils/assistant-text.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): harden provisioning-job failure write-back, idempotency, and lane pinning",
+      "prNumber": 8688,
+      "type": "bugfix",
+      "body": "Four provisioning-robustness fixes surfaced by an audit. Each is independently scoped; all live in the cloud provisioning path.\n\n## 1. Permanent-failure sandbox write-back is now atomic\n**Before:** On a permanently-failed job, flipping the ",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/cloud-api/v1/eliza/agents/route.ts",
+        "packages/cloud-shared/src/db/repositories/jobs.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): isolate crypto/bn.js graph into its own chunk",
+      "prNumber": 8687,
+      "type": "bugfix",
+      "body": "Forward-port of the cloud-frontend crash fix that landed on main in #8682 (KV worker cache is already on develop via #8665).\n\nRolldown non-deterministically folded the crypto/bn.js graph into an eager en_US locale chunk where bn.js runs Buf",
+      "files": [
+        "packages/cloud-frontend/vite.config.ts"
+      ]
+    },
+    {
+      "title": "refactor(ui/cloud): consolidate duplicated JWT-payload decoding (10 copies → 1)",
+      "prNumber": 8686,
+      "type": "refactor",
+      "body": "## Summary\n\nClient-side login cleanup for the **live** cloud frontend (`packages/app` consuming `packages/ui/src/cloud/*`).\n\n### FIX 1 — Consolidate duplicated JWT-payload decoding (10 copies → 1)\n\nThe same base64url-decode + `JSON.parse(at",
+      "files": [
+        "packages/ui/src/cloud/account-security/data/use-session-auth.ts",
+        "packages/ui/src/cloud/api-explorer/use-session-auth.ts",
+        "packages/ui/src/cloud/applications/lib/use-session-auth.ts",
+        "packages/ui/src/cloud/approvals/lib/use-session-auth.ts",
+        "packages/ui/src/cloud/billing/use-session-auth.ts",
+        "packages/ui/src/cloud/documents/lib/use-session-auth.ts",
+        "packages/ui/src/cloud/instances/lib/use-session-auth.ts",
+        "packages/ui/src/cloud/join/lib/use-join-session.ts",
+        "packages/ui/src/cloud/lib/api-client.ts",
+        "packages/ui/src/cloud/lib/jwt.test.ts",
+        "packages/ui/src/cloud/lib/jwt.ts",
+        "packages/ui/src/cloud/monetization/auth-gate.ts",
+        "packages/ui/src/cloud/public-pages/lib/use-session-auth.ts",
+        "packages/ui/src/cloud/shell/StewardProvider.tsx"
+      ]
+    },
+    {
+      "title": "feat(cloud): observable cache breaker open + steward URL parse failures",
+      "prNumber": 8685,
+      "type": "feature",
+      "body": "Two small observability/cleanup fixes so infra incidents are diagnosable from logs alone.\n\n## Fix 1 — Cache circuit-breaker opening is no longer silent\n`packages/cloud-shared/src/lib/cache/client.ts`\n\nThe `CacheClient` circuit breaker silen",
+      "files": [
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-shared/src/lib/cache/client.ts"
+      ]
+    },
+    {
+      "title": "fix(ci/provisioning-worker): raise build:core heap to 8GB (stop plugin-local-inference OOM) [main]",
+      "prNumber": 8684,
+      "type": "bugfix",
+      "body": "## Problem\n\n`Deploy Eliza Provisioning Worker` fails with **`FATAL ERROR: Ineffective mark-compacts near heap limit — JavaScript heap out of memory`** (exit 134) while building `@elizaos/plugin-local-inference` during the remote `bun run bu",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml"
+      ]
+    },
+    {
+      "title": "fix(ci/provisioning-worker): raise build:core heap to 8GB (stop plugin-local-inference OOM)",
+      "prNumber": 8683,
+      "type": "bugfix",
+      "body": "## Problem\n\n`Deploy Eliza Provisioning Worker` fails with **`FATAL ERROR: Ineffective mark-compacts near heap limit — JavaScript heap out of memory`** (exit 134) while building `@elizaos/plugin-local-inference` during the remote `bun run bu",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud): frontend crypto-chunk crash + KV Worker cache (prod hotfix)",
+      "prNumber": 8682,
+      "type": "bugfix",
+      "body": "Two changes bundled so a single main deploy lands both correctly (cloud-cf-deploy deploys the Worker **and** the frontend from main; shipping the frontend fix alone would redeploy the Worker from main without the KV cache).\n\n## 1. cloud-fro",
+      "files": [
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-frontend/vite.config.ts",
+        "packages/cloud-shared/src/lib/cache/adapters/kv-cache-adapter.ts",
+        "packages/cloud-shared/src/lib/cache/client.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(app): exclude web-only cloud dashboard from Capacitor mobile builds",
+      "prNumber": 8681,
+      "type": "bugfix",
+      "body": "## What\nA mobile-only Vite plugin that excludes the web-only cloud dashboard (`packages/ui/src/cloud`) from Capacitor (android/ios) builds.\n\n## Why\nThe cloud→app collapse moved the cloud dashboard into `packages/ui/src/cloud` (web-build-onl",
+      "files": [
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "ci(cloud-deploy): don't cancel manual production deploys",
+      "prNumber": 8680,
+      "type": "other",
+      "body": "Manual workflow_dispatch deploys get a per-run-unique concurrency group + cancel-in-progress=false so they run to completion (the cloud-api Worker deploy was never finishing — cancelled by churn before the cold build:core). Push/PR keep ded",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud-api/e2e): reclaim orphaned PGlite port instead of hard-failing CF Deploy (main)",
+      "prNumber": 8679,
+      "type": "bugfix",
+      "body": "Forward-port of #8677 to `main` so **Cloud CF Deploy** is green on the production branch too.\n\n`Deploy API Worker → Run Worker e2e` was hard-failing with `default PGlite server is already running at 127.0.0.1:55433`. Root cause: the job run",
+      "files": [
+        "packages/cloud-api/test/e2e/run-e2e-batches.mjs"
+      ]
+    },
+    {
+      "title": "docs: sync CLAUDE.md + AGENTS.md for social/messaging connector plugins",
+      "prNumber": 8678,
+      "type": "docs",
+      "body": "Accuracy pass on agent instructions for all social and messaging connector plugins. Same fix categories as the packages pass.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+      "files": []
+    },
+    {
+      "title": "fix(cloud-api/e2e): reclaim orphaned PGlite port instead of hard-failing CF Deploy",
+      "prNumber": 8677,
+      "type": "bugfix",
+      "body": "## Problem\n\n**Cloud CF Deploy** has been red on `main`/`develop` at **Deploy API Worker → Run Worker e2e**, with:\n\n```\nError: [api-e2e] default PGlite server is already running at 127.0.0.1:55433;\n       stop it before running isolated test",
+      "files": [
+        "packages/cloud-api/test/e2e/run-e2e-batches.mjs"
+      ]
+    },
+    {
+      "title": "docs: sync CLAUDE.md + AGENTS.md for app and productivity plugins",
+      "prNumber": 8676,
+      "type": "docs",
+      "body": "Accuracy pass on agent instructions for app-layer and productivity plugins.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+      "files": [
+        "plugins/plugin-agent-orchestrator/AGENTS.md",
+        "plugins/plugin-agent-orchestrator/CLAUDE.md",
+        "plugins/plugin-agent-skills/AGENTS.md",
+        "plugins/plugin-agent-skills/CLAUDE.md",
+        "plugins/plugin-app-control/AGENTS.md",
+        "plugins/plugin-app-control/CLAUDE.md",
+        "plugins/plugin-app-manager/AGENTS.md",
+        "plugins/plugin-app-manager/CLAUDE.md",
+        "plugins/plugin-browser/AGENTS.md",
+        "plugins/plugin-browser/CLAUDE.md",
+        "plugins/plugin-calendar/AGENTS.md",
+        "plugins/plugin-calendar/CLAUDE.md",
+        "plugins/plugin-calendly/AGENTS.md",
+        "plugins/plugin-calendly/CLAUDE.md",
+        "plugins/plugin-coding-tools/AGENTS.md",
+        "plugins/plugin-coding-tools/CLAUDE.md",
+        "plugins/plugin-commands/AGENTS.md",
+        "plugins/plugin-commands/CLAUDE.md",
+        "plugins/plugin-companion/AGENTS.md",
+        "plugins/plugin-companion/CLAUDE.md",
+        "plugins/plugin-computeruse/AGENTS.md",
+        "plugins/plugin-computeruse/CLAUDE.md",
+        "plugins/plugin-contacts/AGENTS.md",
+        "plugins/plugin-contacts/CLAUDE.md",
+        "plugins/plugin-documents/AGENTS.md",
+        "plugins/plugin-documents/CLAUDE.md",
+        "plugins/plugin-finances/AGENTS.md",
+        "plugins/plugin-finances/CLAUDE.md",
+        "plugins/plugin-health/AGENTS.md",
+        "plugins/plugin-health/CLAUDE.md",
+        "plugins/plugin-messages/AGENTS.md",
+        "plugins/plugin-messages/CLAUDE.md",
+        "plugins/plugin-phone/AGENTS.md",
+        "plugins/plugin-phone/CLAUDE.md",
+        "plugins/plugin-relationships/AGENTS.md",
+        "plugins/plugin-relationships/CLAUDE.md",
+        "plugins/plugin-sql/AGENTS.md",
+        "plugins/plugin-sql/CLAUDE.md",
+        "plugins/plugin-task-coordinator/AGENTS.md",
+        "plugins/plugin-task-coordinator/CLAUDE.md",
+        "plugins/plugin-wallet-ui/AGENTS.md",
+        "plugins/plugin-wallet-ui/CLAUDE.md",
+        "plugins/plugin-wallet/AGENTS.md",
+        "plugins/plugin-wallet/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "docs: sync CLAUDE.md + AGENTS.md for native bridge plugins",
+      "prNumber": 8675,
+      "type": "docs",
+      "body": "Accuracy pass on agent instructions for all native device bridge plugins (iOS/Android/macOS/desktop).\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+      "files": []
+    },
+    {
+      "title": "docs: sync CLAUDE.md + AGENTS.md for model provider plugins",
+      "prNumber": 8674,
+      "type": "docs",
+      "body": "Accuracy pass on agent instructions for all model/inference provider plugins.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+      "files": [
+        "plugins/plugin-anthropic-proxy/AGENTS.md",
+        "plugins/plugin-anthropic-proxy/CLAUDE.md",
+        "plugins/plugin-anthropic/AGENTS.md",
+        "plugins/plugin-anthropic/CLAUDE.md",
+        "plugins/plugin-edge-tts/AGENTS.md",
+        "plugins/plugin-edge-tts/CLAUDE.md",
+        "plugins/plugin-elizacloud/AGENTS.md",
+        "plugins/plugin-elizacloud/CLAUDE.md",
+        "plugins/plugin-google-genai/AGENTS.md",
+        "plugins/plugin-google-genai/CLAUDE.md",
+        "plugins/plugin-groq/AGENTS.md",
+        "plugins/plugin-groq/CLAUDE.md",
+        "plugins/plugin-lmstudio/AGENTS.md",
+        "plugins/plugin-lmstudio/CLAUDE.md",
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md",
+        "plugins/plugin-local-inference/native/AGENTS.md",
+        "plugins/plugin-local-inference/native/CLAUDE.md",
+        "plugins/plugin-ollama/AGENTS.md",
+        "plugins/plugin-ollama/CLAUDE.md",
+        "plugins/plugin-openai/AGENTS.md",
+        "plugins/plugin-openai/CLAUDE.md",
+        "plugins/plugin-xai/AGENTS.md",
+        "plugins/plugin-xai/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "docs: sync CLAUDE.md + AGENTS.md for all packages/*",
+      "prNumber": 8673,
+      "type": "docs",
+      "body": "Bulk accuracy pass on agent-facing instructions for every package. Fixed stale file paths, wrong export names, outdated status claims (\"stub\", \"not yet implemented\"), undocumented env vars, and missing plugin surface entries. AGENTS.md is k",
+      "files": [
+        "SECURITY.md",
+        "WINDOWS.md",
+        "packages/agent/AGENTS.md",
+        "packages/agent/CLAUDE.md",
+        "packages/alberta/README.md",
+        "packages/app-core/AGENTS.md",
+        "packages/app-core/CLAUDE.md",
+        "packages/app/AGENTS.md",
+        "packages/app/CLAUDE.md",
+        "packages/chip/AGENTS.md",
+        "packages/chip/CLAUDE.md",
+        "packages/cloud-api/AGENTS.md",
+        "packages/cloud-api/CLAUDE.md",
+        "packages/cloud-frontend/AGENTS.md",
+        "packages/cloud-frontend/CLAUDE.md",
+        "packages/cloud-infra/AGENTS.md",
+        "packages/cloud-infra/CLAUDE.md",
+        "packages/cloud-routing/AGENTS.md",
+        "packages/cloud-routing/CLAUDE.md",
+        "packages/cloud-sdk/AGENTS.md",
+        "packages/cloud-sdk/CLAUDE.md",
+        "packages/cloud-shared/AGENTS.md",
+        "packages/cloud-shared/CLAUDE.md",
+        "packages/core/AGENTS.md",
+        "packages/core/CLAUDE.md",
+        "packages/docs-elizacloud-redirect/AGENTS.md",
+        "packages/docs-elizacloud-redirect/CLAUDE.md",
+        "packages/elizaos/AGENTS.md",
+        "packages/elizaos/CLAUDE.md",
+        "packages/feed/AGENTS.md",
+        "packages/feed/CLAUDE.md",
+        "packages/os/AGENTS.md",
+        "packages/os/CLAUDE.md",
+        "packages/plugin-host-shim-electrobun/AGENTS.md",
+        "packages/plugin-host-shim-electrobun/CLAUDE.md",
+        "packages/plugin-host-shim-electrobun/README.md",
+        "packages/plugin-host-shim/AGENTS.md",
+        "packages/plugin-host-shim/CLAUDE.md",
+        "packages/plugin-sub-agent-claude-code/AGENTS.md",
+        "packages/plugin-sub-agent-claude-code/CLAUDE.md",
+        "packages/plugin-worker-runtime/AGENTS.md",
+        "packages/plugin-worker-runtime/CLAUDE.md",
+        "packages/plugin-worker-runtime/README.md",
+        "packages/robot/AGENTS.md",
+        "packages/robot/CLAUDE.md",
+        "packages/scenario-runner/AGENTS.md",
+        "packages/scenario-runner/CLAUDE.md",
+        "packages/security/AGENTS.md",
+        "packages/security/CLAUDE.md",
+        "packages/shared/AGENTS.md"
+      ]
+    },
+    {
+      "title": "docs: sync CLAUDE.md + AGENTS.md for specialized and game/app plugins",
+      "prNumber": 8672,
+      "type": "docs",
+      "body": "Accuracy pass on agent instructions for specialized, game, and miscellaneous plugins.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+      "files": [
+        "plugins/app-model-tester/AGENTS.md",
+        "plugins/app-model-tester/CLAUDE.md",
+        "plugins/plugin-2004scape/AGENTS.md",
+        "plugins/plugin-2004scape/CLAUDE.md",
+        "plugins/plugin-anthropic-proxy/AGENTS.md",
+        "plugins/plugin-anthropic-proxy/CLAUDE.md",
+        "plugins/plugin-anthropic/AGENTS.md",
+        "plugins/plugin-anthropic/CLAUDE.md",
+        "plugins/plugin-aosp-local-inference/AGENTS.md",
+        "plugins/plugin-aosp-local-inference/CLAUDE.md",
+        "plugins/plugin-capacitor-bridge/AGENTS.md",
+        "plugins/plugin-capacitor-bridge/CLAUDE.md",
+        "plugins/plugin-clawville/AGENTS.md",
+        "plugins/plugin-clawville/CLAUDE.md",
+        "plugins/plugin-codex-cli/AGENTS.md",
+        "plugins/plugin-codex-cli/CLAUDE.md",
+        "plugins/plugin-defense-of-the-agents/AGENTS.md",
+        "plugins/plugin-defense-of-the-agents/CLAUDE.md",
+        "plugins/plugin-edge-tts/AGENTS.md",
+        "plugins/plugin-edge-tts/CLAUDE.md",
+        "plugins/plugin-elizacloud/AGENTS.md",
+        "plugins/plugin-elizacloud/CLAUDE.md",
+        "plugins/plugin-facewear/AGENTS.md",
+        "plugins/plugin-facewear/CLAUDE.md",
+        "plugins/plugin-feed/AGENTS.md",
+        "plugins/plugin-feed/CLAUDE.md",
+        "plugins/plugin-github/AGENTS.md",
+        "plugins/plugin-github/CLAUDE.md",
+        "plugins/plugin-gitpathologist/AGENTS.md",
+        "plugins/plugin-gitpathologist/CLAUDE.md",
+        "plugins/plugin-google-genai/AGENTS.md",
+        "plugins/plugin-google-genai/CLAUDE.md",
+        "plugins/plugin-groq/AGENTS.md",
+        "plugins/plugin-groq/CLAUDE.md",
+        "plugins/plugin-hyperliquid-app/AGENTS.md",
+        "plugins/plugin-hyperliquid-app/CLAUDE.md",
+        "plugins/plugin-hyperscape/AGENTS.md",
+        "plugins/plugin-hyperscape/CLAUDE.md",
+        "plugins/plugin-lmstudio/AGENTS.md",
+        "plugins/plugin-lmstudio/CLAUDE.md",
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md",
+        "plugins/plugin-local-inference/native/AGENTS.md",
+        "plugins/plugin-local-inference/native/CLAUDE.md",
+        "plugins/plugin-native-activity-tracker/AGENTS.md",
+        "plugins/plugin-native-activity-tracker/CLAUDE.md",
+        "plugins/plugin-native-appblocker/AGENTS.md",
+        "plugins/plugin-native-appblocker/CLAUDE.md",
+        "plugins/plugin-native-bun-runtime/AGENTS.md",
+        "plugins/plugin-native-bun-runtime/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "docs: sync README.md files across packages and plugins",
+      "prNumber": 8671,
+      "type": "docs",
+      "body": "User-facing documentation accuracy pass. Fixed stale status claims, wrong package names, incorrect env var names, and outdated plugin surface descriptions.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+      "files": []
+    },
+    {
+      "title": "fix: iOS bundle ID, account pool strategy, onboarding tours, local-only mode, inbox cross-channel",
+      "prNumber": 8670,
+      "type": "bugfix",
+      "body": "Closes #8652. Five pre-launch gaps from Shaw's May 3rd TODO list:\n- iOS: corrects all bundle IDs from `app.eliza` → `ai.elizaos.app` in pbxproj and extension entitlements\n- Account pool strategy: env var `ELIZA_CODING_ACCOUNT_STRATEGY` + UI",
+      "files": [
+        "packages/app-core/platforms/ios/App/App.xcodeproj/project.pbxproj",
+        "packages/app-core/platforms/ios/App/App/DeviceActivityMonitorExtension/DeviceActivityMonitorExtension.entitlements",
+        "packages/app-core/platforms/ios/App/App/DeviceActivityReportExtension/DeviceActivityReportExtension.entitlements",
+        "packages/app-core/platforms/ios/App/App/WebsiteBlockerContentExtension/WebsiteBlockerContentExtension.entitlements",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/cloud-shared/src/lib/onboarding/tours.ts",
+        "plugins/plugin-discord/AGENTS.md",
+        "plugins/plugin-discord/CLAUDE.md",
+        "plugins/plugin-farcaster/AGENTS.md",
+        "plugins/plugin-farcaster/CLAUDE.md",
+        "plugins/plugin-google-chat/AGENTS.md",
+        "plugins/plugin-google-chat/CLAUDE.md",
+        "plugins/plugin-imessage/AGENTS.md",
+        "plugins/plugin-imessage/CLAUDE.md",
+        "plugins/plugin-inbox/src/plugin.ts",
+        "plugins/plugin-inbox/src/providers/cross-channel-context.ts",
+        "plugins/plugin-instagram/AGENTS.md",
+        "plugins/plugin-instagram/CLAUDE.md",
+        "plugins/plugin-local-inference/src/services/router-handler.ts",
+        "plugins/plugin-matrix/AGENTS.md",
+        "plugins/plugin-matrix/CLAUDE.md",
+        "plugins/plugin-nostr/AGENTS.md",
+        "plugins/plugin-nostr/CLAUDE.md",
+        "plugins/plugin-signal/AGENTS.md",
+        "plugins/plugin-signal/CLAUDE.md",
+        "plugins/plugin-slack/AGENTS.md",
+        "plugins/plugin-slack/CLAUDE.md",
+        "plugins/plugin-task-coordinator/src/GlobalPrefsSection.tsx",
+        "plugins/plugin-task-coordinator/src/coding-agent-settings-shared.ts",
+        "plugins/plugin-task-coordinator/src/odysseus/SettingsPanel.tsx",
+        "plugins/plugin-telegram/AGENTS.md",
+        "plugins/plugin-telegram/CLAUDE.md",
+        "plugins/plugin-wechat/AGENTS.md",
+        "plugins/plugin-wechat/CLAUDE.md",
+        "plugins/plugin-whatsapp/AGENTS.md",
+        "plugins/plugin-whatsapp/CLAUDE.md",
+        "plugins/plugin-x/AGENTS.md",
+        "plugins/plugin-x/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "Main",
+      "prNumber": 8669,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-shared/src/db/migrations/0147_user_mcps.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud-shared/src/lib/models/catalog.ts",
+        "packages/cloud-shared/src/lib/models/model-tiers.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): route GLM 5.2 (zai/glm-5.2) into the model catalog",
+      "prNumber": 8668,
+      "type": "feature",
+      "body": "Routes `zai/glm-5.2` into the eliza cloud model catalog so it's selectable as an agent model.\n\n## Changes\n- `catalog.ts` — `ZAI_TEXT_MODEL_IDS` now leads with `zai/glm-5.2`\n- `model-tiers.ts` — adds a `glm-5.2` tier entry (Z.AI latest flags",
+      "files": [
+        "packages/cloud-shared/src/lib/models/catalog.ts",
+        "packages/cloud-shared/src/lib/models/model-tiers.ts"
+      ]
+    },
+    {
+      "title": "Main",
+      "prNumber": 8667,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-shared/src/db/migrations/0147_user_mcps.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json"
+      ]
+    },
+    {
+      "title": "feat(ui): rebuild the interactive tour — lean frames, real voice, cap…",
+      "prNumber": 8666,
+      "type": "feature",
+      "body": "…ability-locked nav\r\n\r\n- 6 lean frames; strip slop (step counter, mode chip, emoji, splash, teleport buttons).\r\n- Guided 'ask to navigate': pre-fill \"open settings\" + spotlight Send -> real nav.\r\n- Real voice BOTH ways: real TTS narration (",
+      "files": [
+        "packages/app/test/ui-smoke/chat-overlay-controls-interactions.spec.ts",
+        "packages/app/test/ui-smoke/tutorial-help-views.spec.ts",
+        "packages/app/test/ui-smoke/tutorial-help-walkthrough.spec.ts",
+        "packages/ui/src/components/pages/tutorial/TutorialNarrator.tsx",
+        "packages/ui/src/components/pages/tutorial/TutorialOverlay.tsx",
+        "packages/ui/src/components/pages/tutorial/TutorialSpotlight.tsx",
+        "packages/ui/src/components/pages/tutorial/TutorialView.tsx",
+        "packages/ui/src/components/pages/tutorial/tutorial-controller.ts",
+        "packages/ui/src/components/pages/tutorial/tutorial-steps.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/events/index.ts",
+        "packages/ui/src/navigation/nav-lock.test.ts",
+        "packages/ui/src/navigation/nav-lock.ts",
+        "packages/ui/src/state/useAppProviderEffects.ts",
+        "packages/ui/src/state/useNavigationState.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): Cloudflare KV cache backend for the Worker",
+      "prNumber": 8665,
+      "type": "feature",
+      "body": "## Problem\n\nAfter migrating Eliza Cloud's cache from Upstash to Railway Redis, the **Cloudflare Worker could not reliably reach Railway's Redis**. `SocketRedis` (RESP2 over `cloudflare:sockets`) to Railway's public TCP proxy **hangs under r",
+      "files": [
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-shared/src/lib/cache/adapters/kv-cache-adapter.ts",
+        "packages/cloud-shared/src/lib/cache/client.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): pin dedicated-agent embeddings to the elizacloud Worker (no more 503)",
+      "prNumber": 8664,
+      "type": "bugfix",
+      "body": "## What\nPin `ELIZAOS_CLOUD_EMBEDDING_URL` in the dedicated-agent provisioning env builder so embeddings hit the healthy elizacloud Worker route instead of the BitRouter base that has no `/embeddings`.\n\n## Why\nVerified live on a fresh Railwa",
+      "files": [
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.test.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): robust logout teardown + self-heal on a 401 (no stale-session blips)",
+      "prNumber": 8663,
+      "type": "bugfix",
+      "body": "Part of the login state/refresh/blip cleanup pass.\n\n## 1. Logout always clears cookies (clean teardown)\nThe logout handler cleared cookies **after** the DB writes (`getCurrentUser` + `endAllUserSessions`), so a transient DB error → **500 wi",
+      "files": [
+        "packages/cloud-api/auth/logout/route.ts",
+        "packages/ui/src/cloud/lib/api-client.ts",
+        "packages/ui/src/cloud/shell/StewardProviderRuntime.tsx"
+      ]
+    },
+    {
+      "title": "feat(settings): add Shut down / Start controls to the in-app cloud agent manager",
+      "prNumber": 8662,
+      "type": "feature",
+      "body": "The in-app **Settings → Agents** manager (`CloudAgentsSection`) supported switch / create+name / rename / delete, but had **no way to shut down (suspend) a running agent or start a stopped one** — even though the client methods already exis",
+      "files": [
+        "packages/ui/src/components/settings/CloudAgentsSection.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): collapse the two Steward token verifiers into one",
+      "prNumber": 8661,
+      "type": "bugfix",
+      "body": "## Why\nThe cloud had **two** `verifyStewardTokenCached` implementations that diverged in ways that produce real session-state bugs:\n\n| | middleware (inline, in `workers-hono-auth`) | routes (shared, in `steward-client`) |\n|---|---|---|\n| Ca",
+      "files": [
+        "packages/cloud-shared/src/lib/auth/steward-client.ts",
+        "packages/cloud-shared/src/lib/auth/workers-hono-auth.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): user_mcps migration (unblocks cloud-api deploy)",
+      "prNumber": 8660,
+      "type": "bugfix",
+      "body": "Adds the hand-authored 0147 migration for user_mcps + mcp_usage (schema shipped without one, causing POST /api/v1/mcps 500 and blocking the cloud-api Worker deploy/e2e). Cherry-picked onto the green cutover main so the app build stays green",
+      "files": [
+        "packages/cloud-shared/src/db/migrations/0147_user_mcps.sql",
+        "packages/cloud-shared/src/db/migrations/meta/_journal.json"
+      ]
+    },
+    {
+      "title": "fix(ci/gitleaks): allowlist YOUR_API_KEY curl-example placeholder",
+      "prNumber": 8659,
+      "type": "bugfix",
+      "body": "## What\n\nOn a normal develop→main merge, gitleaks (correctly scanning incrementally now, post-#8631) flags **one** real finding: `RuleID: curl-auth-header` in `packages/ui/src/cloud/monetization/affiliates/AffiliatesPageClient.tsx`.\n\nIt's a",
+      "files": [
+        ".gitleaks.toml"
+      ]
+    },
+    {
+      "title": "fix(cloud): provision-health falls open when Worker has no Redis binding",
+      "prNumber": 8658,
+      "type": "bugfix",
+      "body": "checkProvisioningWorkerHealth 503'd when the cloud-api Worker had no Redis client — blocking ALL provisioning on a reader-side config gap (e.g. mid Redis-cutover) even with the daemon alive. Fall open in that case (like the rate-limiter). C",
+      "files": [
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.ts"
+      ]
+    },
+    {
+      "title": "release: cloud→app apex cutover (verified-green snapshot)",
+      "prNumber": 8657,
+      "type": "other",
+      "body": "Pinned, build-verified snapshot (develop @0ca719049d) for the production apex cutover. build:core (52/52) + packages/app build:web (10851 modules) verified green in a clean-install worktree. Carries: cloud→app migration, apex deploy-workflo",
+      "files": [
+        "packages/core/src/index.ts",
+        "plugins/plugin-personal-assistant/src/components/LifeOpsPageView.interact.ts",
+        "plugins/plugin-personal-assistant/src/components/LifeOpsPageView.tsx",
+        "plugins/plugin-personal-assistant/src/components/lifeops-view-bundle.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/index.ts",
+        "plugins/plugin-personal-assistant/src/ui.ts",
+        "plugins/plugin-personal-assistant/vite.config.views.ts",
+        "plugins/plugin-training/scripts/gepa-view-context.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): stop steward login bouncing valid sessions back to /login",
+      "prNumber": 8656,
+      "type": "bugfix",
+      "body": "## Why\nFound while auditing the login flow end-to-end (alongside the 2026-06-19 prod login work). Two server-side cloud-api bugs produce the classic *'login succeeds, then lands back on /login'* and *'logged out too early'* symptoms — indep",
+      "files": [
+        "packages/cloud-api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud-api/auth/steward-refresh/route.ts",
+        "packages/cloud-api/auth/steward-session/route.ts"
+      ]
+    },
+    {
+      "title": "release: cloud cutover build fixes (deps + data hooks + MCP e2e)",
+      "prNumber": 8655,
+      "type": "bugfix",
+      "body": "Carries the fixes that make the migration build in CI: declared 11 missing cloud deps in packages/ui, committed the 10 ignored data/ hooks (un-ignored the path), and the MCP-registration SSRF fix. App build verified green in a clean-install",
+      "files": [
+        ".gitignore",
+        "bun.lock",
+        "packages/app-core/platforms/electrobun/remotes/local-model/src/bun/eliza1-catalog.ts",
+        "packages/core/src/scheduled-task/README.md",
+        "packages/core/src/scheduled-task/index.ts",
+        "packages/core/src/scheduled-task/runner.ts",
+        "packages/core/src/scheduled-task/types.ts",
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/shared/src/local-inference/kokoro/runtime-selection.ts",
+        "packages/ui/package.json",
+        "packages/ui/src/api/ios-local-agent-kernel.local-inference.test.ts",
+        "packages/ui/src/cloud/account-security/data/audit-client.ts",
+        "packages/ui/src/cloud/account-security/data/consent-store.ts",
+        "packages/ui/src/cloud/account-security/data/use-session-auth.ts",
+        "packages/ui/src/cloud/account-security/data/user.ts",
+        "packages/ui/src/cloud/admin/data/use-admin-gate.ts",
+        "packages/ui/src/cloud/billing/data/billing-data.ts",
+        "packages/ui/src/cloud/instances/lib/data/credits.ts",
+        "packages/ui/src/cloud/instances/lib/data/eliza-agents.ts",
+        "packages/ui/src/cloud/organization/data/cloud-org-types.ts",
+        "packages/ui/src/cloud/organization/data/use-organization.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/__e2e__/chat-sheet-fixture.tsx",
+        "packages/ui/src/components/shell/__e2e__/output/01-desktop-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/07-desktop-back-to-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/08-desktop-clicked-out-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/11-mobile-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/17-mobile-back-to-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/18-mobile-clicked-out-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/21-state-empty.png",
+        "packages/ui/src/components/shell/__e2e__/output/22-state-booting.png",
+        "packages/ui/src/components/shell/__e2e__/output/23-state-recording-listening.png",
+        "packages/ui/src/components/shell/__e2e__/output/24-state-speaking.png",
+        "packages/ui/src/components/shell/__e2e__/output/25-state-responding.png",
+        "packages/ui/src/components/shell/__e2e__/output/26-state-typing-send.png",
+        "packages/ui/src/components/shell/__e2e__/output/27-state-image-attached.png",
+        "packages/ui/src/components/shell/__e2e__/output/28-state-mic-clicked-recording.png",
+        "packages/ui/src/components/shell/__e2e__/output/29-state-dictation-in-box.png",
+        "packages/ui/src/components/shell/__e2e__/output/30-state-suggestions-off.png",
+        "packages/ui/src/components/shell/__e2e__/output/32-state-keyboard-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/35-state-pill.png",
+        "packages/ui/src/components/shell/__e2e__/output/36-state-pill-tap-opened.png",
+        "packages/ui/src/components/shell/__e2e__/output/36-state-reduced-motion-open.png",
+        "packages/ui/src/components/shell/__e2e__/output/37-state-INPUT.png",
+        "packages/ui/src/components/shell/__e2e__/output/37-state-reduced-motion-open.png",
+        "packages/ui/src/components/shell/__e2e__/output/38-state-INPUT.png",
+        "packages/ui/src/components/shell/__e2e__/output/38-state-OPEN_HALF_OR_OVER.png",
+        "packages/ui/src/components/shell/__e2e__/output/39-state-MAXIMIZED.png",
+        "packages/ui/src/components/shell/__e2e__/output/39-state-OPEN_HALF_OR_OVER.png",
+        "packages/ui/src/components/shell/__e2e__/output/40-state-MAXIMIZED.png"
+      ]
+    },
+    {
+      "title": "fix(cloud): MCP registration SSRF guard must be synchronous (no DNS)",
+      "prNumber": 8654,
+      "type": "bugfix",
+      "body": "## Why\n`group-g2-mcp-registry` e2e fails on **develop and main**, which blocks the cloud deploy pipeline (the deploy job's pre-deploy 'Run Worker e2e' step). Surfaced while debugging why a fix couldn't be shipped during the 2026-06-19 prod ",
+      "files": [
+        "packages/cloud-api/test/e2e/group-g2-mcp-registry.test.ts",
+        "packages/cloud-shared/src/lib/security/outbound-url.ts",
+        "packages/cloud-shared/src/lib/services/user-mcps.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): harden login DB path + unblock deploys during a DB incident",
+      "prNumber": 8653,
+      "type": "bugfix",
+      "body": "## Why\n\nSurfaced by the **2026-06-19 prod login outage**: prod `DATABASE_URL` was cut over to Railway Postgres (via Cloudflare Hyperdrive) **while a `pg_restore` backfill was still running**. The DB itself was healthy (direct auth queries ~",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-shared/src/db/retry-transient.test.ts",
+        "packages/cloud-shared/src/db/retry-transient.ts",
+        "packages/cloud-shared/src/lib/services/users.ts"
+      ]
+    },
+    {
+      "title": "release: MCP registration SSRF fix + cutover follow-through",
+      "prNumber": 8651,
+      "type": "bugfix",
+      "body": "Follow-up release: carries the MCP-registration SSRF fix (4b1368a29c) so the cloud-api Worker e2e (group-g2-mcp-registry) passes and deploy-api succeeds, plus the apex app cutover. Triggers a clean prod deploy run.\n\n🤖 Generated with [Claud",
+      "files": [
+        "packages/app/test/ui-smoke/apps-personal-assistant-feed-interactions.spec.ts",
+        "packages/cloud-api/v1/mcps/route.ts",
+        "packages/ui/src/components/shell/__tests__/useShellController.test.tsx",
+        "packages/ui/src/components/shell/useShellController.ts",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/end-of-turn.test.ts",
+        "packages/ui/src/voice/end-of-turn.ts",
+        "packages/ui/src/voice/should-respond.test.ts",
+        "packages/ui/src/voice/should-respond.ts",
+        "plugins/plugin-native-talkmode/android/src/main/java/ai/eliza/plugins/talkmode/TalkModePlugin.kt",
+        "plugins/plugin-personal-assistant/AGENTS.md",
+        "plugins/plugin-personal-assistant/CLAUDE.md",
+        "plugins/plugin-personal-assistant/src/components/LifeOpsPageView.tsx"
+      ]
+    },
+    {
+      "title": "release: cloud→Eliza-app migration + apex cutover + Railway hardening",
+      "prNumber": 8650,
+      "type": "other",
+      "body": "Release of develop → main. **This triggers the production cutover**: on the main push, `cloud-cf-deploy` builds + deploys `packages/app` to the `eliza-cloud` Pages project at the `elizacloud.ai` apex (Topology A), replacing the `cloud-front",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/core/src/index.node.ts",
+        "packages/core/src/services/evaluator.test.ts",
+        "packages/core/src/services/evaluator.ts",
+        "packages/core/src/services/optimized-prompt-resolver.test.ts",
+        "packages/core/src/services/optimized-prompt.ts",
+        "packages/scripts/sync-artifacts.mjs",
+        "plugins/plugin-app-control/src/evaluators/view-context.test.ts",
+        "plugins/plugin-app-control/src/evaluators/view-context.ts",
+        "plugins/plugin-personal-assistant/docs/lifeops-cleanup-review.md",
+        "plugins/plugin-personal-assistant/src/lifeops/context-graph.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/identity-observations.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/identity-observations/observer.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/index.ts",
+        "plugins/plugin-training/scripts/gepa-view-context.ts",
+        "plugins/plugin-training/src/optimizers/__fixtures__/view-context.jsonl",
+        "plugins/plugin-training/src/optimizers/index.ts",
+        "plugins/plugin-training/src/optimizers/scoring.ts",
+        "plugins/plugin-training/src/optimizers/view-context-dataset.test.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): dedicated-agent registry over Railway Redis + pairing primitive (#8621)",
+      "prNumber": 8649,
+      "type": "feature",
+      "body": "Addresses the remaining **dedicated cloud-agent** pieces tracked in #8621 (the KV/registry repoint and the app auth+lifecycle gap). Two self-contained commits off `develop`.\n\n## 1. Sandbox registry speaks native TCP Redis (Railway), not jus",
+      "files": [
+        "packages/agent/src/runtime/__tests__/sandbox-registry.test.ts",
+        "packages/agent/src/runtime/sandbox-registry.ts",
+        "packages/app-core/src/services/__tests__/sandbox-registry.test.ts",
+        "packages/app-core/src/services/sandbox-registry.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/ui/src/api/client-cloud-pairing.test.ts",
+        "packages/ui/src/api/client-cloud.ts"
+      ]
+    },
+    {
+      "title": "fix: resolve build warnings and plugin startup failures",
+      "prNumber": 8648,
+      "type": "bugfix",
+      "body": "## Summary\n\n- **turbo.json**: add missing `outputs` declarations for 4 packages that produced `WARNING no output files found for task` noise (`eliza-next-example`, `example-browser-extension-chrome`, `@elizaos/registry`, `elizaos-plugin-ech",
+      "files": [
+        "bun.lock",
+        "packages/agent/package.json",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/src/runtime/prompt-compaction.ts",
+        "packages/cloud-services/operator/package.json",
+        "packages/examples/cloud/clone-ur-crush/package.json",
+        "plugins/plugin-sql/src/pglite/adapter.ts",
+        "plugins/plugin-vision/src/vision-models.ts",
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix: dedicated-agent client review follow-ups (202 resume, null-safety, create-branch base)",
+      "prNumber": 8647,
+      "type": "bugfix",
+      "body": "Three confirmed findings from a multi-agent review of the app's **cloud/dedicated-agent client path**, each adversarially verified against the code and fixed + tested.\n\n### 1. 202 resume exhaustion returned the empty placeholder as success ",
+      "files": [
+        "packages/shared/src/utils/assistant-text.test.ts",
+        "packages/shared/src/utils/assistant-text.ts",
+        "packages/ui/src/api/client-base-resume.test.ts",
+        "packages/ui/src/api/client-base-websocket.test.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/api/client-cloud.ts"
+      ]
+    },
+    {
+      "title": "feat(views): self-contained branded hero icons for plugin views",
+      "prNumber": 8646,
+      "type": "feature",
+      "body": "## What\n\nEach plugin **view** is a mini-app served a hero image at `/api/views/<id>/hero`. This makes that image **self-contained in the plugin, branded, and never missing or ugly**, and adds the ability to generate/regenerate a view's icon",
+      "files": [
+        "packages/agent/src/api/views-registry.ts",
+        "packages/elizaos/templates/min-plugin/package.json",
+        "packages/shared/src/index.ts",
+        "packages/shared/src/view-hero-art.test.ts",
+        "packages/shared/src/view-hero-art.ts",
+        "plugins/app-model-tester/package.json",
+        "plugins/plugin-app-control/package.json",
+        "plugins/plugin-app-control/src/actions/views-create.ts",
+        "plugins/plugin-app-control/src/actions/views-edit.ts",
+        "plugins/plugin-app-control/src/actions/views-hero.ts",
+        "plugins/plugin-app-control/src/actions/views-icon.test.ts",
+        "plugins/plugin-app-control/src/actions/views-icon.ts",
+        "plugins/plugin-app-control/src/actions/views-plugin-source.ts",
+        "plugins/plugin-app-control/src/actions/views.ts",
+        "plugins/plugin-blocker/package.json",
+        "plugins/plugin-calendar/package.json",
+        "plugins/plugin-facewear/package.json",
+        "plugins/plugin-finances/package.json",
+        "plugins/plugin-goals/package.json",
+        "plugins/plugin-health/package.json",
+        "plugins/plugin-hyperliquid-app/package.json",
+        "plugins/plugin-inbox/package.json",
+        "plugins/plugin-messages/package.json",
+        "plugins/plugin-polymarket-app/package.json",
+        "plugins/plugin-relationships/assets/hero.svg",
+        "plugins/plugin-relationships/package.json",
+        "plugins/plugin-screenshare/package.json",
+        "plugins/plugin-social-alpha/package.json",
+        "plugins/plugin-todos/package.json",
+        "plugins/plugin-vector-browser/package.json",
+        "scripts/generate-view-heroes.mjs"
+      ]
+    },
+    {
+      "title": "promote: develop -> main (Railway cutover hardening: cache=auto, script TLS, #8634 content)",
+      "prNumber": 8645,
+      "type": "other",
+      "body": "Second promote of the Railway cutover. Brings CACHE_BACKEND=auto (prod Worker caching), standalone-script self-signed-cert TLS hardening, dead-code purge, and the rest of develop to prod. main is 0 commits ahead of develop (clean). Prod cut",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        "bun.lock",
+        "docs/cloud-into-eliza/CUTOVER-RUNBOOK.md",
+        "docs/cloud-into-eliza/DECISIONS.md",
+        "docs/cloud-into-eliza/PLAN.md",
+        "docs/cloud-into-eliza/REVISION-2.md",
+        "packages/app/functions/_middleware.ts",
+        "packages/app/functions/_proxy.ts",
+        "packages/app/playwright.hmr.config.ts",
+        "packages/app/public/_headers",
+        "packages/app/public/_redirects",
+        "packages/app/scripts/smoke-deeplinks.mjs",
+        "packages/app/src/main.tsx",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/app/test/ui-smoke/builtin-views-visual.spec.ts",
+        "packages/app/tsconfig.typecheck.json",
+        "packages/app/vite.config.ts",
+        "packages/app/wrangler.toml",
+        "packages/cloud-api/__tests__/dedicated-agent-proxy.test.ts",
+        "packages/cloud-api/__tests__/middleware-auth-public-token-paths.test.ts",
+        "packages/cloud-api/src/dedicated-agent-proxy.ts",
+        "packages/cloud-api/src/middleware/auth.ts",
+        "packages/cloud-api/test/e2e/group-g2-mcp-registry.test.ts",
+        "packages/cloud-api/v1/sensitive-requests/[id]/route.ts",
+        "packages/cloud-api/v1/sensitive-requests/[id]/submit/route.ts",
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-shared/AGENTS.md",
+        "packages/cloud-shared/CLAUDE.md",
+        "packages/cloud-shared/README.md",
+        "packages/cloud-shared/src/db/__tests__/client-tls.test.ts",
+        "packages/cloud-shared/src/db/client.ts",
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud-shared/src/db/worker-neon-http.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts",
+        "packages/cloud-shared/src/lib/services/neon-client.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs-recovery.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud-shared/src/lib/services/sensitive-requests.test.ts",
+        "packages/cloud-shared/src/lib/services/sensitive-requests.ts",
+        "packages/cloud-shared/src/lib/services/user-mcps.test.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts",
+        "packages/core/src/features/basic-capabilities/providers/attachments.ts",
+        "packages/scripts/cloud/admin/audit-migrations.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts",
+        "packages/scripts/cloud/admin/migrate-database.ts",
+        "packages/scripts/cloud/admin/migrate-with-diagnostics.ts",
+        "packages/scripts/cloud/admin/reconcile-earnings.ts"
+      ]
+    },
+    {
+      "title": "style(plugin-app-control): biome-format views-switching.test.ts",
+      "prNumber": 8644,
+      "type": "tests",
+      "body": "`it.each(HALLUCINATION_CASES)` in `plugins/plugin-app-control/src/actions/views-switching.test.ts` landed unformatted, failing **Quality (Extended) → Format Check (biome)** and **ci → lint-and-format** on main (`4a9119a6b2`). Apply biome's ",
+      "files": [
+        "plugins/plugin-app-control/src/actions/views-switching.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): Railway-cutover hardening — TLS self-signed-cert opt-out, dead-code purge, + guard #8637 self-heal TOCTOU",
+      "prNumber": 8643,
+      "type": "bugfix",
+      "body": "Railway-cutover (Neon+Upstash → Railway) correctness pass, rebased onto current develop. From a 6-dimension adversarial migration audit. The reconcile feature was dropped — #8637 already landed a self-heal — but #8637 shipped a TOCTOU bug t",
+      "files": [
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-shared/AGENTS.md",
+        "packages/cloud-shared/CLAUDE.md",
+        "packages/cloud-shared/README.md",
+        "packages/cloud-shared/src/db/__tests__/client-tls.test.ts",
+        "packages/cloud-shared/src/db/client.ts",
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud-shared/src/db/worker-neon-http.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts",
+        "packages/cloud-shared/src/lib/services/neon-client.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs-recovery.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud-shared/src/lib/services/sensitive-requests.test.ts",
+        "packages/cloud-shared/src/lib/services/user-mcps.test.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts",
+        "packages/scripts/cloud/admin/audit-migrations.ts",
+        "packages/scripts/cloud/admin/migrate-database.ts",
+        "packages/scripts/cloud/admin/migrate-with-diagnostics.ts",
+        "packages/scripts/cloud/admin/reconcile-earnings.ts",
+        "packages/scripts/cloud/eliza1/cost-reconciliation.ts",
+        "packages/scripts/cloud/eliza1/dashboard-alerts.ts"
+      ]
+    },
+    {
+      "title": "Shaw/mig cache hotfix",
+      "prNumber": 8642,
+      "type": "bugfix",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(ui): honor dedicated-agent 202 + Retry-After (transparent resume)",
+      "prNumber": 8641,
+      "type": "bugfix",
+      "body": "## What\n`rawRequest` now honors the **`202 Accepted` + `Retry-After`** contract that the unified-auth Worker (#8628) returns when a **non-running dedicated cloud agent is auto-resuming**: it waits the advertised delay and re-issues the requ",
+      "files": [
+        "packages/ui/src/api/client-base-resume.test.ts",
+        "packages/ui/src/api/client-base.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): prefer OpenAI for embeddings (prod AI_GATEWAY key invalid)",
+      "prNumber": 8640,
+      "type": "bugfix",
+      "body": "Follow-up to #8636: deploying it showed prod's AI_GATEWAY_API_KEY is invalid (embeddings 503→401). Embeddings are OpenAI-native + prod has a valid OPENAI_API_KEY → order OpenAI first. See #8434.",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): unified cloud-token auth on the WebSocket upgrade (no 'Lost backend connection')",
+      "prNumber": 8639,
+      "type": "feature",
+      "body": "Extends #8628 to the WS path. Browsers can't set headers on new WebSocket(), so the app sends the cloud token as ?token=; the proxy now validates it (same ownership check) and rewrites it to the agent's ELIZA_API_TOKEN. Fail-closed: non-own",
+      "files": [
+        "packages/cloud-api/__tests__/dedicated-agent-proxy.test.ts",
+        "packages/cloud-api/src/dedicated-agent-proxy.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): green the four red CI jobs (format, discord, typecheck cache, HMR)",
+      "prNumber": 8638,
+      "type": "bugfix",
+      "body": "Fixes the four red CI jobs reported on the `ci` (main) and `Windows CI` runs. Each root cause also exists on `develop`, so the fixes land here.\n\n## 1. `lint-and-format` → `format:check`\n`@elizaos/core#format:check` failed: `packages/core/sr",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        "packages/app/playwright.hmr.config.ts",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/core/src/features/basic-capabilities/providers/attachments.ts",
+        "plugins/plugin-clawville/package.json",
+        "plugins/plugin-companion/package.json",
+        "plugins/plugin-contacts/package.json",
+        "plugins/plugin-discord/vitest.config.ts",
+        "plugins/plugin-feed/package.json",
+        "plugins/plugin-hyperliquid-app/package.json",
+        "plugins/plugin-messages/package.json",
+        "plugins/plugin-polymarket-app/package.json",
+        "plugins/plugin-shopify-ui/package.json",
+        "plugins/plugin-steward-app/package.json",
+        "plugins/plugin-vector-browser/package.json",
+        "plugins/plugin-vincent/package.json",
+        "plugins/plugin-wallet-ui/package.json"
+      ]
+    },
+    {
+      "title": "feat(cloud): self-heal disconnected always-on (paid) agents",
+      "prNumber": 8637,
+      "type": "feature",
+      "body": "The heartbeat cycle only iterates RUNNING agents, so a dedicated-always agent that dropped past the grace window stayed disconnected forever (agent-router routes only running → subdomain 404s, paid agent dead). Adds a recovery cycle: re-pro",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs-recovery.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): dedicated agent chat — embeddings 503 + wrong-model (:nitro) default",
+      "prNumber": 8636,
+      "type": "bugfix",
+      "body": "Two cloud-side config bugs that break chat on dedicated (paid) containers, found via live agent logs (every app user gets a dedicated agent per #8622). BUG A: embeddings routed through BitRouter (no /v1/embeddings) → 503 on every memory tur",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(shared): unwrap bare {\"reply\":...} reply objects so cloud replies render clean",
+      "prNumber": 8635,
+      "type": "bugfix",
+      "body": "## What\n`extractAssistantReplyText` (used by the chat UI's `normalizeAssistantText`) now unwraps a bare `{\"reply\":\"...\"}` object that a model emitted as its reply text — in addition to the existing `replyText`+`shouldRespond` response-handl",
+      "files": [
+        "packages/shared/src/utils/assistant-text.test.ts",
+        "packages/shared/src/utils/assistant-text.ts"
+      ]
+    },
+    {
+      "title": "promote: develop -> main (Railway DB/cache cutover + 30 commits)",
+      "prNumber": 8633,
+      "type": "other",
+      "body": "Promote develop to main. Includes the Railway Neon->Railway migration code (Hyperdrive Worker DB path #8629, prod Hyperdrive binding #8632, Redis TCP #8602, etc.), validated live on staging. main is 0 commits ahead of develop (clean promote",
+      "files": [
+        ".github/workflows/gitleaks.yml",
+        ".gitleaks.toml",
+        "packages/app/test/ui-smoke/plugin-views-lifecycle.spec.ts",
+        "packages/cloud-api/__tests__/dedicated-agent-proxy.test.ts",
+        "packages/cloud-api/src/dedicated-agent-proxy.ts",
+        "packages/cloud-api/src/index.ts",
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-shared/src/db/client.ts",
+        "packages/cloud-shared/src/lib/runtime/cloud-bindings.ts",
+        "packages/ui/docs/minimal-redesign/00-MASTER-PLAN.md",
+        "packages/ui/docs/minimal-redesign/00-design-reference.md",
+        "packages/ui/docs/minimal-redesign/01-builtin-system-views.md",
+        "packages/ui/docs/minimal-redesign/02-builtin-data-character-views.md",
+        "packages/ui/docs/minimal-redesign/03-plugin-views-productivity.md",
+        "packages/ui/docs/minimal-redesign/04-plugin-views-finance-tools-games.md",
+        "packages/ui/docs/minimal-redesign/05-e2e-screenshot-harness.md",
+        "packages/ui/docs/minimal-redesign/99-REDESIGN-LOG.md",
+        "packages/ui/src/components/character/CharacterExperienceWorkspace.tsx",
+        "packages/ui/src/components/pages/AppsPageView.tsx",
+        "packages/ui/src/components/pages/MemoryViewerView.tsx",
+        "packages/ui/src/components/pages/PluginCard.tsx",
+        "packages/ui/src/components/pages/PluginsView.tsx",
+        "packages/ui/src/components/pages/ViewCatalog.test.tsx",
+        "packages/ui/src/components/pages/ViewCatalog.tsx",
+        "packages/ui/src/components/settings/AppearanceSettingsSection.tsx",
+        "packages/ui/src/components/settings/IdentitySettingsSection.tsx",
+        "packages/ui/src/components/settings/settings-layout.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/__e2e__/chat-sheet-fixture.tsx",
+        "packages/ui/src/components/shell/__e2e__/output/01-desktop-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/06-desktop-back-to-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/07-desktop-back-to-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/07-desktop-clicked-out-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/08-desktop-clicked-out-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/10-mobile-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/11-mobile-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/15-mobile-back-to-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/16-mobile-clicked-out-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/17-mobile-back-to-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/18-mobile-clicked-out-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/19-state-empty.png",
+        "packages/ui/src/components/shell/__e2e__/output/21-state-empty.png",
+        "packages/ui/src/components/shell/__e2e__/output/21-state-recording-listening.png",
+        "packages/ui/src/components/shell/__e2e__/output/22-state-booting.png",
+        "packages/ui/src/components/shell/__e2e__/output/22-state-speaking.png",
+        "packages/ui/src/components/shell/__e2e__/output/23-state-muted.png",
+        "packages/ui/src/components/shell/__e2e__/output/23-state-recording-listening.png",
+        "packages/ui/src/components/shell/__e2e__/output/24-state-speaking.png",
+        "packages/ui/src/components/shell/__e2e__/output/25-state-muted.png",
+        "packages/ui/src/components/shell/__e2e__/output/26-state-image-attached.png"
+      ]
+    },
+    {
+      "title": "chore(cloud): add production Hyperdrive binding (inert until cutover)",
+      "prNumber": 8632,
+      "type": "other",
+      "body": "Prod Hyperdrive binding for the Neon->Railway cutover. Inert until DATABASE_URL points at Railway.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "packages/cloud-api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(ci/gitleaks): skip full-tree re-scan on orphan release baselines",
+      "prNumber": 8631,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe `gitleaks` lane fails on every **clean-baseline release commit** (e.g. the `v2.0.4` baseline `f7a6b0fea5`) with a flood of `generic-api-key` false positives — **584 findings across 151 files** on v2.0.4.\n\nRoot cause: the rel",
+      "files": [
+        ".github/workflows/gitleaks.yml",
+        ".gitleaks.toml"
+      ]
+    },
+    {
+      "title": "fix(cloud): use Hyperdrive in the Worker's real DB path (client.ts)",
+      "prNumber": 8629,
+      "type": "bugfix",
+      "body": "The Worker repositories use client.ts (via db/helpers), not worker-neon-http.ts. client.ts did direct node-pg to Railway -> 'Connection terminated unexpectedly' on workerd. Route the non-Neon pool through the HYPERDRIVE binding.\n\n🤖 Generat",
+      "files": [
+        "packages/cloud-shared/src/db/client.ts",
+        "packages/cloud-shared/src/lib/runtime/cloud-bindings.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): unified cloud-token auth for dedicated agents (no agent password screen)",
+      "prNumber": 8628,
+      "type": "feature",
+      "body": "Closes the auth blocker on #8621 (exposed by the dedicated-default app flip #8622).\n\n**Problem:** a dedicated agent's container has its OWN auth (per-agent `ELIZA_API_TOKEN` Bearer; `ELIZA_DISABLE_AUTO_API_TOKEN=1`). The Worker's `proxyGene",
+      "files": [
+        "packages/cloud-api/__tests__/dedicated-agent-proxy.test.ts",
+        "packages/cloud-api/src/dedicated-agent-proxy.ts",
+        "packages/cloud-api/src/index.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): green Cloud Tests lint + auto-recover disconnected dedicated agents (#8434)",
+      "prNumber": 8627,
+      "type": "bugfix",
+      "body": "Closes out the remaining items on the #8434 dedicated-agent path. The dedicated-agent product is otherwise verified working end-to-end on prod (provision → holds `running` → `<id>.elizacloud.ai` proxies). Two parts, separable commits:\n\n## 1",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud-shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud-shared/src/db/worker-neon-http.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): single-use pg connections on workerd Worker DB path (+revert diag)",
+      "prNumber": 8626,
+      "type": "bugfix",
+      "body": "Fixes 'Connection terminated unexpectedly' on the Worker->Railway(Hyperdrive) path by using single-use pg connections on workerd (mirrors client.ts). Reverts temp diagnostic #8624.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-",
+      "files": [
+        "packages/cloud-api/stripe/credit-packs/route.ts",
+        "packages/cloud-shared/src/db/worker-neon-http.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): raise dedicated provisioning health timeout 180s→360s (slow cold boots)",
+      "prNumber": 8625,
+      "type": "bugfix",
+      "body": "A cold dedicated agent (image pull + boot + ~20 plugins) can take ~5 min to answer `/api/health` over the tailnet; the 180s probe failed the provision even though the agent came up. Raise to 6 min. Part of the #8621 dedicated-agent lifecycl",
+      "files": [
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "chore: temp staging diagnostic for Railway Worker cutover [revert after]",
+      "prNumber": 8624,
+      "type": "other",
+      "body": "Temporary diagnostic; reverted immediately after capturing the error.",
+      "files": [
+        "packages/cloud-api/stripe/credit-packs/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): Worker reaches Railway Postgres via Hyperdrive (+TLS no-verify fallback)",
+      "prNumber": 8623,
+      "type": "bugfix",
+      "body": "Follow-up to #8602, found during the staging Railway cutover. Worker can't do direct node-pg on workerd to Railway; use a Hyperdrive binding (env.HYPERDRIVE) with a direct-pg no-verify fallback. wrangler.toml adds the staging Hyperdrive bin",
+      "files": [
+        "packages/cloud-api/wrangler.toml",
+        "packages/cloud-shared/src/db/worker-neon-http.ts"
+      ]
+    },
+    {
+      "title": "feat(app): provision dedicated agents from the Eliza app (ditch shared default)",
+      "prNumber": 8622,
+      "type": "feature",
+      "body": "The Eliza app now requests `alwaysOn: true` on agent create → users get a **dedicated** (own-container, always-on) agent (the paid/full experience) instead of shared. New users have the signup credit grant; out-of-credit users get the 402 a",
+      "files": [
+        "packages/ui/src/api/client-cloud.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): sort ViewCatalog.test.tsx import names for biome organizeImports",
+      "prNumber": 8620,
+      "type": "bugfix",
+      "body": "## What\n\n`biome check` flags `assist/source/organizeImports` at `packages/ui/src/components/pages/ViewCatalog.test.tsx:22` — the `view-chat-binding` import lists `type ViewChatBinding` before the value import `useViewChatBinding`, which bio",
+      "files": [
+        "packages/ui/src/components/pages/ViewCatalog.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): heartbeat builds bridge health URL directly (prod-verified form)",
+      "prNumber": 8619,
+      "type": "bugfix",
+      "body": "Follow-up to #8611. The form **proven live on the prod daemon** is the direct `new URL('/api/health', rec.bridge_url)` — with it running, a fresh `dedicated-always` agent held `running` for 6+ min (heartbeat updating every ~20s) and `https:",
+      "files": [
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 603.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 603,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 414.17318945635463,
+      "prScore": 413.73518945635465,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 410.24127133013036,
+      "prScore": 406.24127133013036,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 237.9871047749663,
+      "prScore": 229.7871047749663,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 216.49990213494482,
+      "prScore": 216.49990213494482,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "chunxiaoxx",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253869585?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 131,
+  "mergedPRs": 115,
+  "newIssues": 4,
+  "closedIssues": 9,
+  "activeContributors": 8
 }
