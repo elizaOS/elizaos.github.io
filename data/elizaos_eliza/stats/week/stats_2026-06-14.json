@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-14 to 2026-06-21, elizaos/eliza had 338 new PRs (315 merged), 7 new issues, and 21 active contributors.",
+  "overview": "From 2026-06-14 to 2026-06-21, elizaos/eliza had 378 new PRs (328 merged), 33 new issues, and 23 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABFlJRfQ",
@@ -56,16 +56,16 @@
       "commentCount": 5
     },
     {
-      "id": "I_kwDOMT5cIs8AAAABGDvh_w",
-      "title": "Scale: dedicated-agent DB connection architecture (pooler + per-tenant DB)",
-      "author": "NubsCarson",
-      "number": 8696,
+      "id": "I_kwDOMT5cIs8AAAABGGgIww",
+      "title": "Launch-hardening handoff: agent-image bump + KV repoint + apps staging cutover (code merged; operator steps remain)",
+      "author": "lalalune",
+      "number": 8756,
       "repository": "elizaos/eliza",
-      "body": "## Context\nOn 2026-06-19 prod hit `FATAL: sorry, too many clients already` — every DB-backed route 500/000'd. **Already mitigated** (below); filing this to track the *proper* scalable architecture so it doesn't recur as users grow.\n\n## What happened (root cause) — two structural issues\n1. **Hyperdrive oversubscription (the trigger).** Two Cloudflare Hyperdrive configs both point at the *same* Railway PG server (`switchback:49295`); origin pools summed to **95/100** — `eliza-prod-pg`=35 **+ `eliza-staging-pg`=60** (staging eating the prod DB) → ~5 left for daemon/router/agents → exhaustion.\n2. **Per-agent pool floor.** `plugin-sql` hardcoded each agent's pg pool at `max:20/min:2` → every dedicated-agent container holds **≥2 connections even when idle** (50 idle agents = 100 conns before any query).\n\n## Already shipped (mitigation)\n- ✅ Right-sized Hyperdrive origin pools: prod 35→25, staging 60→8. PG dropped 100→~20, prod recovered.\n- ✅ **#8695** — `plugin-sql` pool sizing now env-tunable (`POSTGRES_POOL_MAX/_MIN/_IDLE_TIMEOUT_MS`, defaults unchanged off-cloud); managed agents `max=8/min=0/idle=15s`. Ships with next agent-image build.\n\nCorrect hygiene, fine for the 10-user launch (~37/100), **but not the architecture** — still linear in agent count against one shared DB that also holds billing/users.\n\n## The proper, standard solutions\n### Problem A — connection scaling\n- **PgBouncer / Supavisor / pgcat (transaction mode)** — *the* standard answer (Hyperdrive already does this for the Worker; agents need their own). Caveat: transaction mode breaks prepared statements / `LISTEN`-`NOTIFY` / advisory locks — verify drizzle/node-pg or disable prepared statements.\n- Lean per-client pools (✅ #8695) — necessary, not sufficient.\n- Raise `max_connections` — RAM-bound band-aid (~10MB/conn).\n\n### Problem B — isolation + horizontal scale\n- Schema-per-agent (one server): medium isolation, pool+shard.\n- **Database-per-agent** (the decided per-tenant model): strong isolation, shard tenants across DB servers.\n- **Separate control-plane DB (billing/users) from agent-state DB** — removes the blast-radius that bit us.\n\n### Agent-specific elegant option\n`plugin-sql` already ships **PGlite (embedded local) + WriteBack/Electric sync** (`src/write-back`). Agents owning data locally + syncing centrally removes the shared-DB hot-path connection entirely. (The cloud was on **Neon** pre-Railway — Neon gives a built-in pooler endpoint *and* cheap instant per-tenant branches.)\n\n## Recommendation (phased)\n1. ✅ lean pools + Hyperdrive right-size (done)\n2. **PgBouncer/Supavisor in front of the agent Postgres** (~1 day incl. prepared-stmt compat)\n3. **Database-per-agent**, sharded as you grow\n4. **Operational:** split control-plane DB from agent-state DB; **staging on its own PG instance** (today's trigger); **alert at 70% of max_connections**\n\n## Quick wins\n- [ ] Staging Hyperdrive off the prod PG server (own instance)\n- [ ] Alert on `pg_stat_activity` ≥ 70% `max_connections`\n- [ ] Choose pooler (PgBouncer / Supavisor / Neon pooled endpoint)",
-      "createdAt": "2026-06-19T14:41:12Z",
-      "closedAt": "2026-06-19T19:08:33Z",
-      "state": "CLOSED",
-      "commentCount": 2
+      "body": "## Infra/operator handoff — finish the launch-hardening lane (cc @NubsCarson)\n\nThis tracks the **operator/host steps** to finish the work from #8696 / #8621 / #8434 / #8321 / #8342 / #8434 / #8387 / #8613. All the **code is merged to `develop`**; what remains needs host access / a deliberate prod cutover, which is yours to drive.\n\n### ✅ Merged to `develop` this session (code complete, tested)\n| PR | What | Closes/part of |\n|---|---|---|\n| #8716 | VIEWS desktop-only modes gated off text connectors (no more silent non-answer on Discord/Matrix) | #8613 |\n| #8722 | Atomic container-billing credit decrement (fixes lost-update vs concurrent debits) | #8342 |\n| #8730 | `LEAN_CHAT_PLUGINS` preset + `ELIZA_PLUGIN_SET=lean-chat` selector (no browser) | #8434 |\n| #8754 | **New managed agents use a LOCAL in-container PGlite DB** (shared DB = auth/discovery only) + lean-chat default for new agents | #8696, #8434 |\n\nAlso: #8387 (web-less APK) and #8613 verified/closed earlier; #8342 leaks (suspend→stop, deprovision+slot, idempotency, $100→$0, --cpus) confirmed already on develop.\n\n### 🏛️ Architecture decisions (from @shawmakesmagic)\n1. **Agent state = local in-container DB**; shared Railway DB only for auth/discovery → removes the shared-Postgres connection hot path that caused the \"too many clients\" incident. **No PgBouncer / DB-split needed.** Implemented as a **forward cutover**: only NEW agents go local (flag `ELIZA_AGENT_LOCAL_STATE=1`, `PGLITE_DATA_DIR=/root/.eliza/.pgdata` on the persistent volume); existing agents keep their shared-DB state untouched (no migration). Escape hatch `ELIZA_AGENT_LOCAL_STATE=0`.\n2. **Lean chat = no browser** (disabled until ready); drops shell/coding-tools/orchestrator/gitpathologist for fast dedicated-agent boot.\n3. Apps Product 2: pricing folded into the container fee; **staging-first** cutover.\n\n### 🟢 Live / in-flight automatically (no action needed)\n- Cloud-api Worker auto-deploys `develop` HEAD (incl. #8754) → the local-DB control-plane fix lands on staging via `cloud-cf-deploy` / `cloud-deploy-backend`. **This works on the CURRENT agent image** (PGlite fallback is already in the image) — new staging agents stop hammering the shared DB.\n- Agent image rebuild dispatched (Build Agent Image run on develop) — only needed for the lean-plugins SELECTOR to take effect.\n\n### 🔴 Operator steps remaining (need host access — the running agent infra is NOT in the apps Hetzner project @shaw's token points at; it's a different account)\n\n**Agent lane — makes the lean-plugins + image fixes fully live:**\n1. **Bump `ELIZA_AGENT_IMAGE`** to the new digest from the latest green `Build Agent Image` (`:develop` / `:sha-<short>`) in the provisioning host's `/opt/eliza/cloud/.env.local`, force-pull on core nodes, drain the warm pool. (Local-DB needs no bump; lean-plugins does.)\n2. **Repoint the sandbox registry Redis** — set `SANDBOX_REGISTRY_REDIS_URL` (Railway TCP `redis://…` proxy) on the provisioning host (or as a GH secret + inject via `deploy-eliza-provisioning-worker.yml`, mirroring the `HEADSCALE_*` lines). Without it, sandboxes don't self-register → Discord/Telegram inbound routing is dead (#8621).\n3. After the staging cloud-api deploy, **provision a fresh agent on staging** and confirm: no shared-DB `DATABASE_URL` in the container env, `DATABASE_ADAPTER`→PGlite, memory persists across a container restart (volume-backed), lean plugin set loaded, latency ~3-6s.\n\n**Apps Product 2 — staging cutover (per \"staging first\"):** I dispatched safe `plan`s — review them:\n- `Terraform — Apps Data Plane` staging plan: run 27854986020\n- `Terraform — Apps Shared` plan: run 27854991019\n\nIf the plans are green, the staging cutover sequence is:\n1. `gh workflow run terraform-apps-shared.yml -f action=apply` (tenant DB node — ccx33 + 200GB vol, billable)\n2. `gh workflow run terraform-apps-data-plane.yml -f environment=staging -f action=apply` (app nodes + wildcard DNS)\n3. `gh workflow run deploy-apps-worker.yml` (+ env: `ELIZA_APPS_WORKER_HOST/SSH_KEY`)\n4. `gh workflow run arm-apps-daemon.yml` (`APPS_BASE_DOMAIN=apps-staging.elizacloud.ai`, tenant DSN or `fetch_dsn_from_shared_state=true`)\n5. `gh workflow run apps-deploy-e2e.yml` to validate end-to-end\nRequired GH secrets/vars for these (confirm set in the env): `HCLOUD_APPS_TOKEN`, `R2_STATE_ACCESS_KEY_ID/SECRET`, `CLOUDFLARE_API_TOKEN`, `APPS_CLOUDFLARE_ZONE_ID`, `APPS_OPERATOR_SSH_KEY`, `OPERATOR_INGRESS_CIDRS` (no 0.0.0.0/0), `APPS_CLOUD_API_ORIGIN`.\n\n### ⏸️ Deferred code (intentionally — needs a live ≥2-node cluster to validate, not blind)\n- **#8321 #4 least-loaded app-container node selection** + **#9 app-plane autoscaler** + **#11 nftables/squid firewall wiring** — single-node today; the selection/firewall logic can't be validated without the staging apps cluster above. Do these right after the staging cutover (the cluster gives a validation target; the firewall must carve out the 10.30.x DB-ambassador path).\n- **#8342 tenant-DB min-density gate** — deferred: there's no auto cluster-provisioning to gate (clusters are operator-added via `NoClusterCapacityError`), and the pricing decision was \"fold into the container fee\". Revisit if/when an apps-autoscaler is added.\n\n### Access note\nThe provided `HCLOUD_TOKEN` is the **empty apps project**; the running agent/provisioning host (for steps 1-2 above) is a **different Hetzner account** — those steps need that account's host SSH (you have it). The cloud-api deploys use the GH-stored creds and are already running.\n",
+      "createdAt": "2026-06-20T00:43:44Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
     }
   ],
   "topPRs": [
@@ -94,6 +94,30 @@
       "deletions": 11554
     },
     {
+      "id": "PR_kwDOMT5cIs7owWTl",
+      "title": "release: develop → main (cloud provisioning fixes #8766 + snapshot-404/deletion-pending hardening)",
+      "author": "lalalune",
+      "number": 8804,
+      "body": "Release of develop → main (prod). 188 commits; prod is currently 188 behind.\n\n**Why now / headline provisioning fixes** (prod was missing these):\n- #8766 deprovision lifecycle hardening (snapshot auto-skip + scheduled-backup bridge filter + deletion-state guards + sibling-job cancel).\n- `08f199cbc7` stop the agent_snapshot HTTP-404 flood (V2 image lacks POST /api/snapshot → benign auto-skip) + recover orphaned `deletion_pending` rows (broadened `reEnqueueFailedDeletions`).\n- `a0b6c345fe` fix 11 red eliza-sandbox lifecycle tests (findByIdAndOrgForWrite spies).\n\nFound by auditing the live prod Railway job queue: ~442 stale failed auto-snapshots, 15 sandboxes stuck deletion_pending 2+ days, an agent_upgrade flood (already filtered on develop). All root-caused + adversarially verified; cloud-shared suites green (1230/0).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T20:32:27Z",
+      "mergedAt": null,
+      "additions": 31307,
+      "deletions": 95875
+    },
+    {
+      "id": "PR_kwDOMT5cIs7owYyQ",
+      "title": "release: develop → main — cloud provisioning fixes (#8766, snapshot-404/deletion-pending) + 188-commit catch-up",
+      "author": "lalalune",
+      "number": 8805,
+      "body": "Prod (main) was 188 commits behind develop and missing the cloud provisioning fixes. This merges develop into main (off main, so it's conflict-free), reconciling main's DB-locality hotfix #8783 with develop's canonical version of the same logic.\n\nHeadline provisioning fixes now reaching prod:\n- #8766 deprovision lifecycle hardening (snapshot auto-skip, scheduled-backup bridge filter, deletion-state guards, sibling-job cancel)\n- 08f199cbc7 — stop the agent_snapshot HTTP-404 flood (V2 image lacks /api/snapshot → benign auto-skip) + recover orphaned deletion_pending rows\n- a0b6c345fe — fix 11 red eliza-sandbox lifecycle tests\n\nConflicts (eliza-sandbox.ts, managed-eliza-config.ts + test) resolved to develop's side; verified the merged files retain BOTH #8783's POSTGRES_POOL cap + DATABASE_URL strip AND the provisioning fixes.\n\nSupersedes #8804 (develop→main, was conflicting).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T20:36:55Z",
+      "mergedAt": "2026-06-20T20:38:24Z",
+      "additions": 31260,
+      "deletions": 95906
+    },
+    {
       "id": "PR_kwDOMT5cIs7n5EiG",
       "title": "Shaw/her voice",
       "author": "lalalune",
@@ -104,37 +128,13 @@
       "mergedAt": null,
       "additions": 24442,
       "deletions": 1114
-    },
-    {
-      "id": "PR_kwDOMT5cIs7nyg8u",
-      "title": "Integrate milady/ios-fused-voice-slice → develop (iOS fused voice + CoreML Kokoro + on-device model-grind, plus app-control/cloud/orchestrator/views work)",
-      "author": "lalalune",
-      "number": 8530,
-      "body": "Integration PR for the active `milady/ios-fused-voice-slice` working branch into `develop` (57 commits ahead; 310 behind at open — rebase/merge as the maintainers prefer).\n\n## Highlights (this session)\n- **CoreML Kokoro E2E converter** (`packages/training/scripts/kokoro/coreml/`): fused Kokoro-82M → single CoreML graph matching the iOS `KokoroCoreMlModel` contract (in-graph fixed-bucket alignment, masked AdaIN, injected hn-NSF phase, int32 length). Torch module validated **0.99 spectral** vs real Kokoro; CoreML conversion is structurally correct with a documented vocoder `F.interpolate`/iSTFT fidelity gap (WIP) → **not staged**; iOS uses the fused GGUF Kokoro path until parity lands.\n- **On-device grind-all-models telemetry test** (`plugins/plugin-capacitor-bridge/src/ios/model-grind.ts` + `/api/dev/model-grind` route + env-gated auto-run): grinds text(+MTP) / TTS (RTF) / TTS→ASR (WER) round-trip with per-model load+infer ms and peak RSS. 12 unit tests.\n- **Memory + e2e latency review** (`plugins/plugin-local-inference/docs/memory-and-e2e-latency-review.md`): code-grounded voice latency waterfall, eviction/streaming inefficiency inventory, per-RAM-tier (8→128 GB) co-residency policy, ranked optimizations.\n\n## Other workstreams on this branch (other agents)\napp-control verification (VIEWS/HOMESCREEN real outcomes), cloud monetization/charging proof, orchestrator multi-account coding sub-agents, views hero images + route coverage, plugin live-loading.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-18T05:24:59Z",
-      "mergedAt": "2026-06-18T08:03:48Z",
-      "additions": 24346,
-      "deletions": 1270
-    },
-    {
-      "id": "PR_kwDOMT5cIs7n4woQ",
-      "title": "Milady/ios grind fixes",
-      "author": "lalalune",
-      "number": 8539,
-      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-18T10:07:56Z",
-      "mergedAt": null,
-      "additions": 23869,
-      "deletions": 1112
     }
   ],
   "codeChanges": {
-    "additions": 88492,
-    "deletions": 28157,
-    "files": 1319,
-    "commitCount": 1015
+    "additions": 97030,
+    "deletions": 29576,
+    "files": 1407,
+    "commitCount": 1368
   },
   "completedItems": [
     {
@@ -4828,6 +4828,254 @@
         "packages/cloud-shared/src/lib/services/headscale-integration.test.ts",
         "packages/cloud-shared/src/lib/services/headscale-integration.ts"
       ]
+    },
+    {
+      "title": "feat(local-inference): Mobile Resource Workbench — on-device battery/RSS/tok-s/thermal profiling (#8800)",
+      "prNumber": 8814,
+      "type": "feature",
+      "body": "Closes #8800.\n\n## Mobile Resource Workbench\n\nEnd-to-end on-device resource profiling for elizaOS local inference on **iOS + Android** — battery, peak/steady RSS, prefill/decode tokens/sec, TTFT, thermal-state timeline, and low-power transit",
+      "files": [
+        ".github/workflows/mobile-resource-workbench.yml",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ResourceProbePlugin.java",
+        "packages/app-core/platforms/ios/App/App/ElizaIntentPlugin.swift",
+        "packages/app-core/src/api/dev-compat-routes.ts",
+        "packages/benchmarks/mobile-resource/AGENTS.md",
+        "packages/benchmarks/mobile-resource/BASELINE.md",
+        "packages/benchmarks/mobile-resource/CLAUDE.md",
+        "packages/benchmarks/mobile-resource/README.md",
+        "packages/benchmarks/mobile-resource/android-probe.mjs",
+        "packages/benchmarks/mobile-resource/budgets.json",
+        "packages/benchmarks/mobile-resource/ios-probe.mjs",
+        "packages/benchmarks/mobile-resource/lib.mjs",
+        "packages/benchmarks/mobile-resource/metrics.mjs",
+        "packages/benchmarks/mobile-resource/metrics.test.mjs",
+        "packages/benchmarks/mobile-resource/report.mjs",
+        "packages/benchmarks/mobile-resource/results/.gitignore",
+        "packages/benchmarks/mobile-resource/run-workbench.mjs",
+        "packages/benchmarks/mobile-resource/workloads.mjs",
+        "packages/shared/src/local-inference/index.ts",
+        "packages/shared/src/local-inference/throughput.test.ts",
+        "packages/shared/src/local-inference/throughput.ts",
+        "packages/ui/src/services/local-inference/device-bridge.ts",
+        "packages/ui/src/services/local-inference/index.ts",
+        "packages/ui/src/services/local-inference/resource-snapshot-bridge.test.ts",
+        "packages/ui/src/services/local-inference/resource-snapshot-bridge.ts",
+        "plugins/plugin-local-inference/src/services/device-bridge.ts",
+        "plugins/plugin-local-inference/src/services/device-resource-metrics.test.ts",
+        "plugins/plugin-local-inference/src/services/device-resource-metrics.ts",
+        "plugins/plugin-local-inference/src/services/index.ts",
+        "plugins/plugin-local-inference/src/services/inference-capabilities.test.ts",
+        "plugins/plugin-local-inference/src/services/inference-capabilities.ts",
+        "plugins/plugin-local-inference/src/services/latency-trace.ts",
+        "plugins/plugin-local-inference/src/services/memory-monitor.test.ts",
+        "plugins/plugin-local-inference/src/services/memory-monitor.ts",
+        "plugins/plugin-native-llama/src/capacitor-llama-adapter.ts",
+        "plugins/plugin-native-llama/src/definitions.ts",
+        "plugins/plugin-native-llama/src/device-bridge-client.ts",
+        "plugins/plugin-native-llama/src/generate-stream.test.ts"
+      ]
+    },
+    {
+      "title": "fix(apps): add preview images for current views",
+      "prNumber": 8806,
+      "type": "bugfix",
+      "body": "Adds package-local preview PNGs for current app/view cards and fixes app hero registry caching so preview images load quickly through the app.\n\nVerified locally in a clean develop worktree:\n- `bunx vitest run packages/agent/src/api/views-ro",
+      "files": [
+        "plugins/plugin-app-manager/src/api/apps-routes.test.ts",
+        "plugins/plugin-app-manager/src/api/apps-routes.ts",
+        "plugins/plugin-clawville/assets/hero.png",
+        "plugins/plugin-companion/assets/hero.png",
+        "plugins/plugin-contacts/assets/hero.png",
+        "plugins/plugin-defense-of-the-agents/assets/hero.png",
+        "plugins/plugin-feed/assets/hero.png",
+        "plugins/plugin-phone/assets/hero.png",
+        "plugins/plugin-shopify-ui/assets/hero.png",
+        "plugins/plugin-task-coordinator/assets/hero.png",
+        "plugins/plugin-trajectory-logger/assets/hero.png",
+        "plugins/plugin-vincent/assets/hero.png",
+        "plugins/plugin-wifi/assets/hero.png"
+      ]
+    },
+    {
+      "title": "release: develop → main — cloud provisioning fixes (#8766, snapshot-404/deletion-pending) + 188-commit catch-up",
+      "prNumber": 8805,
+      "type": "bugfix",
+      "body": "Prod (main) was 188 commits behind develop and missing the cloud provisioning fixes. This merges develop into main (off main, so it's conflict-free), reconciling main's DB-locality hotfix #8783 with develop's canonical version of the same l",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/feed-env-audit.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/voice-live-e2e.yml",
+        ".gitignore",
+        ".gitleaks.toml",
+        "bun.lock",
+        "knip.json",
+        "lerna.json",
+        "package.json",
+        "packages/agent/docs/tee-agent-implementation-plan.md",
+        "packages/agent/package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/__tests__/game-tui-mounted-surfaces.test.tsx",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-bundle-lifecycle.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/agent/src/api/binance-skill-helpers.test.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/health-routes.canRespond.test.ts",
+        "packages/agent/src/api/health-routes.ts",
+        "packages/agent/src/api/media-runtime.test.ts",
+        "packages/agent/src/api/media-runtime.ts",
+        "packages/agent/src/api/media-store.test.ts",
+        "packages/agent/src/api/media-store.ts",
+        "packages/agent/src/api/media-thumbnail.test.ts",
+        "packages/agent/src/api/media-thumbnail.ts",
+        "packages/agent/src/api/server-auth.ts",
+        "packages/agent/src/api/server-helpers-config.ts",
+        "packages/agent/src/api/server-helpers.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/agent/src/runtime/view-action-affinity.test.ts",
+        "packages/agent/src/runtime/view-action-affinity.ts",
+        "packages/agent/src/services/app-package-modules.ts",
+        "packages/agent/src/services/registry-client-app-meta.ts",
+        "packages/agent/src/services/tee-sealed-volume.test.ts",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/app-core/platforms/electrobun/docs/convergence-audit.json",
+        "packages/app-core/platforms/electrobun/docs/convergence-audit.md"
+      ]
+    },
+    {
+      "title": "Shaw/composestate provider hook",
+      "prNumber": 8799,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-api/src/stubs/elizaos-core.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/action-tiering.test.ts",
+        "packages/core/src/runtime/action-tiering.ts",
+        "packages/ui/src/components/settings/CloudAgentsSection.test.tsx",
+        "packages/ui/src/components/settings/CloudAgentsSection.tsx",
+        "plugins/plugin-app-control/src/actions/views.ts",
+        "plugins/plugin-local-inference/src/services/voice/eot-classifier.ts",
+        "plugins/plugin-local-inference/src/services/voice/fused-eot-scorer.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): port DB-locality fix to main so the daemon stops needing a hotpatch (#8771)",
+      "prNumber": 8783,
+      "type": "bugfix",
+      "body": "## What\n\nPorts #8771's **DB-locality fix** (the dominant dedicated-chat latency win, ~35s → 6–11s) to **`main`**, so the provisioning daemon stops depending on a hand-applied live hotpatch.\n\n## Why this targets `main` specifically\n\nThe prov",
+      "files": [
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.test.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): RESTORE reverted dedicated-chat fixes (#8768/#8769/#8771/#8759)",
+      "prNumber": 8779,
+      "type": "bugfix",
+      "body": "## Why\nA wip-snapshot commit (`d014e09bd8` \"wip: snapshot in-progress work across runtime, cloud-api, first-run, and tutorial\") + the v2.0.4 baseline reset (merged via `02503ce935`) **clobbered all four merged dedicated-chat fixes** by over",
+      "files": [
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-api/v1/responses/route.ts",
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway-tools.test.ts",
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts",
+        "plugins/plugin-elizacloud/__tests__/unit/normalize-native-tools.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts"
+      ]
+    },
+    {
+      "title": "feat(core): compose_state_providers pipeline hook for dynamic provider filtering",
+      "prNumber": 8778,
+      "type": "feature",
+      "body": "Closes #8755.\n\n## Context\n\n#8755 asks for app-level control over which providers run during `composeState` (\"provider pollution\"). Most of the request is **already addressed in 2.x** — but one genuine gap exists, and this PR fills it.\n\n### ",
+      "files": [
+        "packages/core/src/__tests__/compose-state-provider-hook.test.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/types/pipeline-hooks.ts"
+      ]
+    },
+    {
+      "title": "build: prune desktop runtime dependency copies",
+      "prNumber": 8774,
+      "type": "other",
+      "body": "## What changed\n\n- Collapses patch-compatible WalletConnect runtime copies so Reown/WalletConnect patch drift does not create tar-unsafe nested dependency paths in the desktop bundle.\n- Prunes workspace package runtime copies to package met",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app/test/ui-smoke/cloud-provisioning-startup.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud-agent): kill the ~30s dedicated-chat latency (DB locality + lean trims)",
+      "prNumber": 8771,
+      "type": "other",
+      "body": "## Problem\nAfter the crash (#8768) and gte-small (#8769) fixes, dedicated cloud-agent chat was still **~28–38s/turn**. Measured the real breakdown on a live prod agent (timestamped container logs + the central `llm_trajectories` DB):\n\n| Cos",
+      "files": [
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): cloud containers use cloud embeddings, not local gte-small (dim mismatch + boot waste)",
+      "prNumber": 8769,
+      "type": "bugfix",
+      "body": "## Problem\nOn dedicated cloud agents, container logs showed:\n```\n[eliza] Configured local embedding env: gte-small_fp16.gguf (... dims: 384 ...)\n[eliza] Local embedding warmup: prefetching gte-small_fp16.gguf\n[PLUGIN:SQL] Skipping embedding",
+      "files": [
+        "packages/agent/src/runtime/eliza.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): native-tool calls 500 on flat ToolDefinition shape (should-respond crash)",
+      "prNumber": 8768,
+      "type": "bugfix",
+      "body": "## Problem\nDedicated cloud agents intermittently returned **\"something went wrong on my end\"** and ran slow. Root cause (proven by reproduction against `api.elizacloud.ai/api/v1/chat/completions`): a server-side **`Cannot read properties of",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway-tools.test.ts",
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway.ts",
+        "plugins/plugin-elizacloud/__tests__/unit/normalize-native-tools.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts"
+      ]
+    },
+    {
+      "title": "perf(agent): exclude plugin-local-inference from lean-chat (cloud agents → fast cloud embeddings)",
+      "prNumber": 8762,
+      "type": "other",
+      "body": "Cloud chat agents were running gte-small embeddings on the container CPU (1.5–98s/batch, ~30s/turn, + 384↔1536 dim mismatch dropping memory inserts) despite routing everything else to Eliza Cloud. Exclude plugin-local-inference from lean-ch",
+      "files": [
+        "packages/agent/src/runtime/core-plugins.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud-api): defer chat-completions billing off the response hot path (~7-11s/agent-turn)",
+      "prNumber": 8759,
+      "type": "other",
+      "body": "Defers the post-inference billing/settlement chain via waitUntil so it never blocks the model response. Response usage built from model tokens (identical bytes), billing amounts unchanged — only timing moves. Reservation still synchronous (",
+      "files": [
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-api/v1/responses/route.ts"
+      ]
     }
   ],
   "topContributors": [
@@ -4844,11 +5092,21 @@
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 1506.8083912749714,
-      "prScore": 1484.2543912749716,
+      "totalScore": 1816.0656783913764,
+      "prScore": 1793.0736783913765,
       "issueScore": 16,
       "reviewScore": 4.5,
-      "commentScore": 2.054,
+      "commentScore": 2.492,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 1085.059990437502,
+      "prScore": 1080.859990437502,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -4862,23 +5120,13 @@
       "summary": null
     },
     {
-      "username": "odilitime",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 1011.1308843028937,
-      "prScore": 1006.9308843028938,
-      "issueScore": 4,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 549.8124137700884,
-      "prScore": 548.7364137700883,
+      "totalScore": 582.0023771161615,
+      "prScore": 580.7263771161614,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.0759999999999998,
+      "commentScore": 1.2759999999999998,
       "summary": null
     },
     {
@@ -4932,6 +5180,16 @@
       "summary": null
     },
     {
+      "username": "noobshow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
+      "totalScore": 4.54,
+      "prScore": 0,
+      "issueScore": 4.2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
       "username": "github-advanced-security",
       "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
       "totalScore": 4.5,
@@ -4962,9 +5220,9 @@
       "summary": null
     }
   ],
-  "newPRs": 338,
-  "mergedPRs": 315,
-  "newIssues": 7,
-  "closedIssues": 12,
-  "activeContributors": 21
+  "newPRs": 378,
+  "mergedPRs": 328,
+  "newIssues": 33,
+  "closedIssues": 15,
+  "activeContributors": 23
 }

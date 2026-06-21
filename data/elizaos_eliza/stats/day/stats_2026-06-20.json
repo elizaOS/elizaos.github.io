@@ -5,27 +5,136 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-20 to 2026-06-21, elizaos/eliza had 1 new PRs (1 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-06-20 to 2026-06-21, elizaos/eliza had 41 new PRs (14 merged), 26 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABGGgIww",
+      "title": "Launch-hardening handoff: agent-image bump + KV repoint + apps staging cutover (code merged; operator steps remain)",
+      "author": "lalalune",
+      "number": 8756,
+      "repository": "elizaos/eliza",
+      "body": "## Infra/operator handoff — finish the launch-hardening lane (cc @NubsCarson)\n\nThis tracks the **operator/host steps** to finish the work from #8696 / #8621 / #8434 / #8321 / #8342 / #8434 / #8387 / #8613. All the **code is merged to `develop`**; what remains needs host access / a deliberate prod cutover, which is yours to drive.\n\n### ✅ Merged to `develop` this session (code complete, tested)\n| PR | What | Closes/part of |\n|---|---|---|\n| #8716 | VIEWS desktop-only modes gated off text connectors (no more silent non-answer on Discord/Matrix) | #8613 |\n| #8722 | Atomic container-billing credit decrement (fixes lost-update vs concurrent debits) | #8342 |\n| #8730 | `LEAN_CHAT_PLUGINS` preset + `ELIZA_PLUGIN_SET=lean-chat` selector (no browser) | #8434 |\n| #8754 | **New managed agents use a LOCAL in-container PGlite DB** (shared DB = auth/discovery only) + lean-chat default for new agents | #8696, #8434 |\n\nAlso: #8387 (web-less APK) and #8613 verified/closed earlier; #8342 leaks (suspend→stop, deprovision+slot, idempotency, $100→$0, --cpus) confirmed already on develop.\n\n### 🏛️ Architecture decisions (from @shawmakesmagic)\n1. **Agent state = local in-container DB**; shared Railway DB only for auth/discovery → removes the shared-Postgres connection hot path that caused the \"too many clients\" incident. **No PgBouncer / DB-split needed.** Implemented as a **forward cutover**: only NEW agents go local (flag `ELIZA_AGENT_LOCAL_STATE=1`, `PGLITE_DATA_DIR=/root/.eliza/.pgdata` on the persistent volume); existing agents keep their shared-DB state untouched (no migration). Escape hatch `ELIZA_AGENT_LOCAL_STATE=0`.\n2. **Lean chat = no browser** (disabled until ready); drops shell/coding-tools/orchestrator/gitpathologist for fast dedicated-agent boot.\n3. Apps Product 2: pricing folded into the container fee; **staging-first** cutover.\n\n### 🟢 Live / in-flight automatically (no action needed)\n- Cloud-api Worker auto-deploys `develop` HEAD (incl. #8754) → the local-DB control-plane fix lands on staging via `cloud-cf-deploy` / `cloud-deploy-backend`. **This works on the CURRENT agent image** (PGlite fallback is already in the image) — new staging agents stop hammering the shared DB.\n- Agent image rebuild dispatched (Build Agent Image run on develop) — only needed for the lean-plugins SELECTOR to take effect.\n\n### 🔴 Operator steps remaining (need host access — the running agent infra is NOT in the apps Hetzner project @shaw's token points at; it's a different account)\n\n**Agent lane — makes the lean-plugins + image fixes fully live:**\n1. **Bump `ELIZA_AGENT_IMAGE`** to the new digest from the latest green `Build Agent Image` (`:develop` / `:sha-<short>`) in the provisioning host's `/opt/eliza/cloud/.env.local`, force-pull on core nodes, drain the warm pool. (Local-DB needs no bump; lean-plugins does.)\n2. **Repoint the sandbox registry Redis** — set `SANDBOX_REGISTRY_REDIS_URL` (Railway TCP `redis://…` proxy) on the provisioning host (or as a GH secret + inject via `deploy-eliza-provisioning-worker.yml`, mirroring the `HEADSCALE_*` lines). Without it, sandboxes don't self-register → Discord/Telegram inbound routing is dead (#8621).\n3. After the staging cloud-api deploy, **provision a fresh agent on staging** and confirm: no shared-DB `DATABASE_URL` in the container env, `DATABASE_ADAPTER`→PGlite, memory persists across a container restart (volume-backed), lean plugin set loaded, latency ~3-6s.\n\n**Apps Product 2 — staging cutover (per \"staging first\"):** I dispatched safe `plan`s — review them:\n- `Terraform — Apps Data Plane` staging plan: run 27854986020\n- `Terraform — Apps Shared` plan: run 27854991019\n\nIf the plans are green, the staging cutover sequence is:\n1. `gh workflow run terraform-apps-shared.yml -f action=apply` (tenant DB node — ccx33 + 200GB vol, billable)\n2. `gh workflow run terraform-apps-data-plane.yml -f environment=staging -f action=apply` (app nodes + wildcard DNS)\n3. `gh workflow run deploy-apps-worker.yml` (+ env: `ELIZA_APPS_WORKER_HOST/SSH_KEY`)\n4. `gh workflow run arm-apps-daemon.yml` (`APPS_BASE_DOMAIN=apps-staging.elizacloud.ai`, tenant DSN or `fetch_dsn_from_shared_state=true`)\n5. `gh workflow run apps-deploy-e2e.yml` to validate end-to-end\nRequired GH secrets/vars for these (confirm set in the env): `HCLOUD_APPS_TOKEN`, `R2_STATE_ACCESS_KEY_ID/SECRET`, `CLOUDFLARE_API_TOKEN`, `APPS_CLOUDFLARE_ZONE_ID`, `APPS_OPERATOR_SSH_KEY`, `OPERATOR_INGRESS_CIDRS` (no 0.0.0.0/0), `APPS_CLOUD_API_ORIGIN`.\n\n### ⏸️ Deferred code (intentionally — needs a live ≥2-node cluster to validate, not blind)\n- **#8321 #4 least-loaded app-container node selection** + **#9 app-plane autoscaler** + **#11 nftables/squid firewall wiring** — single-node today; the selection/firewall logic can't be validated without the staging apps cluster above. Do these right after the staging cutover (the cluster gives a validation target; the firewall must carve out the 10.30.x DB-ambassador path).\n- **#8342 tenant-DB min-density gate** — deferred: there's no auto cluster-provisioning to gate (clusters are operator-added via `NoClusterCapacityError`), and the pricing decision was \"fold into the container fee\". Revisit if/when an apps-autoscaler is added.\n\n### Access note\nThe provided `HCLOUD_TOKEN` is the **empty apps project**; the running agent/provisioning host (for steps 1-2 above) is a **different Hetzner account** — those steps need that account's host SSH (you have it). The cloud-api deploys use the GH-stored creds and are already running.\n",
+      "createdAt": "2026-06-20T00:43:44Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGGc-xQ",
+      "title": "Introduce ComposeState Hooks for Dynamic Provider Filtering",
+      "author": "noobshow",
+      "number": 8755,
+      "repository": "elizaos/eliza",
+      "body": "**Is your feature request related to a problem? Please describe.**\n\n### TL;DR\nIn ElizaOS, context providers function as the \"senses\" of an AI agent, assembling data—such as character profiles, memory history, and real-time environment variables—into the prompt context before a response is generated. Currently, this aggregation is static and monolithic. Every registered plugin and system provider executes unconditionally during `composeState`, creating a major engineering bottleneck known as **\"provider pollution.\"**\n\nThis causes three core issues:\n1. **Context Window Dilution:** Extraneous data buries relevant information, leading to poor prompt adherence and AI hallucinations.\n2. **Excessive Token Overhead:** Processing massive, unused data chunks drives up operational inference costs unnecessarily.\n3. **Lack of App-Level Control:** Host applications wrapping ElizaOS have no dynamic, programmatic way to intercept, review, or control what data is being loaded at runtime based on specific message intents.\n\n### Deep-Dive Analysis\nWhen an agent is involved in casual interactions (like an everyday `@mention` response on social media), heavy financial, analytical, or telemetry providers still execute and inject large sets of irrelevant data into the LLM context window.\n\nWhile building an agent, I noticed it was acting highly confused. After debugging and logging the raw prompts, the results revealed that `plugin-bootstrap` (in v1.x) automatically appends every single registered provider to the list when composing state before sending a `useModel` LLM message. \n\nCore templates that render `{{providers}}` or use provider values expose a large \"junk drawer\" of context to LLM prompts, diluting model inputs and breaking persona fidelity. While this deep-dive was traced through `plugin-twitter` to ElizaOS core on v1.x, the limitation persists uniformly in the v2.x architecture.\n\n#### Every `composeState` Call Runs Through Every Default Provider:\n\n| File | Method | `composeState` Call | Provider Filtering? |\n|---|---|---|---|\n| `post.ts:178` | `generateNewTweet` | `this.runtime.composeState({...})` | **None** |\n| `interactions.ts:376` | `shouldEngageWithTweet` | `this.runtime.composeState(shouldEngageMemory)` | **None** |\n| `interactions.ts:725` | `handleTweet` (mentions) | `this.runtime.messageService.handleMessage(...)` | **None** (core pipeline) |\n| `timeline.ts:175` | `handleTimeline` (action decisions) | `this.runtime.composeState(message)` | **None** |\n| `timeline.ts:416` | `handleQuoteAction` | `this.runtime.composeState(message)` | **None** |\n| `timeline.ts:499` | `handleReplyAction` | `this.runtime.composeState(message)` | **None** |\n\nAll 6 paths trigger ~10 default providers (`ACTIONS`, `ACTION_STATE`, `CHARACTER`, `CHOICE`, `ROLES`, `SETTINGS`, `channelState`, `voiceState`, `RECENT_MESSAGES`, `AVAILABLE_DOCUMENTS`), with most taking anywhere from 200ms to 1.8s to resolve.\n\n---\n\n## Flow-by-Flow Case Study: Mention Replies\n\n* **File:** `interactions.ts` → `handleTweet()`\n* **Severity:** **CRITICAL** (Matches the exact class of breakdown seen in core tweet generation)\n\n**Code path:**\n```typescript\n// interactions.ts — handleTweet() delegates to core message handler\nconst result = await this.runtime.messageService.handleMessage(\n  this.runtime,\n  message,\n  callback\n);\n```\n\nThis delegates to the **ElizaOS core message handler**, which internally:\n1. Calls `composeState(message)` with all default providers without any localized filtering.\n2. Uses the core `messageHandlerTemplate` (or `character.templates.messageHandlerTemplate`) which natively renders the full `{{providers}}` block.\n3. Sends the bloated, unoptimized state directly to the LLM.\n\n#### What goes wrong:\n* **Junk-drawer context pollution:** Action lists, action examples containing random names, DM behavior instructions, full provider catalogs, and background error messages are passed unconditionally.\n* **Conflicting Prompts:** Core DM personality instructions (e.g., *\"Be conversational and helpful\"*) directly break custom character files trying to execute a specific persona voice.\n* **Redundancy:** The `CHARACTER` provider triple-dumps system/bio/directions straight into the prompt buffer.\n* **Unreliable RAG:** While the `KNOWLEDGE` provider maps context onto actual tweet text, retrieval remains highly unreliable for short social media posts—causing even more noise.\n\n**Impact:** Mention replies sound generic and assistant-like instead of maintaining targeted persona voices. \n\n---\n\n**Describe the solution you'd like**\n\nThe proposed solution introduces a functional **Provider Pipeline Interceptor System** directly into the ElizaOS state-composition lifecycle. By integrating a reactive framework reducer pattern, host applications gain absolute, dynamic authority over context generation.\n\n`[Default Providers] ──► [Subscriber 1: Filter] ──► [Subscriber 2: Add] ──► [Subscriber 3: Remove] ──► [Final Optimized Context]`\n\n### Key Architecture Principles\n\n* **Reactive Array Reduction Engine:** Instead of treating providers as a rigid, static array, `composeState` transforms into an asynchronous pipeline where the provider collection is passed sequentially through registered event listeners/subscribers.\n* **Developer Freedom via Native JavaScript:** The system hands pure, array-level control over to the application layer. Interceptors are written using the standard predictability of native array operations. Developers can cleanly:\n   * **Filter (Remove)** out polluting blocks (e.g., stripping out heavy ledger providers like `EVM_WALLET_BALANCE` if a message is just a greeting).\n   * **Append (Add)** conditional workflows dynamically (e.g., spreading a `CRYPTO_SWAP` provider into the list only when specific transaction keywords are flagged).\n   * **Transform / Rearrange** execution priorities (e.g., sorting providers to force mission-critical criteria to execute first).\n   * **Pass-Through (No-Touch)** data cleanly by returning the array unmodified when no rules match.\n* **Read-Only Context Boundaries:** Subscribers execute these data transformations safely by inspecting an immutable context payload (containing live `Memory`, active `actionName`, and the base `IAgentRuntime`) without the risk of mutating or breaking core agent states.\n\nThis architecture transitions ElizaOS from a static context architecture to an **intent-driven, decentralized data ecosystem**, dramatically decreasing token overhead while boosting prompt precision.\n\n---\n\n**Describe alternatives you've considered**\n\nAs a localized workaround, I forked the target plugins and manually gated their `composeState` calls utilizing customized parameters like `onlyInclude` arrays and strict `providerList` filtering. However, this requires breaking away from the upstream framework updates and does not address the underlying global state layout limitation.\n\n---\n\n**How to Reproduce:**\n\n1. Install any standard platform plugin that routes through the `messageService.handleMessage` execution path (e.g., `plugin-twitter`).\n2. Trigger an incoming mention or timeline scan. \n3. Observe the `composeState` console logs: every single registered provider runs simultaneously (`CHARACTER`, `ACTIONS`, `RECENT_MESSAGES`, `AVAILABLE_DOCUMENTS`, etc.).\n4. Inspect the outbound prompt payload generated by the core message handler: verify that completely unrelated provider text chunks are present in the final prompt layout.\n\n**Why this Issue?**\nIntroduce a hook-based interception layer for composeState and message lifecycle, enabling controlled, intent-aware context shaping without altering existing provider contracts.",
+      "createdAt": "2026-06-20T00:31:50Z",
+      "closedAt": "2026-06-20T18:19:18Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGKPN_Q",
+      "title": "Shared-agent → cloud-sandbox-agent handoff: unify the state machine and make the UX legible",
+      "author": "lalalune",
+      "number": 8810,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nWhen a user provisions a personal Eliza Cloud agent, they start chatting **immediately** against a shared cloud-runtime REST adapter while their dedicated container boots; a background supervisor then copies the conversation into the container and silently swaps the live client over. The mechanism works and is unit-tested, but it is **invisible to the user, split across two divergent code paths (one of which has no live callers), and surrounded by orphaned/off-brand provisioning UI**. This issue consolidates the handoff into one legible state machine and gives the user honest progress, continuity guarantees, and a real failure surface.\n\nThis is about the shared→dedicated *handoff* and its UX specifically. It does not overlap the settings-shell redesign in #8793 (which it should land on top of) or proactive event commentary in #8792 (referenced below as a delivery channel, not a dependency).\n\n## Current state\n\n**The active handoff path is fully silent.** First-run onboarding drives it from `finishCloudWithSelection` in `packages/ui/src/first-run/use-first-run-controller.ts:782-814`: when a freshly created agent has no bridge URL yet (`selectedAgent.created && !selectedAgent.bridgeUrl`), it fires `client.startCloudAgentHandoff({...}).catch(() => {})`. The `onSwitch` callback rebinds the client base/token and re-persists the active server, but **nothing tells the user** a migration is in flight or that it completed. `runConversationHandoff` (`packages/ui/src/cloud/handoff/conversation-handoff.ts:110-145`) returns a rich `ConversationHandoffResult` with status `switched | switched-empty | timed-out | failed` and an `imported` count — and the caller discards all of it.\n\n**The supervisor + orchestrator are clean, pure, and well-tested** (`packages/ui/src/cloud/handoff/cloud-handoff-supervisor.ts`, `conversation-handoff.ts`). Readiness gates on the agent record exposing a dedicated base AND `status === \"running\"` (`client-cloud.ts:3136-3158`), the import is idempotent and inference-free via `POST /api/conversations/:id/import` (`packages/agent/src/api/conversation-routes.ts:1604-1751`, returns `{ inserted, alreadyPopulated }`), and the default budget is 10 min (`conversation-handoff.ts:67`). The plumbing is good; the problem is that its output never reaches the UI.\n\n**There are two divergent handoff/bind paths and one is dead:**\n- The live path (above) reuses the **cloud session token** as the agent token and never exchanges a pairing token.\n- `pairDedicatedCloudAgent` (`client-cloud.ts:3247-3315`) implements the *other* model end-to-end: resume → poll the self-healing `202 starting` pairing-token endpoint through the ~5 min cold boot → exchange the one-time token at the cloud `/api/auth/pair` relay (origin-bound, `exchangeCloudPairingToken` at `client-cloud.ts:3188-3245`) for the agent's **own** API key, returning `{ status: \"paired\", apiBase, agentToken }` or `{ status: \"manual_auth\", webUiUrl }`. Despite being the documented \"dedicated agent is a full app-server with its own auth\" path, it has **zero live callers** — `grep` finds it only in `packages/ui/src/api/client-cloud-pairing.test.ts`. So the codebase carries two competing answers to \"how do we authenticate against the dedicated container,\" and ships the simpler one while the more correct-looking one is untested-in-practice dead weight.\n\n**`ProvisioningChatView` is orphaned and off-brand.** `packages/ui/src/components/shell/ProvisioningChatView.tsx` (a \"chat with a placeholder agent while your container warms\" surface, backed by `useProvisioningChat.ts` + `getProvisioningAgentStatus`/`sendProvisioningAgentMessage`) is **never rendered in JSX** anywhere — `grep \"<ProvisioningChatView\"` returns nothing; it survives only in tests and the client. It also hardcodes the old Binance-yellow palette (`#ffe600`, `#f0b90b`, `#4ade80`, `#f87171`) and a mono font (`ProvisioningChatView.tsx:15,84-88,177,244,252`), directly violating the brand/hover rules. This is the more compelling \"show the user the container coming up\" UX, but it is currently dead slop.\n\n**Two unrelated \"waking\" UX systems exist and neither is handoff-aware:**\n- Settings `CloudAgentsSection` (`packages/ui/src/components/settings/CloudAgentsSection.tsx`) has its own wake loop: `wakeUntilRunning` resumes a `stopped|sleeping|suspended` agent and polls to `running` (60s/2s) before binding, with a `Waking…` badge (recent polish in `f475d81b26`). It surfaces `error_message` for `error|failed` states and re-syncs status after suspend/resume.\n- The chat shell uses the server-authoritative `canRespond` WS signal (`packages/ui/src/state/parsers.ts:39-50`, `useLifecycleState`, banner re-poll in `useChatLifecycle.ts:535-572`, hardened in `26f4f90a08`) to drive the \"waking up — you can type now\" composer banner (`ContinuousChatOverlay.tsx:2681,2694`).\n\nNeither system knows it is talking to a **shared adapter while a dedicated container provisions behind it**. There is no signal in `useLifecycleState`/`parsers` for \"shared-now, dedicated-pending,\" so the handoff swap is opaque to chat state.\n\n**Raw DB status strings leak to users.** `statusLabelForState` (`packages/ui/src/components/ui/status-badge.helpers.ts:52-57`) just title-cases the enum, so users see `Resuming`, `Stopping`, `Suspended`, `Provisioning` verbatim — fine for an internal console, weak as product copy during a first-run handoff.\n\n**Failure modes are under-surfaced.** Handoff `timed-out`/`failed` are swallowed (user silently stays on the shared adapter — functional, but if the dedicated container never comes up the user is permanently on shared with no notice). `provisionCloudSandbox` (`client-cloud.ts:2835-2993`) throws a developer-flavored string on a shared-runtime result when `allowSharedRuntime` is false (`\"Eliza Cloud returned a shared-runtime agent, but first-run requires a dedicated sandbox…\"`, line 2916) — not user copy. The `selectOrProvisionCloudAgent` create branch (`client-cloud.ts:3066-3094`) falls back to the shared-adapter base when the dedicated `web_ui_url` isn't ready, which is correct, but there is no later reconciliation surfaced if the container subdomain never materializes.\n\n## Proposed work\n\n1. **Pick ONE handoff/auth model and delete the other.** Decide between (a) reuse-cloud-session-token (current live path) and (b) `pairDedicatedCloudAgent` token-exchange. If (a) stays, remove `pairDedicatedCloudAgent`, `exchangeCloudPairingToken`, `getCloudCompatPairingToken`, and `dedicatedAgentOriginFromRedirect` from `client-cloud.ts` plus their test. If (b) is correct, wire it into `startCloudAgentHandoff`/`finishCloudWithSelection` and delete the bare-token rebind. No shipping two answers.\n\n2. **Surface handoff progress + result.** Stop discarding the `ConversationHandoffResult`. Add a single handoff status to chat state (e.g. `handoffPhase: \"shared\" | \"migrating\" | \"switched\" | \"failed\"`) fed from the supervisor's `onProgress`/`onSwitch` and final result, consumed by `useLifecycleState`. Render a quiet, brand-compliant indicator (\"Personal agent ready — moving your chat over…\" → \"Done\") instead of a silent `window`-level swap. On `switched`, optionally route a one-line confirmation through the proactive-commentary channel from #8792 rather than a modal.\n\n3. **Resolve the orphaned `ProvisioningChatView`.** Either delete `ProvisioningChatView.tsx` + `useProvisioningChat.ts` + the `getProvisioningAgentStatus`/`sendProvisioningAgentMessage` client methods (if the silent background handoff is the intended UX), or wire it as the real provisioning surface and rebrand it off the hardcoded `#ffe600`/`#f0b90b` hex + mono font onto theme tokens. Do not leave a dead, off-brand component in `shell/`.\n\n4. **Make the handoff state machine handoff-aware end to end.** Add a \"shared-now / dedicated-pending\" signal so chat-shell readiness (`parsers.ts`/`useLifecycleState`) and Settings `CloudAgentsSection` both understand the transient state instead of each running an independent wake loop. Converge the Settings `wakeUntilRunning` poll and the chat `canRespond` banner on shared readiness semantics where they overlap.\n\n5. **Replace raw status strings with product copy** in `statusLabelForState` (or a handoff-specific label map) for the user-facing first-run/handoff path: `resuming`→\"Starting up\", `provisioning`→\"Setting up\", `suspended/sleeping`→\"Asleep\", etc. Keep the raw enum only in dev/admin surfaces.\n\n6. **Make handoff failure honest.** On `timed-out`/`failed`, surface a non-blocking notice (\"You're connected on a shared agent; your personal agent is still starting\") with a retry that re-invokes the supervisor, instead of a silent permanent fallback. Turn `provisionCloudSandbox`'s developer-string throws into user copy.\n\n## Acceptance criteria\n\n- [ ] Exactly one shared→dedicated bind/auth path remains in `client-cloud.ts`; the other (`pairDedicatedCloudAgent` family **or** the bare-token rebind) is deleted, and `grep` confirms no dead exports.\n- [ ] The `ConversationHandoffResult` from `startCloudAgentHandoff` is consumed (not `.catch(() => {})`-discarded); `switched`, `switched-empty`, `timed-out`, and `failed` each produce a distinct, verifiable user-visible outcome.\n- [ ] During a first-run handoff the user sees clear progress (shared → migrating → switched), brand-compliant (no blue, orange accent only, no hardcoded hex), verified via the cloud-frontend / ui-smoke screenshot loop.\n- [ ] Conversation continuity across the swap is asserted by a test: messages sent on the shared adapter appear after the switch to the dedicated container (extends the idempotent-import coverage in `conversation-routes.ts`).\n- [ ] `ProvisioningChatView` + `useProvisioningChat` are either deleted (with their client methods) or rendered in a live path and rebranded onto theme tokens — no orphaned, off-brand component remains in `packages/ui/src/components/shell/`.\n- [ ] Chat-shell readiness state and `CloudAgentsSection` both reflect the shared-now/dedicated-pending state; no user-facing surface shows a raw DB enum (`Resuming`/`Suspended`) during first-run.\n- [ ] A handoff timeout/failure produces a retryable notice rather than a silent permanent fallback.\n- [ ] `bun run --cwd packages/ui test` passes (handoff supervisor + conversation-handoff + CloudAgentsSection suites green), and the cloud-agent-lifecycle ui-smoke spec covers the migrating→switched transition.\n\n## Files & areas likely involved\n\n- `packages/ui/src/first-run/use-first-run-controller.ts` — `finishCloudWithSelection` (handoff invocation at lines 724-814; result currently discarded at 811-813)\n- `packages/ui/src/api/client-cloud.ts` — `startCloudAgentHandoff` (3096), `selectOrProvisionCloudAgent` (3015), `provisionCloudSandbox` (2835), and the (currently dead) `pairDedicatedCloudAgent` (3247) / `exchangeCloudPairingToken` (3188) / `getCloudCompatPairingToken` (2445)\n- `packages/ui/src/cloud/handoff/cloud-handoff-supervisor.ts`, `conversation-handoff.ts` — supervisor + pure orchestrator (keep; consume their output)\n- `packages/ui/src/cloud/join/lib/run-join-flow.ts`, `JoinPage.tsx` — the JoinPage variant of the same select/provision flow (keep both flows consistent)\n- `packages/ui/src/components/settings/CloudAgentsSection.tsx` — Settings wake loop / status badges / `error_message` surface\n- `packages/ui/src/components/shell/ProvisioningChatView.tsx`, `packages/ui/src/hooks/useProvisioningChat.ts` — orphaned, off-brand provisioning UI (delete or wire+rebrand)\n- `packages/ui/src/state/parsers.ts`, `useLifecycleState.ts`, `useChatLifecycle.ts` — `canRespond` readiness + \"waking up\" banner (add handoff-aware signal)\n- `packages/ui/src/components/ui/status-badge.helpers.ts` — `statusLabelForState` / tone mapping (product copy)\n- `packages/ui/src/components/shell/ContinuousChatOverlay.tsx` — composer \"waking up\" banner copy (lines ~2681, 2694)\n- `packages/agent/src/api/conversation-routes.ts` — `POST /api/conversations/:id/import` silent-import target (the continuity primitive)\n- `packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts`, `packages/app-core/src/services/sandbox-registry.ts` — dedicated-container provisioning + bridge wiring (shared vs dedicated tier semantics)\n- `packages/app/test/ui-smoke/cloud-agent-lifecycle.spec.ts`, `packages/test/cloud-e2e/tests/app-client-onboarding.spec.ts` — lifecycle coverage to extend\n\n## Open questions\n\n- **Which auth model is canonical** for the dedicated container — reuse the cloud session token (live today) or the `pairDedicatedCloudAgent` `/api/auth/pair` token-exchange (implemented but unused)? This decides a large delete in either direction and should be settled before any wiring.\n- **Should provisioning be a visible step or stay invisible?** Today onboarding lands the user in chat on the shared adapter instantly and migrates silently. Do we want the (currently dead) `ProvisioningChatView` \"chat-while-it-warms\" experience back, or is silent-with-a-quiet-progress-pill the intended product?\n- **What is the contract when the dedicated container never comes up** (timeout)? Permanent shared fallback with a notice, an automatic retry budget, or a hard \"personal agent failed to start\" error state — and does the shared agent stay billable in that window?\n- **Should the handoff confirmation route through #8792's proactive-commentary channel** (agent says \"I've moved us to your personal agent\") or stay a passive UI indicator only?\n- **Is the 10-minute handoff budget** (`conversation-handoff.ts:67`) aligned with the ~5 min cold-boot assumption baked into `pairDedicatedCloudAgent` (`client-cloud.ts:3253-3254`), or should they be unified once one path is chosen?\n",
+      "createdAt": "2026-06-20T21:02:38Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGKGDdg",
+      "title": "Mobile Resource Workbench: end-to-end battery, performance, memory, and tokens/sec profiling on iOS + Android",
+      "author": "lalalune",
+      "number": 8800,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nelizaOS runs local LLM/voice inference on-device (iOS via the `LlamaCpp.xcframework`/`libelizainference` Swift bridge, Android via the AOSP/Capacitor llama loader, desktop via in-process `bun:ffi`), but **there is no end-to-end mobile resource profiling**: no battery/energy measurement at all, no on-device RSS/peak-memory capture, and tokens/sec + thermal state are only measured host-side or used as a one-shot routing gate — never sampled over a real on-device workload. The few real-device harnesses we do have (`mobile-local-chat-smoke.mjs`, `packages/app/test/android/*.android.spec.ts`, `android-device-e2e.yml`) prove *correctness* (boot, model load, chat round-trip, route render) and capture **zero** performance/resource data; `local-inference-bench.yml` is explicitly host-only (\"The harness is host-…\"). This issue proposes a **Mobile Resource Workbench**: a repeatable iOS + Android harness that drives representative agent workloads and captures battery drain, peak/steady RSS, prefill/decode tokens/sec, TTFT, thermal state, and CPU/GPU/ANE/NPU utilization, with regression baselines and a report — built on the proven `loadperf` budgets/results/CI-gate pattern.\n\n## Current state\n\n### tokens/sec is measured — but only host-side, never on device\n- `VoiceRunMetrics` (`plugins/plugin-local-inference/src/services/latency-trace.ts:698-840`) accumulates `tokensPerSecond` and `serverRssMb` per turn, but its source is the **llama-server** `/metrics` Prometheus scrape (`plugins/plugin-local-inference/src/services/llama-server-metrics.ts`) and `/proc/<pid>/status VmHWM` — a server process, not a phone.\n- The `eliza-1` benchmark reports mean `tok/s` (`packages/benchmarks/eliza-1/src/report.ts:43`, `metrics.ts`) but resolves the engine in-process via `new LocalInferenceEngine()` / `engine.load(modelPath)` on the **host** (`packages/benchmarks/eliza-1/src/engine-resolver.ts:182-197`).\n- `plugins/plugin-local-inference/scripts/local-inference-ablation.mjs` measures decode tok/s across KV-quant/MTP variants, but spawns a **local llama-server** over HTTP (`127.0.0.1`), Metal/CUDA/CPU host builds only.\n- `voicebench` measures response/voice **TTFT** (`packages/benchmarks/voicebench/typescript/src/bench.ts:1386-1389`) but is a host harness; it does not run on a device and does not capture decode throughput or memory.\n\n### On-device bridge carries the raw numbers but nobody aggregates them\n- `packages/ui/src/services/local-inference/device-bridge.ts:87-95` defines `generateResult` with `promptTokens`, `outputTokens`, **`durationMs`** — so prefill/decode tok/s is *computable* per device call, but it is never differenced into a throughput metric, RSS sample, or report.\n\n### RSS / memory profiling is host-only and partly dead\n- `loadperf` `boot-kpi.mjs` samples peak RSS from `/proc/<pid>/status VmRSS` (`packages/benchmarks/loadperf/boot-kpi.mjs:92-96`) — host process only.\n- `MemoryMonitor` (`plugins/plugin-local-inference/src/services/memory-monitor.ts`) polls `os.freemem()/os.totalmem()` (the Node process view, not the device) and `defaultServerRssMb()` **returns `null`** because \"The local text path is in-process FFI now, so there is no server-side metrics endpoint to scrape\" (line 272-278). So on the in-process mobile path there is effectively no RSS signal.\n\n### Thermal state exists only as a one-shot routing gate, with no Android parity probe\n- iOS surfaces `thermalState` + `lowPowerMode` once at probe time (`packages/app/ios/App/App/ElizaIntentPlugin.swift:251-282`, `getDeviceCapabilities`); `availableRamGb` is returned as `NSNull()` (no live RAM probe).\n- `inference-capabilities.ts:84-87` consumes `thermalState` only to gate MTP speculative decoding; `device-bridge.ts:299-301` uses it for a load decision. There is **no time-series capture** of thermal state across a sustained run, and **no per-token throttle telemetry**.\n- The iOS streaming bridge is itself a documented stub: `plugins/plugin-local-inference/src/services/ios-llama-streaming.ts:9-41` notes the XCFramework \"currently ships without streaming-LLM support\" and `loadIosStreamingLlmBinding` returns `null` (wiring `ProcessInfo.thermalState` into a throttle hook is listed as a TODO).\n- **No Android `getDeviceCapabilities` equivalent exists.** Searched `packages/app/android` and `packages/app-core/platforms/android` — the only battery-related native code is `BatteryOptimizationPlugin.java` (both copies), which is purely the **Doze-mode exemption permission** (`isIgnoringBatteryOptimizations` / `requestIgnoreBatteryOptimizations`), not a level/thermal/memory probe. There is no Android `PowerManager.getCurrentThermalStatus`, `BatteryManager`, `Debug.getMemoryInfo`, or `ActivityManager.MemoryInfo` reader anywhere.\n\n### Zero battery / energy measurement, anywhere\n- A full-repo search for `MetricKit`, `batterystats`, `Battery Historian`, `perfetto`, `powermetrics`, energy deltas, `BatteryManager`, `batteryLevel`, `isCharging` found **nothing** in product code (the only `battery` hits are the Doze permission and the `onBattery` connectivity flag in `packages/ui/src/bridge/native-plugins.ts`). There is no MetricKit `MXAppRunTimeMetric`/`MXCPUMetric` ingestion on iOS and no `dumpsys batterystats` / perfetto trace capture on Android.\n\n### On-device harnesses exist but capture no resource data\n- `packages/app/scripts/mobile-local-chat-smoke.mjs` drives the real on-device agent (adb / `xcrun simctl`) and even *comments* observed throughput (\"~0.2 tok/s generate, observed ~41s end-to-end\", line 63) but only as a hard-coded tolerance note — it does **not** measure or record tok/s, RSS, battery, or thermal.\n- `packages/app/test/android/*.android.spec.ts` + `android-harness.ts` drive the real WebView over CDP against the live backend but assert render/route only.\n- CI: `.github/workflows/android-device-e2e.yml` builds APK + boots an emulator + route smoke (and SIGSEGVs the agent on x86_64 emulators — on-device LOCAL only goes green on a self-hosted arm64 runner); it captures no metrics. `local-inference-bench.yml` runs on `ubuntu-24.04`, host-only. `gpu-bench-nightly.yml` / `voice-bench-smoke.yml` are host/GPU-runner. No workflow profiles device resources.\n\n### The proven pattern to copy\n- `packages/benchmarks/loadperf/` is the right shape to mirror: standalone scripts → measure one dimension → compare to `budgets.json` → write timestamped `results/<kpi>/latest.json` → exit non-zero on budget regression (CI gate), with a `BASELINE.md` and \"ratchet budgets down\" discipline. It is just **host-only** today (`boot-kpi.mjs` = host readyMs + host RSS).\n\n### Mobile model ladder context (what the workbench must sweep)\n- Active mobile tiers: `eliza-1-0_8b` (~556 MB / ~0.7 GB, smallest), `eliza-1-2b`, `eliza-1-4b` (~2.6 GB Q4_K_M) — `packages/shared/src/local-inference/catalog.test.ts`, `CONTEXT_SCALING.md:43-45`.\n- `FIRST_RUN_DEFAULT_MODEL_ID` and the `mobile` recommendation ladder (`TEXT_SMALL: [0_8b, 2b]`) gate which tier loads by total RAM (`CONTEXT_SCALING.md:215-229`); `device-tier.ts:26-28` clamps mobile to `OKAY` at best (iOS jetsam ~3-4 GB ceiling, Android foreground-service requirement) — these device limits are exactly what a resource workbench must quantify rather than assume.\n\n## Proposed work\n\nBuild a **Mobile Resource Workbench** as a new benchmark surface, mirroring `loadperf`'s budgets/results/CI-gate discipline, layered on the existing on-device harnesses.\n\n1. **Native resource probes (close the platform gaps).**\n   - iOS: extend `ElizaIntentPlugin.swift` `getDeviceCapabilities` (or add a `getResourceSnapshot` method) to return a *live* sample: `thermalState`, `isLowPowerModeEnabled`, resident memory (`task_info` / `phys_footprint` via `mach_task_basic_info`), available RAM, and CPU time. Add **MetricKit** (`MXMetricManager`) ingestion (`MXCPUMetric`, `MXAppRunTimeMetric`, `MXAnimationMetric`, energy/`MXCellularConditionMetric` where available) written to `Preferences`/a file the harness reads — the Apple-sanctioned on-device energy/CPU source.\n   - Android: add the missing `getDeviceCapabilities`/`getResourceSnapshot` Capacitor method (parity with iOS) reading `PowerManager.getCurrentThermalStatus`, `BatteryManager` (level + `BATTERY_PROPERTY_CURRENT_NOW`/energy counter), and `Debug.getMemoryInfo()`/`ActivityManager.MemoryInfo` (PSS/RSS). Wire `adb shell dumpsys batterystats` + (optionally) a **perfetto** trace capture into the harness for energy/CPU/GPU breakdown.\n\n2. **Surface per-generation throughput from the device bridge.** Difference `device-bridge.ts` `generateResult` (`promptTokens`/`outputTokens`/`durationMs`) into prefill tok/s and decode tok/s, fold into a `VoiceRunMetrics`-style accumulator (reuse/generalize `latency-trace.ts:VoiceRunMetrics`), and tag with the active tier + backend.\n\n3. **Workbench runner + workloads.** Add a `packages/benchmarks/mobile-resource/` (or `loadperf` mobile lane) runner that, against a real device/sim via the existing `scripts/lib/android-device.mjs` + `xcrun simctl` paths, drives representative workloads: (a) cold model load, (b) single short chat, (c) sustained N-turn chat (RSS-leak + thermal-creep window), (d) full voice loop tied to **#8785** (Voice Workbench) and **#8786** (voice through full pipeline). Capture per-phase: TTFT, prefill/decode tok/s, peak + steady RSS, battery delta (mAh / %), thermal-state timeline, low-power-mode transitions, and CPU/GPU/ANE/NPU utilization where the OS exposes it.\n\n4. **Baselines, budgets, and report.** Add `budgets.json` + `BASELINE.md` per device class and per tier (`eliza-1-0_8b` / `-2b` / `-4b`), write `results/<workload>/latest.json` + a consolidated markdown/HTML report, and exit non-zero on regression — same contract as `loadperf`.\n\n5. **CI wiring.** Add a `workflow_dispatch` (+ nightly) job on the self-hosted arm64 Android device runner already used by `android-device-e2e.yml`, and an iOS-simulator/device lane. Gate on budgets; upload the report + raw traces as artifacts. Keep it off PR-blocking lanes (slow/device-bound) until baselines are stable.\n\n6. **Cross-link evaluations.** Feed the throughput/memory numbers into **#8794** (eliza-1 Gemma vs Qwen perf/memory eval) and **#8787** (Kokoro mobile-default / OmniVoice native) so model/voice-backend choices are decided on measured device data, not host extrapolation.\n\n## Acceptance criteria\n\n- [ ] iOS native probe returns a **live** resource snapshot (resident memory, available RAM, thermal state, low-power mode, CPU time) — not the current one-shot `getDeviceCapabilities` with `availableRamGb: NSNull()`.\n- [ ] iOS MetricKit (`MXMetricManager`) payloads (CPU/energy/runtime) are captured to a file/Preferences and ingested by the harness.\n- [ ] Android exposes a `getDeviceCapabilities`/`getResourceSnapshot` Capacitor method (parity with iOS) reading thermal status, battery level/energy, and PSS/RSS; `dumpsys batterystats` energy is captured by the harness.\n- [ ] Per-generation **prefill and decode tokens/sec** are computed from the on-device `generateResult` (`durationMs`/token counts) and aggregated per workload, per tier.\n- [ ] **Peak and steady RSS** are recorded on-device for cold-load, single-turn, and sustained N-turn workloads, with an RSS-leak flag (reuse `VoiceRunMetrics` leak heuristic).\n- [ ] **TTFT** is recorded on-device for text and voice loops (voice tied to #8785/#8786).\n- [ ] **Battery drain** (% and, where available, mAh/energy) is recorded across a fixed-duration sustained workload on both iOS and Android.\n- [ ] **Thermal-state timeline** + low-power-mode transitions are captured across a sustained run (not a single probe).\n- [ ] CPU/GPU/ANE/NPU utilization is captured where the OS exposes it (MetricKit / batterystats / perfetto), or explicitly recorded as \"not available on this platform\" rather than faked.\n- [ ] A `budgets.json` + `BASELINE.md` exist per device class × tier (`0_8b`/`2b`/`4b`); a runner writes `results/<workload>/latest.json` + a consolidated report and exits non-zero on budget regression.\n- [ ] A `workflow_dispatch` (+ nightly) CI job runs the workbench on the self-hosted arm64 device runner and an iOS sim/device lane, uploading the report + traces as artifacts.\n- [ ] Missing measurements are recorded as missing/null (per AGENTS.md §3/§7), never as fabricated zeros.\n\n## Files & areas likely involved\n\n- `plugins/plugin-local-inference/src/services/latency-trace.ts` — generalize `VoiceRunMetrics` (tok/s, RSS, leak flag) for a device profiling accumulator.\n- `plugins/plugin-local-inference/src/services/inference-capabilities.ts` — extend `CapabilityProbes`/`InferenceCapabilities` with sampled (not one-shot) resource fields.\n- `plugins/plugin-local-inference/src/services/memory-monitor.ts` — replace the `defaultServerRssMb() → null` stub with a real on-device RSS source on the in-process FFI path.\n- `plugins/plugin-local-inference/src/services/ios-llama-streaming.ts` — wire `ProcessInfo.thermalState` throttle hook + per-token timing (currently a `null` stub).\n- `packages/ui/src/services/local-inference/device-bridge.ts` — difference `generateResult` (`durationMs`/`promptTokens`/`outputTokens`) into prefill/decode tok/s.\n- `packages/app/ios/App/App/ElizaIntentPlugin.swift` — live `getResourceSnapshot` + MetricKit ingestion (`MXMetricManager`).\n- `packages/app/android/app/src/main/java/app/eliza/` and `packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/` — new Android resource-probe Capacitor plugin (thermal/battery/memory); today only `BatteryOptimizationPlugin.java` (Doze permission) exists.\n- `packages/app/scripts/mobile-local-chat-smoke.mjs` and `packages/app/scripts/lib/android-device.mjs` — extend to record (not just tolerate) throughput/RSS/battery/thermal.\n- `packages/app/test/android/android-harness.ts`, `*.android.spec.ts` — optional resource assertions on the real WebView/device.\n- `packages/benchmarks/loadperf/` (pattern to mirror: `boot-kpi.mjs`, `budgets.json`, `run-all.mjs`, `BASELINE.md`) → new `packages/benchmarks/mobile-resource/` (or a `loadperf` mobile lane).\n- `packages/benchmarks/eliza-1/src/engine-resolver.ts` + `metrics.ts`/`report.ts` — host tok/s today; cross-feed device numbers for #8794.\n- `packages/shared/src/local-inference/catalog.test.ts`, `CONTEXT_SCALING.md`, `device-tier.ts`, `recommendation.ts` — mobile tier ladder + `minRamGb` the workbench sweeps and validates.\n- `.github/workflows/android-device-e2e.yml`, `local-inference-bench.yml`, `voice-bench-smoke.yml`, `gpu-bench-nightly.yml` — add a device resource-profiling lane on the self-hosted arm64 runner.\n\n## Open questions\n\n- **Battery measurement precision/source:** is `dumpsys batterystats` + iOS MetricKit (delayed, aggregated, hardware-gated) sufficient, or do we require instrumented current draw (external power meter / a lab rig) for the headline \"impact\" number the product owner wants? MetricKit energy is opt-in and only delivered ~daily on-device — acceptable for nightly trend, not per-run gating.\n- **Device matrix:** which physical devices define the baseline (the self-hosted Pixel 9a arm64 runner from `android-device-e2e.yml` + which iPhone tier)? Simulators/emulators cannot measure energy or real thermal — does CI require physical hardware in the loop, or do sims cover RSS/tok-s/TTFT while battery/thermal is physical-only?\n- **iOS streaming dependency:** the on-device streaming-LLM + thermal-throttle path (`ios-llama-streaming.ts`) is still a stub pending the fused `libelizainference.dylib` XCFramework. Does the workbench block on that landing, or profile the current non-streaming Capacitor llama path first?\n- **Budget governance:** who owns the per-device-class budgets and the regression gate, and at what thresholds does a tok/s drop or RSS/battery regression block a merge vs. just warn?\n- **Workload representativeness:** which canonical agent workloads (and which prompt/turn counts / voice durations) constitute the standard mobile profiling set — should they be derived from real session traces or a fixed synthetic script for reproducibility?\n",
+      "createdAt": "2026-06-20T20:04:23Z",
+      "closedAt": "2026-06-20T21:46:06Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGKPO5Q",
+      "title": "Agent startup & container cold-start speed: close the remaining boot-time levers and gate boot-KPI in CI",
+      "author": "lalalune",
+      "number": 8812,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nAgent cold-start has had its biggest readiness-gate regression fixed (the deferred plugin wave no longer starves the `ready:true` flip — `setImmediate(kickoffDeferredBoot)` and per-wave event-loop yields are landed), and the boot-KPI harness is now honest (requires `health.ready===true`, a 3 s sanity floor, and median-of-N). But several measured levers from the boot research are still open: the dev-server runs ~cosmetic banner/pairing work *before* kicking off runtime bootstrap, every installed plugin is recursively `fs.cp`-staged on each boot, and the production **container image boots the agent through `tsx` transpiling `.ts` workspace files at container start**. Crucially, **boot-KPI is not wired into any CI workflow** — the only boot gate is a 180–420 s \"does it boot at all\" Docker smoke with no `readyMs` budget — so there is zero automated protection against boot-time regressions. This issue is to profile current boot with `loadperf`, land the remaining high-confidence optimizations, slim the container, and add a boot-KPI regression budget to CI.\n\n## Current state\n\nGrounded in the boot research (`packages/benchmarks/loadperf/research/03-agent-boot-plugins.md`), `BASELINE.md`, and the live source.\n\n**Already landed (do not re-do):**\n- **Deferred-boot decoupling (research F2/F3).** `startEliza()` in `packages/agent/src/runtime/eliza.ts` now defers the deferred plugin wave to a macrotask — `setImmediate(kickoffDeferredBoot)` at `eliza.ts:5050` — so the caller's readiness-flip continuation runs first. `preregisterCorePluginsInDependencyWaves()` (`eliza.ts:2989`) yields with `setImmediate` between waves (`eliza.ts:3066`) so the bound HTTP server can serve `/api/health` between CPU-bound registrations.\n- **Boot-KPI honesty (research F1).** `packages/benchmarks/loadperf/boot-kpi.mjs` requires `health.ready===true`, enforces a `READY_SANITY_FLOOR_MS = 3000` floor, runs N cold boots (median/p95), and WARNs on CPU contention. The old \"70 ms PASS\" artifact is now impossible.\n- **Blocking/deferred plugin split.** `BLOCKING_CORE_PLUGINS` is intentionally tiny (`@elizaos/plugin-sql`, `@elizaos/plugin-local-inference`), everything else is `DEFERRED_CORE_PLUGINS` (`packages/agent/src/runtime/core-plugins.ts:193-236`). Embedding GGUF warmup is deferred and prefetch-only (`warmEmbeddingModel`, `eliza.ts:4585`), so it is not a boot-RSS contributor.\n- **`LEAN_CHAT_PLUGINS`** (`core-plugins.ts:141`) already exists to strip heavy coding/automation/wallet surfaces from dedicated chat-only cloud agents (`ELIZA_PLUGIN_SET=lean-chat`), and `ELIZA_DEFER_APP_ROUTES=1` flips `ready:true` before the app-route tail (lifeops registers ~188 routes) finishes (`packages/app-core/src/runtime/eliza.ts:502`, `:777`).\n\n**Still open — the remaining levers:**\n\n1. **Dev-server fires runtime bootstrap *after* banner/pairing (research F5, NOT landed).** In `packages/app-core/src/runtime/dev-server.ts`, `ensureAuthPairingCodeForRemoteAccess()` (`:503`), the connection banner, and the dev-settings banner (`:507-533`) all run before `scheduleRuntimeBootstrap(0, \"startup\")` (`:536`). None of that is a prerequisite for runtime boot; under contention this serial pre-bootstrap block was measured at multiple seconds on the critical path.\n\n2. **Per-boot recursive plugin staging (research F4, NOT landed).** `stagePluginImportRoot()` (`packages/agent/src/runtime/plugin-resolver.ts:1191`) always `fs.mkdtemp`s a fresh dir and `fs.cp(packageRoot → staged, {recursive:true})` (`:1218`) plus recursive node_modules staging (`stageNodeModulesEntries`, `:967`) for every installed plugin on every boot, then prunes stale instances (`pruneStalePluginInstances`, `:1075`). The staging exists to bust the ESM module graph on hot-reload of *mutated* plugins; a cold boot has no prior graph to bust, so this is pure I/O on the deferred wave plus unbounded `~/.local/state/.../plugins/.runtime-imports/` disk growth. There is no \"stable dist, no pending reinstall → import in place\" fast-path.\n\n3. **Container starts the agent through a `tsx` transpile (research F6, NOT landed for the container).** Both `packages/app-core/deploy/Dockerfile.ci` (`APP_CMD_START = node --import .../tsx/dist/loader.mjs packages/agent/dist/bin.js start`, `:12`/`:224`) and `packages/app-core/deploy/Dockerfile.cloud-agent` (`CMD [\"tsx\", \"entrypoint.ts\"]`, `:80`) run the agent under tsx, transpiling `.ts` workspace files at every container start — a per-cold-start cost paid on top of module evaluation. The cloud-agent image even `npm install`s `@elizaos/core@alpha` / `plugin-sql@alpha` at build time and resolves the rest dynamically.\n\n4. **No boot-time CI gate at all.** `loadperf/boot-kpi.mjs` is not referenced in any `.github/workflows/*` (grep is empty) and is \"Not registered in the suite orchestrator\" per its own `CLAUDE.md`. The only automated boot check is `packages/app-core/scripts/docker-ci-smoke.sh` invoked by `build-agent-image.yml` (`:277-293`), which only asserts the image serves `/api/health` within `SMOKE_TIMEOUT_SEC` (180 in that job, default 420) — a boot-or-die liveness check with **no `readyMs` budget**. The `coldReadyMs ≤ 25000` / `peakRssMb ≤ 1600` budgets in `budgets.json` are therefore never enforced.\n\n5. **Stale/unverified baseline.** `BASELINE.md` claims production cold `readyMs ≈ 4.6 s` post-F2, but that number was captured ad hoc and is never re-measured; the research's 23–28 s figure predates the F2 fix. Boot is single-threaded and import-bound (research F8), so any number is contention-sensitive and currently un-tracked over time.\n\n6. **Container image weight on the cold path.** `Dockerfile.ci` ships ffmpeg, tailscale/tailscaled, yt-dlp, and the full derived runtime-dep closure (`collect-docker-runtime-deps.mjs`) into a single `node:24-slim` final stage. Pruning is \"safe only\" (GPU binaries, source maps, `__tests__`); image pull + cold-start surface has not been profiled against the lean-chat plugin set.\n\n## Proposed work\n\nOrdered; each step references real modules and is independently shippable behind the existing boot-KPI.\n\n1. **Re-baseline on current `develop`.** Run `node packages/benchmarks/loadperf/boot-kpi.mjs --runs=5 --json` (built `dist/entry.js start`, the shipped path) on a quiesced host and against the lean-chat container, and capture the per-phase `[boot-profile]` laps (`ELIZA_BOOT_PROFILE=1`) + `[eliza-boot]` BootTimer laps. Update `BASELINE.md` with verified median/p95 and ratchet `budgets.json` to the real number.\n\n2. **F5 — move `scheduleRuntimeBootstrap(0,\"startup\")` ahead of the banner/pairing block** in `dev-server.ts` (`:536` → right after `apiUpdateStartup({state:\"starting\"})` near `:467`). Bootstrap is already async-scheduled, so the cosmetic banner + `ensureAuthPairingCodeForRemoteAccess()` can run concurrently. Verify the pairing code + CORS port allowlist still take effect before any cross-origin request.\n\n3. **F4 — add a cold-boot fast-path to `stagePluginImportRoot`** (`plugin-resolver.ts:1191`): when a plugin resolves to a stable `dist/` with no pending reinstall/hot-swap flag, import in place from `packageRoot` and skip the recursive `fs.cp`. Keep staging only on the reinstall/mutated-plugin path so hot-reload still busts the module graph. This removes seconds of deferred I/O and stops `.runtime-imports/` disk growth.\n\n4. **F6 — eliminate the container `tsx` transpile from the cold path.** Build a prebuilt JS entry (the agent already produces `dist/bin.js`) and run the container with plain `node dist/bin.js start` instead of `node --import tsx ... .ts`, so `.ts` workspace files are not transpiled at container start. Pairs with auditing `Dockerfile.ci` / `Dockerfile.cloud-agent` so all imported workspace packages ship as built `dist/` (no on-the-fly `.ts`).\n\n5. **Wire boot-KPI into CI as a regression gate.** Add a `loadperf` boot job (or fold it into `build-agent-image.yml`'s boot-verify step) that runs `boot-kpi.mjs` against the just-built image and fails on `coldReadyMs`/`peakRssMb` budget breach, recording loadavg/contention alongside `readyMs`. This is the server/container analog of the mobile resource workbench in #8800 (same `loadperf` budgets→results→gate pattern). Reuse the honesty gates already in `boot-kpi.mjs`.\n\n6. **Container slimming pass (measure first).** Profile pull + cold-start of the lean-chat container vs the full image; move ffmpeg/yt-dlp/tailscale behind build args or a separate layer when the dedicated agent's plugin set doesn't need them, and consider a multi-stage `node_modules` prune keyed on `LEAN_CHAT_PLUGINS`. Gate every change behind the boot-KPI from step 5.\n\n7. **Optional: F7 — hash `computeVerdictFingerprint`** (`plugin-resolver.ts:1339`) instead of serializing the full env+config string twice per boot. Low impact (tens of ms); include only if step-1 profiling shows it on the resolve cost.\n\n## Acceptance criteria\n\n- [ ] `BASELINE.md` and `budgets.json` updated with a verified median/p95 cold `readyMs` + peak RSS measured on current `develop` via `boot-kpi.mjs --runs=5` (built `dist/entry.js start` path), with contention recorded.\n- [ ] `dev-server.ts` fires `scheduleRuntimeBootstrap` before the banner/pairing block; pairing code, banner, and CORS port allowlist all still function; \"Startup init complete\" timestamp moves earlier relative to \"API server ready\".\n- [ ] `stagePluginImportRoot` imports installed plugins in place on cold boot when `dist/` is stable and no reinstall is pending; staging still used (and verified) on reinstall/hot-swap; cold boot no longer mints a `.runtime-imports/<plugin>/…` dir.\n- [ ] Production container (`Dockerfile.ci` and/or `Dockerfile.cloud-agent`) starts the agent from a prebuilt JS entry with no `tsx` transpile of workspace `.ts` files at container start; `build-agent-image.yml` boot-verify still passes.\n- [ ] A CI job runs `boot-kpi.mjs` and fails the build when `coldReadyMs` or `peakRssMb` exceeds budget (records loadavg/contention); the budget is ratcheted to the new baseline.\n- [ ] Post-change: POST a message to the chat endpoint immediately after `ready:true` returns a response (blocking-set chat path intact), and all deferred plugins still log registration within the deferred window — no capability lost (`packages/agent/src/runtime/__tests__` + `bun run --cwd packages/agent test`).\n- [ ] No new `console.*` in server code; structured `[ClassName]`-prefixed logging only.\n\n## Files & areas likely involved\n\n- `packages/agent/src/runtime/eliza.ts` — `startEliza()`, `kickoffDeferredBoot` (`:4996`/`:5050`), `preregisterCorePluginsInDependencyWaves` (`:2989`), `warmEmbeddingModel` (`:4585`), NODE_PATH setup (`:846-873`).\n- `packages/agent/src/runtime/plugin-resolver.ts` — `stagePluginImportRoot` (`:1191`), `stageNodeModulesEntries` (`:967`), `pruneStalePluginInstances` (`:1075`), `importPluginModuleFromPath` (`:718`), `computeVerdictFingerprint` (`:1339`).\n- `packages/agent/src/runtime/core-plugins.ts` — `BLOCKING_/DEFERRED_/LEAN_CHAT_` plugin sets.\n- `packages/agent/src/runtime/boot-timer.ts`, `boot-telemetry.ts` — per-phase timing / persisted telemetry (already in place; reuse for measurement).\n- `packages/app-core/src/runtime/dev-server.ts` — `scheduleRuntimeBootstrap` (`:536`), `bootstrapRuntime`/`createRuntime`, banner/pairing block (`:503-533`).\n- `packages/app-core/src/runtime/eliza.ts` — `getDeferAppRoutesEnabled` (`:502`), `registerAppRoutePlugins` (`:593`), `getSkippedAppRoutePluginIds` (`:480`), voice warmup (`:1204`).\n- `packages/app-core/deploy/Dockerfile.ci`, `Dockerfile.cloud-agent`, `docker-ci-smoke.sh`, `cloud-agent-shared.ts`, `collect-docker-runtime-deps.mjs`.\n- `packages/benchmarks/loadperf/{boot-kpi.mjs,budgets.json,run-all.mjs,BASELINE.md,research/03-agent-boot-plugins.md,research/00-MASTER-BACKLOG.md}`.\n- `.github/workflows/build-agent-image.yml` — where a boot-KPI gate would attach.\n\n## Open questions\n\n- **Container runtime: prebuilt JS vs tsx.** Is there a reason (source-map fidelity, dynamic plugin `.ts` imports, alpha-tag npm installs in `Dockerfile.cloud-agent`) the agent must run under `tsx` in the container, or can the dedicated/cloud image always run `node dist/bin.js start`? Confirms whether F6 is a clean win or needs the dynamic-import surface mapped first.\n- **Staging fast-path correctness.** What is the exact signal for \"no pending reinstall / mutated plugin\" — a per-plugin reinstall flag, an mtime check against `dist/`, or the existing verdict cache? Need a maintainer call on the contract so hot-reload of a mutated plugin is never silently skipped.\n- **Boot-KPI in CI: where and how strict.** Fold the boot-KPI into the existing `build-agent-image.yml` boot-verify step (reuses the built image, one job) or a standalone `loadperf` workflow? And should the gate run against the full image, the lean-chat set, or both? Affects runner cost and which `coldReadyMs` budget applies.\n- **Lean-chat as the dedicated-agent default.** Should `ELIZA_PLUGIN_SET=lean-chat` (and the matching image slimming) become the default for cloud dedicated chat agents rather than opt-in, given the documented boot/embedding-cost reasons in `core-plugins.ts:141-185`?\n- **Mobile/shared-runtime scope.** Mobile boots a different plugin set (`MOBILE_CORE_PLUGINS`) and shared-runtime cloud agents boot zero local plugins by construction — should mobile cold-start be tracked here or stay with #8800's mobile resource workbench?\n\n",
+      "createdAt": "2026-06-20T21:02:44Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDOMT5cIs7ojoZA",
-      "title": "feat(cloud): new managed agents use local in-container DB + lean chat plugins (#8696, #8434)",
+      "id": "PR_kwDOMT5cIs7owWTl",
+      "title": "release: develop → main (cloud provisioning fixes #8766 + snapshot-404/deletion-pending hardening)",
       "author": "lalalune",
-      "number": 8754,
-      "body": "## Summary\nRoot-cause fix for the #8696 \"too many clients\" incident. Instead of every dedicated agent pooling against the single shared cloud Postgres, **new managed agents keep agent-state in a local in-container PGlite DB** on the persistent `/root/.eliza` volume and use the shared DB only for auth/discovery via the cloud API — removing the shared-Postgres connection hot path (so a pooler/DB-split is no longer required for agents). Also activates the #8434 lean chat plugin set for new agents.\n\n## Design — safe, migration-free forward cutover\n- `prepareManagedElizaBaseEnvironment` stamps new agents with `ELIZA_AGENT_LOCAL_STATE=1`, `PGLITE_DATA_DIR=/root/.eliza/.pgdata` (persistent mount → survives restarts), `ELIZA_PLUGIN_SET=lean-chat`.\n- `computeManagedAgentDbEnv` (in `eliza-sandbox.create()`) injects the shared `DATABASE_URL` **only** when the agent is not flagged local-state and didn't ship its own DB. **Existing agents (no flag) keep their shared-DB state untouched** — no migration, no data loss; only newly provisioned agents go local. Shared URL still exposed as `ELIZA_MANAGED_DATABASE_URL` for opt-in.\n- **Escape hatches:** `ELIZA_AGENT_LOCAL_STATE=0` keeps a new agent on the shared DB; `ELIZA_PLUGIN_SET` override changes plugins. `POSTGRES_POOL_*` retained for the shared-DB path.\n\nAuth/discovery unchanged (cloud API). Ships to **staging first** via CI for validation before any prod promote.\n\n## Tests\n- `managed-eliza-config.test.ts`: new agents default to local-state + lean-chat; escape hatches honored. (11 pass)\n- `eliza-sandbox.test.ts`: `computeManagedAgentDbEnv` — local → no `DATABASE_URL`; existing → shared `DATABASE_URL`; caller-supplied preserved. (19 pass)\n- typecheck + biome clean.\n\nDepends on #8730 (LEAN_CHAT_PLUGINS mechanism, merged).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "number": 8804,
+      "body": "Release of develop → main (prod). 188 commits; prod is currently 188 behind.\n\n**Why now / headline provisioning fixes** (prod was missing these):\n- #8766 deprovision lifecycle hardening (snapshot auto-skip + scheduled-backup bridge filter + deletion-state guards + sibling-job cancel).\n- `08f199cbc7` stop the agent_snapshot HTTP-404 flood (V2 image lacks POST /api/snapshot → benign auto-skip) + recover orphaned `deletion_pending` rows (broadened `reEnqueueFailedDeletions`).\n- `a0b6c345fe` fix 11 red eliza-sandbox lifecycle tests (findByIdAndOrgForWrite spies).\n\nFound by auditing the live prod Railway job queue: ~442 stale failed auto-snapshots, 15 sandboxes stuck deletion_pending 2+ days, an agent_upgrade flood (already filtered on develop). All root-caused + adversarially verified; cloud-shared suites green (1230/0).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-06-20T00:14:04Z",
-      "mergedAt": "2026-06-20T00:14:12Z",
-      "additions": 112,
+      "createdAt": "2026-06-20T20:32:27Z",
+      "mergedAt": null,
+      "additions": 31307,
+      "deletions": 95875
+    },
+    {
+      "id": "PR_kwDOMT5cIs7owYyQ",
+      "title": "release: develop → main — cloud provisioning fixes (#8766, snapshot-404/deletion-pending) + 188-commit catch-up",
+      "author": "lalalune",
+      "number": 8805,
+      "body": "Prod (main) was 188 commits behind develop and missing the cloud provisioning fixes. This merges develop into main (off main, so it's conflict-free), reconciling main's DB-locality hotfix #8783 with develop's canonical version of the same logic.\n\nHeadline provisioning fixes now reaching prod:\n- #8766 deprovision lifecycle hardening (snapshot auto-skip, scheduled-backup bridge filter, deletion-state guards, sibling-job cancel)\n- 08f199cbc7 — stop the agent_snapshot HTTP-404 flood (V2 image lacks /api/snapshot → benign auto-skip) + recover orphaned deletion_pending rows\n- a0b6c345fe — fix 11 red eliza-sandbox lifecycle tests\n\nConflicts (eliza-sandbox.ts, managed-eliza-config.ts + test) resolved to develop's side; verified the merged files retain BOTH #8783's POSTGRES_POOL cap + DATABASE_URL strip AND the provisioning fixes.\n\nSupersedes #8804 (develop→main, was conflicting).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T20:36:55Z",
+      "mergedAt": "2026-06-20T20:38:24Z",
+      "additions": 31260,
+      "deletions": 95906
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ow5B6",
+      "title": "test(e2e): umbrella e2e coverage gate for slash commands, plugin routes, views (#8802)",
+      "author": "lalalune",
+      "number": 8816,
+      "body": "Closes part of #8802 — the umbrella e2e coverage matrix + CI ship-gate, plus the slash-command and plugin-route e2e gaps it inventories.\n\n## What this adds\n\n### 1. Canonical coverage inventory + ship-gate (`packages/scripts/e2e-coverage/`)\n- **`inventory.ts`** enumerates, from real source, every user-triggerable surface: the served slash-command catalog (`getConnectorCommands`), every route-wiring plugin (`discoverRoutePlugins`), zero-test plugins, and the (not-yet-existing) #8791 shortcut registry — cross-checked against a committed manifest.\n- **`manifest.ts`** is the curated source of truth (covered/exempt per surface), the same pattern as `route-coverage.test.ts`'s `DIRECT_ROUTE_CASES`.\n- **`__tests__/e2e-coverage.test.ts`** is the enforced `bun test` ship-gate; **`check-e2e-coverage.ts`** emits `reports/coverage/e2e-matrix.json` + an HTML contact sheet.\n- **Larp-detection (§6):** a `covered` entry only counts when its artifact exists *and* names the real dispatcher (`tryHandleRuntimePluginRoute` / `buildHonoAppForRuntime`). The mocked-`json`-fn `commands-routes.test.ts` is rejected via `LARP_TEST_ARTIFACTS`.\n\n### 2. Slash commands — close the gap\n- `commands-routes.real-server.test.ts` — real loopback `http` server over the real `handleCommandsRoutes`, asserting the served catalog **==** `getConnectorCommands(\"gui\")`.\n- `deterministic-slash-commands.scenario.ts` — `api`-turn over the real route on the scenario runtime; wired into the PR-lane `--scenario` list + the `scenario-pr-workflow` / `deterministic-action-coverage` meta-gates.\n- `slash-commands.spec.ts` — Playwright browser coverage of navigate/client/agent dispatch through `useSlashCommandController`; wired into `scenario-pr.yml`.\n\n### 3. Plugin routes — close the §3 gap\nReal route-level e2e booting the production dispatcher for **11** plugins: `computeruse`, `discord-local`, `elizamaker`, `facewear`, `github`, `imessage`, `music`, `mysticism`, `telegram`, `workflow`, `xr`. (`discord-local` + `elizamaker` were also zero-test — they now have their first tests.)\n\n### 4. CI\n- E2E ship-gate + matrix report wired into `scenario-pr.yml`'s `scenario-runner-e2e` job.\n- Advisory standalone `e2e-coverage-gate.yml` mirrors `coverage-gate.yml`'s advisory→required env switch.\n\n## Acceptance criteria\n- [x] Committed coverage inventory (`reports/coverage/e2e-matrix.json` + viewer) enumerating every command, shortcut, view, plugin, route from real source.\n- [x] Every command in the `GET /api/commands` catalog has a real e2e (real-server route test + scenario + Playwright + overlay component test), not a mocked-handler unit test.\n- [x] Every route-declaring plugin in the §3 list has a route-level e2e booting the real handler via `tryHandleRuntimePluginRoute`/Hono dispatch.\n- [x] All zero-test plugins either gain a real test or are documented test-exempt with written justification (`ZERO_TEST_EXEMPT`).\n- [x] Views remain covered by the existing gates (referenced, not re-implemented per #8796/#8797/#8798).\n- [x] A `check-e2e-coverage` gate fails when a new command/plugin/route ships without a real e2e; advisory standalone workflow + required `bun test` gate (baseline green).\n- [x] New behavioral tests run deterministically in the PR lane (no secrets).\n- [ ] Shortcuts (#8791) — gated on that registry landing; the inventory lights the surface up automatically when it does (tracked as advisory until then).\n\n## Verification (local)\n- `bun test packages/scripts/__tests__/e2e-coverage.test.ts` → 7 pass (0 blocking gaps).\n- `commands-routes.real-server.test.ts` → 4 pass · `deterministic-slash-commands` scenario → pass · `slash-commands.spec.ts` → 4 pass.\n- 11 plugin route tests → all pass.\n- `scenario-pr-workflow.test.ts` + `deterministic-action-coverage.test.ts` meta-gates → 27 pass.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T21:44:42Z",
+      "mergedAt": "2026-06-21T00:09:54Z",
+      "additions": 6848,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDOMT5cIs7oiZpm",
+      "title": "fix(core): bound the redundant successful-tool-call planner loop",
+      "author": "NubsCarson",
+      "number": 8749,
+      "body": "## Problem\n\nA planner that re-issues a tool call **identical** to one that already **succeeded** this turn (same tool name + arguments) cannot get new information — but nothing stopped it.\n\nObserved live: `gpt-5.5` re-issued the same `WEB_FETCH` (same URL) on every planner iteration; each call succeeded, the evaluator said `CONTINUE`, and the loop ran until `maxTrajectoryPromptTokens` aborted the turn — the user got a generic *\"sorry, something went wrong\"* apology instead of the data that had been fetched 17 times.\n\nThis is the success-side analog of the existing `maxRepeatedFailures` guard (which only catches *failing* repeats).\n\n## Fix\n\nIn `runPlannerLoop`:\n\n- **Identity:** identify calls by name + **sorted-key** argument serialization (`canonicalParamsString`), so re-emissions that differ only in key insertion order (common across LLM turns) map to one identity.\n- **Skip redundant:** partition each iteration's non-terminal calls into genuinely-fresh vs repeats of an already-succeeded call; execute only the fresh ones.\n- **Bound + synthesize:** when every planned call is a redundant repeat, count a dead round; past the new `maxRepeatedToolCalls` bound (default **2**), force **one** tool-less synthesis call so the model writes the final answer from results already in the trajectory.\n- **Relax toolChoice:** once a non-terminal tool has executed, relax `toolChoice` from `required` → `auto` (made explicit, since `callPlanner` defaults `undefined` back to `required`) so the planner may synthesize a terminal `REPLY` instead of being pushed to re-call a tool every iteration.\n\nAll structural (tool-call identity + trajectory state), no text heuristics.\n\n## Test\n\nAdds `stops re-executing an identical successful call and forces a terminal synthesis` to `planner-loop.test.ts` — same `WEB_FETCH` returned every iteration, asserts it executes **once** and the loop terminates with the synthesized answer. Full planner-loop suite: **45/45 pass**.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-19T22:32:54Z",
+      "mergedAt": null,
+      "additions": 4339,
+      "deletions": 4124
+    },
+    {
+      "id": "PR_kwDOMT5cIs7owvQz",
+      "title": "feat(local-inference): Mobile Resource Workbench — on-device battery/RSS/tok-s/thermal profiling (#8800)",
+      "author": "lalalune",
+      "number": 8814,
+      "body": "Closes #8800.\n\n## Mobile Resource Workbench\n\nEnd-to-end on-device resource profiling for elizaOS local inference on **iOS + Android** — battery, peak/steady RSS, prefill/decode tokens/sec, TTFT, thermal-state timeline, and low-power transitions — built on the proven `loadperf` budgets/results/CI-gate pattern. `loadperf` measures host load; this measures the *phone*.\n\n### Acceptance criteria\n\n- [x] iOS native probe returns a **live** resource snapshot (resident `phys_footprint`, available RAM via `os_proc_available_memory`, thermal state, low-power mode, CPU time) — not the one-shot `getDeviceCapabilities` with `availableRamGb: NSNull()`.\n- [x] iOS **MetricKit** (`MXMetricManager`) payloads (CPU/energy/runtime) captured to disk and ingested by the harness.\n- [x] Android exposes a `ResourceProbe.getResourceSnapshot` Capacitor method (parity with iOS): thermal status, `BatteryManager` level/charge-counter, `Debug.getMemoryInfo` PSS; `dumpsys` hooks in the host probe.\n- [x] Per-generation **prefill and decode tokens/sec** computed from the on-device `generateResult` (`durationMs`/token counts + measured TTFT) and aggregated per workload, per tier.\n- [x] **Peak and steady RSS** recorded on-device with an RSS-leak flag (reused leak heuristic).\n- [x] **TTFT** recorded on-device (text now; voice loop wired, tied to #8785/#8786).\n- [x] **Battery drain** (% and, where available, µAh) across a fixed-duration workload.\n- [x] **Thermal-state timeline** + low-power transitions across a sustained run (not a single probe).\n- [x] CPU/GPU/ANE/NPU utilisation captured where the OS exposes it (MetricKit / batterystats), else explicitly recorded as missing — never faked.\n- [x] `budgets.json` + `BASELINE.md` per device-class × tier (`0_8b`/`2b`/`4b`); runner writes `results/<workload>/latest.json` + a report and exits non-zero on budget regression.\n- [x] `workflow_dispatch` (+ nightly) CI job: PR-path-filtered harness smoke + dispatch-only Android (self-hosted arm64) / iOS-sim lanes, uploading the report; kept off PR-blocking lanes until baselines are stable.\n- [x] Missing measurements recorded as null/missing, never fabricated zeros (AGENTS.md §3/§7).\n\n### What changed\n\n**Shared / runtime (unit-tested):**\n- `@elizaos/shared/local-inference` `computeGenerationThroughput` — differences `generateResult` into prefill/decode/combined tok/s (TTFT split); `null` when unmeasurable.\n- Capacitor adapter captures first-token wall-clock (TTFT) → relayed through both hand-synced `device-bridge` copies → surfaced via `subscribeGenerationMetrics` + a recent-metrics buffer + `GET /api/dev/device-resource-metrics`.\n- `DeviceResourceMetrics` accumulator generalises `VoiceRunMetrics` (tok/s, RSS+leak, battery, thermal timeline, low-power).\n- `memory-monitor` reports real in-process RSS (`process.memoryUsage().rss`) on the FFI path (was a `null` stub).\n- `inference-capabilities` adds a sampled `ResourceSnapshot` type + pure `thermalThrottleDecision()` policy.\n\n**Native probes:** iOS `ElizaIntent.getResourceSnapshot` + MetricKit sink; Android `ResourceProbePlugin` (registered in both app trees). JS bridge accessor + normaliser.\n\n**Workbench (`packages/benchmarks/mobile-resource/`):** runner + workloads (cold-load / single-turn / sustained-chat / voice-loop), adb/simctl probes, per-tier budgets, report, and `node --test` unit tests for the aggregation + budget logic.\n\n### Testing\n\n- `node --test packages/benchmarks/mobile-resource/metrics.test.mjs` — 7/7.\n- New vitest suites: shared throughput (8), DeviceResourceMetrics (2), memory-monitor (+1), inference-capabilities (7), resource-snapshot normaliser (5), adapter TTFT (generate-stream). All green, plus 131 shared local-inference + plugin consumer suites unaffected.\n- Typecheck clean for all touched code (`@elizaos/shared`, `plugin-native-llama`, `app-core` exit 0; `plugin-local-inference` has only the unrelated pre-existing `csstype`/`packages/ui` local-install artifact).\n\n### Notes\n- Native Swift/Java probes are device-CI-gated (can't compile in a headless lane); the CI device lanes are `workflow_dispatch`-only on the self-hosted pool.\n- Most `budgets.json` budgets start `null` (no baseline yet) — recorded but never failing; `maxPeakRssMb`/`maxSteadyRssMb` are provisional caps derived from tier footprint (documented in `BASELINE.md`). Ratchet in as physical-device baselines land.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T21:24:12Z",
+      "mergedAt": "2026-06-20T21:46:05Z",
+      "additions": 3737,
       "deletions": 10
     }
   ],
   "codeChanges": {
-    "additions": 112,
-    "deletions": 10,
-    "files": 4,
-    "commitCount": 4
+    "additions": 8650,
+    "deletions": 1429,
+    "files": 127,
+    "commitCount": 349
   },
   "completedItems": [
     {
@@ -39,9 +148,277 @@
         "packages/cloud-shared/src/lib/services/managed-eliza-config.test.ts",
         "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
       ]
+    },
+    {
+      "title": "feat(local-inference): Mobile Resource Workbench — on-device battery/RSS/tok-s/thermal profiling (#8800)",
+      "prNumber": 8814,
+      "type": "feature",
+      "body": "Closes #8800.\n\n## Mobile Resource Workbench\n\nEnd-to-end on-device resource profiling for elizaOS local inference on **iOS + Android** — battery, peak/steady RSS, prefill/decode tokens/sec, TTFT, thermal-state timeline, and low-power transit",
+      "files": [
+        ".github/workflows/mobile-resource-workbench.yml",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ResourceProbePlugin.java",
+        "packages/app-core/platforms/ios/App/App/ElizaIntentPlugin.swift",
+        "packages/app-core/src/api/dev-compat-routes.ts",
+        "packages/benchmarks/mobile-resource/AGENTS.md",
+        "packages/benchmarks/mobile-resource/BASELINE.md",
+        "packages/benchmarks/mobile-resource/CLAUDE.md",
+        "packages/benchmarks/mobile-resource/README.md",
+        "packages/benchmarks/mobile-resource/android-probe.mjs",
+        "packages/benchmarks/mobile-resource/budgets.json",
+        "packages/benchmarks/mobile-resource/ios-probe.mjs",
+        "packages/benchmarks/mobile-resource/lib.mjs",
+        "packages/benchmarks/mobile-resource/metrics.mjs",
+        "packages/benchmarks/mobile-resource/metrics.test.mjs",
+        "packages/benchmarks/mobile-resource/report.mjs",
+        "packages/benchmarks/mobile-resource/results/.gitignore",
+        "packages/benchmarks/mobile-resource/run-workbench.mjs",
+        "packages/benchmarks/mobile-resource/workloads.mjs",
+        "packages/shared/src/local-inference/index.ts",
+        "packages/shared/src/local-inference/throughput.test.ts",
+        "packages/shared/src/local-inference/throughput.ts",
+        "packages/ui/src/services/local-inference/device-bridge.ts",
+        "packages/ui/src/services/local-inference/index.ts",
+        "packages/ui/src/services/local-inference/resource-snapshot-bridge.test.ts",
+        "packages/ui/src/services/local-inference/resource-snapshot-bridge.ts",
+        "plugins/plugin-local-inference/src/services/device-bridge.ts",
+        "plugins/plugin-local-inference/src/services/device-resource-metrics.test.ts",
+        "plugins/plugin-local-inference/src/services/device-resource-metrics.ts",
+        "plugins/plugin-local-inference/src/services/index.ts",
+        "plugins/plugin-local-inference/src/services/inference-capabilities.test.ts",
+        "plugins/plugin-local-inference/src/services/inference-capabilities.ts",
+        "plugins/plugin-local-inference/src/services/latency-trace.ts",
+        "plugins/plugin-local-inference/src/services/memory-monitor.test.ts",
+        "plugins/plugin-local-inference/src/services/memory-monitor.ts",
+        "plugins/plugin-native-llama/src/capacitor-llama-adapter.ts",
+        "plugins/plugin-native-llama/src/definitions.ts",
+        "plugins/plugin-native-llama/src/device-bridge-client.ts",
+        "plugins/plugin-native-llama/src/generate-stream.test.ts"
+      ]
+    },
+    {
+      "title": "fix(apps): add preview images for current views",
+      "prNumber": 8806,
+      "type": "bugfix",
+      "body": "Adds package-local preview PNGs for current app/view cards and fixes app hero registry caching so preview images load quickly through the app.\n\nVerified locally in a clean develop worktree:\n- `bunx vitest run packages/agent/src/api/views-ro",
+      "files": [
+        "plugins/plugin-app-manager/src/api/apps-routes.test.ts",
+        "plugins/plugin-app-manager/src/api/apps-routes.ts",
+        "plugins/plugin-clawville/assets/hero.png",
+        "plugins/plugin-companion/assets/hero.png",
+        "plugins/plugin-contacts/assets/hero.png",
+        "plugins/plugin-defense-of-the-agents/assets/hero.png",
+        "plugins/plugin-feed/assets/hero.png",
+        "plugins/plugin-phone/assets/hero.png",
+        "plugins/plugin-shopify-ui/assets/hero.png",
+        "plugins/plugin-task-coordinator/assets/hero.png",
+        "plugins/plugin-trajectory-logger/assets/hero.png",
+        "plugins/plugin-vincent/assets/hero.png",
+        "plugins/plugin-wifi/assets/hero.png"
+      ]
+    },
+    {
+      "title": "release: develop → main — cloud provisioning fixes (#8766, snapshot-404/deletion-pending) + 188-commit catch-up",
+      "prNumber": 8805,
+      "type": "bugfix",
+      "body": "Prod (main) was 188 commits behind develop and missing the cloud provisioning fixes. This merges develop into main (off main, so it's conflict-free), reconciling main's DB-locality hotfix #8783 with develop's canonical version of the same l",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/feed-env-audit.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/voice-live-e2e.yml",
+        ".gitignore",
+        ".gitleaks.toml",
+        "bun.lock",
+        "knip.json",
+        "lerna.json",
+        "package.json",
+        "packages/agent/docs/tee-agent-implementation-plan.md",
+        "packages/agent/package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/__tests__/game-tui-mounted-surfaces.test.tsx",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-bundle-lifecycle.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/agent/src/api/binance-skill-helpers.test.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/health-routes.canRespond.test.ts",
+        "packages/agent/src/api/health-routes.ts",
+        "packages/agent/src/api/media-runtime.test.ts",
+        "packages/agent/src/api/media-runtime.ts",
+        "packages/agent/src/api/media-store.test.ts",
+        "packages/agent/src/api/media-store.ts",
+        "packages/agent/src/api/media-thumbnail.test.ts",
+        "packages/agent/src/api/media-thumbnail.ts",
+        "packages/agent/src/api/server-auth.ts",
+        "packages/agent/src/api/server-helpers-config.ts",
+        "packages/agent/src/api/server-helpers.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/agent/src/runtime/view-action-affinity.test.ts",
+        "packages/agent/src/runtime/view-action-affinity.ts",
+        "packages/agent/src/services/app-package-modules.ts",
+        "packages/agent/src/services/registry-client-app-meta.ts",
+        "packages/agent/src/services/tee-sealed-volume.test.ts",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/app-core/platforms/electrobun/docs/convergence-audit.json",
+        "packages/app-core/platforms/electrobun/docs/convergence-audit.md"
+      ]
+    },
+    {
+      "title": "Shaw/composestate provider hook",
+      "prNumber": 8799,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        "packages/cloud-api/src/stubs/elizaos-core.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/action-tiering.test.ts",
+        "packages/core/src/runtime/action-tiering.ts",
+        "packages/ui/src/components/settings/CloudAgentsSection.test.tsx",
+        "packages/ui/src/components/settings/CloudAgentsSection.tsx",
+        "plugins/plugin-app-control/src/actions/views.ts",
+        "plugins/plugin-local-inference/src/services/voice/eot-classifier.ts",
+        "plugins/plugin-local-inference/src/services/voice/fused-eot-scorer.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): port DB-locality fix to main so the daemon stops needing a hotpatch (#8771)",
+      "prNumber": 8783,
+      "type": "bugfix",
+      "body": "## What\n\nPorts #8771's **DB-locality fix** (the dominant dedicated-chat latency win, ~35s → 6–11s) to **`main`**, so the provisioning daemon stops depending on a hand-applied live hotpatch.\n\n## Why this targets `main` specifically\n\nThe prov",
+      "files": [
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.test.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): RESTORE reverted dedicated-chat fixes (#8768/#8769/#8771/#8759)",
+      "prNumber": 8779,
+      "type": "bugfix",
+      "body": "## Why\nA wip-snapshot commit (`d014e09bd8` \"wip: snapshot in-progress work across runtime, cloud-api, first-run, and tutorial\") + the v2.0.4 baseline reset (merged via `02503ce935`) **clobbered all four merged dedicated-chat fixes** by over",
+      "files": [
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-api/v1/responses/route.ts",
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway-tools.test.ts",
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts",
+        "plugins/plugin-elizacloud/__tests__/unit/normalize-native-tools.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts"
+      ]
+    },
+    {
+      "title": "feat(core): compose_state_providers pipeline hook for dynamic provider filtering",
+      "prNumber": 8778,
+      "type": "feature",
+      "body": "Closes #8755.\n\n## Context\n\n#8755 asks for app-level control over which providers run during `composeState` (\"provider pollution\"). Most of the request is **already addressed in 2.x** — but one genuine gap exists, and this PR fills it.\n\n### ",
+      "files": [
+        "packages/core/src/__tests__/compose-state-provider-hook.test.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/types/pipeline-hooks.ts"
+      ]
+    },
+    {
+      "title": "build: prune desktop runtime dependency copies",
+      "prNumber": 8774,
+      "type": "other",
+      "body": "## What changed\n\n- Collapses patch-compatible WalletConnect runtime copies so Reown/WalletConnect patch drift does not create tar-unsafe nested dependency paths in the desktop bundle.\n- Prunes workspace package runtime copies to package met",
+      "files": [
+        ".github/actions/setup-bun-workspace/action.yml",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app/test/ui-smoke/cloud-provisioning-startup.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud-agent): kill the ~30s dedicated-chat latency (DB locality + lean trims)",
+      "prNumber": 8771,
+      "type": "other",
+      "body": "## Problem\nAfter the crash (#8768) and gte-small (#8769) fixes, dedicated cloud-agent chat was still **~28–38s/turn**. Measured the real breakdown on a live prod agent (timestamped container logs + the central `llm_trajectories` DB):\n\n| Cos",
+      "files": [
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): cloud containers use cloud embeddings, not local gte-small (dim mismatch + boot waste)",
+      "prNumber": 8769,
+      "type": "bugfix",
+      "body": "## Problem\nOn dedicated cloud agents, container logs showed:\n```\n[eliza] Configured local embedding env: gte-small_fp16.gguf (... dims: 384 ...)\n[eliza] Local embedding warmup: prefetching gte-small_fp16.gguf\n[PLUGIN:SQL] Skipping embedding",
+      "files": [
+        "packages/agent/src/runtime/eliza.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): native-tool calls 500 on flat ToolDefinition shape (should-respond crash)",
+      "prNumber": 8768,
+      "type": "bugfix",
+      "body": "## Problem\nDedicated cloud agents intermittently returned **\"something went wrong on my end\"** and ran slow. Root cause (proven by reproduction against `api.elizacloud.ai/api/v1/chat/completions`): a server-side **`Cannot read properties of",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway-tools.test.ts",
+        "packages/cloud-shared/src/lib/providers/vercel-ai-gateway.ts",
+        "plugins/plugin-elizacloud/__tests__/unit/normalize-native-tools.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts"
+      ]
+    },
+    {
+      "title": "perf(agent): exclude plugin-local-inference from lean-chat (cloud agents → fast cloud embeddings)",
+      "prNumber": 8762,
+      "type": "other",
+      "body": "Cloud chat agents were running gte-small embeddings on the container CPU (1.5–98s/batch, ~30s/turn, + 384↔1536 dim mismatch dropping memory inserts) despite routing everything else to Eliza Cloud. Exclude plugin-local-inference from lean-ch",
+      "files": [
+        "packages/agent/src/runtime/core-plugins.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud-api): defer chat-completions billing off the response hot path (~7-11s/agent-turn)",
+      "prNumber": 8759,
+      "type": "other",
+      "body": "Defers the post-inference billing/settlement chain via waitUntil so it never blocks the model response. Response usage built from model tokens (identical bytes), billing amounts unchanged — only timing moves. Reservation still synchronous (",
+      "files": [
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-api/v1/responses/route.ts"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 309.2572871164049,
+      "prScore": 308.8192871164049,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 73.92910613460822,
+      "prScore": 73.92910613460822,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
@@ -50,6 +427,26 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 32.18996334607311,
+      "prScore": 31.989963346073104,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "noobshow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
+      "totalScore": 4.54,
+      "prScore": 0,
+      "issueScore": 4.2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -63,9 +460,9 @@
       "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "newPRs": 41,
+  "mergedPRs": 14,
+  "newIssues": 26,
+  "closedIssues": 3,
+  "activeContributors": 7
 }

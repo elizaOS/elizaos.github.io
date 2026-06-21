@@ -1,0 +1,566 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-21T00:00:00.000Z",
+    "intervalEnd": "2026-06-28T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-21 to 2026-06-28, elizaos/eliza had 34 new PRs (30 merged), 2 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABGNezdA",
+      "title": "On-device inference: enforce every model optimization (fused QJL/TBQ attention, TurboQuant, MTP, KV-quant) — close runtime gaps vs the Eliza-1 contract",
+      "author": "lalalune",
+      "number": 8848,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nOn-device inference speed, performance, and memory overhead are first-class product\nconstraints. We ship a full optimization stack for Eliza-1 — **TurboQuant** weights,\n**QJL** K-cache, **PolarQuant / TBQ3** V-cache, **TCQ** trellis quant, **MTP**\nspeculative decoding, and **fused QJL/Polar attention kernels** — and the\n`plugins/plugin-local-inference/native/AGENTS.md` §3 contract says every applicable\noptimization is **mandatory, never skipped**.\n\nA runtime audit (Pixel 9a / Mali-G715, plus code trace of the CPU/Vulkan/Metal/CUDA\npaths) found that **several of these optimizations are implemented but not actually\napplied on the on-device path** — the model is leaving large, already-built wins on\nthe table. This is a tracking issue to **enforce that every model uses every\noptimization it can**, on every backend, and that **any model that can be quantized\nand isn't, is**.\n\nGoal: for each (model tier × optimization × backend), the optimization is either\napplied or there is a written, verified reason it cannot be — with host-side\nnumerical verification and on-device perf/overhead numbers recorded.\n\n---\n\n## Current-state audit — the gaps found\n\n### 1. 🔴 Fused QJL/TBQ attention op is implemented + Mali-safe but **never routed** (highest leverage)\n\n`GGML_OP_FUSED_ATTN_QJL_TBQ` is fully implemented end-to-end — node constructor in\n`ggml.c`, CPU forward, Vulkan/Metal/CUDA kernels, `supports_op` gate, tests + benches —\nand its type contract exactly matches `eliza-1-0_8b`'s KV design (`typeK: qjl1_256`,\n`typeV: tbq3_0`). The fused Vulkan kernels are **Mali-safe** (single workgroup of 32,\n`barrier()` + shared-mem tree reductions, **zero subgroup intrinsics**, ~1152 B shared\nmem) and are **structurally immune to the generic-FA split-K corruption**.\n\nBut the graph builder **never constructs it**: `src/llama-graph.cpp:1996-2004`\ndequantizes QJL/TBQ/Polar K/V back to F32→F16 and calls generic `ggml_flash_attn_ext`.\nSo on every backend we run a generic FA over a **dequantized F16 KV cache** — paying a\nfull double-cast of the KV cache every step and discarding the entire point of the\nQJL/Polar quantization.\n\nRouting is **not** a one-line wire — there are **three hard blockers** (full trace in\nthe audit; the op is referenced only from tests/benches, never from `src/` or the FFI):\n\n- **(dominant, correctness) Q-projection / per-layer Π.** The op consumes a *256-dim\n  QJL sketch* Q (`q->ne[0]==256`, `ggml.c:5706`), i.e. `Π·q` with the **same per-layer\n  Π that quantized K**. The graph today produces a 128-dim Hadamard-rotated Q (a\n  *different* transform), and the K-quant type-trait path uses a single **process-global\n  `seed=42` default Π** (`quants-qjl.c:115-135`) while production QJL needs **per-layer Π\n  from the training sidecar** (`packages/training/scripts/quantization/qjl_apply.py`).\n  So even wiring Q-projection with the default Π would be numerically wrong vs the\n  trained KV. Must determine what Π the shipped `eliza-1-0_8b` GGUF was quantized with\n  and plumb it into both K-quant and Q-projection.\n- **(correctness) non-causal.** The constructor hardcodes `causal=0` (`ggml.c:5725-5733`)\n  and the CPU forward has *no* mask logic (sums all `n_kv` tokens). A decoder LLM\n  requires causal masking. The Vulkan shader honors a causal push-constant\n  (`fused_attn_qjl_tbq.comp:253`) but it's never set. No mask tensor / sinks / ALiBi /\n  soft-cap inputs either (Qwen3 needs causal + GQA — GQA *is* supported).\n- **(scope) decode-shaped.** The op dispatches one workgroup per `(q_head, q_pos)` and\n  `supports_op` forces `ne[2]==ne[3]==1`, so a 1500-token **prefill = 1500 serial\n  dispatches** — worse than batched FA on compute-bound Mali. The fused op is the right\n  win for **decode** (correctness + parallelism + KV memory + no double-cast), **not**\n  for prefill (see #5).\n- There is also **no public QJL-K + Polar-V ggml op** — only `qjl_tbq` (which matches\n  eliza-1-0_8b's TBQ3-V). The polar Vulkan pipeline is an orphan (no op/constructor/CPU\n  forward). eliza-1-0_8b doesn't need it; larger tiers may.\n\n**Win when done:** for the **decode** path — removes the double-cast + F16 KV\nmaterialization, uses the Mali-safe single-pass kernel (never had the split-K bug), and\nunlocks quantized KV (#2). Prefill speed is a separate axis (#5). Anchors:\n`ggml-vulkan.cpp:775-777,5245-5248,13946-14005,16952-16963`, `ggml.c:5704-5733`,\n`fused-attn-qjl-tbq.c`, `ggml.h:2539`, `src/llama-graph.cpp:1990-2008`.\n\n### 2. 🟠 Bionic host runs an F16 KV cache, not the designed QJL/TBQ/Polar cache\n\nThe Android Mali GPU path (`eliza_inference_llm_stream_open`,\n`tools/omnivoice/src/eliza-inference-ffi.cpp:2879-2884`) maps `cfg.cache_type_k/v` to a\n`ggml_type` but the JNI callers `memset` the config to zero → **F16 KV**\n(`elizavoice-jni.cpp:1283-1290` `nativeLlmSelfTest`, `:1157-1165` `nativeLlmStreamOpen`).\nSo the eliza-1 quantized KV cache (QJL-K / TBQ3-V, the memory + bandwidth win) is **not\nused on device**.\n\n**Dependency:** do **not** flip `cfg.cache_type` to `qjl1_256/tbq3_0` yet — without #1\nit is a *regression* (CPU-offloaded dequant casts + a missing TBQ3_0 V hop). Sequence:\nland #1 first, then set the cache types here.\n\n### 3. 🟠 MTP speculative decoding not wired on the bionic host path\n\n`ELIZA_1_LOAD_METADATA` (mobile-device-bridge) declares `mtp: {draftMin:1, draftMax:2}`\nfor the MTP tiers, but the bionic host builds `cfg` with `draft_min/max = 0` → **MTP\noff**. Per AGENTS.md §3, MTP is mandatory where a NextN head exists (2B+). Wire the draft\nwindow through the JNI/`cfg` to the bionic host so on-device decode uses speculative\ndecoding. (0.8B is the documented non-MTP tier — exempt.)\n\n### 4. 🔴 Generic FA scalar kernel is **non-deterministic** on Mali (intermittent corruption)\n\nVerified on-device: the same prompt under greedy decode (temp=0) produces *different*\noutputs run-to-run — ~50% degenerate into `\" His!!!!\"` token repetition. Identical\ndeterministic inputs → different outputs = a **race / uninitialized shared memory** in\nthe Mali FA scalar path (`flash_attn.comp`), **not** split-K (it persists with\n`split_k=1`). Current mitigation: FA disabled on Android (reliable but no speedup, since\nMali has no coopmat). Candidate hardening (from the split-K trace) worth testing as the\nactual race fix: init `m_max` to `-FLT_MAX` (`uintBitsToFloat(0xFF7FFFFFu)`) not `-inf`,\nremove `[[unroll]]` on the runtime-`k_num` loops, clamp `exp()` args with\n`max(m-m_max, -87.0)`, and fix the y over-dispatch to `CEIL_DIV(HSV, subgroup_size)`.\n**#1 (fused kernel) sidesteps this entirely** for the eliza-1 KV types.\n\n### 5. 🟡 Prefill is matmul-bound on Mali (no cooperative-matrix)\n\nFA-on prefill ≈ FA-off prefill (~22 s / 1500 tokens) → the bottleneck is the\n**scalar mul_mat** (QKV proj + FFN), not attention. Mali-G715 exposes no\n`VK_KHR_cooperative_matrix`, so the matmul runs the scalar path. Investigate a\nMali-tuned `mul_mm` (warp-tile, f16-accumulate) and/or evaluate the GGML **OpenCL/Adreno\nbackend** lineage for Mali. This is the ceiling on on-device prefill latency.\n\n### 6. 🟡 User-downloaded (non-Eliza-1) models — apply every applicable optimization\n\nEliza-1 tiers ship pre-quantized (TurboQuant Q4 + QJL + Polar). Arbitrary\nHuggingFace GGUFs the user installs should still get **every applicable** optimization:\nquantize-if-unquantized (don't run F16/F32 weights when a quant works on the device),\nKV-cache quantization, flash attention (where the backend's FA is correct), and MTP when\nthe model has a NextN/draft head. \"Any model that can be quantized and isn't, should be.\"\n\n---\n\n## Optimization × tier × backend audit matrix (to fill in and keep green)\n\nPer tier (`0_8b`, `2b`, `4b`, `9b`, `27b`, `27b-256k`) and backend\n(CPU, Vulkan/Mali, Vulkan/desktop, Metal, CUDA), confirm each is **applied at runtime**\n(not just present in the bundle):\n\n- [ ] **TurboQuant** weights (turbo3/turbo4) — kernels actually dispatched at runtime\n- [ ] **TCQ** (turbo3_tcq) on desktop/pro/server + long-ctx tiers\n- [ ] **QJL** K-cache (and the fused QJL attention path, not the dequant hop)\n- [ ] **PolarQuant / TBQ3** V-cache (and its fused path)\n- [ ] **MTP** speculative decoding (2B+; wired through every host path incl. bionic)\n- [ ] **Fused attention kernel** routed (no QJL→F16 dequant hop)\n- [ ] **Flash attention** correct + enabled where the backend's FA is verified\n- [ ] **KV-cache quantization** active on device (not silent F16 fallback)\n- [ ] Weight-quant for user-installed models (no F16/F32 when a quant fits)\n\nA cell is only ✅ when verified by the host harness and/or an on-device run with numbers.\n\n---\n\n## Proposed sequence\n\n1. **Resolve the fused-op blockers** (#1): determine the shipped GGUF's Π (per-layer vs\n   default), add causal masking to the fused op, and add a QJL-K+Polar-V op *or*\n   standardize V on TBQ3_0. Validate bit-exact vs the host golden reference.\n2. **Route the graph to the fused op** (#1) gated on `supports_op` + `cparams.flash_attn`\n   so CPU/Vulkan/Metal/CUDA each pick fused-vs-generic correctly.\n3. **Enable quantized KV on the bionic host** (#2) once #1 lands.\n4. **Wire MTP through the bionic host** (#3).\n5. **Fix or retire the generic Mali FA scalar race** (#4) — needed for non-fused KV\n   types / non-Eliza-1 models; keep the `split_k=1` ARM gate + FA-disabled fallback until\n   then.\n6. **Mali matmul / prefill optimization** (#5).\n7. **Generalize to user models** (#6): an \"optimize on install\" pass.\n\n## Verification (no phone required for most of it)\n\n- Host-side golden reference + dispatcher already exist for the fused/QJL/Polar/TBQ\n  kernels: `plugins/plugin-local-inference/native/reference/` (`qjl_polar_ref.c`,\n  `turbo_kernels.c`), fixtures via `gen_fixture.c`, and\n  `native/verify/{vulkan_verify.cpp,metal_verify.mm,cuda_verify.cu}`. `vulkan_verify`\n  runs on **lavapipe** (software Vulkan) on the Linux host.\n- Add a host-side `flash_attn` split-K-vs-single-chunk correctness test (currently\n  missing) to reproduce/guard the Mali race class.\n- Record per-tier on-device numbers: prefill tok/s, decode tok/s, peak RSS, first-token\n  latency, MTP acceptance rate — gate regressions in `eliza-1.manifest.json` `evals`.\n\n## Notes / non-goals\n\n- Upstream `ggml-org/llama.cpp` (fork base b10012, 2026-05-16) has **no Mali FA fix to\n  backport** — the Mali correctness PRs (#23241/#22682/#23359) are still open; the\n  post-base FA PRs (#24123/#23420) are AMD/coopmat-only. Our `split_k=1`-on-`VK_VENDOR_ID_ARM`\n  gate is ahead of upstream — keep it; do not backport for FA correctness.\n- The branding rule holds: user-facing strings say \"Eliza-1\", never the upstream/kernel\n  names.\n\n_Filed from an on-device optimization audit (Pixel 9a / Mali-G715). Kernel-level items\nreference the `elizaOS/llama.cpp` submodule; runtime/wiring items are in this repo\n(`plugins/plugin-local-inference`, `packages/app-core/platforms/android/.../elizavoice-jni`)._\n",
+      "createdAt": "2026-06-21T19:49:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGKGEvw",
+      "title": "E2E coverage sweep: real recorded-mock e2e + CI ship-gate for every slash command, shortcut, view, plugin, and route",
+      "author": "lalalune",
+      "number": 8802,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nelizaOS already has strong, genuinely non-larp e2e machinery — the scenario-runner boots a real `AgentRuntime` over PGLite and exercises real plugin route handlers via its `api` turn kind, a deterministic LLM proxy with strict fixtures gives secret-free runs, a Mockoon-derived external-API mock fleet stands in for real provider calls, and a `external-api-live-drift.yml` nightly re-verifies those mocks against the real APIs. There are even static \"ships-without-a-test → CI fails\" gates for UI routes/pages and views (`route-coverage.test.ts`, `view-interaction-coverage.test.ts`, `plugin-tui-view-coverage.test.ts`). **What is missing is an umbrella coverage matrix and the equivalent ship-gate for the three surfaces that fall through the cracks: slash commands, pre-LLM shortcuts (#8791, new), and plugin-registered HTTP routes.** This issue is the audit/umbrella that inventories every command, shortcut, view, plugin and route, asserts each has a real recorded-mock e2e, and adds a CI gate that fails when a new one ships uncovered.\n\n## Current state\n\n### What is real and good (credit where due)\n\n- **Scenario-runner is a real e2e harness, not larp.** `packages/scenario-runner/src/executor.ts` boots a real runtime and, for `kind: \"api\"` turns, stands up a loopback `http.createServer` that dispatches against `runtime.routes` (the actual plugin-registered handlers) and `fetch`es them (`startScenarioApiServer`, ~line 556; api-turn handler ~line 1261). `packages/scenario-runner/test/scenarios/deterministic-generated-app-routes.scenario.ts` is the gold standard: it registers a real `AppRegistryService`, calls real `handleAppsRoutes`/`handleAppPackageRoutes`/`handleViewsRoutes`, and asserts exact registry/catalog/route-ledger state — zero trivial assertions.\n- **Secret-free determinism exists.** `packages/test/mocks/helpers/llm-proxy-plugin.ts` (`createDeterministicLlmProxyPlugin`, strict mode via `SCENARIO_LLM_PROXY_STRICT=1`) fails closed when no fixture matches, validates tool-call/schema output, and reports diagnostics. Wired through `runtime-factory.ts` (`shouldUseStrictDeterministicLlmProxy`).\n- **Recorded provider mocks derived from real APIs, kept honest.** `packages/test/mocks/environments/*.json` (Mockoon) + the in-process stateful runner (`packages/test/mocks/scripts/start-mocks.ts`) cover ~24 providers; `packages/test/mocks/README.md` documents covered surfaces and remaining gaps; `provider-coverage-contract.test.ts` fails when the table drifts; `.github/workflows/external-api-live-drift.yml` re-runs `*.real.test.ts` against live APIs nightly to detect mock drift. This is exactly the \"mock APIs derived from real calls, cached, validated in CI\" the product owner asked for — for **external** APIs.\n- **PR-lane deterministic e2e runs.** `.github/workflows/ci.yaml` runs `bun run --cwd packages/scenario-runner test:pr:e2e` (17 deterministic scenarios incl. `deterministic-generated-app-routes`, `deterministic-view-switching`, `deterministic-mcp-actions-routes`, `deterministic-workflow-actions-routes`, `deterministic-github-actions-routes`) plus a scenario-catalog completeness check (`packages/scripts/check-scenario-workflow-coverage.mjs`) that fails if any scenario in `packages/test/scenarios` is orphaned from the workflow globs. 701 scenario files exist.\n- **Static ship-gates already exist for UI routes + views.** `packages/app/test/route-coverage.test.ts` diffs the canonical route catalog (`buildRouteCatalog`, mirroring `@elizaos/ui` `TAB_PATHS`) against the all-pages click-safe smoke matrix and fails when a new view/page/tile ships without smoke coverage. `packages/app/test/view-interaction-coverage.test.ts` and `packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts` do the same for view interactions / TUI parity. Rich Playwright `ui-smoke` suite (~60 specs incl. `plugin-views-visual.spec.ts`, `orchestrator-gui-workbench.spec.ts`, `view-manager-actual-flow.spec.ts`).\n\n### The gaps (the actual work)\n\n1. **Slash commands: catalog is served, execution is never e2e-tested.** `plugins/plugin-commands` is a *registry only* — it ships `DEFAULT_COMMANDS` (~26 text commands) + a `COMMAND_REGISTRY` provider but **no action handlers** (confirmed in its CLAUDE.md and `src/index.ts`). The connector catalog (`src/connector-catalog.ts`) adds ~15 navigation/client commands. The wire surface is `GET /api/commands` (`packages/agent/src/api/commands-routes.ts`), consumed by `packages/ui/src/chat/useSlashCommandController.ts`. Tests today:\n   - `packages/agent/src/api/commands-routes.test.ts` — calls the handler with **mocked** `json`/`error` fns (no real server, no execution).\n   - `plugins/plugin-commands/__tests__/parser.test.ts` + `connector-catalog.test.ts` — unit-level; assert a handful of keys (`bash`, `think`), not per-command.\n   - **No scenario, no Playwright spec types `/help` / `/settings` / `/model` into chat and asserts the command executes / navigates.** `grep` for any scenario referencing `api/commands` or slash execution returns empty. So most of the ~40 catalog commands have **zero** behavioral coverage of the click-to-effect path. (Pairs with #8790.)\n2. **Shortcuts (pre-LLM action shortcuts): proposed, not built.** #8791 introduces a pre-LLM shortcut registry. It does not exist yet, so it has no coverage and no gate. This umbrella must include shortcuts in the matrix + gate the moment #8791 lands.\n3. **Plugin HTTP routes: large route-level e2e gap.** ~38 plugins declare `Plugin.routes` (served in prod via `packages/agent/src/api/runtime-plugin-routes.ts` `tryHandleRuntimePluginRoute`; tested generically in `runtime-plugin-routes.test.ts`). Of the plugins that declare routes in their main index, these have **no dedicated route test and no `api`-turn scenario**: `plugin-anthropic-proxy`, `plugin-cli`, `plugin-computeruse`, `plugin-discord-local`, `plugin-facewear`, `plugin-farcaster`, `plugin-github`, `plugin-imessage`, `plugin-music`, `plugin-mysticism`, `plugin-telegram`, `plugin-video`, `plugin-workflow`, `plugin-xr`. (Covered: `plugin-bluebubbles`, `plugin-discord`, `plugin-signal`, `plugin-social-alpha`, `plugin-whatsapp` have `*-routes.test.ts`.) 10 plugins have **no test file at all** (`plugin-action-bench`, `plugin-discord-local`, `plugin-elizamaker`, `plugin-google-meet-cute`, `plugin-local-embedding`, `plugin-mlx`, `plugin-native-shared-types`, `plugin-omnivoice`, `plugin-tee`, `plugin-xmtp`).\n4. **No coverage matrix and no ship-gate for commands/shortcuts/routes.** The existing gates cover UI routes/pages/views. There is **no** `check-command-coverage` / `check-shortcut-coverage` / `check-plugin-route-coverage` gate. The advisory `coverage-gate.yml` only measures line coverage on changed files (`COVERAGE_GATE_ENFORCE=0`) — it does not enforce that a new command/route/view has a behavioral e2e.\n\n## Proposed work\n\nOrdered; depends on the sibling \"e2e mock infra\" issue for any new recorded fixtures.\n\n1. **Build the canonical coverage inventory (source of truth).** A boot-free script (mirror `packages/scripts/check-scenario-workflow-coverage.mjs` style) that enumerates, from real source:\n   - slash commands — `DEFAULT_COMMANDS` (`plugins/plugin-commands/src/registry.ts`) ∪ `navigationCommands()`/client commands (`src/connector-catalog.ts`), i.e. the exact set `GET /api/commands` serves;\n   - shortcuts — the #8791 registry (once it exists);\n   - views — `Plugin.views` declarations resolved by `packages/agent/src/api/views-registry.ts` + `BUILTIN_VIEWS` (reuse the existing view catalog, do not duplicate #8796/#8797/#8798);\n   - plugins + routes — every `Plugin.routes` entry across `plugins/*` (path + method).\n   Emit `reports/coverage/e2e-matrix.json` + an HTML contact sheet (same shape as the scenario catalog inventory viewer).\n2. **Close the command e2e gap (consumes #8790).** Add a `deterministic-slash-commands.scenario.ts` that hits `GET /api/commands` via an `api` turn and, for each `target.kind`, asserts the real effect: `agent` commands route through the message pipeline, `navigate` commands resolve to a real route, `client` commands fire the right effect. Add a Playwright `ui-smoke` spec that types representative slash commands into the composer and asserts navigation/clear/palette via `useSlashCommandController`. Every catalog command must be referenced by at least one of these.\n3. **Close the plugin-route e2e gap.** For each route-declaring plugin currently uncovered (§3 list), add an `api`-turn scenario or a `*-routes.test.ts` that boots the handler through `tryHandleRuntimePluginRoute` (real dispatch, real auth gate, real body parsing) with recorded provider mocks where the route calls out. Prioritize plugins with public routes and user-facing surfaces.\n4. **Wire shortcuts** into the matrix + a deterministic scenario as soon as #8791 lands.\n5. **Add the CI ship-gate.** A `check-e2e-coverage` script + `e2e-coverage-gate.yml` (or a step in `ci.yaml`) that diffs the inventory (§1) against the discovered test/scenario matrix and **fails** when a command, shortcut, view, plugin, or route exists with no real e2e — following the exact precedent of `route-coverage.test.ts` (\"a new view/page/tile that ships without smoke coverage fails CI here\"). Start advisory for one cycle (like `coverage-gate.yml`), then flip to required once the baseline is green.\n6. **Larp-detection pass.** Add a lint rule / review-checklist item so a \"test\" that asserts only shape (`length > 0`, `kind === 'navigate'`) without exercising the real handler does not count as coverage in the gate — the gate should require a real `api`/`action`/Playwright turn, not a mocked-`json`-fn unit test.\n\n## Acceptance criteria\n\n- [ ] A committed coverage inventory (`reports/coverage/e2e-matrix.json` + viewer) enumerating every slash command, shortcut, view, plugin, and route from real source.\n- [ ] Every command in the `GET /api/commands` catalog has a real e2e (scenario `api`/`action` turn or Playwright spec) that exercises its actual effect — not a mocked handler unit test.\n- [ ] Every shortcut in the #8791 registry has a deterministic e2e (gated on #8791 landing; tracked as a checklist item until then).\n- [ ] Every route-declaring plugin in the §3 uncovered list has a route-level e2e booting the real handler via `tryHandleRuntimePluginRoute`/`api`-turn, with recorded provider mocks for any external calls.\n- [ ] All 10 zero-test plugins either gain a real test or are documented as intentionally test-exempt with written justification.\n- [ ] Views remain covered by the existing gates (no regression); this issue references #8796/#8797/#8798 rather than re-implementing view e2e.\n- [ ] A `check-e2e-coverage` CI gate fails when a new command/shortcut/view/plugin/route ships without a real e2e; advisory for one cycle, then required.\n- [ ] New behavioral tests run deterministically in the PR lane (no secrets) via `SCENARIO_USE_LLM_PROXY=1` + the Mockoon mock fleet; any new external fixtures are covered by `external-api-live-drift.yml`.\n- [ ] `bun run --cwd packages/scenario-runner test:pr:e2e` and the new gate are green on `develop`.\n\n## Files & areas likely involved\n\n- `plugins/plugin-commands/src/registry.ts`, `src/connector-catalog.ts`, `src/parser.ts` — command source of truth.\n- `packages/agent/src/api/commands-routes.ts` + `commands-routes.test.ts` — `GET /api/commands` (currently mocked-only).\n- `packages/ui/src/chat/useSlashCommandController.ts`, `slash-menu.ts`, `components/shell/SlashCommandMenu.tsx` — command execution consumers.\n- `packages/agent/src/api/runtime-plugin-routes.ts` (`tryHandleRuntimePluginRoute`) + `runtime-plugin-routes.test.ts` — real plugin-route dispatch.\n- `packages/agent/src/api/views-registry.ts`, `views-routes.ts`, `builtin-views.ts` — view surface (reference, don't dup).\n- `packages/scenario-runner/src/executor.ts` (`startScenarioApiServer`, `api`-turn handler), `runtime-factory.ts`, `test/scenarios/deterministic-generated-app-routes.scenario.ts` (template).\n- `packages/test/mocks/` — `helpers/llm-proxy-plugin.ts`, `environments/*.json`, `scripts/start-mocks.ts`, `helpers/provider-coverage.ts`, `README.md`.\n- Existing gate precedents to extend: `packages/app/test/route-coverage.test.ts`, `view-interaction-coverage.test.ts`, `ui-smoke-coverage.test.ts`, `packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts`, `packages/scripts/check-scenario-workflow-coverage.mjs`.\n- CI: `.github/workflows/ci.yaml`, `scenario-pr.yml`, `test.yml`, `coverage-gate.yml`, `external-api-live-drift.yml`, `live-scenarios.yml`; new `check-e2e-coverage` script under `packages/scripts/`.\n- Uncovered route plugins (new tests): `plugin-anthropic-proxy`, `plugin-cli`, `plugin-computeruse`, `plugin-discord-local`, `plugin-facewear`, `plugin-farcaster`, `plugin-github`, `plugin-imessage`, `plugin-music`, `plugin-mysticism`, `plugin-telegram`, `plugin-video`, `plugin-workflow`, `plugin-xr`.\n\n## Open questions\n\n- **Gate scope per surface:** should the gate require coverage of *every* route on a plugin, or one representative happy-path + auth-gate per plugin? (Per-route is exhaustive but high-churn; per-plugin-surface is the cheaper floor.)\n- **What counts as \"covered\" for a command?** One scenario per `target.kind` (agent/navigate/client) vs one per command. Recommend per-command for `agent`-target commands (behavioral) and per-kind for navigate/client (effect is structural).\n- **Larp threshold:** do we hard-fail the gate on mocked-`json`-fn unit tests (like the current `commands-routes.test.ts`), or just not count them? Recommend \"don't count, don't fail\" so existing unit tests stay.\n- **Connector command parity:** should Discord/Telegram native-command registration (`plugins/plugin-discord/catalog-commands.ts`, `plugins/plugin-telegram/src/command-registration.ts`) be in-scope for this gate, or owned by #8790? (Currently they have catalog unit tests but no live-render e2e.)\n- **Provider-key-gated routes:** for plugins whose routes only work with real credentials and have no mock yet (e.g. some `plugin-farcaster`/`plugin-video` paths), do we require a new Mockoon fixture (blocks on the mock-infra issue) or accept a `external-api-live-drift`-style nightly-only real test?\n- **#8791 sequencing:** shortcuts can't be gated until the registry exists — confirm this umbrella stays open across #8791, or splits the shortcut requirement into a follow-up.\n",
+      "createdAt": "2026-06-20T20:04:28Z",
+      "closedAt": "2026-06-21T19:34:08Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABGLk-VA",
+      "title": "LifeOps split: complete live owner/agent connector and view validation",
+      "author": "lalalune",
+      "number": 8833,
+      "repository": "elizaos/eliza",
+      "body": "## Background\n\nLifeOps was split from the old mega-plugin surface into `plugin-personal-assistant` plus domain plugins for calendar, scheduling/reminders, goals, inbox, health, blocker/focus, finances, documents, phone/messages, relationships, etc.\n\nA deep local audit found the current static/code-level split is in good shape: stale registered LifeOps action surfaces were removed, personal-assistant owner actions have role gates plus handler-level owner checks, the split plugins build/test in isolation, and the shared scheduled-task architecture is still routed through the personal-assistant runner rather than a second LifeOps scheduler.\n\nThe remaining work is not more local grep/testing. It is live, account-backed validation across OWNER and AGENT sides, native devices, and OAuth/provider state.\n\n## Already validated locally\n\n- `plugin-personal-assistant` focused tests/build passed.\n- Split plugin focused tests/typechecks passed for relationships, documents, phone, health, goals, calendar, blocker, scheduling, reminders, finances, inbox, and todos.\n- Root `bun run verify` passed before the final upstream submodule-only merge.\n- Final upstream sync merged latest `origin/develop`; `origin/develop` is an ancestor of the working branch.\n- Final submodule-specific validation passed for `plugins/plugin-local-inference` after the upstream `llama.cpp` gitlink change.\n- No stale `plugin-lifeops` migration markers were found by static scan.\n- Core planned-tool execution and message action filtering both enforce `roleGate`.\n- Personal-assistant owner actions now also guard at handler execution time.\n\n## Remaining work\n\n### 1. Provision live test identities\n\nCreate and document the actual test identities/devices needed to validate the split end to end:\n\n- OWNER Google account with Calendar and Gmail enabled.\n- AGENT Google account or grant state where the agent has non-owner identity.\n- OWNER and AGENT identities for Telegram, Discord, Signal, WhatsApp, iMessage, X, and Slack if Slack is part of the deployed LifeOps surface.\n- Twilio test number and recipient allowlist for phone/voice flows.\n- Native devices or simulators for iOS/macOS/Android flows that cannot be proven in unit tests.\n- Health-provider accounts/devices for Apple Health/HealthKit, Google Fit or Health Connect, Fitbit, Oura, Strava, and Withings as applicable.\n- Finance/subscription data sources: Gmail billing corpus, CSV fixture, Plaid or equivalent sandbox, PayPal sandbox if supported.\n- Browser/password-manager/remote-desktop/travel-provider accounts where those connectors are expected to participate in personal assistant workflows.\n\n### 2. Validate OWNER vs AGENT permission matrix\n\nFor every connector/action surface, test these states and record evidence:\n\n- Unauthenticated connector.\n- OWNER authenticated and authorized.\n- AGENT authenticated but not owner-authorized.\n- Expired/revoked grant.\n- Missing required scope.\n- Multiple grants where owner-side selection must win.\n- Planned tool execution path.\n- Direct handler invocation path.\n- UI-triggered path from the relevant view.\n\nExpected behavior:\n\n- Owner-only actions deny non-owner execution with a clear permission error.\n- Handler-level guards match `roleGate` behavior.\n- Connector calls return typed `DispatchResult` data, not booleans or swallowed failures.\n- Approval-required outbound actions route through the approval policy rather than sending silently.\n- Owner-side grants are selected for owner-only operations.\n\n### 3. Validate live connectors\n\nRun live send/read/sync smoke tests for:\n\n- Google Calendar: list, create/update/delete or draft event, availability, scheduling conflict handling, owner-vs-agent grant behavior.\n- Gmail/inbox: read/search, label/archive where supported, outbound email approval flow, billing/subscription extraction if used by finances.\n- Telegram, Discord, Signal, WhatsApp, iMessage, X, Slack: status/read/send or draft/send paths, unavailable states, revoked auth, and owner-vs-agent behavior.\n- Phone/voice/SMS: Twilio env, outbound call/SMS authorization, inbound routing if supported, Android SMS default-role/native bridge behavior where applicable.\n- Health: Apple Health/HealthKit permissions, Google Fit/Health Connect permissions, Fitbit/Oura/Strava/Withings sync and unavailable/error paths.\n- Blocker/focus: macOS hosts/SelfControl/admin permission flows, iOS Family Controls, Android Usage Access.\n- Finances: subscription detection, payment/provider import, CSV/sandbox paths, approval boundaries for sensitive operations.\n- Documents/browser/password-manager/remote desktop/travel providers if included in the deployed assistant workflows.\n\n### 4. Validate views and integration flows\n\nVerify each split view renders, navigates, refreshes, and performs its expected actions with both mock and live data:\n\n- Calendar.\n- Scheduling/reminders.\n- Goals.\n- Inbox.\n- Health.\n- Blocker/focus.\n- Finances/subscriptions.\n- Documents.\n- Relationships.\n- Phone/messages.\n- Any remaining compatibility `#lifeops` deep links or aliases in `packages/app`.\n\nFor each view, capture:\n\n- Empty state.\n- Loading state.\n- Error/unavailable connector state.\n- Populated state.\n- Refresh/retry behavior.\n- Mobile and desktop layout.\n- Navigation from app launcher/sidebar/deep link.\n- Agent-created data showing up in the view.\n- View action resulting in the correct agent/tool/connector behavior.\n\n### 5. Add durable live QA artifacts\n\nAfter accounts/devices are available, add or update:\n\n- A documented LifeOps live-validation matrix with account/device prerequisites.\n- Repeatable smoke-test instructions for local and CI-adjacent validation.\n- Redacted screenshots or logs proving each connector/view state was exercised.\n- Any missing scenario-runner or e2e coverage that can be safely automated without real secrets.\n- Clear skip behavior for live tests when credentials/devices are absent.\n\n## Acceptance criteria\n\n- All listed connector families have OWNER and AGENT side evidence.\n- Every owner-only action has matching denial behavior through planned tools, direct handlers, and UI-triggered flows.\n- Every split view has been checked on desktop and mobile with empty, loading, error, and populated states.\n- OAuth/native permission failures are explicit and recoverable in the UI and agent responses.\n- Live connector failures return typed results and do not silently succeed.\n- Approval-gated outbound flows are validated end to end.\n- The validation matrix documents exactly which accounts, devices, scopes, env vars, and provider sandboxes were used.\n- Any discovered bug gets a linked issue or PR before this issue is closed.\n\n## Notes\n\nThe local audit did not identify remaining stale LifeOps cruft in registered plugin surfaces. The known gap is confidence that real-world OAuth, native permissions, side selection, provider-specific failure modes, and UI integration all behave correctly with live accounts and devices.\n",
+      "createdAt": "2026-06-21T07:49:44Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7o7_Od",
+      "title": "Shaw/composestate provider hook",
+      "author": "lalalune",
+      "number": 8852,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n<!-- If there is a UI change, please include before and after screenshots or videos. This will speed up PRs being merged. It is extra nice to annotate screenshots with arrows or boxes pointing out the differences. -->\r\n<!--\r\n## Screenshots\r\n### Before\r\n### After\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-21T22:07:05Z",
+      "mergedAt": "2026-06-21T23:36:08Z",
+      "additions": 55152,
+      "deletions": 20166
+    },
+    {
+      "id": "PR_kwDOMT5cIs7ow5B6",
+      "title": "test(e2e): umbrella e2e coverage gate for slash commands, plugin routes, views (#8802)",
+      "author": "lalalune",
+      "number": 8816,
+      "body": "Closes part of #8802 — the umbrella e2e coverage matrix + CI ship-gate, plus the slash-command and plugin-route e2e gaps it inventories.\n\n## What this adds\n\n### 1. Canonical coverage inventory + ship-gate (`packages/scripts/e2e-coverage/`)\n- **`inventory.ts`** enumerates, from real source, every user-triggerable surface: the served slash-command catalog (`getConnectorCommands`), every route-wiring plugin (`discoverRoutePlugins`), zero-test plugins, and the (not-yet-existing) #8791 shortcut registry — cross-checked against a committed manifest.\n- **`manifest.ts`** is the curated source of truth (covered/exempt per surface), the same pattern as `route-coverage.test.ts`'s `DIRECT_ROUTE_CASES`.\n- **`__tests__/e2e-coverage.test.ts`** is the enforced `bun test` ship-gate; **`check-e2e-coverage.ts`** emits `reports/coverage/e2e-matrix.json` + an HTML contact sheet.\n- **Larp-detection (§6):** a `covered` entry only counts when its artifact exists *and* names the real dispatcher (`tryHandleRuntimePluginRoute` / `buildHonoAppForRuntime`). The mocked-`json`-fn `commands-routes.test.ts` is rejected via `LARP_TEST_ARTIFACTS`.\n\n### 2. Slash commands — close the gap\n- `commands-routes.real-server.test.ts` — real loopback `http` server over the real `handleCommandsRoutes`, asserting the served catalog **==** `getConnectorCommands(\"gui\")`.\n- `deterministic-slash-commands.scenario.ts` — `api`-turn over the real route on the scenario runtime; wired into the PR-lane `--scenario` list + the `scenario-pr-workflow` / `deterministic-action-coverage` meta-gates.\n- `slash-commands.spec.ts` — Playwright browser coverage of navigate/client/agent dispatch through `useSlashCommandController`; wired into `scenario-pr.yml`.\n\n### 3. Plugin routes — close the §3 gap\nReal route-level e2e booting the production dispatcher for **11** plugins: `computeruse`, `discord-local`, `elizamaker`, `facewear`, `github`, `imessage`, `music`, `mysticism`, `telegram`, `workflow`, `xr`. (`discord-local` + `elizamaker` were also zero-test — they now have their first tests.)\n\n### 4. CI\n- E2E ship-gate + matrix report wired into `scenario-pr.yml`'s `scenario-runner-e2e` job.\n- Advisory standalone `e2e-coverage-gate.yml` mirrors `coverage-gate.yml`'s advisory→required env switch.\n\n## Acceptance criteria\n- [x] Committed coverage inventory (`reports/coverage/e2e-matrix.json` + viewer) enumerating every command, shortcut, view, plugin, route from real source.\n- [x] Every command in the `GET /api/commands` catalog has a real e2e (real-server route test + scenario + Playwright + overlay component test), not a mocked-handler unit test.\n- [x] Every route-declaring plugin in the §3 list has a route-level e2e booting the real handler via `tryHandleRuntimePluginRoute`/Hono dispatch.\n- [x] All zero-test plugins either gain a real test or are documented test-exempt with written justification (`ZERO_TEST_EXEMPT`).\n- [x] Views remain covered by the existing gates (referenced, not re-implemented per #8796/#8797/#8798).\n- [x] A `check-e2e-coverage` gate fails when a new command/plugin/route ships without a real e2e; advisory standalone workflow + required `bun test` gate (baseline green).\n- [x] New behavioral tests run deterministically in the PR lane (no secrets).\n- [ ] Shortcuts (#8791) — gated on that registry landing; the inventory lights the surface up automatically when it does (tracked as advisory until then).\n\n## Verification (local)\n- `bun test packages/scripts/__tests__/e2e-coverage.test.ts` → 7 pass (0 blocking gaps).\n- `commands-routes.real-server.test.ts` → 4 pass · `deterministic-slash-commands` scenario → pass · `slash-commands.spec.ts` → 4 pass.\n- 11 plugin route tests → all pass.\n- `scenario-pr-workflow.test.ts` + `deterministic-action-coverage.test.ts` meta-gates → 27 pass.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T21:44:42Z",
+      "mergedAt": "2026-06-21T00:09:54Z",
+      "additions": 6848,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDOMT5cIs7oxnvL",
+      "title": "feat(cli-inference): claude --print / codex exec chat model-provider (subscription via the sanctioned CLI)",
+      "author": "NubsCarson",
+      "number": 8820,
+      "body": "## What\n\nA model-provider plugin (`@elizaos/plugin-cli-inference`) that serves chat/planner inference by spawning the **local Claude Code / Codex CLI** (`claude --print` / `codex exec`) as eliza model handlers, instead of calling the vendor HTTP API.\n\n## Why\n\nThis lets an agent run its chat on the operator's **Claude Max / ChatGPT subscription via the sanctioned CLI** — the licensed vehicle for those subscriptions — rather than replaying a consumer-subscription token against the API. Useful for self-hosted operators and for per-user dedicated cloud containers where each user brings their own CLI auth.\n\n## Design\n\n- **Inert unless `ELIZA_CHAT_VIA_CLI=claude|codex`** — self-gated; loads via `PROVIDER_PLUGIN_MAP` + its own `autoEnableModule`. Zero effect on existing paths when unset.\n- Registers `TEXT_LARGE` / `TEXT_MEGA` / `RESPONSE_HANDLER` at **priority 100** so it deterministically wins those tiers when enabled. **Does not** register `ACTION_PLANNER` — the CLI can't honor GBNF / native-tool / `responseSchema` constrained decoding, so the planner stays on the configured grammar/tool-honoring provider. `RESPONSE_HANDLER` (the user-facing reply) is the intended sub-served tier.\n- Threads eliza's **full composed prompt** (`system` + `messages`) to the CLI, so the model produces eliza's exact structured output.\n- **Sandboxed**: runs in an isolated empty cwd, env-filtered (`filterEnv`), binary-allowlisted; never injects the subscription token into the child env or logs (the CLI reads `~/.claude` / `~/.codex` itself). stderr is value-redacted.\n- Per-call timeout with SIGKILL escalation + process-group kill; throws on timeout/non-zero-exit/empty-output so the runtime falls back to the configured provider.\n\n## Testing\n\nUnit tests (26) mock the spawn and assert argv, context threading, the timeout/error paths, and binary resolution. Verified end-to-end against the real `claude --print` and `codex exec` binaries.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T23:29:53Z",
+      "mergedAt": null,
+      "additions": 2054,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7oxQFk",
+      "title": "fix(vault): avoid macOS keychain prompts",
+      "author": "odilitime",
+      "number": 8818,
+      "body": "## Summary\n\n- Route macOS vault master-key reads/writes through the stable `/usr/bin/security` CLI before touching `@napi-rs/keyring`.\n- Keep generated vault master-key writes off argv by passing the password over stdin.\n- Document why the macOS path differs: Keychain ACLs are tied to the requesting binary, and dev Bun paths/signatures can trigger a GUI prompt every startup.\n\n## Why\n\nOn local macOS startup, `securityd` showed a Keychain prompt for `/Users/user1/.bun/bin/bun` while accessing `eliza/vault.masterKey`. The existing item ACL trusted an older signed app path and `/usr/bin/security`, but not the current Bun binary. If the user denies that prompt, startup can ask again on the next run and wallet hydration fails.\n\nUsing `/usr/bin/security` matches the stable path already used elsewhere in app-core and avoids making the changing Bun binary the Keychain ACL subject.\n\n## Validation\n\n- `bunx @biomejs/biome check --write packages/vault/src/master-key.ts`\n- `bun run --cwd packages/vault test` — 186 passing\n- `bun run --cwd packages/vault typecheck`\n- `bun run --cwd packages/vault build`\n- `LOG_LEVEL=debug bun run start` reached `agent-wallets ... wallets ready`\n- Live `/usr/bin/log stream` for `securityd` keychain prompt / ACL reject events stayed empty during startup\n- `git diff --check`\n\nNote: package test/typecheck/build and the live startup proof were run in the main checkout with dependencies installed; the fresh PR worktree was used to keep the branch scope isolated to this one-file change.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-20T22:32:55Z",
+      "mergedAt": null,
+      "additions": 1181,
+      "deletions": 121
+    },
+    {
+      "id": "PR_kwDOMT5cIs7o3EZ5",
+      "title": "perf(agent): cold-boot plugin import fast-path + boot-KPI CI budget",
+      "author": "standujar",
+      "number": 8836,
+      "body": "## What\n\nTwo boot-time items from #8812, both safe-by-default:\n\n1. **`perf(agent)` — opt-in cold-boot plugin import-in-place fast-path.** On a cold boot a plugin was never imported in the process, so there is no ESM module record to bust — yet `importPluginModuleFromPath` always `fs.cp`-copies the package to a fresh staged dir first. Staging only exists to force a fresh module URL when hot-reloading a *mutated* plugin (ESM has no cache-eviction API); on first import it is pure I/O waste + unbounded `<state>/plugins/.runtime-imports/` growth. The fast-path imports in place from the real package root, gated on a process-local \"first import\" `Set` (the decisive, race-free signal) + a stable `dist/` + the `ELIZA_PLUGIN_COLD_IMPORT_IN_PLACE` flag. Any re-import still stages, so hot-reload stays correct.\n\n2. **`ci(agent-image)` — warn-first boot-KPI cold-start budget** in `docker-ci-smoke.sh`. Today the only boot gate is the liveness smoke (no readyMs budget), so nothing catches a boot regression. This records the cold readyMs (`docker run` → first `/api/health` ready) and compares it to `boot.coldReadyMs` (25000ms) from `budgets.json`. `build-agent-image.yml` already invokes this script, so the gate runs with no workflow change — this PR's CI produces the first measured boot baseline on the real `Dockerfile.ci` image.\n\n## Safety\n\n- **Fast-path is OFF by default** — with `ELIZA_PLUGIN_COLD_IMPORT_IN_PLACE` unset, behavior is byte-identical (same `stagePluginImportRoot` call/args; only an in-memory `Set` insert is added). A failed cold import escalates to staging on retry. `stagePluginImportRoot` + `pruneStalePluginInstances` untouched.\n- **CI gate is WARN-FIRST** — a budget breach prints a `::warning::` but does NOT fail. Enforcing (`BOOT_KPI_ENFORCE=1` in the workflow env) is a deliberate follow-up once a green baseline is confirmed. The measurement is purely additive, fully guarded (missing jq/budget/timer → \"not measured\"), and the liveness pass/fail path is unchanged.\n\n## Test\n\n- `bun run --cwd packages/agent test src/runtime/plugin-resolver-cold-import.test.ts` — **5 passing**: cold-in-place / re-import-stages / flag-off-unchanged / no-dist-stages / per-name-keying. Biome clean.\n- `docker-ci-smoke.sh`: `shellcheck` clean, `bash -n` clean. The readyMs gate is CI-validated (needs the built image); this PR's CI run produces the first baseline.\n\n## Notes\n\n- The perf win (less deferred-wave I/O + no `.runtime-imports/` growth) is measured in CI via the new gate, not locally. The largest boot lever (shrinking the blocking plugin set / lean-chat default) is a separate product decision tracked in #8812; this is the safe, decision-independent slice.\n- A tiny follow-up will add the explanatory comment + commented `BOOT_KPI_ENFORCE` toggle to `build-agent-image.yml` (needs `workflow` token scope).\n\nPart of #8812.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-21T12:47:35Z",
+      "mergedAt": "2026-06-21T17:16:00Z",
+      "additions": 385,
+      "deletions": 12
+    }
+  ],
+  "codeChanges": {
+    "additions": 10145,
+    "deletions": 3191,
+    "files": 126,
+    "commitCount": 370
+  },
+  "completedItems": [
+    {
+      "title": "feat(ui/chat): one-tap Retry on transient chat failures",
+      "prNumber": 8855,
+      "type": "feature",
+      "body": "## What\nOn a transient failure (`rate_limited` / `provider_issue`) the chat showed the graceful 'busy — wait and resend' message as a plain bubble with **no affordance** — the user had to retype. Now those render the message **+ a one-tap R",
+      "files": [
+        "packages/ui/src/components/chat/MessageContent.stories.tsx",
+        "packages/ui/src/components/chat/MessageContent.tsx"
+      ]
+    },
+    {
+      "title": "revert(agent-image): restore tsx loader to unblock the red boot-verify build",
+      "prNumber": 8853,
+      "type": "other",
+      "body": "**🚨 Launch-blocker unblock.** The develop agent-image build has been red ~10h — every build since #8837 (`99203e80c0`, 'start the agent under plain node, drop the tsx loader') fails at *Verify image boots*. Dropping tsx broke node-ESM reso",
+      "files": [
+        "packages/app-core/deploy/Dockerfile.ci",
+        "packages/app-core/scripts/build-image.sh",
+        "packages/app-core/scripts/docker-ci-smoke.sh"
+      ]
+    },
+    {
+      "title": "Shaw/composestate provider hook",
+      "prNumber": 8852,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!-- This risks section must be filled out before the final review ",
+      "files": [
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/voice-workbench.yml",
+        "packages/agent/src/api/agent-status-routes.ts",
+        "packages/agent/src/api/binance-skill-helpers.ts",
+        "packages/agent/src/api/commands-routes.real-server.test.ts",
+        "packages/agent/src/api/commands-routes.test.ts",
+        "packages/agent/src/api/commands-routes.ts",
+        "packages/agent/src/api/memory-bounds.ts",
+        "packages/agent/src/api/model-provider-helpers.ts",
+        "packages/agent/src/api/plugin-discovery-helpers.ts",
+        "packages/agent/src/api/server-auth.ts",
+        "packages/agent/src/api/static-file-server.ts",
+        "packages/agent/src/api/views-routes.interact-coverage.test.ts",
+        "packages/agent/src/api/wallet.ts",
+        "packages/agent/src/api/workbench-helpers.ts",
+        "packages/agent/src/api/ws-event-replay.ts",
+        "packages/agent/src/index.ts",
+        "packages/agent/src/runtime/first-time-setup.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/src/runtime/plugin-types.ts",
+        "packages/agent/src/runtime/tool-call-cache-wrapper.ts",
+        "packages/agent/src/runtime/view-action-affinity.ts",
+        "packages/agent/src/runtime/view-capability-audit.test.ts",
+        "packages/agent/src/services/commands-shortcut-runtime.test.ts",
+        "packages/agent/src/services/index.ts",
+        "packages/agent/src/services/proactive-interaction-decider.test.ts",
+        "packages/agent/src/services/proactive-interaction-decider.ts",
+        "packages/agent/src/test-utils/sqlite-compat.ts",
+        "packages/agent/src/triggers/scheduling.ts",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/android/app/src/main/elizavoice-jni/elizavoice-jni.cpp",
+        "packages/app-core/scripts/aosp/stage-default-models.mjs",
+        "packages/app-core/scripts/aosp/stage-default-models.test.mjs",
+        "packages/app-core/scripts/docker-ci-smoke.sh",
+        "packages/app-core/scripts/patches/llama-mobile-kokoro-tts.patch",
+        "packages/app-core/scripts/release-workflow-drift.test.ts",
+        "packages/app-core/scripts/run-mobile-build-ios-engine-gate.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/voice-interactive.mjs",
+        "packages/app-core/src/api/server-first-run-helpers.ts",
+        "packages/app-core/src/index.ts",
+        "packages/app-core/src/runtime/dev-server.ts",
+        "packages/app-core/src/runtime/voice-warmup.test.ts",
+        "packages/app-core/src/runtime/voice-warmup.ts",
+        "packages/app-core/src/test-support/test-helpers.ts",
+        "packages/app-core/test/helpers/i18n.ts",
+        "packages/app-core/test/helpers/loopback.ts"
+      ]
+    },
+    {
+      "title": "perf(agent): parallelize document-recovery searches off the chat reply path",
+      "prNumber": 8850,
+      "type": "docs",
+      "body": "## What\nLive forensics on a cloud agent (PhoneProd) found the dominant chat latency isn't the LLM reply (~1s) — it's the **document augmentation that runs synchronously before every reply**. `chat-routes.ts` awaits `maybeAugmentChatMessageW",
+      "files": [
+        "packages/agent/src/api/chat-augmentation.ts"
+      ]
+    },
+    {
+      "title": "revert(core): drop ineffective embedding-batch drain change",
+      "prNumber": 8849,
+      "type": "other",
+      "body": "Follow-up to the session deepscan. The embedding BatchQueue **never pools >1 item** — a turn's memories are queued individually via `queueEmbeddingGeneration` spread across the turn, so the drain catches one at a time regardless of `drainIn",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model-cerebras-fallback.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts",
+        "packages/core/src/services/embedding.test.ts",
+        "packages/core/src/services/embedding.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): render the cloud-handoff banner as a floating pill (on-device legibility)",
+      "prNumber": 8847,
+      "type": "bugfix",
+      "body": "## What\nOn-device review of #8845 on a real phone (Seeker) caught a legibility bug: the `/chat` view is a full-screen overlay with an **orange ambient background**, so the in-flow top banner (a) sat *behind* the overlay — only a clipped sli",
+      "files": [
+        "packages/ui/src/components/shell/CloudHandoffBanner.tsx"
+      ]
+    },
+    {
+      "title": "chore(e2e-coverage): flip the #8802 ship-gate to required (baseline green)",
+      "prNumber": 8846,
+      "type": "other",
+      "body": "Completes the last rollout step of [#8802](https://github.com/elizaOS/eliza/issues/8802) **AC7**: _\"advisory for one cycle, then required once the baseline is green.\"_ The full scenario-pr workflow now passes on develop, so this flips `E2E_",
+      "files": [
+        ".github/workflows/e2e-coverage-gate.yml",
+        ".github/workflows/scenario-pr.yml",
+        "packages/scripts/e2e-coverage/manifest.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): surface the shared→dedicated cloud-agent handoff with a chat banner",
+      "prNumber": 8845,
+      "type": "feature",
+      "body": "## What\n\nMake the seamless shared→dedicated cloud-agent handoff **visible**. Today a brand-new user already gets the best-case flow — they chat **instantly** on the shared adapter while their dedicated container cold-boots (~60-90s), the ba",
+      "files": [
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/shell/CloudHandoffBanner.tsx",
+        "packages/ui/src/hooks/index.ts",
+        "packages/ui/src/hooks/useCloudHandoffPhase.test.tsx",
+        "packages/ui/src/hooks/useCloudHandoffPhase.ts"
+      ]
+    },
+    {
+      "title": "refactor(cli-inference): remove dead sandbox code, dedup redactStderr, drop fake spawnFn injection",
+      "prNumber": 8844,
+      "type": "refactor",
+      "body": "Code-audit cleanup of `plugin-cli-inference` (no behavior change, +20/-125):\n- delete ~93 lines of never-applied sandbox-builder code (`SandboxPlan`/`SandboxOptions`/`buildSandboxedCommand`/`isExecutable`/`locateBundledProfiles`/`hasBinary`",
+      "files": [
+        "plugins/plugin-cli-inference/index.ts",
+        "plugins/plugin-cli-inference/src/claude-cli.ts",
+        "plugins/plugin-cli-inference/src/codex-cli-exec.ts",
+        "plugins/plugin-cli-inference/src/sandbox.ts"
+      ]
+    },
+    {
+      "title": "refactor(ui,agent): dedupe session code — reuse canonical helpers, kill copy-paste",
+      "prNumber": 8843,
+      "type": "refactor",
+      "body": "## What\n\nCleanup of code authored across this session, driven by an adversarially-verified deepscan against the cleanliness rules (**no >1 function with the same purpose · no AI slop · general-not-narrow, no hacky string-matching**). Net **",
+      "files": [
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/ui/src/api/android-native-agent-transport.ts",
+        "packages/ui/src/api/desktop-http-transport.ts",
+        "packages/ui/src/api/native-cloud-http-transport.ts",
+        "packages/ui/src/api/transport.ts",
+        "packages/ui/src/state/useChatSend.ts"
+      ]
+    },
+    {
+      "title": "refactor(core): one canonical isRateLimitError with structural 429 detection",
+      "prNumber": 8842,
+      "type": "refactor",
+      "body": "## What\n\nConsolidate 429/rate-limit detection to the **single canonical detector** in `@elizaos/core` (`packages/core/src/services/message.ts`) and fix a real status-code bug introduced alongside it.\n\n## Why — rule-2 dedup (one function per",
+      "files": [
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/credit-detection.test.ts",
+        "packages/agent/src/api/credit-detection.ts",
+        "packages/core/src/services/__tests__/failure-reply-prompt.test.ts",
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): sub-agents must run code and report the real output, not just write it",
+      "prNumber": 8841,
+      "type": "bugfix",
+      "body": "## Problem\n\nDeepscan of a codex-exec coding-spawn (`compute the factorial of 12 and report only the number`): the sub-agent **wrote** `factorial_12.py` but never **ran** it, returned no number, and the parent had to **re-spawn a second sub-",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-identity.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-shared): fail fast on a cerebras 429 instead of ~50s of retries",
+      "prNumber": 8839,
+      "type": "bugfix",
+      "body": "## Problem (measured on a live prod dedicated agent)\n\nEngaged-pace chat turns spike to **47–52s** returning a 2-token stub. Root cause traced end-to-end: the reply routes `generateDirectReplyModel → useModel →` the Worker gateway, which cal",
+      "files": [
+        "packages/cloud-shared/src/lib/providers/language-model-cerebras-fallback.test.ts",
+        "packages/cloud-shared/src/lib/providers/language-model.ts"
+      ]
+    },
+    {
+      "title": "fix(core): don't force a tool on bare requiresTool with no named action (planner over-gating)",
+      "prNumber": 8838,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe Stage-1 router's `requiresTool=true` over-flags **pure-knowledge** turns (\"how old am I + star sign?\") and **sub-agent-relay** turns (relaying a finished sub-agent's answer). `requireNonTerminalToolCall` then hard-forced a n",
+      "files": [
+        "packages/core/src/__tests__/message-benchmark-integration.contract.test.ts",
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "perf(agent-image): start the agent under plain node, drop the tsx loader",
+      "prNumber": 8837,
+      "type": "other",
+      "body": "## What\n\n`perf(agent-image)` — start the production agent under plain **`node`** instead of `node --import <tsx loader> dist/bin.js start` (#8812, F6).\n\nThe prebuilt CI image's dist is already compiled JS with `.ts` specifiers rewritten to ",
+      "files": [
+        "packages/app-core/deploy/Dockerfile.ci",
+        "packages/app-core/scripts/build-image.sh",
+        "packages/app-core/scripts/docker-ci-smoke.sh"
+      ]
+    },
+    {
+      "title": "perf(agent): cold-boot plugin import fast-path + boot-KPI CI budget",
+      "prNumber": 8836,
+      "type": "other",
+      "body": "## What\n\nTwo boot-time items from #8812, both safe-by-default:\n\n1. **`perf(agent)` — opt-in cold-boot plugin import-in-place fast-path.** On a cold boot a plugin was never imported in the process, so there is no ESM module record to bust — ",
+      "files": [
+        "packages/agent/src/runtime/plugin-resolver-cold-import.test.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/app-core/scripts/docker-ci-smoke.sh"
+      ]
+    },
+    {
+      "title": "fix(test): mock /api/transcripts in ui-smoke default routes",
+      "prNumber": 8835,
+      "type": "bugfix",
+      "body": "[#8830](https://github.com/elizaOS/eliza/pull/8830) added `/apps/transcripts` to `DIRECT_ROUTE_CASES` (to satisfy the route-coverage gate). `apps-utility-interactions.spec.ts` iterates that list and asserts each app window renders with **ze",
+      "files": [
+        "packages/app/test/ui-smoke/helpers.ts"
+      ]
+    },
+    {
+      "title": "fix(test): correct selectors in realigned ui-smoke specs (local-verified)",
+      "prNumber": 8834,
+      "type": "bugfix",
+      "body": "Follow-up to [#8830](https://github.com/elizaOS/eliza/pull/8830). I ran these specs against the **live stack locally** (`bun run --cwd packages/app test:e2e <spec> --project=chromium`) and found three selectors #8830 got wrong. CI never cau",
+      "files": [
+        "packages/app/test/ui-smoke/android-system-apps.spec.ts",
+        "packages/app/test/ui-smoke/automations.spec.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts"
+      ]
+    },
+    {
+      "title": "test(core): guard embedding drain accumulation (#8829)",
+      "prNumber": 8832,
+      "type": "tests",
+      "body": "Follow-up regression guard for #8829.\n\n**Why:** the embedding \"batch-of-1\" silently came back on a clean image because nothing pinned the drain interval the service actually chooses. With the `TEXT_EMBEDDING_BATCH` batch handler registered,",
+      "files": [
+        "packages/core/src/services/embedding.test.ts"
+      ]
+    },
+    {
+      "title": "fix(test): realign orchestrator-gui-workbench spec with shipped view contract",
+      "prNumber": 8831,
+      "type": "bugfix",
+      "body": "Two **deterministic** `orchestrator-gui-workbench` failures (both surfaced as `element(s) not found` after #8827 unblocked `build-views`). Both are stale-mock drift — the view is correct per its typed contract. **Test mock only.**\n\n- **`:70",
+      "files": [
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(test): realign stale ui-smoke specs with shipped product redesigns",
+      "prNumber": 8830,
+      "type": "bugfix",
+      "body": "## Why\n\nAfter [#8827](https://github.com/elizaOS/eliza/pull/8827) unblocked `build-views`, the ui-smoke jobs (`app browser view lifecycle`, `all-pages`, `ratcheted`) actually ran their specs and surfaced a batch of **deterministic** failure",
+      "files": [
+        "packages/app/test/ui-smoke/all-pages-clicksafe.spec.ts",
+        "packages/app/test/ui-smoke/android-system-apps.spec.ts",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/automations.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/ui-smoke.spec.ts",
+        "packages/app/test/ui-smoke/view-switching-chat-e2e.spec.ts",
+        "scripts/ai-qa/route-catalog.ts"
+      ]
+    },
+    {
+      "title": "fix(core): accumulate the embedding drain so it actually batches",
+      "prNumber": 8829,
+      "type": "bugfix",
+      "body": "The batched-embed path landed (#ff388a5eb8) but `drainIntervalMs:100` drained before a turn's memories (which trickle in ~250ms apart) could accumulate — so each drain embedded **1** item (\"batch of 1\"), and the ~40s post-turn spike was NOT",
+      "files": [
+        "packages/core/src/services/embedding.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): reconcile deep-linked app-shell tab when its page registers late",
+      "prNumber": 8828,
+      "type": "bugfix",
+      "body": "## Problem\n\nApp-shell pages (e.g. `@elizaos/plugin-facewear/register` registering `/apps/smartglasses/tui`) are loaded from **idle-scheduled** side-effect modules (`packages/app/src/main.tsx` `scheduleSideEffectAppModuleLoads`). A deep link",
+      "files": [
+        "packages/ui/src/state/useAppProviderEffects.ts",
+        "packages/ui/src/state/useNavigationPathSync.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(phone): import PermissionRecoveryCallout from the @elizaos/ui/components barrel (unblocks build-views)",
+      "prNumber": 8827,
+      "type": "bugfix",
+      "body": "The `build-views` step (prerequisite for the ui-smoke Playwright lane) failed: `plugin-phone`'s `PhoneAppView` imported the deep subpath `@elizaos/ui/components/permissions/PermissionRecoveryCallout`, which `DynamicViewLoader`'s `HOST_EXTER",
+      "files": [
+        "plugins/plugin-phone/src/components/PhoneAppView.tsx"
+      ]
+    },
+    {
+      "title": "test(scenario): classify plugin-local-inference START/STOP_TRANSCRIPTION in the action-surface manifest",
+      "prNumber": 8826,
+      "type": "tests",
+      "body": "Fixes the `Zero-Key unit + UI coverage` job (the `Scenario runner unit coverage` step): `deterministic-action-coverage.test.ts` failed because `plugin-local-inference` now ships `START_TRANSCRIPTION` + `STOP_TRANSCRIPTION` (the on-device tr",
+      "files": [
+        "packages/scenario-runner/src/__tests__/deterministic-action-coverage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): keep the Stage-1 routed action on the planner surface under degenerate retrieval ties",
+      "prNumber": 8825,
+      "type": "bugfix",
+      "body": "Fixes the pre-existing `deterministic-xr-view-actions` failure in the strict PR-lane scenario run (`scenario-runner-e2e`: 17 passed, 1 failed of 18).\n\n**Root cause** (core action-tiering, not the scenario): when retrieval degenerates and ti",
+      "files": [
+        "packages/core/src/runtime/action-tiering.ts"
+      ]
+    },
+    {
+      "title": "feat(agent): friendly rate-limited chat reply for a transient 429",
+      "prNumber": 8824,
+      "type": "feature",
+      "body": "## What\nA bare HTTP 429 (no billing context) — e.g. the shared Cerebras key briefly over its requests/min under concurrent load — currently falls through to the generic **\"Sorry, I'm having a provider issue\"**, which reads as *broken*. This",
+      "files": [
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/credit-detection.test.ts",
+        "packages/agent/src/api/credit-detection.ts",
+        "packages/ui/src/api/client-types-chat.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): stop chat from \"eating\" messages on transient send/load failures",
+      "prNumber": 8823,
+      "type": "bugfix",
+      "body": "Pre-launch readiness audit (24-agent workflow; flaky-mobile-data is the explicit beta target) surfaced three recoverability bugs where a **transient** failure looks like **data loss** to the user. None are server-side data loss (a refresh/r",
+      "files": [
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/src/state/useDataLoaders.ts"
+      ]
+    },
+    {
+      "title": "test(e2e): umbrella e2e coverage gate for slash commands, plugin routes, views (#8802)",
+      "prNumber": 8816,
+      "type": "tests",
+      "body": "Closes part of #8802 — the umbrella e2e coverage matrix + CI ship-gate, plus the slash-command and plugin-route e2e gaps it inventories.\n\n## What this adds\n\n### 1. Canonical coverage inventory + ship-gate (`packages/scripts/e2e-coverage/`)\n",
+      "files": [
+        ".github/workflows/e2e-coverage-gate.yml",
+        ".github/workflows/scenario-pr.yml",
+        "packages/agent/src/api/commands-routes.real-server.test.ts",
+        "packages/app/test/ui-smoke/slash-commands.spec.ts",
+        "packages/scenario-runner/package.json",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-slash-commands.scenario.ts",
+        "packages/scripts/__tests__/e2e-coverage.test.ts",
+        "packages/scripts/check-e2e-coverage.ts",
+        "packages/scripts/e2e-coverage/README.md",
+        "packages/scripts/e2e-coverage/inventory.ts",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "packages/test/vitest/shims/elizaos-core-connector.ts",
+        "plugins/plugin-computeruse/src/__tests__/routes-e2e.test.ts",
+        "plugins/plugin-discord-local/src/__tests__/routes-e2e.test.ts",
+        "plugins/plugin-elizamaker/src/__tests__/routes-e2e.test.ts",
+        "plugins/plugin-facewear/src/__tests__/routes-e2e.test.ts",
+        "plugins/plugin-github/src/routes-e2e.test.ts",
+        "plugins/plugin-imessage/src/routes-e2e.test.ts",
+        "plugins/plugin-music/src/__tests__/routes-e2e.test.ts",
+        "plugins/plugin-mysticism/src/__tests__/routes-e2e.test.ts",
+        "plugins/plugin-telegram/src/routes-e2e.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/routes-e2e.test.ts",
+        "plugins/plugin-xr/src/__tests__/routes-e2e.test.ts",
+        "reports/coverage/README.md",
+        "reports/coverage/e2e-matrix.json",
+        "reports/coverage/viewer/index.html",
+        "reports/coverage/viewer/matrix-data.js"
+      ]
+    },
+    {
+      "title": "perf(core): harden evaluator schema-memo against transient 400s (follow-up to #8803)",
+      "prNumber": 8815,
+      "type": "other",
+      "body": "Follow-up hardening to #8803 (the evaluator schema-memo, merged to develop as `028b969454`). An adversarial pre-deploy review of the merged change surfaced a real edge case that the original review treated as behavior-preserving:\n\n**Problem",
+      "files": [
+        "packages/core/src/services/evaluator.test.ts",
+        "packages/core/src/services/evaluator.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 328.2073581510806,
+      "prScore": 323.5693581510806,
+      "issueScore": 4.2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 306.5569282241605,
+      "prScore": 306.1189282241605,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 193.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 193.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 84.1443276860922,
+      "prScore": 84.1443276860922,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "noobshow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
+      "totalScore": 45.122242100105716,
+      "prScore": 44.78224210010571,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 34,
+  "mergedPRs": 30,
+  "newIssues": 2,
+  "closedIssues": 1,
+  "activeContributors": 8
+}
