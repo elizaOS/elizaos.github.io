@@ -1,0 +1,82 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-23T00:00:00.000Z",
+    "intervalEnd": "2026-06-24T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-23 to 2026-06-24, elizaos/eliza had 3 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7pbUy_",
+      "title": "fix(core): fall through to the uncapped path when the direct-reply fast path can't serve",
+      "author": "NubsCarson",
+      "number": 9074,
+      "body": "## Fall through to the uncapped path when the direct-reply fast path truncates\n\nFixes #9073. cc @lalalune — this touches the direct-reply fast path you added to `core/message.ts`; flagging for your review since it's your design.\n\n### Problem\nThe DM/API direct-reply fast path is the **first** branch for short conversational messages and hard-caps output at `DIRECT_REPLY_FAST_PATH_MAX_TOKENS = 96` with **no truncation recovery** (that lives only in the non-fast-path Stage-1 branch). `shouldUseDirectReplyFastPath` only blocks >280-char / tool-keyword messages, so \"explain X\", \"write a poem\", \"summarize Y\" take the fast path and — when the answer needs >96 tokens — are delivered **cut off mid-sentence** (`finish_reason=length`). Cloud dedicated-agent chat ingress defaults to `ChannelType.DM/API`, so it's live for the launch. The main path a few lines down already omits the cap for direct channels, with a comment explaining exactly why a hard ceiling truncates long replies — the fast path contradicts it.\n\n### Fix\nReuse the existing `stage1HitCompletionLimit` on the fast-path result: ship the fast reply only when it finished within the budget; on a completion-limit truncation, **fall through to the uncapped main Stage-1 path** for a complete answer (with a debug log). Short replies that fit keep the fast path — only genuinely-long answers pay the full-path cost. Surgical: the success block is unchanged behavior, just guarded; the empty-Stage-1 *rescue* fast path (a separate, rarer last-resort after the full path already returned empty) is intentionally left as-is.\n\n### Tests\nTwo new cases in `message-runtime-stage1.test.ts`:\n- a fast reply with `finishReason: \"length\"` → asserts a **second** (full-path) model call happens and the **complete** reply is delivered, not the truncated text, plus the fall-through debug log;\n- a fast reply with `finishReason: \"stop\"` → asserts it's returned verbatim in **exactly one** model call (fast path preserved).\n\n**73/73** in the stage1 file + 18/18 across related message suites; biome + core typecheck clean. Branched off current develop (`3a98847626`).\n\n### Evidence\nN/A for screenshots. The human-verifiable proof is a live cerebras dedicated-agent turn: ask \"explain how rainbows form\" — before, the reply cuts off ~70 words in; after, it completes (the fall-through fires, visible as the `falling through to the full Stage-1 path` debug log). Real-LLM trajectory can be captured via the scenario runner on request.\n\nFound by an adversarial multi-agent audit of the cloud dedicated-agent chat path: 2 confirmed launch-blockers (this + the provision-flapping fix #9072), 3 real-but-minor, 4 refuted.\n\n---\n**Update:** extended the guard to also fall through when the fast path returns an **empty/whitespace** reply (reasoning-only or blank small-model output → a blank message bubble), since it is the same code path and failure class. Both failure modes (truncated **or** empty) now fall through to the uncapped main path. Tests: **74/74** in the stage1 file (3 new fast-path cases: truncation, empty, and the fits-the-budget happy path); biome + core typecheck clean.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-23T00:31:40Z",
+      "mergedAt": null,
+      "additions": 159,
+      "deletions": 26
+    },
+    {
+      "id": "PR_kwDOMT5cIs7pbNIi",
+      "title": "fix(cloud): size stale-job recovery above the cold-boot worst case (provision flapping)",
+      "author": "NubsCarson",
+      "number": 9072,
+      "body": "## Size stale-job recovery above the cold-boot worst case (provision flapping)\n\nFixes #9071.\n\n### Problem\n`recoverStaleJobs` reset a job stuck `in_progress` past a **flat 5-min** threshold back to `pending` — for *every* job type. A **cold** dedicated-agent provision legitimately takes up to **~11 min** (`PULL_TIMEOUT_MS` 5m + `HEALTH_CHECK_TIMEOUT_MS` 6m) before `/api/health` answers. So a slow cold provision had its job reset mid-flight, re-claimed, and the second `provision()` collided on the deterministic container name `agent-<id>` — the \"already in use\" error matched `create()`'s port-collision branch → `docker rm -f` **force-removed the still-booting container**. Result: provision flapping, repeated teardown/rebuild, and orphaned containers on the exact cold-start path every new user hits. `trySetProvisioning` deliberately admits a `provisioning` row and defers to \"the job-level stale recovery as the time gate\" — that gate was simply mis-sized.\n\nSibling fix to #9066 (which hardened the **delete** path's wall-clock; this hardens the **provision** path's).\n\n### Fix\nPer-job-type stale threshold in `ProvisioningJobService`:\n- cold-boot types (`agent_provision` / `resume` / `wake` / `restart` / `upgrade`) → **15 min** (clears the ~11-min worst case with margin);\n- fast ops (delete/suspend/logs/…) → keep the tight **5-min** backstop.\n\nThe `trySetProvisioning` \"admit `provisioning`\" design stays valid because its deferred time gate is now correctly sized — no lock-semantics change, minimal blast radius.\n\n### Why not also gate the lock / add per-agent single-flight?\nRoot-causing the threshold fully closes the realistic window (cold boot ≤11m < 15m gate), so provision #1 reaches `running` before recovery can fire; a re-claim after that finds the row `running` and `provision()` idempotently returns. Adding a recency gate to the shared `trySetProvisioning` (also used by resume/wake/restart) would be belt-and-suspenders for a pathological >15-min provision — deferred to keep this fix surgical.\n\n### Tests\n`provisioning-jobs-stale-threshold.test.ts` — pins that cold-boot types get a threshold `> 11 min` (the cold-boot worst case) and fast ops keep exactly 5 min, with the two tiers genuinely distinct. **1 pass / 0 fail / 8 expect()**; biome + typecheck clean. Branched off current develop (`3a98847626`).\n\n### Evidence\nThis is a daemon-internal timing fix; the human-verifiable proof is the live fleet-verify path already used for #9066 (provision → settle to a single `running` container without a mid-boot teardown). N/A: UI screenshots, LLM trajectories (no agent/prompt/model change).\n\nFound by an adversarial multi-agent audit of the cloud dedicated-agent chat path (launch readiness): 9 findings → 2 confirmed launch-blockers (this + a core fast-path truncation), 3 real-but-minor, 4 refuted.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-23T00:23:09Z",
+      "mergedAt": null,
+      "additions": 96,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs7pa5KL",
+      "title": "fix(agent): honor lookup { all: true } for pinned dual-stack web-fetch (Invalid IP: undefined)",
+      "author": "NubsCarson",
+      "number": 9070,
+      "body": "## What\nThe pinned-address fetch path (SSRF-guarded `node:http` request for code custom actions + WEB_FETCH) installs a custom `lookup` that returns the single-arg `(err, address, family)` form:\n\n```ts\nlookup: (_hostname, _options, callback) => {\n  callback(null, target.pinnedAddress, family);\n},\n```\n\nBut **`autoSelectFamily` defaults to `true` on Node 20+** (and the repo targets Node 24). For a **dual-stack host**, Node calls `lookup` with `{ all: true }` and expects an **array** of `{ address, family }`. With the single-arg form, Node reads the address string as an array (`addr[0].address` → `undefined`) and throws:\n\n```\nInvalid IP address: undefined\n```\n\nSo every pinned fetch to a dual-stack host (e.g. `api.coingecko.com`, `api.coinbase.com`) fails — live-info / price / weather lookups all error out.\n\n## Fix\nBranch on `options.all`: return `[{ address, family }]` for the array form, keep the single-arg form otherwise. Behavior-preserving for single-stack hosts; restores pinned fetch for dual-stack ones.\n\n## Verify\nLive on Node 22 (milady VPS, cerebras + WEB_FETCH): the coingecko fetch went from `Invalid IP address: undefined` → `200`, and the bot answered **\"Bitcoin is currently at $64,416 USD\"** (0 IP errors in the log). Single-stack hosts unaffected.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-23T00:02:32Z",
+      "mergedAt": null,
+      "additions": 15,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 3
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 50.14532082441188,
+      "prScore": 50.14532082441188,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
