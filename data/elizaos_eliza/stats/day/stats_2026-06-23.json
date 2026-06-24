@@ -5,59 +5,1665 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-23 to 2026-06-24, elizaos/eliza had 3 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "overview": "From 2026-06-23 to 2026-06-24, elizaos/eliza had 137 new PRs (114 merged), 0 new issues, and 9 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
-      "id": "PR_kwDOMT5cIs7pbUy_",
-      "title": "fix(core): fall through to the uncapped path when the direct-reply fast path can't serve",
-      "author": "NubsCarson",
-      "number": 9074,
-      "body": "## Fall through to the uncapped path when the direct-reply fast path truncates\n\nFixes #9073. cc @lalalune — this touches the direct-reply fast path you added to `core/message.ts`; flagging for your review since it's your design.\n\n### Problem\nThe DM/API direct-reply fast path is the **first** branch for short conversational messages and hard-caps output at `DIRECT_REPLY_FAST_PATH_MAX_TOKENS = 96` with **no truncation recovery** (that lives only in the non-fast-path Stage-1 branch). `shouldUseDirectReplyFastPath` only blocks >280-char / tool-keyword messages, so \"explain X\", \"write a poem\", \"summarize Y\" take the fast path and — when the answer needs >96 tokens — are delivered **cut off mid-sentence** (`finish_reason=length`). Cloud dedicated-agent chat ingress defaults to `ChannelType.DM/API`, so it's live for the launch. The main path a few lines down already omits the cap for direct channels, with a comment explaining exactly why a hard ceiling truncates long replies — the fast path contradicts it.\n\n### Fix\nReuse the existing `stage1HitCompletionLimit` on the fast-path result: ship the fast reply only when it finished within the budget; on a completion-limit truncation, **fall through to the uncapped main Stage-1 path** for a complete answer (with a debug log). Short replies that fit keep the fast path — only genuinely-long answers pay the full-path cost. Surgical: the success block is unchanged behavior, just guarded; the empty-Stage-1 *rescue* fast path (a separate, rarer last-resort after the full path already returned empty) is intentionally left as-is.\n\n### Tests\nTwo new cases in `message-runtime-stage1.test.ts`:\n- a fast reply with `finishReason: \"length\"` → asserts a **second** (full-path) model call happens and the **complete** reply is delivered, not the truncated text, plus the fall-through debug log;\n- a fast reply with `finishReason: \"stop\"` → asserts it's returned verbatim in **exactly one** model call (fast path preserved).\n\n**73/73** in the stage1 file + 18/18 across related message suites; biome + core typecheck clean. Branched off current develop (`3a98847626`).\n\n### Evidence\nN/A for screenshots. The human-verifiable proof is a live cerebras dedicated-agent turn: ask \"explain how rainbows form\" — before, the reply cuts off ~70 words in; after, it completes (the fall-through fires, visible as the `falling through to the full Stage-1 path` debug log). Real-LLM trajectory can be captured via the scenario runner on request.\n\nFound by an adversarial multi-agent audit of the cloud dedicated-agent chat path: 2 confirmed launch-blockers (this + the provision-flapping fix #9072), 3 real-but-minor, 4 refuted.\n\n---\n**Update:** extended the guard to also fall through when the fast path returns an **empty/whitespace** reply (reasoning-only or blank small-model output → a blank message bubble), since it is the same code path and failure class. Both failure modes (truncated **or** empty) now fall through to the uncapped main path. Tests: **74/74** in the stage1 file (3 new fast-path cases: truncation, empty, and the fits-the-budget happy path); biome + core typecheck clean.\n",
+      "id": "PR_kwDOMT5cIs7pxBrC",
+      "title": "feat: add @s7g-network/plugin-s7g — DePIN settlement layer for Eliza agents",
+      "author": "Sovereign7G",
+      "number": 9138,
+      "body": "## Summary\n\nAdds the Sovereign 7G Network plugin (@s7g-network/plugin-s7g) to the ElizaOS monorepo — a DePIN settlement layer for AI agents.\n\n## Features\n\n- **8 actions:** GET_LIQUIDITY, GET_YIELD, ARBITRAGE, RISK, EXECUTE, HL_ARBITRAGE, HL_LIQUIDITY, HL_YIELD\n- **DeFi Operations:** Liquidity management, yield optimization, arbitrage\n- **Hyperliquid Integration:** Perpetual futures, funding rate arbitrage\n- **DePIN Settlement:** Cross-chain USDC via CCTP, x402 micropayments\n- **Risk Assessment:** Stablecoin de-peg detection, liquidation monitoring\n\n## Architecture\n\nThe plugin communicates with 29 autonomous S7G agents via ACP protocol at api.7g.sol. All actions are registered through the standard ElizaOS Plugin interface.\n\n## Files\n\n- plugins/plugin-s7g/ (4 files: package.json, tsconfig.json, index.ts, src/index.ts)\n- Follows ElizaOS monorepo conventions (ESM, bun, workspace peer deps)",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-06-23T00:31:40Z",
+      "createdAt": "2026-06-23T17:42:14Z",
       "mergedAt": null,
-      "additions": 159,
-      "deletions": 26
+      "additions": 64946,
+      "deletions": 29924
     },
     {
-      "id": "PR_kwDOMT5cIs7pbNIi",
-      "title": "fix(cloud): size stale-job recovery above the cold-boot worst case (provision flapping)",
-      "author": "NubsCarson",
-      "number": 9072,
-      "body": "## Size stale-job recovery above the cold-boot worst case (provision flapping)\n\nFixes #9071.\n\n### Problem\n`recoverStaleJobs` reset a job stuck `in_progress` past a **flat 5-min** threshold back to `pending` — for *every* job type. A **cold** dedicated-agent provision legitimately takes up to **~11 min** (`PULL_TIMEOUT_MS` 5m + `HEALTH_CHECK_TIMEOUT_MS` 6m) before `/api/health` answers. So a slow cold provision had its job reset mid-flight, re-claimed, and the second `provision()` collided on the deterministic container name `agent-<id>` — the \"already in use\" error matched `create()`'s port-collision branch → `docker rm -f` **force-removed the still-booting container**. Result: provision flapping, repeated teardown/rebuild, and orphaned containers on the exact cold-start path every new user hits. `trySetProvisioning` deliberately admits a `provisioning` row and defers to \"the job-level stale recovery as the time gate\" — that gate was simply mis-sized.\n\nSibling fix to #9066 (which hardened the **delete** path's wall-clock; this hardens the **provision** path's).\n\n### Fix\nPer-job-type stale threshold in `ProvisioningJobService`:\n- cold-boot types (`agent_provision` / `resume` / `wake` / `restart` / `upgrade`) → **15 min** (clears the ~11-min worst case with margin);\n- fast ops (delete/suspend/logs/…) → keep the tight **5-min** backstop.\n\nThe `trySetProvisioning` \"admit `provisioning`\" design stays valid because its deferred time gate is now correctly sized — no lock-semantics change, minimal blast radius.\n\n### Why not also gate the lock / add per-agent single-flight?\nRoot-causing the threshold fully closes the realistic window (cold boot ≤11m < 15m gate), so provision #1 reaches `running` before recovery can fire; a re-claim after that finds the row `running` and `provision()` idempotently returns. Adding a recency gate to the shared `trySetProvisioning` (also used by resume/wake/restart) would be belt-and-suspenders for a pathological >15-min provision — deferred to keep this fix surgical.\n\n### Tests\n`provisioning-jobs-stale-threshold.test.ts` — pins that cold-boot types get a threshold `> 11 min` (the cold-boot worst case) and fast ops keep exactly 5 min, with the two tiers genuinely distinct. **1 pass / 0 fail / 8 expect()**; biome + typecheck clean. Branched off current develop (`3a98847626`).\n\n### Evidence\nThis is a daemon-internal timing fix; the human-verifiable proof is the live fleet-verify path already used for #9066 (provision → settle to a single `running` container without a mid-boot teardown). N/A: UI screenshots, LLM trajectories (no agent/prompt/model change).\n\nFound by an adversarial multi-agent audit of the cloud dedicated-agent chat path (launch readiness): 9 findings → 2 confirmed launch-blockers (this + a core fast-path truncation), 3 real-but-minor, 4 refuted.\n",
+      "id": "PR_kwDOMT5cIs7pzQbU",
+      "title": "refactor(registry): move first-party registry out of app-core to @elizaos/registry/first-party, plugin-owned entries",
+      "author": "lalalune",
+      "number": 9190,
+      "body": "Moves the first-party curated registry out of `app-core` into **`@elizaos/registry/first-party`** and flips entry ownership to **plugin-side** with build-time aggregation. (#9177, the game-app removal this was stacked on, is now **merged**; this PR is auto-retargeted to `develop`.) Three commits:\n\n### 1 — extract the package + shim + runtime overlay\n- Moved `schema.ts` / `loader.ts` / `index.ts` / `app-registry.ts` out of `packages/app-core/src/registry/` into `packages/registry/src/first-party/`, exported as **`@elizaos/registry/first-party`**.\n- `packages/app-core/src/registry/index.ts` is now a **one-line re-export shim**, so `@elizaos/app-core/registry` + the app-core barrel stay stable — the sole cross-package consumer (`plugin-registry`), the capacitor-bridge tsconfig path, and the hyperliquid vitest alias need **no change**.\n- Added **`registerRegistryEntry()`** — a Symbol-keyed global overlay so any plugin can contribute/override an entry **at runtime** (validated fail-loud; runtime wins by `id`).\n- Preserved the boot-critical invariants verbatim (`var cacheSlot` TDZ-hardening, circular-import self-heal, on-device `process.argv[1]` fallback). Moved the 3 registry tests with the code.\n\n### 2 — plugin-owned entries + aggregation\n- Relocated all **110 entries**: 77 → their owning plugin/package dir as `registry-entry.json`; 33 → `first-party/curated/` (8 built-in app-viewers, 23 entries for non-vendored plugins, 2 no-npmName). Deleted the central `entries/` dir.\n- Added **`generate.ts`** — scans `plugins/*` + `packages/*` `registry-entry.json` (object or array) + `curated/`, validates fail-loud, dedupes by `id`, writes a single committed **`generated.json`**. Scripts: `generate:first-party` + `generate:first-party:check` (CI drift gate).\n- Loader now reads the **single `generated.json`** (vs scanning per-kind dirs) → on-device staging is one file, mirroring the community registry pattern.\n\n### 3 — plugins ship their entry on publish\n- Added `registry-entry.json` to the `files` array of all 77 plugins/packages that own one, so a published plugin carries its own registry metadata for downstream aggregation (the extensible, plugin-side path).\n\n### Verification\n- `loadRegistry()` output **BYTE-IDENTICAL** to the pre-refactor golden — after the package move *and* the plugin-side migration: **110 entries** (18 app / 68 plugin / 24 connector), identical ids/npmNames/groups.\n- Plugin-side overlay proven (register → 110→111; override-by-id keeps 111 with the new value); shim resolves end-to-end.\n- Typecheck clean (`@elizaos/registry`, `app-core`, `plugin-registry`); registry tests green (23); `generated.json` drift-check green; smartglasses gate self-test green.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-06-23T00:23:09Z",
-      "mergedAt": null,
-      "additions": 96,
-      "deletions": 1
+      "createdAt": "2026-06-23T19:20:51Z",
+      "mergedAt": "2026-06-23T19:57:37Z",
+      "additions": 9637,
+      "deletions": 174
     },
     {
-      "id": "PR_kwDOMT5cIs7pa5KL",
-      "title": "fix(agent): honor lookup { all: true } for pinned dual-stack web-fetch (Invalid IP: undefined)",
-      "author": "NubsCarson",
-      "number": 9070,
-      "body": "## What\nThe pinned-address fetch path (SSRF-guarded `node:http` request for code custom actions + WEB_FETCH) installs a custom `lookup` that returns the single-arg `(err, address, family)` form:\n\n```ts\nlookup: (_hostname, _options, callback) => {\n  callback(null, target.pinnedAddress, family);\n},\n```\n\nBut **`autoSelectFamily` defaults to `true` on Node 20+** (and the repo targets Node 24). For a **dual-stack host**, Node calls `lookup` with `{ all: true }` and expects an **array** of `{ address, family }`. With the single-arg form, Node reads the address string as an array (`addr[0].address` → `undefined`) and throws:\n\n```\nInvalid IP address: undefined\n```\n\nSo every pinned fetch to a dual-stack host (e.g. `api.coingecko.com`, `api.coinbase.com`) fails — live-info / price / weather lookups all error out.\n\n## Fix\nBranch on `options.all`: return `[{ address, family }]` for the array form, keep the single-arg form otherwise. Behavior-preserving for single-stack hosts; restores pinned fetch for dual-stack ones.\n\n## Verify\nLive on Node 22 (milady VPS, cerebras + WEB_FETCH): the coingecko fetch went from `Invalid IP address: undefined` → `200`, and the bot answered **\"Bitcoin is currently at $64,416 USD\"** (0 IP errors in the log). Single-stack hosts unaffected.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "id": "PR_kwDOMT5cIs7p01_g",
+      "title": "Feat/plugin trust layer for AI Agents",
+      "author": "stvor-hq",
+      "number": 9203,
+      "body": "# Relates to\r\n\r\nNew plugin. Opens discussion around ERC-8183 as a lifecycle standard for agent-to-agent commerce in elizaOS.\r\n\r\n# Sync with develop\r\n\r\n- [x] Rebased onto latest `origin/develop`\r\n- [x] `bun run verify` passes\r\n\r\nWithin `packages/plugin-agent-commerce-pqc`:\r\n\r\n$ bun run verify\r\n\r\n✓ TypeScript type-check passes\r\n✓ Vitest suite passes\r\n\r\n35 tests passed.\r\n\r\n# Risks\r\n\r\nMedium.\r\n\r\nThis PR adds a new opt-in plugin under `packages/plugin-agent-commerce-pqc`. No existing runtime behavior is modified.\r\n\r\nThe plugin registers:\r\n\r\n- 1 Service (`agent_commerce`)\r\n- 4 Actions\r\n- 1 Provider\r\n\r\nState is persisted through the existing `runtime.createMemory()` API using the `erc8183:job:` namespace.\r\n\r\nKnown operational risks:\r\n\r\n- hydration currently loads up to 1000 job records per agent\r\n- rate limiting is process-local and not distributed\r\n- reputation persistence is memory-backed by default\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\nAdds an ERC-8183-inspired commerce workflow for elizaOS agents.\r\n\r\nThe plugin enables one agent to:\r\n\r\n1. Create a job\r\n2. Fund a job\r\n3. Submit a deliverable\r\n4. Evaluate the result\r\n5. Complete, refund, expire, or abort the workflow\r\n\r\nState machine:\r\n\r\nOPEN → FUNDED → SUBMITTED → COMPLETE\r\n                           ↘ REFUND\r\n              ↘ EXPIRED\r\n         ↘ ABORTED\r\n\r\n## Registered extension points\r\n\r\n| Type | Name |\r\n|--------|--------|\r\n| Service | agent_commerce |\r\n| Action | CREATE_SECURE_JOB |\r\n| Action | FUND_SECURE_JOB |\r\n| Action | SUBMIT_DELIVERABLE |\r\n| Action | JOB_STATUS |\r\n| Provider | COMMERCE_CONTEXT |\r\n\r\n## Persistence\r\n\r\nJobs are stored through `runtime.createMemory()` using:\r\n\r\nerc8183:job:<jobId>\r\n\r\nEach state transition appends a new memory record.\r\n\r\nOn restart, the store lazily hydrates from memory records and reconstructs the latest job state using the highest `updatedAt` value.\r\n\r\n## Security features\r\n\r\n- SHA-256 payload attestation\r\n- Deliverable hash verification\r\n- Reputation-based funding gate\r\n- Rate limiting\r\n- State transition validation\r\n- Idempotent terminal transitions\r\n\r\n## What kind of change is this?\r\n\r\nFeature (non-breaking).\r\n\r\nAll changes are additive.\r\n\r\n# Documentation changes needed?\r\n\r\nNo.\r\n\r\nThe package includes its own README.\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n- `src/elizaos/index.ts`\r\n- `src/service.ts`\r\n- `src/state-machine.ts`\r\n- `src/store/elizaos.ts`\r\n\r\n## Detailed testing steps\r\n\r\nRun:\r\n\r\n```bash\r\ncd packages/plugin-agent-commerce-pqc\r\n\r\nbun run verify\r\n\r\nExpected result:\r\n\r\n35 tests passed\r\n0 failures\r\n\r\nOptional lifecycle demo:\r\n\r\nLOG_LEVEL=info bun run demo-lifecycle.ts\r\n\r\nThe demo exercises:\r\n\r\n- createJob\r\n- fundJob\r\n- submitJob\r\n- evaluateJob\r\n- abort path\r\n- persistence path\r\n\r\nEvidence\r\nReal LLM-call trajectory\r\nN/A.\r\n\r\nThe plugin currently exposes deterministic actions and state-machine logic. No scenario-runner integration exists yet.\r\n\r\nBackend + frontend logs\r\n\r\nVerification output:\r\n\r\nRUN  v4.1.5\r\n\r\nTest Files  1 passed (1)\r\nTests       35 passed (35)\r\n\r\nExit code: 0\r\n\r\nLifecycle demo output includes:\r\n\r\nCreated job -> OPEN\r\nFunded job -> FUNDED\r\nSubmitted deliverable -> SUBMITTED\r\nEvaluated job -> COMPLETE\r\nHash mismatch -> ABORTED\r\n\r\nScreenshots (before / after) + video walkthrough\r\nN/A — backend plugin, no UI.\r\n\r\nAudio / voice walkthrough\r\nN/A.\r\n\r\nKnown limitations\r\nHydration loads at most 1000 memory records per agent.\r\nRate limiting is process-local.\r\nMemoryReputationProvider is not persistent across restarts.\r\nDistributed deployments require a custom reputation backend and shared rate-limit implementation.",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-06-23T00:02:32Z",
+      "createdAt": "2026-06-23T20:34:21Z",
       "mergedAt": null,
-      "additions": 15,
-      "deletions": 1
+      "additions": 2934,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7pftUj",
+      "title": "feat(plugin): add security layer between agents",
+      "author": "stvor-hq",
+      "number": 9083,
+      "body": "# Relates to\r\nMEV bot Jaredfromsubway.eth was drained $7.5M (Jun 21, 2026) via attacker-controlled contracts tricking automated financial execution logic , the same attack class that threatens AI agents making autonomous financial decisions. This plugin addresses that surface with cryptographic counterparty verification and integrity checks before funds release.\r\n\r\n# Sync with develop\r\n- [x] Rebased/merged onto the latest origin/develop; zero conflicts\r\n- [ ] `bun run verify` — `@elizaos/prompts#build` fails due to Node.js v20 \r\n      incompatibility in the monorepo (unrelated to this plugin). \r\n      Plugin itself builds successfully: `@elizaos/plugin-agent-commerce:build ✅`\r\n\r\n# Risks\r\nLow. New standalone plugin, no changes to existing packages. \r\nOpt-in only — agents load it explicitly.\r\n\r\n# Background\r\n## What does this PR do?\r\nAdds `@elizaos/plugin-agent-commerce-pqc` - a security layer for financial \r\ntransactions between ElizaOS agents using cryptography primitives.\r\n\r\nImplements ERC-8183 job lifecycle (create → fund → submit → evaluate) with:\r\n- ML-KEM-768 payload hashing (PayloadHasher with timingSafeEqual)\r\n- LLM prompt injection detection (SecurityGuard)\r\n- SHA-256 deliverable integrity verification\r\n- Role-based access control for job evaluation\r\n- Rate limiting for API calls\r\n\r\n## What kind of change is this?\r\nFeature (non-breaking change which adds functionality)\r\n\r\n# Documentation changes needed?\r\nMy changes do not require a change to the project documentation.\r\nREADME included in the plugin package.\r\n\r\n# Testing\r\n## Where should a reviewer start?\r\n`packages/plugin-agent-commerce-pqc/src/index.ts` — plugin entry point\r\n`packages/plugin-agent-commerce-pqc/src/state-machine.ts` — core logic\r\n\r\n## Detailed testing steps\r\n1. Add plugin to agent character file:\r\n   `plugins: [\"@elizaos/plugin-agent-commerce-pqc\"]`\r\n2. Start agent: `bun run dev`\r\n3. Send: \"Create job for agent-bob: build REST API, budget 100\"\r\n4. Verify job created with state OPEN\r\n5. Send: \"Submit deliverable for job-xxx: API deployed at https://...\"\r\n6. Verify deliverable hash stored, state → SUBMITTED\r\n\r\n# Evidence\r\n## Real LLM-call trajectory\r\nN/A — plugin is additive, no model/prompt changes\r\n\r\n## Backend + frontend logs\r\nN/A — standalone plugin, no backend changes\r\n\r\n## Screenshots (before / after) + video walkthrough\r\nN/A — no UI changes\r\n\r\n## Audio / voice walkthrough\r\nN/A\r\n\r\n## Discord username\r\nsapog_kun",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-23T05:39:21Z",
+      "mergedAt": null,
+      "additions": 2300,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7pafbP",
+      "title": "[codex] fix deterministic response-handler tool calls",
+      "author": "NubsCarson",
+      "number": 9069,
+      "body": "## Summary\n- allow response-handler evaluators to attach deterministic tool calls to the Stage-1 plan\n- execute deterministic response-handler tool calls through the normal action executor before invoking the planner\n- make the direct private-chat fast path yield when a response-handler evaluator claims the turn, so explicit view/app commands can run VIEWS instead of only replying with an acknowledgement\n\n## Root Cause\nLive desktop/Cerebras view-switching was producing replies like \"opening your Inbox now\" but staying on /chat. Trajectories showed the runtime was taking the direct private-chat fast path and executing zero tools, bypassing the app-control response-handler evaluator that should force VIEWS.\n\n## Validation\n- bun run --cwd packages/core test src/runtime/__tests__/response-handler-evaluators.test.ts src/__tests__/message-runtime-stage1.test.ts --coverage.enabled=false\n- bun run --cwd packages/core typecheck\n- bun run --cwd plugins/plugin-app-control typecheck\n- bun run --cwd plugins/plugin-app-control test src/evaluators/view-command-shortcut.test.ts --coverage.enabled=false\n- git diff --check\n- live desktop/Cerebras UI smoke on rebased develop: 6/6 passed for check my messages, muéstrame mi calendario, revisa mi correo, 我的待办事项, カレンダーを開いて, 지갑 열어",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-22T23:34:48Z",
+      "mergedAt": "2026-06-23T05:58:41Z",
+      "additions": 1697,
+      "deletions": 155
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 3
+    "additions": 31980,
+    "deletions": 5339,
+    "files": 504,
+    "commitCount": 189
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "fix(cloud): size stale-job recovery above the cold-boot worst case (provision flapping)",
+      "prNumber": 9072,
+      "type": "bugfix",
+      "body": "## Size stale-job recovery above the cold-boot worst case (provision flapping)\n\nFixes #9071.\n\n### Problem\n`recoverStaleJobs` reset a job stuck `in_progress` past a **flat 5-min** threshold back to `pending` — for *every* job type. A **cold*",
+      "files": [
+        "packages/cloud-shared/src/lib/services/provisioning-jobs-stale-threshold.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): honor lookup { all: true } for pinned dual-stack web-fetch (Invalid IP: undefined)",
+      "prNumber": 9070,
+      "type": "bugfix",
+      "body": "## What\nThe pinned-address fetch path (SSRF-guarded `node:http` request for code custom actions + WEB_FETCH) installs a custom `lookup` that returns the single-arg `(err, address, family)` form:\n\n```ts\nlookup: (_hostname, _options, callback",
+      "files": [
+        "packages/agent/src/runtime/custom-actions.ts"
+      ]
+    },
+    {
+      "title": "[codex] fix deterministic response-handler tool calls",
+      "prNumber": 9069,
+      "type": "bugfix",
+      "body": "## Summary\n- allow response-handler evaluators to attach deterministic tool calls to the Stage-1 plan\n- execute deterministic response-handler tool calls through the normal action executor before invoking the planner\n- make the direct priva",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/runtime/__tests__/response-handler-evaluators.test.ts",
+        "packages/core/src/runtime/response-handler-evaluators.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/types/components.ts",
+        ".github/workflows/scenario-pr.yml",
+        "packages/agent/assets/view-heroes/background.png",
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/test/api/accounts-routes.test.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-live-validation.test.ts",
+        "packages/app/capacitor.config.ts",
+        "packages/app/index.html",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/app/test/ui-smoke/view-manager-actual-flow.spec.ts",
+        "packages/core/src/services/optimized-prompt-resolver.test.ts",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-browser-computeruse-progress.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-xr-view-actions.scenario.ts",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "packages/ui/src/components/apps/internal-tool-apps.ts",
+        "packages/ui/test/stubs/host-external.ts",
+        "plugins/plugin-app-control/src/actions/view-command-matcher.test.ts",
+        "plugins/plugin-app-control/src/actions/view-command-matcher.ts",
+        "plugins/plugin-app-control/src/evaluators/view-command-routing.ts",
+        "plugins/plugin-app-control/src/evaluators/view-command-shortcut.test.ts",
+        "plugins/plugin-app-control/src/evaluators/view-command-shortcut.ts",
+        "plugins/plugin-calendar/test/client-calendar.test.ts"
+      ]
+    },
+    {
+      "title": "test(lifeops): inbox_triage capability scenario for GEPA regression coverage (#8795)",
+      "prNumber": 9224,
+      "type": "tests",
+      "body": "Adds `inbox-triage-capability.scenario.ts` — the wired `inbox_triage` GEPA/trajectory capability (`plugin-inbox/.../triage-classifier.ts` via OptimizedPromptService) had no capability-scoped scenario; this mirrors `calendar-extract-capabili",
+      "files": [
+        "plugins/plugin-personal-assistant/test/scenarios/inbox-triage-capability.scenario.ts"
+      ]
+    },
+    {
+      "title": "test(ui): lock in chat-transcript per-message memoization (render-count regression, #9141)",
+      "prNumber": 9223,
+      "type": "tests",
+      "body": "Adds a render-count regression test proving that streaming a token into the last message re-renders ONLY the last `ChatMessage`, not the whole transcript — locking in the existing memoization the perf work depends on. Counts renders via the",
+      "files": [
+        "packages/ui/src/components/composites/chat/chat-transcript.render-count.test.tsx"
+      ]
+    },
+    {
+      "title": "test(local-inference): offline DER scorer test for the voice diarization harness (#9147)",
+      "prNumber": 9222,
+      "type": "tests",
+      "body": "Adds an offline (no-GGUF) Diarization Error Rate regression test for the existing `scoreDiarization` in the voice e2e harness — the model-independent slice of #9147. 6 cases, arithmetic hand-verified: perfect→DER 0; one swap / one miss → 0.",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/e2e-harness.der.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): rank home-slot widgets via rankHomeWidgets (#9143)",
+      "prNumber": 9221,
+      "type": "feature",
+      "body": "Wires the orphaned home-widget ranking core (`packages/ui/src/widgets/home-priority.ts` — built + unit-tested, never called) into `WidgetHost` for the `home` slot only: resolved declarations now pass through `rankHomeWidgets(decls, [], {max",
+      "files": [
+        "packages/ui/src/widgets/WidgetHost.home-rank.test.tsx",
+        "packages/ui/src/widgets/WidgetHost.tsx"
+      ]
+    },
+    {
+      "title": "feat(local-inference): on-device ASR + vision via the bionic Vulkan host (#8848)",
+      "prNumber": 9219,
+      "type": "feature",
+      "body": "## What\n\nWires **on-device STT/ASR and vision/screen-recognition** through the in-process bionic Vulkan inference host on Android, so the agent's `TRANSCRIPTION` + `IMAGE_DESCRIPTION` model delegates run on the Mali GPU instead of failing.\n",
+      "files": [
+        "packages/app-core/platforms/android/app/src/main/elizavoice-jni/elizavoice-jni.cpp",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaBionicInferenceServer.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaVoiceNative.java",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.ts",
+        "plugins/plugin-local-inference/src/services/bionic-host-loader.test.ts",
+        "plugins/plugin-local-inference/src/services/bionic-host-loader.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): run ensureLocalInferenceHandler on the bionic-delegated phone (#8848)",
+      "prNumber": 9218,
+      "type": "bugfix",
+      "body": "## Bug (found on a real Pixel 9a build off develop)\nOn Android with dynamic-Vulkan **bionic-host delegation** (`ELIZA_BIONIC_HOST_DELEGATED=1`, which suppresses `ELIZA_LOCAL_LLAMA`), `shouldEnableMobileLocalInference()` returned **false** —",
+      "files": [
+        "plugins/plugin-local-inference/src/runtime/mobile-local-inference-gate.test.ts",
+        "plugins/plugin-local-inference/src/runtime/mobile-local-inference-gate.ts"
+      ]
+    },
+    {
+      "title": "style(app): organize-imports for the side-effect-modules plugin import (#9178)",
+      "prNumber": 9217,
+      "type": "other",
+      "body": "Biome `organizeImports` follow-up to #9211 — the new `appSideEffectModulesPlugin` import wasn't in sorted order. `biome check --write` reorders it (1 line, no-op functionally). Lint now clean on the file.",
+      "files": [
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "feat(computeruse): set_value — a11y element value write (completes trycua/cua verb parity, #9170)",
+      "prNumber": 9216,
+      "type": "feature",
+      "body": "## Summary\nThe **last** trycua/cua verb. cua exposes `set_value` (set a UI element's value directly); we had a11y READ but no WRITE. Coordinate-addressed (`set_value` at `[x,y]` = value), consistent with the click/detect model.\n\n- **`deskto",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-coverage.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/set-value.test.ts",
+        "plugins/plugin-computeruse/src/actions/use-computer.ts",
+        "plugins/plugin-computeruse/src/parity/parity-matrix.ts",
+        "plugins/plugin-computeruse/src/platform/desktop.ts",
+        "plugins/plugin-computeruse/src/platform/driver.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-computeruse/src/types.ts"
+      ]
+    },
+    {
+      "title": "feat(computeruse): binary filesystem verbs — read_bytes/write_bytes/create_dir/directory_exists/get_file_size (#9170)",
+      "prNumber": 9215,
+      "type": "feature",
+      "body": "## Summary\nCloses the last filesystem parity blind spot vs trycua/cua. cua exposes binary-safe guest I/O (`read_bytes`/`write_bytes` base64) + `create_dir` + `directory_exists` + `get_file_size`; `file-ops.ts` had only text `readFile`/`writ",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-coverage.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/file-bytes.test.ts",
+        "plugins/plugin-computeruse/src/approval-manager.ts",
+        "plugins/plugin-computeruse/src/parity/parity-matrix.ts",
+        "plugins/plugin-computeruse/src/platform/file-ops.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-computeruse/src/types.ts"
+      ]
+    },
+    {
+      "title": "ci(computeruse): ready-to-adopt 3-OS real-driver CI lane template (#9170)",
+      "prNumber": 9214,
+      "type": "other",
+      "body": "## Why\nThe trycua/cua parity verbs are implemented and **machine-checked on all 4 platforms in the default lane** (`parity-matrix.ts` + `cua-parity-coverage.test.ts`), and real-driver **actuation** is verified on Windows. The one remaining ",
+      "files": [
+        "plugins/plugin-computeruse/ci-templates/README.md",
+        "plugins/plugin-computeruse/ci-templates/cua-parity-real.yml"
+      ]
+    },
+    {
+      "title": "feat(computeruse): kill_app — terminate a process by pid/name (trycua/cua parity, #9170)",
+      "prNumber": 9213,
+      "type": "feature",
+      "body": "## Summary\ncua exposes `kill_app` (process terminate); we had `launch` (start) but no kill. Adds the sibling `COMPUTER_USE` verb, closing a tracked parity blind spot.\n\n- **`platform/launch.ts`** — `killApp(target)`: win32 `taskkill /F /PID|",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-coverage.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/m12-verbs.test.ts",
+        "plugins/plugin-computeruse/src/actions/use-computer.ts",
+        "plugins/plugin-computeruse/src/parity/parity-matrix.ts",
+        "plugins/plugin-computeruse/src/platform/launch.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-computeruse/src/types.ts"
+      ]
+    },
+    {
+      "title": "feat(computeruse): M12 window bounds getters — get_window_size / get_window_position (trycua/cua, #9170)",
+      "prNumber": 9212,
+      "type": "feature",
+      "body": "## Summary\n\nCompletes the M12 window-getter surface for trycua/cua parity. cua exposes\n`get_window_size` and `get_window_position`; we had `set_bounds` (set) +\n`get_current_window_id` + `get_application_windows`, but **no bounds READ**. Thi",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-coverage.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/m12-verbs.test.ts",
+        "plugins/plugin-computeruse/src/actions/window.ts",
+        "plugins/plugin-computeruse/src/parity/parity-matrix.ts",
+        "plugins/plugin-computeruse/src/platform/windows-list.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-computeruse/src/types.ts"
+      ]
+    },
+    {
+      "title": "fix(app): wire the manifest-driven side-effect modules Vite plugin (#9178)",
+      "prNumber": 9211,
+      "type": "bugfix",
+      "body": "## Critical: `build:web` is broken on develop\n\n#9178 (manifest-driven renderer side-effect registration) added `import { SIDE_EFFECT_APP_MODULE_LOADERS } from \"virtual:eliza-side-effect-app-modules\"` in `plugin-registrations.ts` and created",
+      "files": [
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "test(voice): add music-background robustness scenario (#9147)",
+      "prNumber": 9207,
+      "type": "tests",
+      "body": "## What\nThe deterministic `music` noise kind landed in `corpus-augment.ts` (d56efcc80b) but **no scenario exercised it** — one of the #9147 acceptance items (new robustness scenarios incl. music).\n\n## Change\nAdds `music-background-commands`",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/workbench-scenarios.ts"
+      ]
+    },
+    {
+      "title": "feat(local-inference): smooth chat streaming — fine-grained per-step token cap (#9174)",
+      "prNumber": 9206,
+      "type": "feature",
+      "body": "Local chat replies streamed in ~32-token jumps because `FfiStreamingRunner` emits one chunk per `llmStreamNext` step (`DEFAULT_MAX_TOKENS_PER_STEP = 32`), so short replies appeared all at once. This threads the existing per-call `maxTokensP",
+      "files": [
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.test.ts",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.ts",
+        "plugins/plugin-local-inference/src/services/backend.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-backend.ts"
+      ]
+    },
+    {
+      "title": "fix(training): align Python manifest tokenizer family to gemma4 (#8848)",
+      "prNumber": 9205,
+      "type": "bugfix",
+      "body": "## What\n`packages/training/scripts/manifest/eliza1_manifest.py:43` declared the tokenizer family as `\"gemma\"`, but the TS contract (`schema.ts:42`) and the live HF Gemma-4 manifests (#9172) use `\"gemma4\"`. The two validators of the same fro",
+      "files": [
+        "packages/training/scripts/manifest/eliza1_manifest.py"
+      ]
+    },
+    {
+      "title": "refactor(agent): promote approval-queue to ApprovalService (LifeOps Slice 4) (#8833)",
+      "prNumber": 9204,
+      "type": "refactor",
+      "body": "## LifeOps decomposition — Slice 4: promote approval-queue to `@elizaos/agent` `ApprovalService`\n\nImplements **Slice 4** of the LifeOps extraction plan: `plugins/plugin-personal-assistant/docs/lifeops-extraction-plan.md` → \"Slice 4 — Promot",
+      "files": [
+        "packages/agent/src/index.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/services/approval/index.ts",
+        "packages/agent/src/services/approval/service.test.ts",
+        "packages/agent/src/services/approval/service.ts",
+        "packages/agent/src/services/approval/sql.ts",
+        "packages/agent/src/services/approval/store.ts",
+        "packages/agent/src/services/approval/types.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/approval-queue.ts"
+      ]
+    },
+    {
+      "title": "test(core): task-scheduler tick-error-logging regression coverage (#9152)",
+      "prNumber": 9202,
+      "type": "tests",
+      "body": "Reference: #9152.\n\nThe production fix — logging the task-scheduler `tick().catch` error via the structured logger instead of swallowing it — **already landed on develop** via `b97f361c9d` (`logger.error({ err }, \"[TaskScheduler] tick failed",
+      "files": [
+        "packages/core/src/services/task-scheduler.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): dynamic priority-ranking core for the home widget surface (#9143)",
+      "prNumber": 9201,
+      "type": "feature",
+      "body": "Follow-up to the merged foundational slice (`27ab45dbfb`, which added the `home` slot + mounted `<WidgetHost slot=\"home\">`). That mount renders home widgets by **static `order`**; per the design intent, the home screen should instead surfac",
+      "files": [
+        "packages/ui/src/widgets/home-priority.test.ts",
+        "packages/ui/src/widgets/home-priority.ts",
+        "packages/ui/src/widgets/index.ts"
+      ]
+    },
+    {
+      "title": "test: green up plugin-view/xr/voice/mtp suites after game-plugin deletion (#9178 follow-up)",
+      "prNumber": 9200,
+      "type": "tests",
+      "body": "## Summary\n\nFollow-up to #9178 (game-plugin deletion + manifest-driven plugin registration, already merged). Fixes the test failures that #9178 surfaced or shifted, plus a few pre-existing cross-domain drifts found while driving the suites ",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/app/test/hmr-coverage.test.ts",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/ui/src/hooks/useDefaultProviderPresets.test.tsx",
+        "packages/ui/src/services/local-inference/active-model.test.ts",
+        "packages/ui/vitest.setup.ts",
+        "plugins/plugin-xr/src/__tests__/xr-bundle-coverage.test.ts",
+        "plugins/plugin-xr/src/__tests__/xr-feature-parity.test.ts"
+      ]
+    },
+    {
+      "title": "feat: add plugin-x402-alpha-data to registry",
+      "prNumber": 9199,
+      "type": "feature",
+      "body": "## Description\n\nAdd `plugin-x402-alpha-data` to the community plugin registry.\n\n**15 paid alpha data endpoints via x402 protocol:**\n- Token safety, whale tracking, yield strategies, governance, sentiment\n- USDC payments on Base + Solana\n\n**",
+      "files": [
+        "packages/registry/entries/third-party/plugin-x402-alpha-data.json"
+      ]
+    },
+    {
+      "title": "docs(computeruse): mark M9 Set-of-Marks landed in parity audit + coverage guard (#9170)",
+      "prNumber": 9198,
+      "type": "docs",
+      "body": "M9 (Set-of-Marks numbered-overlay grounding) landed on develop (`96c82cbeb4`) —\n`plugin-vision/src/som.ts` + `set-of-marks-provider.ts`, registered via the\n`registerSetOfMarksProvider` seam. The just-merged parity coverage guard (#9195)\nand",
+      "files": [
+        "plugins/plugin-computeruse/docs/TRYCUA_PARITY_AUDIT.md",
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-coverage.test.ts"
+      ]
+    },
+    {
+      "title": "refactor(agent): promote pending-prompts/global-pause/handoff to runtime services (LifeOps Slice 3) (#8833)",
+      "prNumber": 9197,
+      "type": "refactor",
+      "body": "## LifeOps Slice 3 — promote cache-backed stores to `@elizaos/agent` runtime services\n\nExecutes **Slice 3** of the LifeOps extraction plan\n(`plugins/plugin-personal-assistant/docs/lifeops-extraction-plan.md` §\"Slice 3 —\nPromote pending-prom",
+      "files": [
+        "packages/agent/src/index.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/services/global-pause/index.ts",
+        "packages/agent/src/services/global-pause/service.test.ts",
+        "packages/agent/src/services/global-pause/service.ts",
+        "packages/agent/src/services/global-pause/store.ts",
+        "packages/agent/src/services/handoff/index.ts",
+        "packages/agent/src/services/handoff/service.test.ts",
+        "packages/agent/src/services/handoff/service.ts",
+        "packages/agent/src/services/handoff/store.ts",
+        "packages/agent/src/services/pending-prompts/index.ts",
+        "packages/agent/src/services/pending-prompts/service.test.ts",
+        "packages/agent/src/services/pending-prompts/service.ts",
+        "packages/agent/src/services/pending-prompts/store.ts",
+        "plugins/plugin-personal-assistant/src/actions/scheduled-task.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/global-pause/store.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/handoff/store.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/pending-prompts/store.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/runtime-wiring.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/scheduler.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/work-threads/field-evaluator-thread-ops.ts",
+        "plugins/plugin-personal-assistant/src/plugin.ts",
+        "plugins/plugin-personal-assistant/src/providers/pending-prompts.ts",
+        "plugins/plugin-personal-assistant/src/providers/room-policy.ts",
+        "plugins/plugin-personal-assistant/test/stubs/agent.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): point apex chunk-safety hard gate at the verify:chunks script (#9150)",
+      "prNumber": 9196,
+      "type": "bugfix",
+      "body": "## Problem\n\nPR #9188 (already merged) made the **Verify bundle chunk safety** step a **hard gate** in both apex deploy jobs (`deploy-console` + `deploy-app`) by dropping `continue-on-error`. But the step runs:\n\n```yaml\nrun: bun run verify:c",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "test(computeruse): cross-platform parity coverage guard + un-gate real lane (#9170 M14)",
+      "prNumber": 9195,
+      "type": "tests",
+      "body": "## Summary\n\nFirst slice of **M14** — making \"tests of every single thing trycua/cua does, on\nall platforms\" machine-checkable, and removing the win32-only hardcode that hid\nthe M8 `key_down` bug (#9189).\n\n### 1. `cua-parity-coverage.test.ts",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-coverage.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-input.real.test.ts"
+      ]
+    },
+    {
+      "title": "test(streaming): live cloud token-by-token verification (#9174 follow-up)",
+      "prNumber": 9194,
+      "type": "tests",
+      "body": "Follow-up to #9192 (which merged before this landed). Adds the **live-LLM cloud verification** for #9174.\n\n`#9192` hardened the streaming pipeline (knob + regression tests at every layer) but I could not produce a real cloud trajectory ther",
+      "files": [
+        ".github/issue-evidence/9174-streaming-verify-harden/README.md",
+        ".github/issue-evidence/9174-streaming-verify-harden/live-cloud-streaming-timeline.txt",
+        "plugins/plugin-openai/__tests__/cloud-streaming.live.test.ts"
+      ]
+    },
+    {
+      "title": "docs(computeruse): current-state trycua/cua parity audit (#9170)",
+      "prNumber": 9193,
+      "type": "docs",
+      "body": "## Summary\n\nA refreshed, **current-state** parity + test-coverage audit for computer-use ×\nvision, after M3 / M3.5 / M4a / M5 / M6 / M7 / M8 landed. The `reports/trycua-*.txt`\nsnapshot predates M7+M8 and is now stale; this is the authoritat",
+      "files": [
+        "plugins/plugin-computeruse/docs/TRYCUA_PARITY_AUDIT.md"
+      ]
+    },
+    {
+      "title": "feat(streaming): verify + harden token-by-token streaming (#9174)",
+      "prNumber": 9192,
+      "type": "feature",
+      "body": "Closes #9174.\n\nThe local + cloud token-streaming pipeline was already wired end-to-end (see the issue body). This PR **verifies and hardens** it — it adds no new streaming mechanism.\n\n## What changed\n\n- **Local granularity knob** — `FfiStre",
+      "files": [
+        ".github/issue-evidence/9174-streaming-verify-harden/README.md",
+        ".github/issue-evidence/9174-streaming-verify-harden/regression-test-output.txt",
+        ".github/issue-evidence/9174-streaming-verify-harden/sse-token-timeline.txt",
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/__tests__/resolve-stream-fields.test.ts",
+        "packages/core/src/utils/__tests__/streaming-field-events.test.ts",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.test.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-runner.test.ts",
+        "plugins/plugin-local-inference/src/services/ffi-streaming-runner.ts"
+      ]
+    },
+    {
+      "title": "refactor: remove cross-layer LifeOps app-shell tokens (page-lifeops scope, event sources, connector id) (#8833)",
+      "prNumber": 9191,
+      "type": "refactor",
+      "body": "## What\n\nStage 2 of the LifeOps top-down de-hardcode (#8833). Stage 1 (#9162) landed the bulk; this removes the **cross-layer** umbrella tokens it left behind that span shared contracts + agent + UI + plugins. Owner direction: completely re",
+      "files": [
+        "packages/agent/src/api/conversation-metadata.ts",
+        "packages/agent/src/api/server-helpers-swarm.ts",
+        "packages/agent/src/api/suggestions-routes.test.ts",
+        "packages/agent/src/api/suggestions-routes.ts",
+        "packages/agent/src/providers/page-scoped-context.ts",
+        "packages/shared/src/contracts/__tests__/schema-vs-type-drift.test.ts",
+        "packages/shared/src/contracts/conversation-routes.ts",
+        "packages/ui/src/components/pages/page-scoped-conversations.ts",
+        "packages/ui/src/components/shell/usePromptSuggestions.test.ts",
+        "packages/ui/src/hooks/useActivityEvents.ts",
+        "plugins/plugin-personal-assistant/src/actions/life.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/service-mixin-reminders.ts",
+        "plugins/plugin-workflow/src/lib/automations-types.ts"
+      ]
+    },
+    {
+      "title": "refactor(registry): move first-party registry out of app-core to @elizaos/registry/first-party, plugin-owned entries",
+      "prNumber": 9190,
+      "type": "refactor",
+      "body": "Moves the first-party curated registry out of `app-core` into **`@elizaos/registry/first-party`** and flips entry ownership to **plugin-side** with build-time aggregation. (#9177, the game-app removal this was stacked on, is now **merged**;",
+      "files": [
+        "bun.lock",
+        "packages/app-core/AGENTS.md",
+        "packages/app-core/CLAUDE.md",
+        "packages/app-core/package.json",
+        "packages/app-core/scripts/run-local-plugin-live-smoke.mjs",
+        "packages/app-core/src/registry/index.ts",
+        "packages/core/package.json",
+        "packages/core/registry-entry.json",
+        "packages/registry/AGENTS.md",
+        "packages/registry/CLAUDE.md",
+        "packages/registry/package.json",
+        "packages/registry/src/first-party/app-registry.ts",
+        "packages/registry/src/first-party/connector-accounts.test.ts",
+        "packages/registry/src/first-party/curated/apps/database-viewer.json",
+        "packages/registry/src/first-party/curated/apps/log-viewer.json",
+        "packages/registry/src/first-party/curated/apps/memory-viewer.json",
+        "packages/registry/src/first-party/curated/apps/plugin-viewer.json",
+        "packages/registry/src/first-party/curated/apps/relationship-viewer.json",
+        "packages/registry/src/first-party/curated/apps/runtime-debugger.json",
+        "packages/registry/src/first-party/curated/apps/skills-viewer.json",
+        "packages/registry/src/first-party/curated/apps/trajectory-viewer.json",
+        "packages/registry/src/first-party/curated/connectors/mattermost.json",
+        "packages/registry/src/first-party/curated/connectors/msteams.json",
+        "packages/registry/src/first-party/curated/connectors/nextcloud-talk.json",
+        "packages/registry/src/first-party/curated/connectors/tlon.json",
+        "packages/registry/src/first-party/curated/connectors/zalo.json",
+        "packages/registry/src/first-party/curated/connectors/zalouser.json",
+        "packages/registry/src/first-party/curated/plugins/auto-trader.json",
+        "packages/registry/src/first-party/curated/plugins/blooio.json",
+        "packages/registry/src/first-party/curated/plugins/clipboard.json",
+        "packages/registry/src/first-party/curated/plugins/copilot-proxy.json",
+        "packages/registry/src/first-party/curated/plugins/directives.json",
+        "packages/registry/src/first-party/curated/plugins/experience.json",
+        "packages/registry/src/first-party/curated/plugins/gmail-watch.json",
+        "packages/registry/src/first-party/curated/plugins/hedera.json",
+        "packages/registry/src/first-party/curated/plugins/memory.json",
+        "packages/registry/src/first-party/curated/plugins/moltbook.json",
+        "packages/registry/src/first-party/curated/plugins/plugin-manager.json",
+        "packages/registry/src/first-party/curated/plugins/prose.json",
+        "packages/registry/src/first-party/curated/plugins/rss.json",
+        "packages/registry/src/first-party/curated/plugins/s3-storage.json",
+        "packages/registry/src/first-party/curated/plugins/trust.json",
+        "packages/registry/src/first-party/curated/plugins/tts.json",
+        "packages/registry/src/first-party/curated/plugins/twilio.json",
+        "packages/registry/src/first-party/curated/plugins/vercel-ai-gateway.json",
+        "packages/registry/src/first-party/curated/plugins/webhooks.json",
+        "packages/registry/src/first-party/facewear-registry.test.ts",
+        "packages/registry/src/first-party/generate.ts",
+        "packages/registry/src/first-party/generated.json",
+        "packages/registry/src/first-party/index.ts"
+      ]
+    },
+    {
+      "title": "fix(computeruse): key_down/key_up must accept bare modifier keys (shift/ctrl/alt/cmd) (#9170)",
+      "prNumber": 9189,
+      "type": "bugfix",
+      "body": "## Summary\n\nM8 (develop `ca204a2027`, \"verb-parity pack\") added the `key_down` / `key_up`\npress-hold primitives, but **holding a bare modifier throws on every platform**:\n\n```\nUnsupported key for nutjs driver: \"shift\"\n```\n\n`resolveKeyCode` ",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/nut-driver-input.test.ts",
+        "plugins/plugin-computeruse/src/platform/nut-driver.ts"
+      ]
+    },
+    {
+      "title": "fix(app): pin crypto graph to lazy vendor chunk + hard chunk-safety gate (#9150)",
+      "prNumber": 9188,
+      "type": "bugfix",
+      "body": "Closes #9150.\n\n## Problem\n\nThe apex deploy lost the `verify-chunk-safety` gate after the cloud-frontend → `packages/app` cutover. The prior restore (on develop) wired the gate **non-blocking** (`continue-on-error: true`) because a *real* `b",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/app/scripts/verify-chunk-safety.mjs",
+        "packages/app/test/verify-chunk-safety.test.ts",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "test(ui): conversation switching/management hardening (#9149)",
+      "prNumber": 9186,
+      "type": "tests",
+      "body": "Closes #9149.\n\nLocks in the conversation-management surface with real tests, proves swipe-nav switches conversations end-to-end, and removes the dead `ChatHistorySwiper` widget. No product/behavior change — pure `packages/ui` testing + dead",
+      "files": [
+        "packages/ui/src/components/chat/widgets/chat-history-swiper.stories.tsx",
+        "packages/ui/src/components/chat/widgets/chat-history-swiper.tsx",
+        "packages/ui/src/components/composites/chat/chat-conversation-item.test.tsx",
+        "packages/ui/src/components/conversations/ConversationsSidebar.stories.tsx",
+        "packages/ui/src/components/conversations/ConversationsSidebar.test.tsx",
+        "packages/ui/src/components/conversations/conversation-sidebar-model.test.ts",
+        "packages/ui/src/components/conversations/conversations.stories.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/conversation-nav.test.ts",
+        "packages/ui/src/components/shell/useShellController.ts",
+        "packages/ui/src/index.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): conversation copy/paste parity across chat surfaces (#9148)",
+      "prNumber": 9185,
+      "type": "feature",
+      "body": "Closes #9148.\n\nUnifies the copy/paste contract between the desktop `ChatView` and the mobile `ContinuousChatOverlay`, reusing the existing `CodeBlock`/`CopyButton`, clipboard, and attachment primitives — no new clipboard or attachment paths",
+      "files": [
+        "packages/ui/src/components/chat/MessageContent.code-block.test.tsx",
+        "packages/ui/src/components/chat/MessageContent.stories.tsx",
+        "packages/ui/src/components/chat/MessageContent.tsx",
+        "packages/ui/src/components/chat/message-parser-code.test.ts",
+        "packages/ui/src/components/chat/message-parser-helpers.ts",
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/components/composites/chat/chat-message-actions.test.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/utils/image-attachment.test.ts",
+        "packages/ui/src/utils/image-attachment.ts"
+      ]
+    },
+    {
+      "title": "docs(local-inference): source the Gemma-4 MTP drafter + Metal spec-decode runbook",
+      "prNumber": 9183,
+      "type": "docs",
+      "body": "Follow-up to #9172 (which landed the separate-drafter MTP contract). That PR's validator now *requires* a bundled drafter — this PR closes the artifact gap behind the candidate's `mtp/MISSING.txt` by **finding and sourcing the drafter**, an",
+      "files": [
+        "plugins/plugin-local-inference/docs/gemma4-mtp-drafter-conversion.md",
+        "plugins/plugin-local-inference/native/verify/PLATFORM_MATRIX.md"
+      ]
+    },
+    {
+      "title": "fix(app): restore the bn.js/crypto chunk-safety gate after the apex cutover (#9150)",
+      "prNumber": 9182,
+      "type": "bugfix",
+      "body": "## What\n\nThe apex moved from `packages/cloud-frontend` to `packages/app` (#9093), which dropped **both** the `vendor-crypto` chunk group and the `verify-chunk-safety.mjs` gate that guard the recurring Rolldown crash (bn.js folds into an eag",
+      "files": [
+        "packages/app/package.json",
+        "packages/app/scripts/verify-chunk-safety.mjs",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-e2e): make the skipped-frontend state loud + explicit, not a silent pass (#9151)",
+      "prNumber": 9181,
+      "type": "bugfix",
+      "body": "## What\n\nAfter the apex cutover deleted `packages/cloud-frontend`, `startCloudStack` takes the \"frontend absent\" branch permanently and only `console.warn`ed before leaving `urls.frontend` empty — a **green-but-empty** signal where a review",
+      "files": [
+        "packages/test/cloud-e2e/src/fixtures/stack.ts",
+        "packages/test/cloud-e2e/src/helpers/test-fixtures.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-infra): pgbouncer session pooler + raised connection ceiling for the apps tenant DB (#8321)",
+      "prNumber": 9179,
+      "type": "bugfix",
+      "body": "## What\n\nCloses the last open **code** gap of the #8321 apps scaling audit — **P0 #2: Postgres connection ceiling**. The tenant Postgres node shipped with the default `max_connections = 100` and **no connection pooler**, so the apps data pl",
+      "files": [
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/README.md",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/cloud-init/tenant-db.yaml.tftpl",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/main.tf",
+        "packages/cloud-infra/cloud/terraform/hetzner/apps-shared/outputs.tf",
+        "packages/cloud-infra/tests/terraform-static.test.ts"
+      ]
+    },
+    {
+      "title": "chore(app): delete game plugins + manifest-driven plugin registration",
+      "prNumber": 9178,
+      "type": "other",
+      "body": "## Summary\n\nTwo related cleanups, requested while finishing #8796:\n\n1. **Delete 5 game plugins** — `defense-of-the-agents`, `clawville`, `scape`, `2004scape`, `hyperscape` — and every reference across the app shell, shared app contract, UI ",
+      "files": [
+        "bun.lock",
+        "knip.json",
+        "packages/agent/src/__tests__/game-tui-mounted-surfaces.test.tsx",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-agent-surface-coverage.test.ts",
+        "packages/agent/src/__tests__/view-bundle-lifecycle.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/app-core/platforms/electrobun/scripts/generate-convergence-audit.ts",
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "packages/app-core/src/registry/entries/apps/clawville.json",
+        "packages/app/knip.json",
+        "packages/app/package.json",
+        "packages/app/src/plugin-registrations.test.ts",
+        "packages/app/src/plugin-registrations.ts",
+        "packages/app/src/types/app-plugin-modules.d.ts",
+        "packages/app/src/types/side-effect-app-modules.d.ts",
+        "packages/app/test/external-api-mock-validation.test.ts",
+        "packages/app/test/fixtures/plugin-view-visual-review.md",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/app/test/route-coverage.test.ts",
+        "packages/app/test/ui-smoke/aesthetic-audit-rules.ts",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/game-apps.spec.ts",
+        "packages/app/test/ui-smoke/plugin-view-cases.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/view-interaction-coverage.test.ts",
+        "packages/app/tsconfig.json",
+        "packages/app/tsconfig.typecheck.json",
+        "packages/app/vite.config.ts",
+        "packages/app/vite/app-side-effect-modules.ts",
+        "packages/elizaos/templates/project/apps/app/vite.config.ts",
+        "packages/elizaos/templates/project/scripts/ensure-elizaos-optional-app-stubs.mjs",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "packages/shared/src/contracts/apps.ts",
+        "packages/ui/src/components/apps/AppsSidebar.stories.tsx",
+        "packages/ui/src/components/apps/helpers-icons.test.ts",
+        "packages/ui/src/components/apps/helpers.ts",
+        "packages/ui/src/components/pages/ViewCatalog.test.tsx",
+        "packages/ui/src/components/views/ViewIcon.tsx",
+        "packages/ui/src/hooks/view-catalog.test.ts",
+        "packages/ui/stories/__screens__/gui-xr-manifest.json",
+        "packages/ui/stories/__screens__/gui/clawville.png",
+        "packages/ui/stories/__screens__/review/clawville.md",
+        "packages/ui/stories/__screens__/tui/clawville.txt",
+        "packages/ui/stories/__screens__/tui/manifest.json",
+        "packages/ui/stories/__screens__/xr/clawville.png",
+        "plugins/app-model-tester/package.json",
+        "plugins/plugin-2004scape/assets/._hero.png",
+        "plugins/plugin-2004scape/assets/hero.png"
+      ]
+    },
+    {
+      "title": "chore(apps): remove game apps (clawville/scape/hyperscape/2004scape/defense-of-the-agents), keep game infra",
+      "prNumber": 9177,
+      "type": "other",
+      "body": "Removes five game **apps** while keeping all generic game **infrastructure**. First of two PRs in a games + registry cleanup (the second moves the first-party registry out of `app-core` to plugin-side ownership).\n\n## What changed\n- **Delete",
+      "files": [
+        ".gitignore",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/api/config-routes.ts",
+        "packages/agent/src/api/plugin-discovery-helpers.ts",
+        "packages/agent/src/config/env-vars.ts",
+        "packages/app-core/src/api/server-config-filter.ts",
+        "packages/app/package.json",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): seed a default Springboard favorites dock on first run (#9144)",
+      "prNumber": 9176,
+      "type": "bugfix",
+      "body": "## What\n\nThe iOS-like Springboard shipped with an **empty favorites dock** — `emptyLayout()` returns no favorites and `readSpringboardLayout()` returned it on first run, so a fresh install showed no dock at all (`springboard-layout.ts:35-37",
+      "files": [
+        "packages/ui/src/state/springboard-layout.test.ts",
+        "packages/ui/src/state/springboard-layout.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): paint the chat drag-handle bar — was hardcoded opacity-0 (#9142)",
+      "prNumber": 9175,
+      "type": "bugfix",
+      "body": "## What\n\nThe continuous-chat sheet grabber + collapsed-pill expose a grabbable, gesture-wired, keyboard-operable handle, but the **visible bar never painted**: both the `SheetGrabber` bar and the `PillHandle` bar `<span>` were hardcoded `op",
+      "files": [
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-e2e.mjs"
+      ]
+    },
+    {
+      "title": "feat(computeruse): wire ocr + detect_elements to real OCR (trycua parity, #9170 M7)",
+      "prNumber": 9173,
+      "type": "feature",
+      "body": "**P0 fix** from the trycua/cua parity issue #9170 (M7).\n\n`COMPUTER_USE` advertises `ocr` and `detect_elements` in its action enum, but `computer-use-service.ts` **stubbed both** (\"not available on local machines\") — even though plugin-visio",
+      "files": [
+        "plugins/plugin-computeruse/src/approval-manager.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): enforce Gemma-4 separate-drafter MTP in the manifest contract",
+      "prNumber": 9172,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe #9033 Gemma-4 cutover moved the **catalog** and **runtime** to separate-drafter MTP — every tier bundles `mtp/drafter-<tier>.gguf`, loaded by llama.cpp as `-md … --spec-type draft-mtp` — but left the **manifest validator + s",
+      "files": [
+        "plugins/plugin-local-inference/native/verify/PLATFORM_MATRIX.md",
+        "plugins/plugin-local-inference/native/verify/evidence/platform/darwin-arm64-metal-gemma-gen.log",
+        "plugins/plugin-local-inference/native/verify/evidence/platform/darwin-arm64-metal.json",
+        "plugins/plugin-local-inference/src/services/downloader.test.ts",
+        "plugins/plugin-local-inference/src/services/manifest/eliza-1.manifest.v1.json",
+        "plugins/plugin-local-inference/src/services/manifest/manifest.test.ts",
+        "plugins/plugin-local-inference/src/services/manifest/schema.ts",
+        "plugins/plugin-local-inference/src/services/manifest/validator.ts",
+        "plugins/plugin-local-inference/src/services/ram-budget-cache.test.ts"
+      ]
+    },
+    {
+      "title": "test(cloud-e2e): repoint frontend boot to packages/app web dev (#9151)",
+      "prNumber": 9171,
+      "type": "tests",
+      "body": "Fixes #9151.\n\n## Problem\n\nAfter #9093 deleted `packages/cloud-frontend`, `startCloudStack` (`packages/test/cloud-e2e/src/fixtures/stack.ts`) hit a permanent `console.warn` skip branch (cloud-frontend dir absent), leaving `urls.frontend = \"\"",
+      "files": [
+        "packages/test/cloud-e2e/src/fixtures/env.ts",
+        "packages/test/cloud-e2e/src/fixtures/stack.ts",
+        "packages/test/cloud-e2e/src/helpers/test-fixtures.ts"
+      ]
+    },
+    {
+      "title": "feat(local-inference): prefer GPU lib target on CUDA hosts (bundle delivery, #9105)",
+      "prNumber": 9168,
+      "type": "feature",
+      "body": "Follow-up to #9163. The downloader now derives `preferGpu` from the device's probed backends (`availableBackends.includes(\"cuda\")`) and passes it to `resolveHostLibTargets`, so a CUDA-capable host pulls the `…-cuda` fused-lib set when the b",
+      "files": [
+        "plugins/plugin-local-inference/src/services/downloader.ts"
+      ]
+    },
+    {
+      "title": "chore(agent-orchestrator): remove dead gemini/aider/hermes adapter placeholders (#9146)",
+      "prNumber": 9167,
+      "type": "other",
+      "body": "## Summary\n\nSlice of #9146 (its Q4 \"resolve placeholder adapters: wire or remove\"). The `gemini` / `aider` / `hermes` adapter types were dead placeholders — they appeared **only** in `KNOWN_ADAPTER_TYPES` in `plugins/plugin-agent-orchestrat",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/services/task-agent-routing.ts",
+        "plugins/plugin-openai/__tests__/cerebras-spawn-subagent-refusal.live.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): make chat drag-handle bar visible off-iOS (#9142)",
+      "prNumber": 9166,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the invisible chat drag-handle reported in #9142 (PART 1 — the handle fix; the broader transient-glitch test harness, tasks 3-7, is deferred to its own PR per the issue triage).\n\nThe grabber bar `<span>` in **both** `Sheet",
+      "files": [
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx"
+      ]
+    },
+    {
+      "title": "feat(computeruse): clipboard + get_cursor_position (trycua/cua parity, #9105)",
+      "prNumber": 9165,
+      "type": "feature",
+      "body": "trycua/cua feature-parity (EPIC #9105). trycua's cua-driver exposes a `get_cursor_position` MCP tool and clipboard control; we had neither exposed as agent capabilities.\n\n## Changes\n- **CLIPBOARD action registered.** `clipboardAction` (read",
+      "files": [
+        "plugins/plugin-computeruse/AGENTS.md",
+        "plugins/plugin-computeruse/CLAUDE.md",
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-input.real.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/cua-parity-surface.test.ts",
+        "plugins/plugin-computeruse/src/actions/use-computer.ts",
+        "plugins/plugin-computeruse/src/approval-manager.ts",
+        "plugins/plugin-computeruse/src/index.ts",
+        "plugins/plugin-computeruse/src/platform/clipboard.test.ts",
+        "plugins/plugin-computeruse/src/platform/clipboard.ts",
+        "plugins/plugin-computeruse/src/platform/desktop.ts",
+        "plugins/plugin-computeruse/src/platform/driver.ts",
+        "plugins/plugin-computeruse/src/platform/nut-driver.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-computeruse/src/types.ts"
+      ]
+    },
+    {
+      "title": "perf(ui): guard readiness poll against redundant setAgentStatus re-renders (#9141)",
+      "prNumber": 9164,
+      "type": "other",
+      "body": "## Slice of #9141 — readiness-poll re-render guard\n\nThis is the smallest standalone win called out in the issue triage: the 1.5s readiness poll in `packages/ui/src/state/useChatLifecycle.ts`. While the agent is \"waking up…\", the poll's `ref",
+      "files": [
+        "packages/ui/src/state/useChatLifecycle.readiness.test.ts",
+        "packages/ui/src/state/useChatLifecycle.ts"
+      ]
+    },
+    {
+      "title": "feat(local-inference): wire fused-lib bundle delivery (manifest lib[] + downloader → <bundleRoot>/lib)",
+      "prNumber": 9163,
+      "type": "feature",
+      "body": "## Wire the fused-lib bundle-delivery path (#9105 / local-inference)\n\nCloses the last unwired piece of fused-lib delivery I flagged in the pipeline audit: the desktop runtime already resolves a **bundle-local** fused lib at `<bundleRoot>/li",
+      "files": [
+        "plugins/plugin-local-inference/src/services/downloader.ts",
+        "plugins/plugin-local-inference/src/services/lib-target.test.ts",
+        "plugins/plugin-local-inference/src/services/lib-target.ts",
+        "plugins/plugin-local-inference/src/services/manifest/index.ts",
+        "plugins/plugin-local-inference/src/services/manifest/schema.ts",
+        "plugins/plugin-local-inference/src/services/manifest/types.ts"
+      ]
+    },
+    {
+      "title": "refactor(app): remove the top-down LifeOps aggregate surface — Stage 1 (#8833)",
+      "prNumber": 9162,
+      "type": "refactor",
+      "body": "## LifeOps eradication — Stage 1 (app-shell / UI de-hardcode)\n\nPer the decomposition direction: **LifeOps is no longer a thing unto itself** — it was split into independent plugins (inbox, calendar, health, blocker, scheduling, finances, go",
+      "files": [
+        "packages/app-core/platforms/electrobun/src/application-menu.ts",
+        "packages/app/src/deep-link-handler.ts",
+        "packages/app/src/deep-link-routing.test.ts",
+        "packages/app/src/deep-link-routing.ts",
+        "packages/app/src/main.tsx",
+        "packages/ui/src/components/pages/AppDetailsView.stories.tsx",
+        "packages/ui/src/components/pages/page-scoped-conversations.ts",
+        "packages/ui/src/components/settings/permission-types.ts",
+        "packages/ui/src/components/shell/usePromptSuggestions.ts",
+        "packages/ui/src/navigation/index.ts",
+        "packages/ui/src/platform/assistant-launch-payload.test.ts",
+        "packages/ui/src/platform/assistant-launch-payload.ts",
+        "packages/ui/src/state/chat-conversation-guards.ts",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/src/widgets/registry.ts"
+      ]
+    },
+    {
+      "title": "chore(cloud): remove dead cloud-frontend refs left by the apex cutover (#9093)",
+      "prNumber": 9161,
+      "type": "other",
+      "body": "## What\n\nFollow-up cleanup to **#9093** (cloud-frontend → packages/app apex cutover), which merged the package deletion but left a handful of dead references to the now-deleted `packages/cloud-frontend`.\n\n## Why these are safe / non-urgent\n",
+      "files": [
+        "packages/app-core/scripts/check-i18n.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.mjs",
+        "packages/cloud-shared/src/lib/constants/agent-flavors.ts",
+        "packages/shared/src/hardware-catalog/index.ts"
+      ]
+    },
+    {
+      "title": "chore: remove dangling cloud-frontend refs the #9093 cutover left behind",
+      "prNumber": 9158,
+      "type": "other",
+      "body": "## Summary\n\nFollow-up to the #9093 apex cutover (which deleted `packages/cloud-frontend` and is now on `develop`). That PR's base predated several `cloud-frontend` references that landed on `develop` in parallel, so the merge left **danglin",
+      "files": [
+        "packages/app-core/scripts/check-i18n.mjs",
+        "packages/app-core/scripts/lib/agent-source-watcher.mjs",
+        "scripts/cloud/mock-stack-up.mjs",
+        "scripts/e2e-recordings/audit-ui-coverage.mjs",
+        "scripts/e2e-recordings/suites.mjs"
+      ]
+    },
+    {
+      "title": "feat(computeruse): M3 — unified ScreenState + DirtyTileDescriber + dHash-gated describe-skip + token counters (#9105)",
+      "prNumber": 9156,
+      "type": "feature",
+      "body": "## #9105 M3 — Unified `ScreenState` + dHash-gated description\n\nCompletes the **P1 M3** milestone of the Computer Use × Vision EPIC (#9105). Additive on existing seams — no second scheduler, no hard cross-plugin dep, no second capture stack.",
+      "files": [
+        "plugins/plugin-computeruse/AGENTS.md",
+        "plugins/plugin-computeruse/CLAUDE.md",
+        "plugins/plugin-computeruse/src/__tests__/computer-use-agent.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/mobile-cascade.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/scene-builder.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/screen-state.test.ts",
+        "plugins/plugin-computeruse/src/actions/use-computer-agent.ts",
+        "plugins/plugin-computeruse/src/scene/scene-builder.ts",
+        "plugins/plugin-computeruse/src/scene/screen-state.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-vision/src/dirty-tile-describer.test.ts",
+        "plugins/plugin-vision/src/dirty-tile-describer.ts"
+      ]
+    },
+    {
+      "title": "test(app): extract + unit-test the all-views aesthetic-audit rules (#8796)",
+      "prNumber": 9140,
+      "type": "tests",
+      "body": "The brand-color / verdict policy that is the heart of #8796's acceptance criteria — **no-blue detection**, orange/black/blue **bucketing**, the **TUI/overlay-canvas exemptions**, and **verdict precedence** — lived inline inside the Playwrig",
+      "files": [
+        "packages/app/test/audit/aesthetic-audit-rules.test.ts",
+        "packages/app/test/ui-smoke/aesthetic-audit-rules.ts",
+        "packages/app/test/ui-smoke/all-views-aesthetic-audit.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(elizacloud,ci): correct embedding 429-retry error contract + run cloud-script guards",
+      "prNumber": 9139,
+      "type": "bugfix",
+      "body": "## What\n\nThree CI-regression follow-ups surfaced while reviewing the recently-landed PRs **#9108 / #9109 / #9112** (a multi-agent review of the CI-regression batch). All are fixes to code already on `develop`.\n\n### 1. `plugin-elizacloud` em",
+      "files": [
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts",
+        "packages/scripts/test-cloud-run.mjs",
+        "plugins/plugin-elizacloud/src/models/embeddings.ts"
+      ]
+    },
+    {
+      "title": "fix(health): route the health planner through OptimizedPromptService (#8795)",
+      "prNumber": 9137,
+      "type": "bugfix",
+      "body": "Acceptance criterion #2 of #8795 — \"Route LifeOps LLM call sites through OptimizedPromptService\". The `health_checkin` task is fully defined in the taxonomy, scorers, and datasets but had **zero production consumer**: no call site invoked `",
+      "files": [
+        "plugins/plugin-health/src/actions/health.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): wire developerModeEnabled in App.tsx view router (fixes TS2304 breaking ui typecheck on develop)",
+      "prNumber": 9135,
+      "type": "bugfix",
+      "body": "## The bug (live on develop)\n`renderViewRouterContent` in `packages/ui/src/App.tsx` gates developerOnly app-shell pages on `developerModeEnabled`, but that name is **never defined, imported, or passed** — a live `TS2304: Cannot find name 'd",
+      "files": [
+        "packages/ui/src/App.tsx"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): extract + test the provider sandbox-registry resolution (#8756)",
+      "prNumber": 9134,
+      "type": "tests",
+      "body": "`docker-sandbox-provider.ts` already exports a tested family of pure `env -> value` helpers (`resolveDockerSandboxImage`, `requiresHeadscaleRoute`, `buildStewardProxyEnv`, `resolveContainerPort`, …). The **provider-side sandbox-registry res",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/docker-sandbox-headscale-route.test.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "docs(computeruse): add referenced-but-missing AOSP_SYSTEM_APP.md (#9105 M6)",
+      "prNumber": 9133,
+      "type": "docs",
+      "body": "Milestone **M6** (EPIC #9105), documentation slice. CLAUDE.md + README.md link `docs/AOSP_SYSTEM_APP.md` but it was missing — this adds the AOSP computer-use deployment contract (platform-signed system app; SurfaceControl/READ_FRAME_BUFFER ",
+      "files": [
+        "plugins/plugin-computeruse/docs/AOSP_SYSTEM_APP.md"
+      ]
+    },
+    {
+      "title": "feat(computeruse): per-Scene grounding cache in Cascade (#9105 M5)",
+      "prNumber": 9132,
+      "type": "feature",
+      "body": "Focused core of milestone **M5** (EPIC #9105): the **predict/ground split** as a per-Scene grounding cache.\n\nGrounding the same target (ref/rationale) on the same Scene is deterministic, so the cheap GROUND step is memoized: a repeat resolu",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/cascade-grounding-cache.test.ts",
+        "plugins/plugin-computeruse/src/actor/cascade.ts"
+      ]
+    },
+    {
+      "title": "test(mobile): extract + test the iOS store engine-embed gate (#8861)",
+      "prNumber": 9131,
+      "type": "tests",
+      "body": "Closes the one untested gap that could silently re-introduce #8861 (a store IPA shipping WITHOUT the on-device Bun engine, so \"start local agent\" hard-fails).\n\nTwo pieces of code decide whether the engine ships: `shouldIncludeIosFullBunEngi",
+      "files": [
+        "packages/app/scripts/ios-store-engine-gate.mjs",
+        "packages/app/scripts/ios-store-engine-gate.test.mjs",
+        "packages/app/scripts/mobile-release-preflight.mjs"
+      ]
+    },
+    {
+      "title": "feat(computeruse): Brain frame-dHash describe cache + token counters (#9105 M3)",
+      "prNumber": 9130,
+      "type": "feature",
+      "body": "Focused, low-risk core of milestone **M3** (EPIC #9105): the **dHash-gated describe skip** — the dominant CUA-loop token saving.\n\n## Why\nThe Brain calls `useModel(IMAGE_DESCRIPTION)` every step. The WS2 MemoryArbiter only dedups that for **",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/brain-dhash-cache.test.ts",
+        "plugins/plugin-computeruse/src/actor/brain.ts"
+      ]
+    },
+    {
+      "title": "test(task-coordinator): cover the orchestrator-status universal slash command (#8790)",
+      "prNumber": 9129,
+      "type": "tests",
+      "body": "The only non-core-plugin command contribution on develop — task-coordinator's `/orchestrator-status` (`plugins/plugin-task-coordinator/src/orchestrator-command.ts`, landed by #9104 to prove the universal slash-command contract with a non-co",
+      "files": [
+        "plugins/plugin-task-coordinator/__tests__/unit/orchestrator-command.test.ts"
+      ]
+    },
+    {
+      "title": "feat(computeruse): structured ScreenshotErrorCode contract for capture failures (#9105 M3.5)",
+      "prNumber": 9128,
+      "type": "feature",
+      "body": "## What\n\nAdds a structured, machine-readable error contract for screenshot capture failures in `@elizaos/plugin-computeruse` — the \"structured `ScreenshotErrorCode` contract\" called for in the Computer-Use × Vision EPIC (#9105, §6 / M3.5).\n",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/screenshot-errors.test.ts",
+        "plugins/plugin-computeruse/src/platform/screenshot-errors.ts",
+        "plugins/plugin-computeruse/src/platform/screenshot.ts"
+      ]
+    },
+    {
+      "title": "docs(ios): add #8861 on-device/TestFlight full-Bun verification runbook (#8861)",
+      "prNumber": 9127,
+      "type": "docs",
+      "body": "## Summary\n\nAdds the missing maintainer checklist for #8861. The **code + CI side is landed on develop**\n(PRs #8859/#8860): `apple-store-release.yml` `build-ios` sets the store/full-Bun env, stages\nthe iOS agent bundle, and `preflight:ios:s",
+      "files": [
+        ".github/issue-evidence/8861-ios-fullbun-testflight-runbook.md"
+      ]
+    },
+    {
+      "title": "chore(android): de-slop stale qwen3.5/head_dim=256 comments to Gemma-4 reality (#8848)",
+      "prNumber": 9126,
+      "type": "other",
+      "body": "## Summary\n\nCloses the last host-doable code item for #8848. PR #9094 corrected the C++ JNI\n(`elizavoice-jni.cpp`) to the Gemma-4 cutover (#9033) reality but **missed two Android\nJava files**, which still described the shipped tiers as `qwe",
+      "files": [
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaBionicInferenceServer.java"
+      ]
+    },
+    {
+      "title": "feat(computeruse): per-notch scroll + manual-drag fallback (#9105 M3.5)",
+      "prNumber": 9125,
+      "type": "feature",
+      "body": "Milestone **M3.5** of EPIC #9105 — nutjs input-correctness robustness (adopted from open-computer-use).\n\n## Changes\n- **Per-notch scroll**: `nutScroll` emits one wheel notch at a time (`clampScrollNotches` → 1..20, 8ms pacing) so coalescing",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/nut-driver-input.test.ts",
+        "plugins/plugin-computeruse/src/platform/nut-driver.ts"
+      ]
+    },
+    {
+      "title": "test(lifeops): pin retry-beats-terminal on the last dispatch step (#8833)",
+      "prNumber": 9124,
+      "type": "tests",
+      "body": "Closes the one net-new pure-logic gap in the LifeOps dispatch-policy suite (#8833): `decideDispatchPolicy` evaluates the retry / rate-limit branches **before** the `isLastStep` terminal check, so a transient failure on the LAST step intenti",
+      "files": [
+        "plugins/plugin-personal-assistant/test/contracts.test.ts"
+      ]
+    },
+    {
+      "title": "chore(vision): silence biome noUnusedFunctionParameters in runToggleSubMode (#9105)",
+      "prNumber": 9123,
+      "type": "other",
+      "body": "Tiny follow-up to the M2+M4a landing (#9121): `runToggleSubMode` takes a `message` param it doesn't use, which biome flags as `lint/correctness/noUnusedFunctionParameters`. Prefix it `_message`.\n\nIndependently validated the merged M2+M4a on",
+      "files": [
+        "plugins/plugin-vision/src/action.ts"
+      ]
+    },
+    {
+      "title": "feat(vision): GET_SCREEN element-merge core (#9105 M2)",
+      "prNumber": 9122,
+      "type": "feature",
+      "body": "Advances the next un-shipped P0 of the Computer Use × Vision EPIC (#9105) — **Slice 2 / M2, the GET_SCREEN element merge** — as a pure, dependency-free module, exactly mirroring how M1 (#9107) shipped its `computeruse-ocr-bridge.ts` (struct",
+      "files": [
+        "plugins/plugin-vision/src/get-screen-elements.test.ts",
+        "plugins/plugin-vision/src/get-screen-elements.ts"
+      ]
+    },
+    {
+      "title": "feat(vision): GET_SCREEN action + native Windows.Media.Ocr coord provider (#9105 M2+M4a)",
+      "prNumber": 9121,
+      "type": "feature",
+      "body": "Milestones **M2 (GET_SCREEN)** + **M4a (native Windows OCR)** of EPIC #9105. Builds on M1 (#9107).\n\n## M4a — native zero-token OCR-with-coords (Windows)\n`WindowsMediaOcrService` runs the built-in WinRT `Windows.Media.Ocr` engine via Windows",
+      "files": [
+        "plugins/plugin-vision/src/action.ts",
+        "plugins/plugin-vision/src/get-screen.test.ts",
+        "plugins/plugin-vision/src/get-screen.ts",
+        "plugins/plugin-vision/src/index.ts",
+        "plugins/plugin-vision/src/ocr-service-windows.test.ts",
+        "plugins/plugin-vision/src/ocr-service-windows.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): revert #9033 catalog/downloader from #9114 (green develop)",
+      "prNumber": 9120,
+      "type": "bugfix",
+      "body": "Reverts the `#9033` catalog/downloader changes that landed via #9114 and turned develop's tests red.\n\n#9114 bundled two things: (1) the Kokoro TTS + Whisper STT cloud-voice integration (cloud-api routes, bindings, live test) — **kept**, and",
+      "files": [
+        "packages/shared/src/local-inference/catalog.ts",
+        "plugins/plugin-local-inference/src/services/downloader.ts"
+      ]
+    },
+    {
+      "title": "test(app-core): guard the provisioning-host redis reconcile loop (#8756)",
+      "prNumber": 9119,
+      "type": "tests",
+      "body": "## What\n\n`#8756` notes the provisioning-worker code is merged and only operator steps remain. One of those — setting `SANDBOX_REGISTRY_REDIS_URL` (gates #8621 connector inbound routing) — is injected into the host `.env.local` solely by the",
+      "files": [
+        "packages/app-core/src/services/__tests__/deploy-provisioning-worker-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "test(calendar): add calendar_extract LifeOps capability behavior scenario (#8795)",
+      "prNumber": 9118,
+      "type": "tests",
+      "body": "## Summary\n\nPart of #8795 (LifeOps end-to-end scenario coverage + per-capability GEPA loop), scoped to **one capability done well**: a behavior scenario for the `calendar_extract` LifeOps capability.\n\nThe `calendar_extract` capability is al",
+      "files": [
+        "plugins/plugin-personal-assistant/test/scenarios/calendar-extract-capability.scenario.ts"
+      ]
+    },
+    {
+      "title": "ci: repair PRR workflow ref",
+      "prNumber": 9117,
+      "type": "other",
+      "body": "## Summary\n- update the PRR reusable workflow caller from the removed `elizaOS/prr@feed` ref to `elizaOS/prr@master`\n- keep the paired `prr_ref` input in sync with the `uses:` ref, per the workflow contract comment\n\n## Why\nThe `feed` ref no",
+      "files": [
+        ".github/workflows/run-prr.yml"
+      ]
+    },
+    {
+      "title": "chore: add eliza-dl standalone model downloader util",
+      "prNumber": 9116,
+      "type": "other",
+      "body": "Lands the one remaining parked worktree util — a standalone Eliza-1 (Gemma-4) model downloader that drives `@elizaos/plugin-local-inference`'s `startDownload`/`getDownloads` facade and prints progress. Useful for exercising the local-infere",
+      "files": [
+        "eliza-dl.mjs"
+      ]
+    },
+    {
+      "title": "feat(vision,computeruse): unify full-screen OCR onto the coord seam + auto-register at boot (#9105 M1)",
+      "prNumber": 9115,
+      "type": "feature",
+      "body": "## #9105 M1 — fix the doubly-broken full-screen OCR seam\n\nCloses the M1 milestone of #9105. Removes the dominant token cost by making full-screen OCR actually work, **additively on the existing seams** (no second scheduler, no hard dependen",
+      "files": []
+    },
+    {
+      "title": "feat(voice): Kokoro TTS + Whisper STT free cloud voice + fix #9033 local download",
+      "prNumber": 9114,
+      "type": "feature",
+      "body": "## Summary\n\nTwo related pieces of voice work:\n\n### 1. Kokoro TTS + Whisper STT as the free cloud voice path\n- `packages/cloud-api/v1/voice/tts/route.ts` — when `KOKORO_TTS_URL` is set, synthesize via the self-hosted Kokoro service (`POST /a",
+      "files": [
+        "packages/cloud-api/__tests__/voice-kokoro-whisper-live.test.ts",
+        "packages/cloud-api/v1/voice/stt/route.ts",
+        "packages/cloud-api/v1/voice/tts/route.ts",
+        "packages/cloud-shared/src/types/cloud-worker-env.ts",
+        "packages/shared/src/local-inference/catalog.ts",
+        "plugins/plugin-local-inference/src/services/downloader.ts"
+      ]
+    },
+    {
+      "title": "fix(inbox): consume the optimized inbox_triage prompt (#8795)",
+      "prNumber": 9113,
+      "type": "bugfix",
+      "body": "## What\n\n`inbox_triage` is in the LifeOps optimization taxonomy (`OPTIMIZED_PROMPT_TASKS`), but the inbox classifier never consulted `OptimizedPromptService` — so a GEPA-optimized `inbox_triage` artifact could never reach it. `morning_brief",
+      "files": [
+        "plugins/plugin-inbox/src/inbox/triage-classifier.ts",
+        "plugins/plugin-inbox/test/triage-optimized-prompt.test.ts"
+      ]
+    },
+    {
+      "title": "fix: repair CI regressions in app views and health checks",
+      "prNumber": 9112,
+      "type": "bugfix",
+      "body": "## Summary\n- harden app-shell routing for nested /apps/*/tui views and fix Facewear TUI resolution\n- align Hyperliquid smoke fixtures with the current positions DTO and guard stale numeric fields\n- stabilize provisioning worker heartbeat te",
+      "files": [
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health.ts",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/apps/internal-tool-apps.test.ts",
+        "packages/ui/src/navigation/index.ts",
+        "plugins/plugin-elizacloud/src/models/embeddings.ts",
+        "plugins/plugin-facewear/src/register.ts",
+        "plugins/plugin-hyperliquid-app/src/HyperliquidPositionsPanel.tsx"
+      ]
+    },
+    {
+      "title": "docs(packaging): fix stale brand namespace in PUBLISHING_GUIDE (#7770)",
+      "prNumber": 9111,
+      "type": "bugfix",
+      "body": "## What\n\n`packages/app-core/packaging/PUBLISHING_GUIDE.md` still used the retired `eliza-ai` GitHub org and the old `ai.eliza.Eliza` flatpak app-id, diverging from the actual packaging manifests and the per-channel release-secrets playbooks",
+      "files": [
+        "packages/app-core/packaging/PUBLISHING_GUIDE.md"
+      ]
+    },
+    {
+      "title": "test(local-inference): host-mockable unit tests for the multi-backend FFI selector seam (#9033)",
+      "prNumber": 9110,
+      "type": "tests",
+      "body": "## What\n\nAdds host-mockable unit tests for the **TS-side in-process FFI backend selector** ahead of the Gemma 4 multi-backend `libelizainference` device kernels landing (#9033). Tests-only, bounded — no source behavior change.\n\nThe native s",
+      "files": [
+        "plugins/plugin-local-inference/src/services/__tests__/backend-selector.precedence.test.ts"
+      ]
+    },
+    {
+      "title": "test(cloud): guard provisioning-worker SANDBOX_REGISTRY_REDIS_URL .env.local reconcile (#8756)",
+      "prNumber": 9109,
+      "type": "tests",
+      "body": "## What\n\nAdds a focused regression test for the operator-step bug tracked in #8756: the `deploy-eliza-provisioning-worker.yml` deploy must reconcile `SANDBOX_REGISTRY_REDIS_URL` into the worker's systemd `EnvironmentFile` (`/opt/eliza/cloud",
+      "files": [
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "feat(vision,computeruse): unify full-screen OCR onto the coord seam + auto-register at boot (#9105 M1)",
+      "prNumber": 9107,
+      "type": "feature",
+      "body": "First slice (M1) of the Computer-Use × Vision integration EPIC #9105.\n\n## Problem (two verified defects)\n1. `plugin-computeruse/src/scene/ocr-adapter.ts` consumed the **line-only** `OcrProvider` registry, not the coord-aware `CoordOcrProvid",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/ocr-adapter-coord-seam.test.ts",
+        "plugins/plugin-computeruse/src/scene/ocr-adapter.ts",
+        "plugins/plugin-vision/build.ts",
+        "plugins/plugin-vision/src/computeruse-ocr-bridge.test.ts",
+        "plugins/plugin-vision/src/computeruse-ocr-bridge.ts",
+        "plugins/plugin-vision/src/index.ts"
+      ]
+    },
+    {
+      "title": "test(personal-assistant): OWNER vs AGENT permission-matrix harness + validation matrix doc (#8833)",
+      "prNumber": 9106,
+      "type": "tests",
+      "body": "## What\n\nAdds the consolidated OWNER vs AGENT permission-matrix harness and the consolidated live-validation matrix doc requested by issue #8833 (§2/§5: validate the owner-vs-agent permission matrix for the split LifeOps surface, and add du",
+      "files": [
+        "plugins/plugin-personal-assistant/docs/owner-agent-validation-matrix.md",
+        "plugins/plugin-personal-assistant/package.json",
+        "plugins/plugin-personal-assistant/test/owner-agent-permission-matrix.integration.test.ts"
+      ]
+    },
+    {
+      "title": "test(task-coordinator): prove universal slash-command contract with a non-core plugin (#8790)",
+      "prNumber": 9104,
+      "type": "tests",
+      "body": "## What\n\nProves the universal slash-command / connector-command contract (#8790) **end to end from a real, non-core, view-owning plugin** — and adds a regression test. Previously the contract was only exercised by core commands and an inlin",
+      "files": [
+        "bun.lock",
+        "packages/agent/src/api/commands-routes.noncore-plugin.test.ts",
+        "packages/test/vitest/default.config.ts",
+        "plugins/plugin-task-coordinator/AGENTS.md",
+        "plugins/plugin-task-coordinator/CLAUDE.md",
+        "plugins/plugin-task-coordinator/package.json",
+        "plugins/plugin-task-coordinator/src/index.ts",
+        "plugins/plugin-task-coordinator/src/orchestrator-command.ts",
+        "plugins/plugin-task-coordinator/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(views): strip springboard scrim + remove orange chat glow bars (#8796)",
+      "prNumber": 9103,
+      "type": "bugfix",
+      "body": "Rebased revival of prior #8796 work onto current `develop` (single clean commit).\n\n## What\n- **`ViewCatalog.tsx`** — drop the frosted `bg-bg/55 backdrop-blur-2xl` scrim (and its `border-b`) so the view catalog is fully transparent over the ",
+      "files": [
+        "packages/ui/src/components/pages/ViewCatalog.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx"
+      ]
+    },
+    {
+      "title": "feat(ui): add proactive-suggestions setting (off/subtle/chatty) (#8792)",
+      "prNumber": 9102,
+      "type": "feature",
+      "body": "## What\n\nAdds a user-facing **Proactive suggestions** control (off / subtle / chatty) to the **Capabilities** settings section that drives `ELIZA_PROACTIVE_INTERACTIONS`.\n\nCloses the open gap on #8792: the runtime/gate already consumes `ELI",
+      "files": [
+        "packages/ui/src/components/settings/CapabilitiesSection.test.tsx",
+        "packages/ui/src/components/settings/CapabilitiesSection.tsx"
+      ]
+    },
+    {
+      "title": "fix(local-inference): #8848 required-kernels activation gate + startup kernel-set log + M9 hf-search delete",
+      "prNumber": 9100,
+      "type": "bugfix",
+      "body": "Finishes three residual local-inference gaps that are still open on develop after the #8809/#8848 landings (#9094/#9095/#9076). These are the parts **not** already covered by the recent arbiter-footprint / context-fit work.\n\n## #8848 §3 — r",
+      "files": [
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md",
+        "plugins/plugin-local-inference/src/services/active-model.ts",
+        "plugins/plugin-local-inference/src/services/hf-search.test.ts",
+        "plugins/plugin-local-inference/src/services/hf-search.ts",
+        "plugins/plugin-local-inference/src/services/manifest/index.ts",
+        "plugins/plugin-local-inference/src/services/required-kernels-gate.test.ts"
+      ]
+    },
+    {
+      "title": "fix(tui): re-export getTerminalViewFactory + TerminalViewMountOptions from the barrel",
+      "prNumber": 9099,
+      "type": "bugfix",
+      "body": "While verifying #8918 (whose cloud-view scenario is already on develop, commit f393a45485), found that `getTerminalViewFactory`, `TerminalViewFactory`, and `TerminalViewMountOptions` are defined in `packages/tui/src/view-registry.ts` but no",
+      "files": [
+        "packages/tui/src/index.ts"
+      ]
+    },
+    {
+      "title": "test(local-inference): cover HF download proxy routing + cloud-api worker route (#8807)",
+      "prNumber": 9098,
+      "type": "tests",
+      "body": "## What\n\nAdds unit-test coverage for the HuggingFace download proxy used by the local-model install flow (issue #8807, \"Local-model install reliability\"). No production code changes — tests only.\n\n### `packages/shared` — `resolveHfDownloadB",
+      "files": [
+        "packages/cloud-api/__tests__/hf-proxy-route.test.ts",
+        "packages/shared/src/local-inference/hf-proxy.test.ts"
+      ]
+    },
+    {
+      "title": "docs(os): release-secrets maintainer playbooks + consolidated checklist (#7770)",
+      "prNumber": 9097,
+      "type": "docs",
+      "body": "## What\n\nAdds the missing maintainer documentation for the cross-platform release pipeline tracked in #7770. The publish workflows are already implemented; this fills the documentation gap with per-channel credential playbooks plus one cons",
+      "files": [
+        "packages/os/docs/release-secrets-android.md",
+        "packages/os/docs/release-secrets-apple.md",
+        "packages/os/docs/release-secrets-checklist.md",
+        "packages/os/docs/release-secrets-flathub.md",
+        "packages/os/docs/release-secrets-homebrew.md",
+        "packages/os/docs/release-secrets-snap.md",
+        "packages/os/docs/release-secrets-windows.md"
+      ]
+    },
+    {
+      "title": "chore(local-inference): drop stale qwen35 TokenizerFamily member (#9033)",
+      "prNumber": 9096,
+      "type": "other",
+      "body": "## What\n\nRemove the stale `qwen35` member from the `TokenizerFamily` union in `packages/shared/src/local-inference/types.ts`. The Gemma cutover removed every active runtime reference to it, so it was a dead union member.\n\n- `packages/shared",
+      "files": [
+        "packages/app/test/ui-smoke/model-download-deferral.spec.ts",
+        "packages/shared/src/local-inference/types.ts",
+        "plugins/plugin-aosp-local-inference/src/aosp-local-inference-bootstrap.ts"
+      ]
+    },
+    {
+      "title": "feat(local-inference): opt-in f16 KV when the host has headroom (#8809 AC#4)",
+      "prNumber": 9095,
+      "type": "feature",
+      "body": "## What & why\n\nCompletes the **second half of #8809 AC#4** — \"larger context / more accurate KV when there's headroom.\" The memory-aware context selector (#9076) already sized the q8_0 KV window to free RAM; this adds the documented `prefer",
+      "files": [
+        "packages/shared/src/local-inference/CONTEXT_SCALING.md",
+        "plugins/plugin-local-inference/src/services/active-model-context-fit.test.ts",
+        "plugins/plugin-local-inference/src/services/active-model.ts",
+        "plugins/plugin-local-inference/src/services/context-fit.test.ts",
+        "plugins/plugin-local-inference/src/services/context-fit.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): live arbiter footprint accounting + device-class context tests (#8809) + Gemma KV de-slop (#8848)",
+      "prNumber": 9094,
+      "type": "bugfix",
+      "body": "## What & why\n\nCloses the remaining **host-doable** gaps in #8809 (local-inference memory management) and the **host-doable** slop in #8848 (on-device optimization enforcement). The genuinely device/training-gated items are scoped honestly ",
+      "files": [
+        "packages/app-core/platforms/android/app/src/main/elizavoice-jni/elizavoice-jni.cpp",
+        "plugins/plugin-local-inference/docs/MEMORY_ARBITER.md",
+        "plugins/plugin-local-inference/src/services/context-fit.test.ts",
+        "plugins/plugin-local-inference/src/services/engine.ts",
+        "plugins/plugin-local-inference/src/services/memory-arbiter.test.ts",
+        "plugins/plugin-local-inference/src/services/service.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): consolidate cloud-frontend into @elizaos/ui — repoint apex to packages/app, delete cloud-frontend",
+      "prNumber": 9093,
+      "type": "feature",
+      "body": "## Consolidate cloud-frontend into `@elizaos/ui` — repoint the apex to `packages/app`, delete cloud-frontend\n\nCollapses the two parallel cloud frontends into one codebase. `@elizaos/ui/cloud` already contains the entire cloud app (router sh",
+      "files": [
+        ".github/CODEOWNERS",
+        ".github/issue-evidence/README.md",
+        ".github/pull_request_template.md",
+        ".github/workflows/ci.yaml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-e2e.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/test.yml",
+        "bun.lock",
+        "docs/cloud-into-eliza/CUTOVER-RUNBOOK.md",
+        "docs/cloud-into-eliza/DECISIONS.md",
+        "knip.json",
+        "package.json",
+        "packages/app/functions/_proxy.ts",
+        "packages/app/wrangler.toml",
+        "packages/cloud-frontend/.claude/launch.json",
+        "packages/cloud-frontend/.gitignore",
+        "packages/cloud-frontend/AGENTS.md",
+        "packages/cloud-frontend/CLAUDE.md",
+        "packages/cloud-frontend/README.md",
+        "packages/cloud-frontend/aesthetic-audit-output/LOOP_1_TRIAGE.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/app-auth-authorize.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/approve.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/auth-callback-email.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/auth-cli-login.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/auth-error.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/auth-success.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/ballot.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/blog.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/bsc.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-account.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-admin-infra.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-admin-metrics.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-admin-redemptions.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-admin.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-affiliates.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-agent-chat.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-agent-detail.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-agents.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-analytics.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-api-explorer.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-api-keys.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-app-detail.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-apps-create.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-apps.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-billing-success.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-billing.md",
+        "packages/cloud-frontend/aesthetic-audit-output/manual-review/dashboard-chat.md"
+      ]
+    },
+    {
+      "title": "docs(local-inference): Gemma GPU evidence via Vulkan (RTX 5080) — closes M6 FA-512 gap on a real GPU",
+      "prNumber": 9092,
+      "type": "docs",
+      "body": "Follow-up to the M6/M7 Gemma verification docs (landed via #9060). CUDA is toolkit-blocked on this host (Blackwell sm_120 needs CUDA 13.x), but **Vulkan uses the DRM path, not UVM, so it drives the RTX 5080 fine** — which provides the GPU h",
+      "files": [
+        "plugins/plugin-local-inference/native/verify/M6-gemma-kv-geometry-and-fa.md",
+        "plugins/plugin-local-inference/native/verify/M7-gemma-cpu-verification-2026-06-22.md",
+        "plugins/plugin-local-inference/native/verify/PLATFORM_MATRIX.md"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): stabilize strict scenario CI imports",
+      "prNumber": 9091,
+      "type": "bugfix",
+      "body": "## Summary\n\nFollow-up hardening for #8932 / #8892 after validating the strict orchestrator scenario lane on current `develop`.\n\nThis PR:\n- passes `runtime` into custom scenario final checks so source-loaded scenario custom checks match seed",
+      "files": [
+        "packages/app/vite.config.ts",
+        "packages/core/src/__tests__/confirmation.test.ts",
+        "packages/core/src/utils/confirmation.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): hand native PCM turns to device pipeline",
+      "prNumber": 9089,
+      "type": "bugfix",
+      "body": "## Summary\n\nCloses #8786.\n\nThis PR completes the remaining agent-doable native PCM handoff for the first-class voice pipeline:\n\n- adds `NativePcmVoiceTurnCoordinator`, an exported TypeScript bridge that native mic-capture front-ends can cal",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/transcript-realaudio.spec.ts",
+        "packages/ui/tsconfig.json",
+        "plugins/plugin-local-inference/src/adapters/capacitor-llama/native-voice-capture.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): stabilize nightly benchmark setup",
+      "prNumber": 9086,
+      "type": "bugfix",
+      "body": "## Why\n\nTwo scheduled develop benchmark workflows were failing before they could exercise their intended quality gates:\n\n- `memperf` let `setup-bun` infer the exact `packageManager` canary (`bun@1.4.0-canary.1`), which returned a 404 from G",
+      "files": [
+        ".github/workflows/local-inference-bench.yml",
+        ".github/workflows/memperf.yml"
+      ]
+    },
+    {
+      "title": "test(evidence): desktop/browser screen recording on Windows (#8932)",
+      "prNumber": 9085,
+      "type": "tests",
+      "body": "Screen recording of the live elizaOS app (`bun run dev` on Windows) rendering + responding in a browser: load → hover the run-mode options → open Advanced → navigates to the \"Connect your own agent\" setup. Pairs with the committed screensho",
+      "files": [
+        ".github/issue-evidence/8932-orchestrator-scenarios/README.md",
+        ".github/issue-evidence/8932-orchestrator-scenarios/desktop-dashboard-windows.webm"
+      ]
+    },
+    {
+      "title": "test(evidence): desktop/browser run-on-Windows screenshot (#8932)",
+      "prNumber": 9084,
+      "type": "tests",
+      "body": "Adds the desktop/browser run-evidence requested for the orchestrator work.\n\n`bun run dev` was booted **on Windows** and the dashboard opened in a headless browser (the desktop app serves the same web UI):\n\n- API server ready on `http://127.",
+      "files": [
+        ".github/issue-evidence/8932-orchestrator-scenarios/README.md",
+        ".github/issue-evidence/8932-orchestrator-scenarios/desktop-dashboard-windows.png"
+      ]
+    },
+    {
+      "title": "test(orchestrator): live-model grilling trajectory evidence (#8932)",
+      "prNumber": 9082,
+      "type": "tests",
+      "body": "Follow-up to #9054/#9051 closing the **\"run against a live model\"** gap for #8932.\n\nThe deterministic PR lane (#9051) and the keyless unit test cover the logic, but neither runs a live model (#9051's `native.jsonl` is 0 bytes — the determin",
+      "files": [
+        ".github/issue-evidence/8932-orchestrator-scenarios/README.md",
+        ".github/issue-evidence/8932-orchestrator-scenarios/live-grilling-trajectory.json",
+        "plugins/plugin-agent-orchestrator/test/scenarios/_live-grilling-evidence.ts"
+      ]
+    },
+    {
+      "title": "test(voice): prove the VOICE_GROUP parse->gate chain end to end (#8786)",
+      "prNumber": 9081,
+      "type": "tests",
+      "body": "## Summary\n\nStrengthens #8786 AC #9. The multi-agent `VOICE_GROUP` turn-taking gate (`core.voice_group_address`) was unit-tested by **hand-feeding `addressedTo`** straight into the gate, so the chain AC #9 actually cares about — model envel",
+      "files": [
+        "packages/core/src/__tests__/voice-group-room.test.ts"
+      ]
+    },
+    {
+      "title": "feat(app-core,local-inference): wire desktop fused-lib bundle delivery",
+      "prNumber": 9080,
+      "type": "feature",
+      "body": "Lands the parked desktop **fused-lib bundle delivery** work (the code half).\n\n## What's here\n- `packages/app-core/src/runtime/bundled-fused-lib.ts` (+ unit test) — resolver that locates the bundled `libelizainference` fused lib for the desk",
+      "files": [
+        ".github/issue-evidence/phala-deploy-secret-guard.patch",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app-core/scripts/stage-desktop-fused-lib.mjs",
+        "packages/app-core/src/runtime/bundled-fused-lib.test.ts",
+        "packages/app-core/src/runtime/bundled-fused-lib.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "plugins/plugin-local-inference/src/services/voice/ffi-bindings.ts",
+        "plugins/plugin-shell/generated/specs/spec-helpers.d.ts",
+        "plugins/plugin-shell/generated/specs/specs.d.ts",
+        "plugins/plugin-shell/index.d.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): join the ASR transcript into live diarization ingestion (#8786)",
+      "prNumber": 9079,
+      "type": "bugfix",
+      "body": "## Summary\n\nAdvances #8786 (AC #1–3): **the live diarization path now joins the ASR transcript**, so a voice turn reaches the agent as one attributed `VOICE_DM` carrying **transcript + speaker** — not a transcript-less diarization event.\n\nB",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.ts"
+      ]
+    },
+    {
+      "title": "feat(local-inference): auto-build + bundle the fused lib in CI desktop releases",
+      "prNumber": 9077,
+      "type": "feature",
+      "body": "## What\n\nMake the **existing** desktop release pipeline ship local inference automatically, with **no `.github/workflows/` change**: `release-electrobun.yml` already runs `desktop-build.mjs stage`, so this teaches `stageDesktopFusedLib()` t",
+      "files": [
+        "packages/app-core/scripts/desktop-build.mjs"
+      ]
+    },
+    {
+      "title": "fix(local-inference): size runtime context by memory budget",
+      "prNumber": 9076,
+      "type": "bugfix",
+      "body": "## Summary\n- adds a pure runtime context-fit helper for Eliza-1 q8_0 KV sizing\n- wires active-model load args to use the current hardware probe when no explicit context override is set\n- updates #8809/#9033 context-scaling docs so dynamic-f",
+      "files": [
+        "packages/shared/src/local-inference/CONTEXT_SCALING.md",
+        "plugins/plugin-local-inference/docs/gemma4-next-wave-plans.md",
+        "plugins/plugin-local-inference/src/services/active-model-context-fit.test.ts",
+        "plugins/plugin-local-inference/src/services/active-model.ts",
+        "plugins/plugin-local-inference/src/services/context-fit.test.ts",
+        "plugins/plugin-local-inference/src/services/context-fit.ts",
+        "plugins/plugin-local-inference/src/services/index.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): sync scenario PR coverage contract",
+      "prNumber": 9075,
+      "type": "bugfix",
+      "body": "## Summary\n- updates the scenario PR workflow contract test to expect the orchestrator PR lane already wired in package.json\n- documents plugin-remote-ledger in the zero-test exemption manifest because it currently ships only package metada",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        "packages/agent/assets/view-heroes/background.png",
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/test/api/accounts-routes.test.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-live-validation.test.ts",
+        "packages/app/capacitor.config.ts",
+        "packages/app/index.html",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/app/test/ui-smoke/view-manager-actual-flow.spec.ts",
+        "packages/core/src/services/optimized-prompt-resolver.test.ts",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-browser-computeruse-progress.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-xr-view-actions.scenario.ts",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "packages/ui/src/components/apps/internal-tool-apps.ts",
+        "packages/ui/test/stubs/host-external.ts",
+        "plugins/plugin-app-control/src/actions/view-command-matcher.ts",
+        "plugins/plugin-calendar/test/client-calendar.test.ts"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 355.99456295547964,
+      "prScore": 345.05656295547965,
+      "issueScore": 0,
+      "reviewScore": 10.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 141.87524866715142,
+      "prScore": 141.67524866715144,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "stvor-hq",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/294440778?u=e68dc469e239eca3c8f166bdcc829902ba5fb1f4&v=4",
+      "totalScore": 84.38354779315219,
+      "prScore": 84.38354779315219,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Sovereign7G",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/296210960?v=4",
+      "totalScore": 55.222469661034395,
+      "prScore": 55.02246966103439,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
       "totalScore": 50.14532082441188,
       "prScore": 50.14532082441188,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sna4an",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/178591296?v=4",
+      "totalScore": 22.60226121886171,
+      "prScore": 22.60226121886171,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -72,11 +1678,31 @@
       "reviewScore": 18,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "babyblueviper1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/241826547?u=0ce76bbb806a27fe454fda00e27530c3b53d2d27&v=4",
+      "totalScore": 8.440292546497023,
+      "prScore": 8.100292546497023,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "noobshow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
+      "totalScore": 7.387306144334055,
+      "prScore": 7.387306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 3,
-  "mergedPRs": 0,
+  "newPRs": 137,
+  "mergedPRs": 114,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 3
+  "activeContributors": 9
 }

@@ -1,0 +1,98 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-24T00:00:00.000Z",
+    "intervalEnd": "2026-06-25T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-24 to 2026-06-25, elizaos/eliza had 2 new PRs (1 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7p43RA",
+      "title": "fix(cloud): isolate untrusted app builds from the runtime fleet (Product-2 BLOCKER #6)",
+      "author": "NubsCarson",
+      "number": 9230,
+      "body": "## Blocker\n\n**Product-2 BLOCKER #6 — build-from-repo runs an untrusted Dockerfile on the same node + root Docker daemon that hosts other tenants' live containers.**\n\n`buildContainerExecutorDeps` / `makeNodeBuilderExec` wired the build path (`AppImageBuilder` → `app-build-cmd`) to run `docker build` of a **user-supplied Dockerfile** over SSH on a runtime node — the same root `dockerd` running other tenants' containers. A malicious Dockerfile (RUN steps reaching the docker socket, build-arg/cache poisoning, daemon API access) could compromise co-tenant containers or the node. The platform has real paying users.\n\n## Fix (code) — two complementary seams, no weakening of tenant DB/network isolation\n\n**1. Throwaway, isolated builder** — `app-build-cmd.ts`, `app-image-builder.ts`\n- New `buildIsolatedAppImageScript()` emits a single shell script that:\n  - `docker buildx create --driver docker-container --name <unique> --bootstrap` — a **fresh BuildKit running in its own container**, isolated from the host daemon's build cache and image store;\n  - `trap 'docker buildx rm --force <unique>' EXIT` — the throwaway builder is **always torn down** (success, failure, or signal), so untrusted BuildKit state never lingers and builders don't accumulate;\n  - `set -e` so a create failure aborts before any build runs.\n- `--push` writes **straight to the registry from inside the isolated BuildKit**, so even on push the untrusted image is never loaded into the host daemon's image store.\n- The builder name carries random per-build entropy (`randomBytes`) so two concurrent untrusted builds never share a BuildKit.\n- `AppImageBuilder` defaults `isolatedBuilder: true`; opt out (`isolatedBuilder: false`) only for trusted/verification builds. All context/build-args remain shell-quoted (injection-safe).\n\n**2. Arming gate + dedicated builder host** — `app-builder-host.ts` (new, pure), `containers-env.ts`, `container-executor-deps.ts`\n- Build-from-repo is **OFF unless explicitly armed** (`APPS_BUILD_FROM_REPO_ENABLED=1`) **AND** an isolated builder host resolves.\n- Host selection **prefers a dedicated `APPS_BUILDS_HOST`** (distinct from any tenant-hosting node); it only falls back to the runtime node when the operator **explicitly opts in** via `APPS_BUILD_ON_RUNTIME_NODE=1`.\n- So an un-armed / mis-configured canary never builds an untrusted Dockerfile, and never builds on a tenant-hosting node by accident — it cleanly falls back to the prebuilt-image path.\n- The gate (`decideBuilderArming` / `selectBuilderHost`) is a **pure module**, so the security decision is unit-testable without the DB/SSH/runtime-fleet chain.\n\n## Tests\n\n- `app-build-cmd.test.ts` — isolated-build script: docker-container driver, `--bootstrap`, `trap … EXIT` teardown, `set -e` ordering (create before build), `--push` from inside the isolated builder (never `--load`), injection-safe quoting; `isolatedBuilderName` derivation.\n- `app-image-builder.test.ts` — default is the throwaway isolated builder; unique builder name per build; `isolatedBuilder:false` → plain host-daemon build.\n- `app-builder-host.test.ts` (new) — arming gate matrix (backend-disabled / not-armed / no-isolated-host / armed+dedicated / armed+runtime-opt-in) and dedicated-host preference.\n- Out-of-band: the **exact emitted script was executed under `bash` and `sh`** with a stubbed `docker` — valid POSIX shell, and the teardown `docker buildx rm` **fires even when the build fails** (exit code preserved).\n\n## Verification\n\n- `bunx @biomejs/biome check --write <changed files>` → clean (formatting only).\n- `bun test --isolate app-build-cmd.test.ts app-image-builder.test.ts app-builder-host.test.ts` → **29 pass / 0 fail**, 100% coverage on the three changed source files.\n- Filtered typecheck `bun run --cwd packages/cloud-shared typecheck | grep <my files>` → **no errors naming any changed file** (the 6 suite errors are pre-existing transitive `TS2307` noise — `@elizaos/security/kms`, generated i18n data — unrelated to this change).\n- `node-builder-exec.test.ts` (the SSH-returning integration test) can't run in this worktree because `container-executor-deps` transitively imports `@elizaos/core` (not built/linked here); the **same failure reproduces on `origin/develop` unchanged** — pre-existing, not introduced here. Its gate logic is now covered purely by `app-builder-host.test.ts`.\n\n## Infra follow-up (not code)\n\n- Provision a **dedicated builder node** (no tenant containers) and set `APPS_BUILDS_HOST`; that node's `dockerd` needs the `docker-container` buildx driver and a registry login (`docker login`). Until that exists, build-from-repo stays **gated OFF** (or, if an operator accepts the residual blast radius the throwaway-builder narrows, `APPS_BUILD_ON_RUNTIME_NODE=1` opts into the runtime node).\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-24T00:23:09Z",
+      "mergedAt": null,
+      "additions": 584,
+      "deletions": 46
+    },
+    {
+      "id": "PR_kwDOMT5cIs7p4vGe",
+      "title": "fix(cloud): bind app host ports to loopback + dial node-local Caddy (apps ingress)",
+      "author": "NubsCarson",
+      "number": 9229,
+      "body": "## The blocker (Product-2, cross-tenant ingress bypass)\n\nApps containers published their host port with `-p ${hostPort}:${port}`, which binds **`0.0.0.0`** on the app node. On the shared Hetzner **private network**, that makes every tenant app's published port reachable from any other node/container on the net — a cross-tenant ingress bypass that sidesteps the per-app `--internal` Docker network. The platform has real paying tenants, so this is a hard go-live blocker.\n\nCaddy is **co-located** on each app node (installed by cloud-init), so the published port never needs to be reachable off-host. Today the Caddy ingress route reverse-proxies to `nodeHost:hostPort` (the private-network IP) — which is exactly what *requires* the 0.0.0.0 bind.\n\n## The fix (coordinated pair — both halves, or ingress breaks)\n\n1. **Bind the published port to loopback** — `buildAppDockerCreateCmd` now emits `-p 127.0.0.1:${hostPort}:${port}` (`app-docker-cmd.ts`). The port binds the node loopback only, unreachable across the private network.\n2. **Dial loopback from Caddy** — `buildCaddyRoute` now dials `127.0.0.1:hostPort` instead of `nodeHost:hostPort` (`apps-ingress-routes.ts`). Caddy runs on the same node, so the loopback upstream is correct.\n\nBecause `nodeHost` was used *only* for the dial in the route builder, it's now a dead field — so it's removed from `AppRouteInput`, the `AddRouteOpts` it extends, and the `onRouteAdded` hook param (`container-job-executors.ts`, `container-executor-deps.ts` flows through unchanged via the spread). The node host is **still persisted** to the container record via `markRunning` — that's a separate concern from the dial and is untouched.\n\n## Isolation is preserved / strengthened\n\n- **Tenant network isolation unchanged** — the per-app `--internal` network, `--cap-drop=ALL`, `no-new-privileges`, pids-limit, egress proxy are all untouched.\n- **Host-matching unchanged** — routes still host-match `<shortid>.<base>` **plus** the app's verified custom domains on the same route/`@id`; on-demand TLS `ask` flow is unaffected. Verified by the routes/provisioner tests.\n- Net effect: the published port is now reachable **only** by the node-local Caddy over loopback, so the cross-tenant private-network path is closed.\n\n## Tests\n\n- `app-docker-cmd.test.ts` — asserts the `-p 127.0.0.1:49001:3000` mapping for default and custom ports, **and** a new guard test that no bare / `0.0.0.0` publish can slip in (`expect(cmd).not.toMatch(/-p (?!127\\.0\\.0\\.1:)/)`).\n- `apps-ingress-routes.test.ts` / `apps-ingress-provisioner.test.ts` — assert the upstream dial is `127.0.0.1:hostPort` (and custom-domain host-match still folds in while the dial stays loopback).\n- `container-job-executors.test.ts` — asserts the `onRouteAdded` route no longer carries `nodeHost`, while `markRunning` still persists it.\n- `scripts/verify-apps-ingress-routing.sh` (real stock-Caddy proof) — now co-locates the app in Caddy's netns so `127.0.0.1:5678` reaches it, mirroring the production loopback-only publish.\n\n## Verification\n\n```\nbiome check --write <8 files>   -> Checked 8 files, no diagnostics (1 reflow)\nbun test --isolate <4 files>    -> 31 pass / 0 fail\ntypecheck (filtered to my files) -> clean (no errors naming the changed files)\n```",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-24T00:14:52Z",
+      "mergedAt": null,
+      "additions": 72,
+      "deletions": 36
+    },
+    {
+      "id": "PR_kwDOMT5cIs7p1UfJ",
+      "title": "docs(streaming): real browser video of token-by-token dashboard streaming (#9174)",
+      "author": "lalalune",
+      "number": 9209,
+      "body": "Follow-up to #9192 and #9194 — adds the **in-browser video** of token-by-token streaming, the last open item on #9174.\n\nCaptured against the **running agent server** wired to a **live cloud model** (Together AI, OpenAI-compatible), driving a real Chromium recording over the real SSE endpoint.\n\n## Artifacts (`.github/issue-evidence/9174-streaming-verify-harden/`)\n\n- **`dashboard-streaming.webm`** — screen-recording of two chat turns rendering token-by-token. The page applies the **exact production `mergeStreamingText`** (verbatim from `packages/shared/src/utils/streaming-text.ts`) per SSE `token` frame — the same incremental render `@elizaos/ui`'s `useStreamingText` performs.\n- **`dashboard-video-frames/`** + `dashboard-streaming-final.png` — waiting → streamed → done stills (footer shows e.g. `streamed 10 token frame(s) in 3281ms · live cloud model`).\n- **`live-fullstack-sse-stream.txt`** — raw SSE from `POST /api/conversations/:id/messages/stream`: 10 incremental `token` frames + `done`, through the full agent reply pipeline (shouldRespond → REPLY → structured extractor → SSE).\n\n## Why a focused harness page (not the full app shell)\n\nThe app's first-run onboarding in this checkout is gated on Eliza Cloud sign-in (redirect blocked headless) or an on-device model (none installed) — no path for \"local agent on a custom OpenAI-compatible endpoint\". Booting the shell also surfaced two pre-existing, streaming-unrelated breakages (an unwired `virtual:eliza-side-effect-app-modules` and a stale `@elizaos/core` browser dist). The harness exercises the **real backend + real SSE + real merge algorithm + live model**; only the page chrome differs from the production dashboard. The model → SSE → render chain is real.\n\nCompletes the end-to-end verification for #9174: cloud (#9194) + transport/frontend (#9192) + this rendered-DOM video.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-23T20:58:08Z",
+      "mergedAt": "2026-06-24T00:26:30Z",
+      "additions": 63,
+      "deletions": 12
+    }
+  ],
+  "codeChanges": {
+    "additions": 63,
+    "deletions": 12,
+    "files": 7,
+    "commitCount": 3
+  },
+  "completedItems": [
+    {
+      "title": "docs(streaming): real browser video of token-by-token dashboard streaming (#9174)",
+      "prNumber": 9209,
+      "type": "docs",
+      "body": "Follow-up to #9192 and #9194 — adds the **in-browser video** of token-by-token streaming, the last open item on #9174.\n\nCaptured against the **running agent server** wired to a **live cloud model** (Together AI, OpenAI-compatible), driving ",
+      "files": [
+        ".github/issue-evidence/9174-streaming-verify-harden/README.md",
+        ".github/issue-evidence/9174-streaming-verify-harden/dashboard-streaming-final.png",
+        ".github/issue-evidence/9174-streaming-verify-harden/dashboard-streaming.webm",
+        ".github/issue-evidence/9174-streaming-verify-harden/dashboard-video-frames/01-waiting-first-token.png",
+        ".github/issue-evidence/9174-streaming-verify-harden/dashboard-video-frames/02-turn1-streamed.png",
+        ".github/issue-evidence/9174-streaming-verify-harden/dashboard-video-frames/03-turn2-streaming.png",
+        ".github/issue-evidence/9174-streaming-verify-harden/live-fullstack-sse-stream.txt"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 82.89194185146661,
+      "prScore": 82.89194185146661,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}
