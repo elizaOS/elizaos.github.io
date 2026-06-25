@@ -1,0 +1,413 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-25T00:00:00.000Z",
+    "intervalEnd": "2026-06-26T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-25 to 2026-06-26, elizaos/eliza had 32 new PRs (25 merged), 0 new issues, and 4 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7qW92I",
+      "title": "De-larp the benchmark suite: delete unwired benchmarks, wire PARTIAL→REAL, scheduled orchestrator lane + CI-coverage gate (#9475)",
+      "author": "lalalune",
+      "number": 9549,
+      "body": "## De-larp the benchmark suite (#9475)\n\nVerified every claim against the code before acting (this is a \"verify every benchmark actually benchmarks Eliza\" task), then implemented the full checklist. **6 commits**, each test-verified.\n\n### ✅ Delete (LARP / shim / dup — confirmed zero `@elizaos` wiring + zero registry entry)\nDeleted the dirs + **fully unwired them from the orchestrator** (they were entangled in `code_agent_matrix.py`, `adapters.py`, `code_agent_coverage.py`, `random_baseline_runner.py`, `runner.py`, `matrix_validation.py`, and ~20 tests — not a simple `git rm`):\n- vendored upstreams: `claw-eval`, `qwen-claw-bench`, `swe-bench-pro`, `swe-bench-multilingual`, `loca-bench`\n- `qwen-web-bench` (stub), `compactbench` (judges compactors, not the agent), `evm` (abandoned)\n- import-shim / dup matrix adapters: `app_eval`, `clawbench_matrix`, `claw_eval_matrix`, `qwen_claw_bench_matrix`, `swe_bench_pro_matrix`, `openclaw_benchmark`\n- `skillsbench` / `elizaos_mmau` / `mmau` were already gone on `develop`.\n- Also cleaned deletion **stragglers** in KEPT code: removed the orphaned `eliza-adapter` EVM bridge + test, and fixed `app-eval/test_code_agent_coding.py` + docs that imported the removed `benchmarks.app_eval` shim.\n\n### ✅ Wire up (PARTIAL → REAL)\n- **rlm-bench**: registry + CLI `--mode` default `stub` → `rlm` (real inference).\n- **adhdbench**: `--provider` default → `eliza` (real bridge); `mock-passthrough` now opt-in.\n- **experience**: `--mode` default `direct` (no LLM) → `eliza-bridge` (real AgentRuntime).\n- **interrupt-bench**: default `scripted` → `cerebras` (real model).\n  - *Finding:* the orchestrator adapter layer already routed adhd/experience/interrupt/rlm through the real bridge by default — the larp was only the bare CLI/registry default, now fixed (belt-and-suspenders).\n- **three-agent-dialogue**: genuinely IGNORED → **registered** as an orchestrator adapter (command + scorer reading `verification.json` + synthetic calibration payload; satisfies the discovery/calibration/cross-matrix invariants).\n- **personality-bench**: already adapter-registered with real runtime (confirmed).\n- **app-eval**: its deterministic keyword scorer is **intentional/reproducible** (AGENTS.md). Added an **opt-in** LLM judge (`APP_EVAL_LLM_JUDGE=1`) that *augments* it (default unchanged) — pure, unit-tested blending.\n\n### ✅ Relabel (REAL but not measuring the Eliza agent)\nAdded honest top-of-README notes to `standard/` (raw-model academic), `scambench` + `abliteration-robustness` (generic provider/model eval), `loadperf/` + `mobile-resource/` (infra/device KPIs).\n\n### ✅ Fix CI + docs (highest value)\n- **Scheduled orchestrator lane**: `.github/workflows/benchmark-orchestrator-scheduled.yml` — weekly (+dispatch) real-model run of the core subset (`bfcl,action-calling,agentbench,tau_bench,mint,context_bench`) via `python -m benchmarks.orchestrator run --provider groq`, gated on `GROQ_API_KEY` (skips gracefully), with subset-scoped publishability + artifact upload.\n- **Smoke/manual marker + test**: `orchestrator/ci_coverage.py` classifies every registered benchmark into a CI lane (`scheduled`/`smoke`/`manual`); `tests/test_ci_coverage.py` keeps it **1:1 with the registry** so no benchmark silently gets zero coverage.\n- **README rewrite**: replaced the \"40+\" framing with the honest breakdown (43 registered / ~25 bridge-wired-real / explicit CI lanes), documents what was deleted and the new lanes.\n\n### Validation\n- `pytest orchestrator/tests + tests` → **480 passed, 1 failed**. The one failure (`test_hermes_env_all_incomplete_zero_is_not_publishable`) is **pre-existing on `develop`** (hermes-env scoring, untouched by this PR, unrelated to #9475).\n- `orchestrator list-benchmarks` → 51 adapters, **all benchmark dirs covered**.\n- app-eval judge tests (9) + code-agent-coding tests green.\n- New workflow YAML validated; comprehensive grep confirms **zero remaining references** to any deleted dir/module.\n\nCloses #9475\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T01:28:36Z",
+      "mergedAt": "2026-06-25T03:36:22Z",
+      "additions": 873,
+      "deletions": 884347
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qWwJT",
+      "title": "docs(8795): deep LifeOps scenario/benchmark/GEPA audit report + 53 verified findings",
+      "author": "lalalune",
+      "number": 9545,
+      "body": "Adds the research report requested on #8795 under `.github/issue-evidence/`.\n\nProduced by a **10-subsystem parallel audit** (scenario-runner, PA scenarios, PA LLM consumers, health/screentime, scheduling spine, GEPA scoring, OptimizedPromptService, Python lifeops-bench, persona/fuzz lens, CI wiring) with **adversarial per-finding verification** — 53 of 56 candidate findings confirmed, 3 refuted. Plus hand-verified refinements on the highest-severity items.\n\n## Headline findings (all file:line-anchored in the report)\n\n- **CRITICAL — inverted/capped LIVE scorer.** The Python LIVE scorer caps a *correct* write agent at **0.3** (`scorer.py:1242-1244`): `expected_state_hash` replays an empty ground-truth on the seed (`runner.py:2855-2858`), so it equals the *unmutated* world and `state_component` is structurally unearnable for any world-mutating scenario → LIVE `pass@1` (≥0.99) is unreachable for every agent incl. PerfectAgent. The conformance oracle runs STATIC-only, which is why it shipped. *(Fix is a design decision — recommend extending the PerfectAgent/WrongAgent oracle to LIVE rather than a drive-by scoring rewrite.)*\n- **HIGH — `execution.plannerText` is a dead field** (declared + read by `buildPlannerAssertionBlob`, assigned nowhere). `plannerIncludes*`/`plannerExcludes` are action-routing assertions mis-named as reasoning assertions.\n- **HIGH — large larp surface in the PA corpus:** ~200 `personalityExpect` scenarios pass enforcing nothing (read only by `personality-bench`, never `runScenario`); 67% of `responseIncludesAny` turns are echo-satisfiable; 130 `executive.*` scenarios (77%) carry no load-bearing assertion; `plannerExcludes` lists exclude tokens that can never be emitted (`PAYMENT_EXECUTED` ×47).\n- **HIGH — runtime bugs + dead targets:** `sleep-recap` pack can never fire (unknown `personal_baseline_sufficient` gate); bedtime/wake-up safety gates fall through to allow; Fitbit distance overstated ~2.5×; `meeting_prep`/`screentime_recap` are fully-plumbed but consumerless GEPA targets.\n- **Safety/persona blind spots:** no scorer rewards a correct refusal/escalation; zero child/elderly/ESL/voice-transcription/adversarial coverage; no self-harm/crisis handling in health.\n\n## Contents\n- `8795-lifeops-audit-report.md` — full report (exec summary, system map, findings by severity, edge-case/fuzz/persona matrix, the `meeting_prep`/`screentime_recap` decision, a prioritized chunked work plan, and what's already solid).\n- `8795-confirmed-findings.json` — the 53 confirmed findings (subsystem/kind/severity/evidence/fix) for traceability.\n\nEvidence/docs only — no runtime code change. First code fix from this audit already merged: **#9540** (`health_checkin` trajectory tagging). Further fixes will land as small follow-up PRs.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T01:14:27Z",
+      "mergedAt": "2026-06-25T01:14:43Z",
+      "additions": 852,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qV4ok",
+      "title": "test+feat: schedule_plan GEPA seed (#9299) + keyless mock-LLM monetization journey (#9477)",
+      "author": "lalalune",
+      "number": 9531,
+      "body": "Two independent, fully-tested increments closing the actionable code follow-ups on their issues.\n\n### `#9299` — `schedule_plan` LifeOps GEPA seed\nThe scheduling-negotiation planner (`SCHEDULE_PLAN_INSTRUCTIONS`) becomes a third lifeops GEPA seed task in `plugins/plugin-training/scripts/lifeops-gepa-seed.ts`, alongside `calendar_extract` and `inbox_triage`. The 11-row dataset covers every subaction (`start`/`propose`/`respond`/`finalize`/`cancel`/`list_active`/`list_proposals`), the wrong-tool + vague guards (`shouldAct=false`), and multilingual formal/informal phrasing (FR/ES) per the #9299 real-conversation requirement. The per-task persistence guard is extended so a degenerate optimized prompt that drops the subaction vocabulary can't replace the working baseline.\n\n- **Test** (`lifeops-gepa-seed.test.ts`, 8/8, was 6): keys assertion updated; schedule_plan baseline/shape coverage; every-subaction-present check; multilingual check; malformed-persistence guard.\n\n### `#9477` — keyless mock-LLM creator-monetization journey\nCloses the two open code follow-ups on the (otherwise manual) #9477:\n- An in-process OpenAI-compatible **mock LLM** (`mock-llm.ts`) + a `mockLlm` stack option that points the worker's `OPENAI_BASE_URL`/`OPENAI_API_KEY` at it (synced into `.dev.vars` via `providerOverrideKeys`). The new `monetized-mock-llm-journey.spec.ts` drives the **real** `POST /api/v1/messages` + `x-app-id` billing/markup/earnings seam against an `openai/<model>` id with **no paid key** — the gap the `CEREBRAS_API_KEY`-gated `creator-monetization-journey.spec.ts` left.\n- Fixes the stale doc path `app/api/cron/container-billing/route.ts` → `packages/cloud-api/cron/container-billing/route.ts` in `survival-economics.md`.\n\n- **Verified** (1 passed, 8.7s): end-user org debited `0.000016` (base + 100% markup), creator `app_earnings` `0 → 0.000008`, the mock served the inference. Only the LLM bytes are mocked; credits/markup/earnings are fully real.\n\n## Verification\n- `plugin-training` typecheck: turbo 30/30 green; `lifeops-gepa-seed.test.ts` 8/8\n- `monetized-mock-llm-journey.spec.ts`: 1 passed (real debit + markup asserted)\n- `cloud-e2e` tsc: only the pre-existing tsconfig `baseUrl` deprecation; no errors in touched files\n- biome format clean\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T00:11:35Z",
+      "mergedAt": "2026-06-25T00:11:45Z",
+      "additions": 595,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qVswm",
+      "title": "feat(voice): sample-level AEC for live barge-in (#9455)",
+      "author": "lalalune",
+      "number": 9526,
+      "body": "Closes the sample-level half of #9455 (split from #9147, which only did turn-level self-echo rejection).\n\n## What\nThe live half-duplex voice path had no **sample-level** AEC: it could reject a whole turn that was the agent's own voice (`selfVoiceSimilarity` WeSpeaker cosine in `respond-gate.ts`), but it could not recover a **barge-in during playback** — the residual of the agent's own TTS still corrupted the user's transcript. This adds the per-sample layer.\n\nNew module `plugins/plugin-local-inference/src/services/voice/aec.ts`:\n- A length-`L` FIR filter models the acoustic echo path (speaker→room→mic); per mic sample, `echo_hat = wᵀ·x` over the delay-aligned far-end window, output `e = near − echo_hat`, and **normalized-LMS** adaptation `w ← w + μ·e·x/(xᵀx+δ)`.\n- A **double-talk detector** freezes adaptation (but keeps filtering) when the near-end clearly exceeds the echo estimate — so a genuine barge-in is preserved and the filter never diverges onto the user's voice (with a hangover hold).\n- `setDelaySamples()` for the measured mic↔playback latency; `erle()` helper; pure, dependency-free, 16 kHz mono fp32, mirrors `vad.ts` / `self-voice-imprint.ts`. The far-end reference is already available at the `VoiceScheduler.onAudio` tap.\n\n## Verification (Linux-CPU, deterministic, model-free — fully CI-able)\n`bunx vitest run src/services/voice/__tests__/aec.test.ts` → **4/4 pass**:\n- **31.68 dB ERLE** on a synthetic decaying-IR echo path after NLMS convergence (≥20 dB asserted).\n- Double-talk: near-end talker preserved (corr **0.999**), DT detector fires, and a following echo-only segment stays cancelled (post-DT ERLE **74.75 dB**) — i.e. the filter froze and did not diverge.\n- `erle()` edge cases + `process()` length/finite invariants.\n\n## Scope\nThis is the linear AEC core (the bulk of the ERLE). The **AEC3-grade nonlinear residual suppressor + comfort noise**, and **live mic↔playback delay calibration + on-device ERLE/barge-in validation**, are the documented stage-2 (`needs-device`) follow-up the issue itself frames as \"a further stage.\"\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T00:00:58Z",
+      "mergedAt": null,
+      "additions": 492,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qWaWw",
+      "title": "feat(training): live GEPA optimization of LifeOps actions on gpt-oss-120b (#9299 Scope 5)",
+      "author": "lalalune",
+      "number": 9543,
+      "body": "Part of #9299, **Scope 5** (GEPA-optimize the LifeOps actions for gpt-oss-120b). The seed harness was already wired (#9429/#9531) but no **live** before/after optimization had been run and no optimized artifacts produced — the marquee remaining DoD item. This PR runs it live and attaches measured results.\n\n## Live before/after (gpt-oss-120b, gen=2 population=4)\n\n| Task | Baseline | Optimized | Δ |\n| --- | --- | --- | --- |\n| `calendar_extract` | 0.795 | 0.864 | **+0.068** |\n| `inbox_triage` | 0.625 | 0.667 | **+0.042** |\n| `schedule_plan` | _running; appended on completion_ | | |\n\nOptimized prompts persisted to the standard optimized-prompt store (`OptimizedPromptService`) so they auto-load at boot. Artifacts + raw run logs are committed under `plugins/plugin-training/docs/audit/9299-gepa-live/` as human-verifiable evidence (these run logs ARE the real-LLM gpt-oss-120b trajectories for the optimization).\n\n## Model/provider note (honest)\n\nThe issue says **gpt-oss-120b on Cerebras**; no `CEREBRAS_API_KEY` is present on this machine, so the run used the **identical `gpt-oss-120b` weights served by Together AI** (OpenAI-compatible) via the adapter's existing `CEREBRAS_BASE_URL` override. Same model, same seed harness, same persistence path — only the transport endpoint differs. `RESULTS.md` documents the exact re-run command for Cerebras.\n\n## Code change\n\n- `cerebras-eval-model.ts`: add `fetchChatWithRetry` — bounded retry (429 + 5xx + network) with exponential backoff. A single optimizer run fans out into dozens of provider calls; one transient `500` (common on serverless gpt-oss relays) previously aborted the whole generation, which is exactly why prior live runs couldn't complete. Also match `reasoning_effort` on the `<vendor>/gpt-oss-*` model form, not just the bare id. Existing seed/scoring unit tests pass (28/28).\n\n## Scope-2 audit (bonus)\n\n`DEPENDENCY_GRAPH.md` gains a domain-extraction status table: the modules flagged as \"still embedded\" are each in their correct home (calendar-gate + service-mixins are PA composition glue; email-classifier/entities/relationships are runtime shims). Flags `lifeops/bill-extraction.ts` as unconsumed finance scaffolding for the owner to wire into `plugin-finances` or remove.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T00:49:40Z",
+      "mergedAt": "2026-06-25T01:34:56Z",
+      "additions": 491,
+      "deletions": 9
+    }
+  ],
+  "codeChanges": {
+    "additions": 3821,
+    "deletions": 4735,
+    "files": 95,
+    "commitCount": 42
+  },
+  "completedItems": [
+    {
+      "title": "refactor(ui): dedup AgentActivityBox onto canonical activityEventToPlaintext (#9449)",
+      "prNumber": 9557,
+      "type": "refactor",
+      "body": "Part of #9449 Pillar B (dedup). Routes coding-agent session status through the canonical `activityEventToPlaintext` from @elizaos/core (the same serializer `useActivityEvents` uses for the live WS rail) instead of a parallel hand-rolled sta",
+      "files": [
+        "packages/ui/src/components/chat/AgentActivityBox.tsx"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): cover app-credits billing-price, purchase clamp, metadata guards",
+      "prNumber": 9553,
+      "type": "tests",
+      "body": "## What\n\nFour untested, load-bearing branches in `AppCreditsService`, surfaced by the launch-readiness coverage audit (#8434). **Test-only — no production code changed.** Extends the existing mock-based `app-credits-ledger.test.ts` (13 → 21",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-credits-ledger.test.ts"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): real PGlite coverage for CreditsService.reconcile (settlement path)",
+      "prNumber": 9551,
+      "type": "tests",
+      "body": "## What\n\n`CreditsService.reconcile()` is the **money-settlement seam** that runs after every metered request (a2a skills, ai-billing, agent-budgets, eliza-sandbox, voice/stt — ~20 production callers): it refunds the reserved-vs-actual exces",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/credits-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "De-larp the benchmark suite: delete unwired benchmarks, wire PARTIAL→REAL, scheduled orchestrator lane + CI-coverage gate (#9475)",
+      "prNumber": 9549,
+      "type": "other",
+      "body": "## De-larp the benchmark suite (#9475)\n\nVerified every claim against the code before acting (this is a \"verify every benchmark actually benchmarks Eliza\" task), then implemented the full checklist. **6 commits**, each test-verified.\n\n### ✅ ",
+      "files": [
+        ".github/workflows/benchmark-orchestrator-scheduled.yml",
+        "packages/benchmarks/AGENTS.md",
+        "packages/benchmarks/CLAUDE.md",
+        "packages/benchmarks/README.md",
+        "packages/benchmarks/abliteration-robustness/README.md",
+        "packages/benchmarks/adhdbench/scripts/run_benchmark.py",
+        "packages/benchmarks/app-eval/AGENTS.md",
+        "packages/benchmarks/app-eval/CLAUDE.md",
+        "packages/benchmarks/app-eval/evaluate.py",
+        "packages/benchmarks/app-eval/llm_judge.py",
+        "packages/benchmarks/app-eval/test_code_agent_coding.py",
+        "packages/benchmarks/app-eval/test_llm_judge.py",
+        "packages/benchmarks/app_eval/README.md",
+        "packages/benchmarks/app_eval/__init__.py",
+        "packages/benchmarks/app_eval/code_agent_coding.py",
+        "packages/benchmarks/claw-eval/AGENTS.md",
+        "packages/benchmarks/claw-eval/CLAUDE.md",
+        "packages/benchmarks/claw-eval/Dockerfile.agent",
+        "packages/benchmarks/claw-eval/INTEGRATION.md",
+        "packages/benchmarks/claw-eval/README.md",
+        "packages/benchmarks/claw-eval/cleanup_traces.py",
+        "packages/benchmarks/claw-eval/config_general.yaml",
+        "packages/benchmarks/claw-eval/config_multimodal.yaml",
+        "packages/benchmarks/claw-eval/config_user_agent.yaml",
+        "packages/benchmarks/claw-eval/mock_services/_base.py",
+        "packages/benchmarks/claw-eval/mock_services/calendar/server.py",
+        "packages/benchmarks/claw-eval/mock_services/caption/server.py",
+        "packages/benchmarks/claw-eval/mock_services/config/server.py",
+        "packages/benchmarks/claw-eval/mock_services/contacts/server.py",
+        "packages/benchmarks/claw-eval/mock_services/crm/server.py",
+        "packages/benchmarks/claw-eval/mock_services/documents/server.py",
+        "packages/benchmarks/claw-eval/mock_services/finance/server.py",
+        "packages/benchmarks/claw-eval/mock_services/gmail/server.py",
+        "packages/benchmarks/claw-eval/mock_services/helpdesk/server.py",
+        "packages/benchmarks/claw-eval/mock_services/inventory/server.py",
+        "packages/benchmarks/claw-eval/mock_services/kb/server.py",
+        "packages/benchmarks/claw-eval/mock_services/notes/server.py",
+        "packages/benchmarks/claw-eval/mock_services/ocr/server.py",
+        "packages/benchmarks/claw-eval/mock_services/rss/server.py",
+        "packages/benchmarks/claw-eval/mock_services/scheduler/server.py",
+        "packages/benchmarks/claw-eval/mock_services/todo/server.py",
+        "packages/benchmarks/claw-eval/mock_services/web/server.py",
+        "packages/benchmarks/claw-eval/mock_services/web_real/__init__.py",
+        "packages/benchmarks/claw-eval/mock_services/web_real/search_serp.py",
+        "packages/benchmarks/claw-eval/mock_services/web_real/server.py",
+        "packages/benchmarks/claw-eval/mock_services/web_real_injection/__init__.py",
+        "packages/benchmarks/claw-eval/mock_services/web_real_injection/search_serp.py",
+        "packages/benchmarks/claw-eval/mock_services/web_real_injection/server.py",
+        "packages/benchmarks/claw-eval/pyproject.toml",
+        "packages/benchmarks/claw-eval/requirements-sandbox-server.txt"
+      ]
+    },
+    {
+      "title": "fix(lifeops): coerce hallucinated Gmail subaction to the safe default (#8795)",
+      "prNumber": 9548,
+      "type": "bugfix",
+      "body": "From the #8795 audit (#9545): `parseGmailPlan` blind-cast the model's `subaction` line — `(fields.get(\"subaction\") || \"triage\") as GmailPlanSubaction` — so a malformed/hallucinated value (e.g. `\"delete_everything\"`) flowed downstream into t",
+      "files": [
+        "plugins/plugin-personal-assistant/src/lifeops/llm/extract-gmail-plan.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-optimized-prompts.test.ts"
+      ]
+    },
+    {
+      "title": "test(training): edge-case + discriminative coverage for LifeOps GEPA scorers (#8795)",
+      "prNumber": 9547,
+      "type": "tests",
+      "body": "From the #8795 audit (#9545): the per-capability GEPA scorers (`scoreStructuredFields` / `scoreActionSet`) were flagged as a place where a degenerate/empty output could score high — a \"larp scorer\" that optimizes toward nothing. The gepa-sc",
+      "files": [
+        "plugins/plugin-training/src/optimizers/scoring.lifeops.test.ts"
+      ]
+    },
+    {
+      "title": "fix(calendar): resolve everyday relative dates (\"tomorrow\", \"in 2 days\") (#8795)",
+      "prNumber": 9546,
+      "type": "bugfix",
+      "body": "From the #8795 audit (report in #9545): the CALENDAR action's deterministic date resolver `parseExplicitLocalDate` handled ISO dates, month names, numeric dates, and weekday names — but returned **null** for the most common everyday phrasin",
+      "files": [
+        "plugins/plugin-calendar/src/actions/calendar-handler.ts",
+        "plugins/plugin-calendar/test/parse-explicit-local-date.test.ts"
+      ]
+    },
+    {
+      "title": "docs(8795): deep LifeOps scenario/benchmark/GEPA audit report + 53 verified findings",
+      "prNumber": 9545,
+      "type": "docs",
+      "body": "Adds the research report requested on #8795 under `.github/issue-evidence/`.\n\nProduced by a **10-subsystem parallel audit** (scenario-runner, PA scenarios, PA LLM consumers, health/screentime, scheduling spine, GEPA scoring, OptimizedPrompt",
+      "files": [
+        ".github/issue-evidence/8795-confirmed-findings.json",
+        ".github/issue-evidence/8795-lifeops-audit-report.md"
+      ]
+    },
+    {
+      "title": "feat(training): live GEPA optimization of LifeOps actions on gpt-oss-120b (#9299 Scope 5)",
+      "prNumber": 9543,
+      "type": "feature",
+      "body": "Part of #9299, **Scope 5** (GEPA-optimize the LifeOps actions for gpt-oss-120b). The seed harness was already wired (#9429/#9531) but no **live** before/after optimization had been run and no optimized artifacts produced — the marquee remai",
+      "files": [
+        "plugins/plugin-personal-assistant/DEPENDENCY_GRAPH.md",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/RESULTS.md",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/calendar_extract.optimized.json",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/calendar_extract.run.log",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/inbox_triage.optimized.json",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/inbox_triage.run.log",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/schedule_plan.optimized.json",
+        "plugins/plugin-training/docs/audit/9299-gepa-live/schedule_plan.run.log",
+        "plugins/plugin-training/src/core/cerebras-eval-model.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core): build desktop renderer fallback URL with pathToFileURL (Windows)",
+      "prNumber": 9542,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe main elizaOS desktop app (Electrobun platform) has the same malformed-`file://`-URL bug just fixed in `@elizaos/setup` (#9530), but in the **primary app**. `resolveRendererUrl()`'s last-resort fallback (used when the local r",
+      "files": [
+        "packages/app-core/platforms/electrobun/src/index.ts"
+      ]
+    },
+    {
+      "title": "fix(coding-tools): cross-platform source search/list (PowerShell on Windows)",
+      "prNumber": 9541,
+      "type": "bugfix",
+      "body": "## Problem\n\nFollow-on to #9514 (which made the memory/disk/health canned commands cross-platform). The SHELL action also canonicalizes broad source *search* and *list* requests to canned commands — but those two were still **POSIX-only**:\n\n",
+      "files": [
+        "plugins/plugin-coding-tools/src/actions/bash.test.ts",
+        "plugins/plugin-coding-tools/src/actions/bash.ts"
+      ]
+    },
+    {
+      "title": "fix(health): tag health_checkin planner trajectory with its own task (#8795)",
+      "prNumber": 9540,
+      "type": "bugfix",
+      "body": "## The bug (data-collection end of the health_checkin optimization loop was dead)\n\nThe health planner's sole LLM call (`resolveHealthPlanWithLlm` → `runJsonModel`, `plugins/plugin-health/src/actions/health.ts`) already routes its instructio",
+      "files": [
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/health.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): pricing-catalog fetch failure must not 500 inference (cerebras 404 — LIVE OUTAGE)",
+      "prNumber": 9539,
+      "type": "bugfix",
+      "body": "## 🔴 Live prod outage — cloud chat down for all cerebras (gpt-oss) users\n\nMeasured just now on prod:\n```\nPOST https://api.elizacloud.ai/api/v1/chat/completions  →  HTTP 500\n{\"error\":{\"message\":\"Request failed for https://api.cerebras.ai/pu",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.ts"
+      ]
+    },
+    {
+      "title": "fix(vault): launch the Bitwarden CLI (.cmd shim) via shell on Windows",
+      "prNumber": 9537,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe vault's own install guidance (`install.ts:103`) steers Windows users to install the Bitwarden CLI via `npm i -g @bitwarden/cli`, which produces a **`bw.cmd`** npm shim. But every `bw` invocation uses `execFile` with **no** `",
+      "files": [
+        "packages/vault/src/external-credentials.ts",
+        "packages/vault/src/install.ts",
+        "packages/vault/src/manager.ts"
+      ]
+    },
+    {
+      "title": "test(cloud): cover keyless mock-LLM /messages seam in nightly net + docs (#9477)",
+      "prNumber": 9536,
+      "type": "tests",
+      "body": "## What\n\nFollow-through on #9531, which landed the always-on **keyless mock-LLM monetization journey** (`monetized-mock-llm-journey.spec.ts`) that drives the `POST /api/v1/messages` + `x-app-id` billing seam with no paid key — the last open",
+      "files": [
+        ".github/workflows/monetized-loop-nightly.yml",
+        "packages/test/cloud-e2e/docs/monetized-loop-coverage.md"
+      ]
+    },
+    {
+      "title": "test(cloud-shared): cover app-credits money-safety branches (post-debit compensation + reconcile loss-absorb)",
+      "prNumber": 9535,
+      "type": "tests",
+      "body": "## What\n\nAdds mutation-verified coverage for **two load-bearing, previously-untested money-safety branches** in `AppCreditsService` (`packages/cloud-shared/src/lib/services/app-credits.ts`). Both are invariants that only matter *after the u",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-credits-ledger.test.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): spawn npm via shell on Windows in plugin-installer (.cmd shim)",
+      "prNumber": 9534,
+      "type": "bugfix",
+      "body": "## Problem\n\n`plugin-installer.ts` installs plugins via `execFileAsync` (= `promisify(execFile)`) with **no** `shell` option. On Windows, npm is **`npm.cmd`** (a batch shim) and `execFile` cannot launch a `.cmd` without a shell — it rejects ",
+      "files": [
+        "packages/agent/src/services/plugin-installer.ts"
+      ]
+    },
+    {
+      "title": "fix(android): bump fused-lib build pin past the Mali flash-attn fix (#9508)",
+      "prNumber": 9533,
+      "type": "bugfix",
+      "body": "Refs #9508. Pairs with the already-merged verify-fused-symbols gate (#9528).\n\n## The actual root cause\n`compile-libllama.mjs` (the production build for the bionic fused Vulkan lib) checks out a **pinned fork commit** `LLAMA_CPP_COMMIT` and ",
+      "files": [
+        "packages/app-core/scripts/aosp/compile-libllama.mjs"
+      ]
+    },
+    {
+      "title": "fix(agent): spawn the global package-manager via shell on Windows for self-update",
+      "prNumber": 9532,
+      "type": "bugfix",
+      "body": "## Problem\n\n`eliza update` (and the auto-updater) runs the resolved upgrade command through `self-updater.ts` `runCommand`:\n\n```ts\nconst child = spawn(command, args, { stdio: [\"inherit\", \"inherit\", \"pipe\"] });\n// shell:true removed — all up",
+      "files": [
+        "packages/agent/src/services/self-updater.ts"
+      ]
+    },
+    {
+      "title": "test+feat: schedule_plan GEPA seed (#9299) + keyless mock-LLM monetization journey (#9477)",
+      "prNumber": 9531,
+      "type": "tests",
+      "body": "Two independent, fully-tested increments closing the actionable code follow-ups on their issues.\n\n### `#9299` — `schedule_plan` LifeOps GEPA seed\nThe scheduling-negotiation planner (`SCHEDULE_PLAN_INSTRUCTIONS`) becomes a third lifeops GEPA",
+      "files": [
+        "packages/test/cloud-e2e/src/fixtures/mock-llm.ts",
+        "packages/test/cloud-e2e/src/fixtures/stack.ts",
+        "packages/test/cloud-e2e/tests/monetized-mock-llm-journey.spec.ts",
+        "plugins/plugin-training/scripts/lifeops-gepa-seed.ts",
+        "plugins/plugin-training/src/scripts/lifeops-gepa-seed.test.ts"
+      ]
+    },
+    {
+      "title": "fix(os-setup): build renderer file URL with pathToFileURL (Windows blank-app)",
+      "prNumber": 9530,
+      "type": "bugfix",
+      "body": "## Problem\n\n`@elizaos/setup` (the Electrobun AOSP-flasher microapp, which ships a Windows package via `package:windows`) builds its renderer URL as:\n\n```ts\nconst indexPath = path.join(here, \"..\", \"renderer\", \"index.html\");\nreturn `file://${",
+      "files": [
+        "packages/os/setup/src/main/electrobun-main.ts"
+      ]
+    },
+    {
+      "title": "fix(test): dev-smoke seeds the same-origin base so the chat composer paints (#9452)",
+      "prNumber": 9529,
+      "type": "bugfix",
+      "body": "Fixes #9452.\n\n## Symptom\nThe `bun run dev onboarding chat` dev-smoke (`packages/app/test/dev-smoke/bun-dev-onboarding-chat.spec.ts`) is red **every time it actually executes** (path-gate-skips on unrelated PRs, `test.skip`s without a live k",
+      "files": [
+        "packages/app/test/dev-smoke/live-onboarding.ts"
+      ]
+    },
+    {
+      "title": "fix(android): fail-closed gate for the Mali flash-attn mitigation in the fused Vulkan lib (#9508)",
+      "prNumber": 9528,
+      "type": "bugfix",
+      "body": "Refs #9508.\n\n## Problem\nOn-device generate via the bionic Vulkan host `ggml_abort`s (SIGABRT) mid-decode on Mali GPUs (Pixel 9a / Tensor G4 / Mali-G715) — the scalar flash-attn subgroup race. The fork already has the mitigation (`VK_VENDOR_",
+      "files": [
+        ".github/issue-evidence/9508-mali-fa-mitigation-gate.md",
+        "packages/app-core/scripts/build-helpers/verify-fused-symbols.mjs"
+      ]
+    },
+    {
+      "title": "fix(music): discover yt-dlp on Windows (where + .exe candidates)",
+      "prNumber": 9527,
+      "type": "bugfix",
+      "body": "## Problem\n\n`plugin-music` requires `yt-dlp` at runtime for audio download/caching. Its binary discovery (`src/utils/ytdlpCheck.ts`) is POSIX-only, so on Windows yt-dlp is found **only** if `YT_DLP_PATH` is explicitly set — normal \"it's on ",
+      "files": [
+        "plugins/plugin-music/src/utils/ytdlpCheck.ts"
+      ]
+    },
+    {
+      "title": "docs(skill): fix stale path + document gated deploy surface (#9477)",
+      "prNumber": 9517,
+      "type": "bugfix",
+      "body": "Surfaced while executing the manual monetized-app test of #9477.\n\n## Manual test result (evidence)\nI ran the deterministic monetized loop against the in-process mock stack:\n```\nbun --conditions=eliza-source --bun playwright test \\\n  monetiz",
+      "files": [
+        "packages/skills/skills/build-monetized-app/references/sdk-flow.md",
+        "packages/skills/skills/build-monetized-app/references/survival-economics.md"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 274.60900615811823,
+      "prScore": 274.17100615811825,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 202.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 202.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 173.7897332324346,
+      "prScore": 173.4497332324346,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 32,
+  "mergedPRs": 25,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 4
+}
