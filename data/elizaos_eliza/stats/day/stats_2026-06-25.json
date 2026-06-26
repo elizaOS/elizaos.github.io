@@ -5,9 +5,57 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-25 to 2026-06-26, elizaos/eliza had 32 new PRs (25 merged), 0 new issues, and 4 active contributors.",
+  "overview": "From 2026-06-25 to 2026-06-26, elizaos/eliza had 214 new PRs (183 merged), 0 new issues, and 9 active contributors.",
   "topIssues": [],
   "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7qu1NC",
+      "title": "feat(app): harden desktop shell and view apps",
+      "author": "NubsCarson",
+      "number": 9725,
+      "body": "## Summary\n\n- Harden desktop/web shell view switching, app-control view commands, plugin lifecycle/view registry behavior, and cloud/dev launch paths.\n- Add simple Notes/Calendar test views plus calendar LifeOps HTTP routes so view switching and view-backed actions have concrete plugin surfaces to exercise.\n- Polish launcher UX: home <-> springboard and inner springboard pages now follow the pointer during swipe, then settle with a spring-like transition; springboard tiles render clean deterministic app icons instead of cropped preview/hero images.\n- Expand regression coverage for continuous chat gestures, shell layout stability, springboard interaction, view switching, app-control, calendar routes, plugin loading, and dev smoke helpers.\n\n## Why\n\nThis branch packages the local desktop/cloud shell QA work into one draft PR so maintainers can review it against current `develop`. The main user-facing issues addressed are laggy/snap-only launcher paging, messy app icons, fragile chat/shell gesture states, and missing concrete test plugin views for notes/calendar style workflows.\n\n## Impact\n\n- UI users should see smoother launcher paging and cleaner app icons across browser, desktop, and mobile webviews.\n- App-control can target and reason about view context more reliably.\n- Calendar/simple view plugin surfaces give QA and agents real view-backed actions instead of fake-only paths.\n- Calendar unit config now aliases source workspace packages consistently and keeps real-db tests out of the unit lane.\n\n## Checks\n\n- `bunx @biomejs/biome check packages/ui/src/components/shell/HomeSpringboardSurface.tsx packages/ui/src/components/shell/HomeSpringboardSurface.composed.test.tsx packages/ui/src/components/views/ViewTileImage.tsx packages/ui/src/components/pages/Springboard.tsx packages/ui/src/components/pages/Springboard.test.tsx plugins/plugin-calendar/vitest.config.ts`\n- `bun run --cwd packages/ui test -- src/components/shell/ContinuousChatOverlay.test.tsx src/components/shell/ContinuousChatOverlay.fuzz.test.tsx src/components/shell/HomeSpringboardSurface.composed.test.tsx src/components/pages/Springboard.test.tsx src/components/shell/use-pull-gesture.test.ts src/hooks/view-catalog.test.ts src/hooks/useLayoutShiftMonitor.test.ts src/testing/layout-stability.test.ts src/App.navigate-view-wiring.test.tsx src/app-navigate-view.test.ts`\n- `bun run --cwd plugins/plugin-simple-views test`\n- `bun run --cwd plugins/plugin-calendar test`\n- `bun run --cwd plugins/plugin-app-control test -- src/actions/view-command-matcher.test.ts src/actions/views-switching.test.ts src/evaluators/view-context.test.ts`\n- `bun run --cwd packages/app test:e2e -- test/ui-smoke/springboard-interaction.spec.ts`\n- Manual Playwright rendered `/apps` mobile and desktop: launcher swipe state followed pointer, app-page swipe followed pointer, no console/page errors observed.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T20:33:13Z",
+      "mergedAt": null,
+      "additions": 6250,
+      "deletions": 825
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qaFGT",
+      "title": "feat(plugin-embeddings): provider-agnostic standalone TEXT_EMBEDDING plugin",
+      "author": "NubsCarson",
+      "number": 9572,
+      "body": "Closes #9567.\n\n## What\nA new standalone **`@elizaos/plugin-embeddings`** — a provider-agnostic (\"bring your own\") `TEXT_EMBEDDING` provider. Point one set of `EMBEDDING_*` vars at **any** OpenAI-compatible `/embeddings` endpoint (personal OpenAI key, Eliza Cloud, Voyage, Together, local TEI/Infinity/vLLM/LM Studio) and embeddings work **independent of the chat brain**.\n\n## Why\nEmbeddings were coupled to the chat provider. A self-hosted bot on **Claude** (no embeddings API) or **Cerebras** (no `/embeddings`) had no clean path to real embeddings — `plugin-elizacloud` bundles `TEXT_EMBEDDING` with priority-50 text handlers that hijack the chat brain and is gated to a cloud `eliza_xxx` key; `plugin-openai`'s `OPENAI_EMBEDDING_*` override only works when plugin-openai is itself enabled and smuggles non-OpenAI providers under an `OPENAI_` namespace. This generalizes the existing `plugin-lmstudio` (`capabilities:[\"embedding\"]`) pattern into a chat-agnostic one.\n\n## Design (purely additive, zero regression)\n- Registers **only** `TEXT_EMBEDDING` + `TEXT_EMBEDDING_BATCH` — no text/image/audio handlers, no actions/providers/services.\n- **Load-gated**: auto-enables only when `EMBEDDING_BASE_URL` or `EMBEDDING_API_KEY` is set → not loaded on any existing deployment.\n- **Priority `1`**: `local-inference @0 < plugin-embeddings @1 < Eliza Cloud @50` — opt-in beats a bare local embedder, yields to a paired Cloud. (This is the one product call from #9567 — happy to change the band.)\n- **Throws on every real failure** (issue #9324 / Commandment 8) — never a zero/garbage vector. Null boot-probe returns a correctly-sized marker for the dimension probe only.\n- Raw `fetch` (no `@ai-sdk` dep); `@elizaos/core` peer only. Browser build suppresses the `Authorization` header unless `EMBEDDING_BROWSER_URL` (server proxy) is set.\n- **Zero changes** to core / plugin-sql / plugin-openai / plugin-elizacloud / plugin-local-inference.\n\n### Mode matrix\n| Mode (no `EMBEDDING_*`) | embeddings | Δ |\n|---|---|---|\n| cloud | plugin-elizacloud @50 | **identical** |\n| local | plugin-local-inference @0 | **identical** |\n| self-hosted Claude/Cerebras (opt in) | this plugin → any endpoint | **new capability** |\n\n## Evidence (real, live)\nLive-tested on a self-hosted **Claude-chat** bot (`provider=anthropic` throughout), same plugin, two providers by swapping one var:\n- **OpenAI Direct** (`EMBEDDING_BASE_URL=https://api.openai.com/v1`): `[Embeddings] POST https://api.openai.com/v1/embeddings model=text-embedding-3-small` ×2 (store + recall), stored a memory, Claude chat unaffected.\n- **Eliza Cloud** (`EMBEDDING_BASE_URL=https://www.elizacloud.ai/api/v1`): boot init resolved the cloud endpoint; a recall query returned **\"Teal.\"** — correctly recalling the memory stored under OpenAI embeddings (same model/dim → compatible vectors). Zero embedding errors.\n- 27/27 unit tests (null-probe width, wire-mocked vector, dimension-mismatch/empty/unsupported/no-endpoint/non-OK throws, batch ordering, `VECTOR_DIMS` contract), build + lint clean.\n\nScreenshots/video N/A (server-side embedding plumbing; backend logs above are the evidence). Audio N/A.\n\n## Follow-up (not this PR)\nopenai/openrouter/elizacloud ~95% duplicate a hand-rolled `fetch(${baseURL}/embeddings)` — a shared OpenAI-compatible embeddings client is a worthwhile separate cleanup.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T05:05:55Z",
+      "mergedAt": "2026-06-25T05:11:12Z",
+      "additions": 1578,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qa5pg",
+      "title": "feat(#9565): boot startup telemetry, first-paint reduction, launch orange #ef5a1f",
+      "author": "lalalune",
+      "number": 9595,
+      "body": "Closes part of #9565 (boot/startup optimization epic).\n\n## What\n\nOptimizes the device agent boot/startup readiness path end to end, building on\nthe renderer-surface orange already landed by #9587 (which fixed only\n`index.html` + `StartupShell`, left native launch configs at `#FF5800`, and set\n`StartupShell` to `var(--bg,…)` which renders the theme white/black — see proof).\n\n### 1. Measure — renderer startup trace + unified trace id\n`@elizaos/ui/state/startup-telemetry` — a dependency-free recorder emitting\n`performance.mark()`s at the documented cold-start checkpoints and mirroring them\nto `window.__ELIZA_STARTUP_TRACE__`. It only **observes**; `useStartupCoordinator`\nstays the sole startup authority and the pure reducer is untouched. The trace id\nadopts a native-host-injected `window.__ELIZA_STARTUP_TRACE_ID__` when present\n(one id across native host ↔ renderer ↔ backend boot), else derives a\nrenderer-local id + records `timeOrigin` for time-based correlation.\n\nCheckpoints: `module-eval`, `main-start`, `app-modules:start/end`,\n`bridges:start/end`, `react-mount:start/end`, `startup-shell:first-paint`,\n`coordinator:<phase>` (incl. `coordinator:ready`).\n\n### 2. Optimize — shrink the first-paint critical path\n`initializeAppModules()` blocked the first React mount on **10** plugin imports;\nthe boot config reads only **3** synchronously. The other 7 (personal-assistant,\nvincent, task-coordinator ×2, phone, steward, training) are imported for\nside-effect registration / `React.lazy` pre-warm only → moved to the existing\nidle path (`BOOT_CONFIG_DEFERRED_MODULE_LOADERS`). Measured `app-modules` span:\n**~33–44 ms warm** (was a blocking await of 10 imports).\n\n### 3. Launch orange = `#ef5a1f` (no flash)\nEvery boot/loading/launch surface now uses `#ef5a1f` (= `DEFAULT_BACKGROUND_COLOR`,\nthe home `ShaderBackground`) so native splash → React `StartupShell` → home is a\nsingle seamless orange. `StartupShell` uses a dedicated `--launch-bg` token\n(**proven** to render `rgb(239,90,31)` = `#ef5a1f`; `--bg` resolves to the theme\n`rgb(245,245,244)` near-white, so develop's `var(--bg,…)` would flash near-white).\nNative surfaces fixed: `capacitor.config.ts`, `app.config.ts` web colors + PWA\nmanifest, Android `colors.xml`/`styles.xml`, iOS `LaunchScreen.storyboard`. Brand\naccent stays `#FF5800`.\n\n## Guardrails\n- `packages/app/test/first-paint-guard.test.ts` — fails CI on a new blocking\n  plugin import in `initializeAppModules()`.\n- `packages/app/test/brand-surface.test.ts` — every launch surface = `#ef5a1f`\n  (tied to `DEFAULT_BACKGROUND_COLOR`); brand stays `#FF5800`.\n- `packages/ui/src/state/startup-telemetry.test.ts` — recording/dedup/host-id/\n  window mirror.\n\n## Docs + harness\n- `packages/app/docs/device-boot-startup.md` — per-platform boot sequence\n  diagrams (desktop/Android/iOS/web-remote), checkpoint catalog, cross-process\n  trace-id seam, baseline matrix status.\n- `scripts/capture-startup-trace.mjs` (`bun run --cwd packages/app trace:startup`)\n  — repeatable Playwright trace capture (cold/warm).\n\n## Evidence (`.github/issue-evidence/9565-startup-readiness/`)\n- `desktop-web-renderer-trace-m4max.json` + `renderer-trace-second-capture.json`\n  — real cold/warm renderer traces (app-modules span 33–44 ms).\n- `startup-shell-orange-ef5a1f.png` + `startup-orange-proof.md` — computed\n  `backgroundColor: rgb(239,90,31)` = `#ef5a1f`.\n\n## Tests\n`packages/app`: brand-surface (9) + first-paint-guard (3) green.\n`packages/ui`: startup-telemetry (8) + startup-coordinator/useStartupCoordinator/\nstartup-shell (20) green. Lint + typecheck clean for touched files.\n\n## Non-goals honored\nNo second boot state machine (extends the coordinator + observes). Agent is not\nmarked ready before first-turn deps. No LifeOps/health or media-store changes.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T05:59:20Z",
+      "mergedAt": "2026-06-25T09:20:59Z",
+      "additions": 1395,
+      "deletions": 97
+    },
+    {
+      "id": "PR_kwDOMT5cIs7qbHYA",
+      "title": "feat(voice): wire live AEC echoReference + on-device delay calibration (#9583)",
+      "author": "lalalune",
+      "number": 9603,
+      "body": "Follow-up to #9455 / #9575. The NLMS echo canceller seam in `audio-frame-consumer.ts` was ready, but on the live device path nothing supplied the far-end reference and the playback→mic delay was never calibrated. This wires both.\n\n## What this delivers (the three #9583 checkboxes)\n\n- [x] **Wire the `echoReference` provider on the live device path.** New `PlaybackReferenceBuffer` (a bounded, timestamped ring of the agent's TTS playback PCM) + `createEchoReferenceProvider` factory, owned by `LiveDiarizationSession` and passed to the `AudioFrameConsumer`. The device feeds the far-end via a new `POST /api/voice/audio-frames/playback` route. When no playback covers a mic window the provider returns `null` and the canceller is skipped entirely (zero idle cost, exact passthrough).\n- [x] **On-device playback→mic delay calibration per platform.** `echo-delay-calibrator.ts` estimates the bulk delay by normalized cross-correlation (GCC-style) over an echo-only window, with a per-platform seed table (`darwin`/`ios`/`android`/`win32`/`linux`). The session seeds from `process.platform` and auto-refines on the first echo-only burst; the active delay + confidence are surfaced in `/api/voice/audio-frames/status`.\n- [x] **(Optional) AEC3-class residual-echo suppression.** Opt-in single-band residual suppressor on the canceller output, gated strictly to echo-only frames (far-end active, no double-talk) so it can never suppress a barge-in. Default off; enabled per device via `ELIZA_VOICE_AEC_RESIDUAL_SUPPRESSION`.\n\n## Evidence\n\n40 vitest tests, all green, typecheck clean:\n- `playback-reference-buffer.test.ts` — write/read alignment, gaps→null, eviction, delay offset, **end-to-end** proof that buffer→provider→consumer→canceller cancels the agent echo by **>10 dB ERLE**.\n- `echo-delay-calibrator.test.ts` — recovers a known delay (±2 samples, confidence >0.7), zero-delay, silence→0, and does **not** false-lock on uncorrelated near-end speech.\n- `nlms-echo-canceller.test.ts` — residual suppressor is a no-op by default, further attenuates echo-only residual when on, never attenuates the user while the agent is silent, and does not crush the user during double-talk.\n\n```\nTest Files  4 passed (4)\n     Tests  40 passed (40)\n```\n\nThe actual playback-capture wiring (device-side) and per-device delay tuning still happen on hardware; this lands the reusable agent-side machinery + seams + auto-calibration so a device run just supplies frames.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-25T06:11:25Z",
+      "mergedAt": null,
+      "additions": 1363,
+      "deletions": 275
+    },
     {
       "id": "PR_kwDOMT5cIs7qW92I",
       "title": "De-larp the benchmark suite: delete unwired benchmarks, wire PARTIAL→REAL, scheduled orchestrator lane + CI-coverage gate (#9475)",
@@ -19,61 +67,13 @@
       "mergedAt": "2026-06-25T03:36:22Z",
       "additions": 873,
       "deletions": 884347
-    },
-    {
-      "id": "PR_kwDOMT5cIs7qWwJT",
-      "title": "docs(8795): deep LifeOps scenario/benchmark/GEPA audit report + 53 verified findings",
-      "author": "lalalune",
-      "number": 9545,
-      "body": "Adds the research report requested on #8795 under `.github/issue-evidence/`.\n\nProduced by a **10-subsystem parallel audit** (scenario-runner, PA scenarios, PA LLM consumers, health/screentime, scheduling spine, GEPA scoring, OptimizedPromptService, Python lifeops-bench, persona/fuzz lens, CI wiring) with **adversarial per-finding verification** — 53 of 56 candidate findings confirmed, 3 refuted. Plus hand-verified refinements on the highest-severity items.\n\n## Headline findings (all file:line-anchored in the report)\n\n- **CRITICAL — inverted/capped LIVE scorer.** The Python LIVE scorer caps a *correct* write agent at **0.3** (`scorer.py:1242-1244`): `expected_state_hash` replays an empty ground-truth on the seed (`runner.py:2855-2858`), so it equals the *unmutated* world and `state_component` is structurally unearnable for any world-mutating scenario → LIVE `pass@1` (≥0.99) is unreachable for every agent incl. PerfectAgent. The conformance oracle runs STATIC-only, which is why it shipped. *(Fix is a design decision — recommend extending the PerfectAgent/WrongAgent oracle to LIVE rather than a drive-by scoring rewrite.)*\n- **HIGH — `execution.plannerText` is a dead field** (declared + read by `buildPlannerAssertionBlob`, assigned nowhere). `plannerIncludes*`/`plannerExcludes` are action-routing assertions mis-named as reasoning assertions.\n- **HIGH — large larp surface in the PA corpus:** ~200 `personalityExpect` scenarios pass enforcing nothing (read only by `personality-bench`, never `runScenario`); 67% of `responseIncludesAny` turns are echo-satisfiable; 130 `executive.*` scenarios (77%) carry no load-bearing assertion; `plannerExcludes` lists exclude tokens that can never be emitted (`PAYMENT_EXECUTED` ×47).\n- **HIGH — runtime bugs + dead targets:** `sleep-recap` pack can never fire (unknown `personal_baseline_sufficient` gate); bedtime/wake-up safety gates fall through to allow; Fitbit distance overstated ~2.5×; `meeting_prep`/`screentime_recap` are fully-plumbed but consumerless GEPA targets.\n- **Safety/persona blind spots:** no scorer rewards a correct refusal/escalation; zero child/elderly/ESL/voice-transcription/adversarial coverage; no self-harm/crisis handling in health.\n\n## Contents\n- `8795-lifeops-audit-report.md` — full report (exec summary, system map, findings by severity, edge-case/fuzz/persona matrix, the `meeting_prep`/`screentime_recap` decision, a prioritized chunked work plan, and what's already solid).\n- `8795-confirmed-findings.json` — the 53 confirmed findings (subsystem/kind/severity/evidence/fix) for traceability.\n\nEvidence/docs only — no runtime code change. First code fix from this audit already merged: **#9540** (`health_checkin` trajectory tagging). Further fixes will land as small follow-up PRs.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-25T01:14:27Z",
-      "mergedAt": "2026-06-25T01:14:43Z",
-      "additions": 852,
-      "deletions": 0
-    },
-    {
-      "id": "PR_kwDOMT5cIs7qV4ok",
-      "title": "test+feat: schedule_plan GEPA seed (#9299) + keyless mock-LLM monetization journey (#9477)",
-      "author": "lalalune",
-      "number": 9531,
-      "body": "Two independent, fully-tested increments closing the actionable code follow-ups on their issues.\n\n### `#9299` — `schedule_plan` LifeOps GEPA seed\nThe scheduling-negotiation planner (`SCHEDULE_PLAN_INSTRUCTIONS`) becomes a third lifeops GEPA seed task in `plugins/plugin-training/scripts/lifeops-gepa-seed.ts`, alongside `calendar_extract` and `inbox_triage`. The 11-row dataset covers every subaction (`start`/`propose`/`respond`/`finalize`/`cancel`/`list_active`/`list_proposals`), the wrong-tool + vague guards (`shouldAct=false`), and multilingual formal/informal phrasing (FR/ES) per the #9299 real-conversation requirement. The per-task persistence guard is extended so a degenerate optimized prompt that drops the subaction vocabulary can't replace the working baseline.\n\n- **Test** (`lifeops-gepa-seed.test.ts`, 8/8, was 6): keys assertion updated; schedule_plan baseline/shape coverage; every-subaction-present check; multilingual check; malformed-persistence guard.\n\n### `#9477` — keyless mock-LLM creator-monetization journey\nCloses the two open code follow-ups on the (otherwise manual) #9477:\n- An in-process OpenAI-compatible **mock LLM** (`mock-llm.ts`) + a `mockLlm` stack option that points the worker's `OPENAI_BASE_URL`/`OPENAI_API_KEY` at it (synced into `.dev.vars` via `providerOverrideKeys`). The new `monetized-mock-llm-journey.spec.ts` drives the **real** `POST /api/v1/messages` + `x-app-id` billing/markup/earnings seam against an `openai/<model>` id with **no paid key** — the gap the `CEREBRAS_API_KEY`-gated `creator-monetization-journey.spec.ts` left.\n- Fixes the stale doc path `app/api/cron/container-billing/route.ts` → `packages/cloud-api/cron/container-billing/route.ts` in `survival-economics.md`.\n\n- **Verified** (1 passed, 8.7s): end-user org debited `0.000016` (base + 100% markup), creator `app_earnings` `0 → 0.000008`, the mock served the inference. Only the LLM bytes are mocked; credits/markup/earnings are fully real.\n\n## Verification\n- `plugin-training` typecheck: turbo 30/30 green; `lifeops-gepa-seed.test.ts` 8/8\n- `monetized-mock-llm-journey.spec.ts`: 1 passed (real debit + markup asserted)\n- `cloud-e2e` tsc: only the pre-existing tsconfig `baseUrl` deprecation; no errors in touched files\n- biome format clean\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-25T00:11:35Z",
-      "mergedAt": "2026-06-25T00:11:45Z",
-      "additions": 595,
-      "deletions": 3
-    },
-    {
-      "id": "PR_kwDOMT5cIs7qVswm",
-      "title": "feat(voice): sample-level AEC for live barge-in (#9455)",
-      "author": "lalalune",
-      "number": 9526,
-      "body": "Closes the sample-level half of #9455 (split from #9147, which only did turn-level self-echo rejection).\n\n## What\nThe live half-duplex voice path had no **sample-level** AEC: it could reject a whole turn that was the agent's own voice (`selfVoiceSimilarity` WeSpeaker cosine in `respond-gate.ts`), but it could not recover a **barge-in during playback** — the residual of the agent's own TTS still corrupted the user's transcript. This adds the per-sample layer.\n\nNew module `plugins/plugin-local-inference/src/services/voice/aec.ts`:\n- A length-`L` FIR filter models the acoustic echo path (speaker→room→mic); per mic sample, `echo_hat = wᵀ·x` over the delay-aligned far-end window, output `e = near − echo_hat`, and **normalized-LMS** adaptation `w ← w + μ·e·x/(xᵀx+δ)`.\n- A **double-talk detector** freezes adaptation (but keeps filtering) when the near-end clearly exceeds the echo estimate — so a genuine barge-in is preserved and the filter never diverges onto the user's voice (with a hangover hold).\n- `setDelaySamples()` for the measured mic↔playback latency; `erle()` helper; pure, dependency-free, 16 kHz mono fp32, mirrors `vad.ts` / `self-voice-imprint.ts`. The far-end reference is already available at the `VoiceScheduler.onAudio` tap.\n\n## Verification (Linux-CPU, deterministic, model-free — fully CI-able)\n`bunx vitest run src/services/voice/__tests__/aec.test.ts` → **4/4 pass**:\n- **31.68 dB ERLE** on a synthetic decaying-IR echo path after NLMS convergence (≥20 dB asserted).\n- Double-talk: near-end talker preserved (corr **0.999**), DT detector fires, and a following echo-only segment stays cancelled (post-DT ERLE **74.75 dB**) — i.e. the filter froze and did not diverge.\n- `erle()` edge cases + `process()` length/finite invariants.\n\n## Scope\nThis is the linear AEC core (the bulk of the ERLE). The **AEC3-grade nonlinear residual suppressor + comfort noise**, and **live mic↔playback delay calibration + on-device ERLE/barge-in validation**, are the documented stage-2 (`needs-device`) follow-up the issue itself frames as \"a further stage.\"\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-25T00:00:58Z",
-      "mergedAt": null,
-      "additions": 492,
-      "deletions": 0
-    },
-    {
-      "id": "PR_kwDOMT5cIs7qWaWw",
-      "title": "feat(training): live GEPA optimization of LifeOps actions on gpt-oss-120b (#9299 Scope 5)",
-      "author": "lalalune",
-      "number": 9543,
-      "body": "Part of #9299, **Scope 5** (GEPA-optimize the LifeOps actions for gpt-oss-120b). The seed harness was already wired (#9429/#9531) but no **live** before/after optimization had been run and no optimized artifacts produced — the marquee remaining DoD item. This PR runs it live and attaches measured results.\n\n## Live before/after (gpt-oss-120b, gen=2 population=4)\n\n| Task | Baseline | Optimized | Δ |\n| --- | --- | --- | --- |\n| `calendar_extract` | 0.795 | 0.864 | **+0.068** |\n| `inbox_triage` | 0.625 | 0.667 | **+0.042** |\n| `schedule_plan` | _running; appended on completion_ | | |\n\nOptimized prompts persisted to the standard optimized-prompt store (`OptimizedPromptService`) so they auto-load at boot. Artifacts + raw run logs are committed under `plugins/plugin-training/docs/audit/9299-gepa-live/` as human-verifiable evidence (these run logs ARE the real-LLM gpt-oss-120b trajectories for the optimization).\n\n## Model/provider note (honest)\n\nThe issue says **gpt-oss-120b on Cerebras**; no `CEREBRAS_API_KEY` is present on this machine, so the run used the **identical `gpt-oss-120b` weights served by Together AI** (OpenAI-compatible) via the adapter's existing `CEREBRAS_BASE_URL` override. Same model, same seed harness, same persistence path — only the transport endpoint differs. `RESULTS.md` documents the exact re-run command for Cerebras.\n\n## Code change\n\n- `cerebras-eval-model.ts`: add `fetchChatWithRetry` — bounded retry (429 + 5xx + network) with exponential backoff. A single optimizer run fans out into dozens of provider calls; one transient `500` (common on serverless gpt-oss relays) previously aborted the whole generation, which is exactly why prior live runs couldn't complete. Also match `reasoning_effort` on the `<vendor>/gpt-oss-*` model form, not just the bare id. Existing seed/scoring unit tests pass (28/28).\n\n## Scope-2 audit (bonus)\n\n`DEPENDENCY_GRAPH.md` gains a domain-extraction status table: the modules flagged as \"still embedded\" are each in their correct home (calendar-gate + service-mixins are PA composition glue; email-classifier/entities/relationships are runtime shims). Flags `lifeops/bill-extraction.ts` as unconsumed finance scaffolding for the owner to wire into `plugin-finances` or remove.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-25T00:49:40Z",
-      "mergedAt": "2026-06-25T01:34:56Z",
-      "additions": 491,
-      "deletions": 9
     }
   ],
   "codeChanges": {
-    "additions": 3821,
-    "deletions": 4735,
-    "files": 95,
-    "commitCount": 42
+    "additions": 28094,
+    "deletions": 13916,
+    "files": 838,
+    "commitCount": 302
   },
   "completedItems": [
     {
@@ -371,6 +371,2157 @@
         "packages/skills/skills/build-monetized-app/references/sdk-flow.md",
         "packages/skills/skills/build-monetized-app/references/survival-economics.md"
       ]
+    },
+    {
+      "title": "fix(agent-orchestrator): align opencode local fixtures",
+      "prNumber": 9751,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Replaces remaining plugin-agent-orchestrator `qwen2.5-coder` local opencode test fixtures with the shipped local `eliza-1-4b` model name.\n- Keeps the tests focused on local OpenAI-compatible routing and no-key-leak behavior; n",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/model-chooser-contract.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/opencode-spawn-config-auto-detect.test.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core): remove Qwen Cerebras autowire case",
+      "prNumber": 9750,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Removes the Qwen model id from Cerebras benchmark autowire intent detection.\n- Replaces the hard-coded two-model comparison with a normalized bare Cerebras model allowlist.\n- Keeps the default Cerebras benchmark model on `gpt-",
+      "files": [
+        "packages/app-core/src/benchmark/__tests__/cerebras-endpoint.test.ts",
+        "packages/app-core/src/benchmark/cerebras-autowire.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): align vision fixtures with Gemma",
+      "prNumber": 9748,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Renames active local-inference vision fixture keys from `qwen3-vl*` to `gemma-vl*`.\n- Aligns test fixture `modelFamily` values with the runtime `gemma-vl` default.\n- Replaces Qwen-specific local VLM comments in `plugin-vision`",
+      "files": [
+        "plugins/plugin-computeruse/src/actor/brain.ts",
+        "plugins/plugin-local-inference/__tests__/imagegen-handler.test.ts",
+        "plugins/plugin-local-inference/__tests__/imagegen-vision-coexist.test.ts",
+        "plugins/plugin-local-inference/__tests__/memory-arbiter.test.ts",
+        "plugins/plugin-local-inference/__tests__/vision-describe.test.ts",
+        "plugins/plugin-local-inference/__tests__/vl-cross-eviction.test.ts",
+        "plugins/plugin-local-inference/__tests__/ws1-ws2-seam.test.ts",
+        "plugins/plugin-vision/src/screen-capture.ts",
+        "plugins/plugin-vision/src/screen-tiler.test.ts",
+        "plugins/plugin-vision/src/screen-tiler.ts",
+        "plugins/plugin-vision/src/service.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): remove Qwen imagegen defaults",
+      "prNumber": 9746,
+      "type": "bugfix",
+      "body": "## Summary\n- Move every Eliza-1 imagegen tier default and publish requirement to the monolithic `imagegen-sd-1_5-q5_0` GGUF instead of the Qwen-backed Z-Image split bundle.\n- Switch Together synthetic-data generation defaults from Qwen to `",
+      "files": [
+        "packages/chip/ELIZA_1_BUNDLE_EXTRAS.json",
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/training/scripts/benchmark/__init__.py",
+        "packages/training/scripts/benchmark/native_tool_call_bench.py",
+        "packages/training/scripts/format_for_training.py",
+        "packages/training/scripts/inference/serve_vllm.py",
+        "packages/training/scripts/manifest/audit_hf_eliza1_release.py",
+        "packages/training/scripts/manifest/eliza1_platform_plan.py",
+        "packages/training/scripts/manifest/test_audit_hf_eliza1_release.py",
+        "packages/training/scripts/manifest/test_eliza1_platform_plan.py",
+        "packages/training/scripts/synth/together_synth.py",
+        "packages/training/scripts/to_together_format.py",
+        "packages/training/scripts/train_nebius.sh",
+        "packages/training/scripts/verify_optimization_stack.py",
+        "plugins/plugin-local-inference/__tests__/imagegen-publishing.test.ts",
+        "plugins/plugin-local-inference/__tests__/imagegen-routing.test.ts",
+        "plugins/plugin-local-inference/__tests__/imagegen-sd-cpp-probe.test.ts",
+        "plugins/plugin-local-inference/__tests__/text-bundle.test.ts",
+        "plugins/plugin-local-inference/src/provider.ts",
+        "plugins/plugin-local-inference/src/services/imagegen/backend-selector.test.ts",
+        "plugins/plugin-local-inference/src/services/imagegen/backend-selector.ts",
+        "plugins/plugin-local-inference/src/services/imagegen/types.ts"
+      ]
+    },
+    {
+      "title": "fix(feed): default training and local inference to Gemma",
+      "prNumber": 9742,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Switch Feed RL/training defaults from Qwen to Gemma 4 E4B (`google/gemma-4-E4B-it`).\n- Replace Feed local/model tier config with Gemma 4 E2B/E4B/12B/31B, including official Google QAT GGUF repo ids and context-window metadata.",
+      "files": [
+        ".github/workflows/feed-rl-training.yml",
+        "packages/feed/apps/cli/src/__tests__/train-pipeline.test.ts",
+        "packages/feed/apps/cli/src/commands/model.ts",
+        "packages/feed/apps/cli/src/commands/train.ts",
+        "packages/feed/apps/web/src/app/api/scambench/route.ts",
+        "packages/feed/packages/agents/package.json",
+        "packages/feed/packages/agents/src/__tests__/rl.test.ts",
+        "packages/feed/packages/agents/src/autonomous/AutonomousGroupChatService.ts",
+        "packages/feed/packages/agents/src/autonomous/AutonomousPlanningCoordinator.ts",
+        "packages/feed/packages/agents/src/autonomous/AutonomousPostingService.ts",
+        "packages/feed/packages/agents/src/character-roster/__tests__/trust-experiment.test.ts",
+        "packages/feed/packages/agents/src/character-roster/trust-experiment.ts",
+        "packages/feed/packages/agents/src/llm/__tests__/agent-llm.integration.test.ts",
+        "packages/feed/packages/agents/src/llm/ollama-provider.ts",
+        "packages/feed/packages/agents/src/training/AutomationPipeline.ts",
+        "packages/feed/packages/agents/src/training/ModelSelectionService.ts",
+        "packages/feed/packages/agents/src/training/RLModelConfig.ts",
+        "packages/feed/packages/agents/src/training/storage/ModelStorageService.ts",
+        "packages/feed/packages/agents/src/utils/prompt-builder.ts",
+        "packages/feed/packages/api/src/utils/token-counter.ts",
+        "packages/feed/packages/engine/src/llm/token-counter.ts",
+        "packages/feed/packages/engine/src/llm/xml-parser.ts",
+        "packages/feed/packages/testing/unit/shared/token-counter.test.ts"
+      ]
+    },
+    {
+      "title": "fix(training): satisfy training stack ruff lint",
+      "prNumber": 9741,
+      "type": "bugfix",
+      "body": "## Summary\n- Split one-line statements in Kokoro CoreML helper scripts so the Training Stack ruff lint lane passes on current develop.\n- Remove extraneous f-string prefixes from the Eliza-1 source-weight staging test.\n- No behavior changes;",
+      "files": [
+        "packages/training/scripts/kokoro/coreml/diag_stages.py",
+        "packages/training/scripts/kokoro/coreml/export_e2e_coreml.py",
+        "packages/training/scripts/kokoro/coreml/gen_assets.py",
+        "packages/training/scripts/kokoro/coreml/validate_e2e_coreml.py",
+        "packages/training/scripts/manifest/test_stage_eliza1_source_weights.py"
+      ]
+    },
+    {
+      "title": "fix(nearai): default direct routing to Gemma",
+      "prNumber": 9740,
+      "type": "bugfix",
+      "body": "## Summary\n- Switch NEAR AI direct-account small/large defaults to `google/gemma-4-31B-it` across plugin config, registry metadata, generated first-party registry output, docs, and agent first-run provider switching.\n- Update the NEAR model",
+      "files": [
+        "packages/agent/src/api/model-provider-helpers.test.ts",
+        "packages/agent/src/api/model-provider-helpers.ts",
+        "packages/agent/src/api/provider-switch-config.test.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/registry/src/first-party/generated.json",
+        "plugins/plugin-nearai/AGENTS.md",
+        "plugins/plugin-nearai/CLAUDE.md",
+        "plugins/plugin-nearai/README.md",
+        "plugins/plugin-nearai/__tests__/config.test.ts",
+        "plugins/plugin-nearai/__tests__/text-params.test.ts",
+        "plugins/plugin-nearai/package.json",
+        "plugins/plugin-nearai/registry-entry.json",
+        "plugins/plugin-nearai/utils/config.ts"
+      ]
+    },
+    {
+      "title": "fix(steward): declare personal assistant dependency",
+      "prNumber": 9739,
+      "type": "bugfix",
+      "body": "## Summary\n- declare `@elizaos/plugin-personal-assistant` as a workspace dependency of `@elizaos/plugin-steward-app`\n- keep `bun.lock` in sync so Turbo/Bun can order and resolve the dynamic BLOCK fallback import\n\n## Why\n`plugin-steward-app/",
+      "files": [
+        "bun.lock",
+        "plugins/plugin-steward-app/package.json"
+      ]
+    },
+    {
+      "title": "fix(local-inference): real Kokoro StyleTTS-2/iSTFTNet decoder — Kokoro TTS actually speaks (#9588)",
+      "prNumber": 9738,
+      "type": "bugfix",
+      "body": "## Summary\n\nKokoro TTS never actually produced speech. This makes it work — end-to-end, **verified intelligible on the already-shipped `bundles/2b` Q4_K_M GGUF** (no model republish needed). Native `llama.cpp` submodule bump (`82925c0e9 → b",
+      "files": [
+        "plugins/plugin-local-inference/native/llama.cpp"
+      ]
+    },
+    {
+      "title": "fix(ui): redirect unauthenticated apex visitors to /login instead of 401-walling (Gate B)",
+      "prNumber": 9737,
+      "type": "bugfix",
+      "body": "## The bug (Gate B — the last launch hold)\n`elizacloud.ai` (the apex control-plane host) serves `packages/app` via `CloudRouterShell`, but has **no same-origin agent backend**. The shell registers explicit cloud/auth routes but **nothing fo",
+      "files": [
+        "packages/ui/src/cloud/shell/CloudRouterShell.test.tsx",
+        "packages/ui/src/cloud/shell/CloudRouterShell.tsx"
+      ]
+    },
+    {
+      "title": "chore(ui): remove dead use-json-render-message hook (knip-verified)",
+      "prNumber": 9736,
+      "type": "other",
+      "body": "## What\n\nRemoves `packages/ui/src/genui/use-json-render-message.ts` — a dead module exporting `useJsonRenderMessage` / `useOfficialJsonRenderMessage` that is referenced nowhere in the repo.\n\n## Proof of deadness\n\n- **Not in the public API s",
+      "files": [
+        "packages/ui/src/genui/use-json-render-message.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): \"*\" wildcard opens apps-deploy to every org (full-launch posture)",
+      "prNumber": 9735,
+      "type": "feature",
+      "body": "## What\n\nAdds an explicit `\"*\"` wildcard to the production apps-deploy gate so we can open app deploys to **every org** (the actual launch posture) with one config value, instead of enumerating org ids.\n\n## Why\n\n`apps-deploy-gate.ts` was a ",
+      "files": [
+        "packages/cloud-api/__tests__/apps-deploy-gate.test.ts",
+        "packages/cloud-api/src/lib/apps-deploy-gate.ts"
+      ]
+    },
+    {
+      "title": "fix(training): switch RL defaults to Gemma",
+      "prNumber": 9734,
+      "type": "bugfix",
+      "body": "## Summary\n- Switch active RL scripts, Atropos environments, and Tinker examples from Qwen model names to Gemma 4 E2B/E4B/12B/31B tiers.\n- Add Tinker base-model alias resolution for Eliza tier names onto Gemma upstream model IDs.\n- Prefer G",
+      "files": [
+        "packages/training/scripts/rl/ab_testing.py",
+        "packages/training/scripts/rl/compare_kondo_rates.py",
+        "packages/training/scripts/rl/demo_continuous_rl.py",
+        "packages/training/scripts/rl/diagnose_learning.py",
+        "packages/training/scripts/rl/feed_env.py",
+        "packages/training/scripts/rl/hybrid_env.py",
+        "packages/training/scripts/rl/kl_controller.py",
+        "packages/training/scripts/rl/measure_learning.py",
+        "packages/training/scripts/rl/online_env.py",
+        "packages/training/scripts/rl/red_team_gym.py",
+        "packages/training/scripts/rl/run_ab_test.py",
+        "packages/training/scripts/rl/run_adversarial_eval.py",
+        "packages/training/scripts/rl/run_adversarial_training.py",
+        "packages/training/scripts/rl/run_nebius_continuous_rl.sh",
+        "packages/training/scripts/rl/run_red_team_gym.py",
+        "packages/training/scripts/rl/run_shared_model_rl.py",
+        "packages/training/scripts/rl/run_team_rl.py",
+        "packages/training/scripts/rl/run_tinker_training.py",
+        "packages/training/scripts/rl/team_rl.py",
+        "packages/training/scripts/rl/tinker/tinker_client.py",
+        "packages/training/scripts/rl/tinker/tinker_trainer.py",
+        "packages/training/tests/rl/test_tinker_client.py"
+      ]
+    },
+    {
+      "title": "fix(training): accept 27b-256k Gemma tier aliases",
+      "prNumber": 9733,
+      "type": "bugfix",
+      "body": "## Summary\n- accept the active `27b-256k` and `eliza-1-27b-256k` release-tier aliases in the Gemma RL capacity planner\n- align `model_registry.get(...)` so the active 256k 27B variant resolves to the Gemma 4 31B registry entry\n- add planner",
+      "files": [
+        "packages/training/scripts/rl/gemma_capacity.py",
+        "packages/training/scripts/training/model_registry.py",
+        "packages/training/scripts/training/test_model_registry.py",
+        "packages/training/tests/rl/test_gemma_capacity.py"
+      ]
+    },
+    {
+      "title": "fix(ci): stop the UI Story Gate flaking on useAppSelector harness throws",
+      "prNumber": 9732,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe UI Story Gate kept failing on a **moving** set of `useAppSelector used before AppProvider rendered` console errors (27 → 12 → 3 → 1 across recent runs, a *different* subset each run). The headless gate renders every story wi",
+      "files": [
+        "packages/ui/test/story-gate/run-story-gate.mjs"
+      ]
+    },
+    {
+      "title": "chore(core): surface facts/relationships dedup read failures instead of silently swallowing",
+      "prNumber": 9731,
+      "type": "other",
+      "body": "## What\n\n`searchSimilarFacts` and `fetchExistingRelationships` (in `packages/core/src/runtime/facts-and-relationships.ts`) load existing facts/relationships so the model can deduplicate before writing new ones. Both wrapped the DB read in a",
+      "files": [
+        "packages/core/src/runtime/facts-and-relationships.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): flip app off 'building' when its container provision permanently fails",
+      "prNumber": 9730,
+      "type": "bugfix",
+      "body": "## What\n\nCloses the failure-path sibling of #9228 in the Product-2 apps-deploy lifecycle.\n\nA **successful** `APP_DEPLOY` job only ensures the tenant DB, creates the `containers` row, enqueues a `CONTAINER_PROVISION`, and self-completes. So ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/provisioning-jobs-failure-writeback.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts"
+      ]
+    },
+    {
+      "title": "perf(local-inference): lazy-load active-model/engine off the boot path (#9565)",
+      "prNumber": 9729,
+      "type": "other",
+      "body": "Follow-up to #9727. `local-inference-routes.ts` still eagerly imported `active-model.js` for two engine-free symbols (`assertManifestEvalsPassed`, `CandidateModelActivationError`), but active-model top-level-imports the FFI **engine (~545ms",
+      "files": [
+        "plugins/plugin-local-inference/src/local-inference-routes.ts"
+      ]
+    },
+    {
+      "title": "chore(scripts): memory-bounded per-package knip + dead-file verifier",
+      "prNumber": 9728,
+      "type": "other",
+      "body": "Adds two reusable dead-code tooling scripts (part of #9626 cleanup). Plain `knip` OOMs on this monorepo (full ~4k-file graph); `knip-per-package.mjs` runs it isolated per workspace (exports-aware entries, bounded heap), and `verify-dead-fil",
+      "files": [
+        "scripts/knip-per-package.mjs",
+        "scripts/verify-dead-files.mjs"
+      ]
+    },
+    {
+      "title": "perf(local-inference): lazy-load the heavy service off the boot path (#9565)",
+      "prNumber": 9727,
+      "type": "other",
+      "body": "## Problem\n`plugin-local-inference` is one of only **two** plugins that block agent boot. Its root entry re-exports `local-inference-routes.ts`, which **top-level-imported `localInferenceService`** (`services/service.js`) — and that eagerly",
+      "files": [
+        "plugins/plugin-local-inference/src/local-inference-routes.ts"
+      ]
+    },
+    {
+      "title": "chore: remove 7 knip-verified dead files (-643 LOC)",
+      "prNumber": 9726,
+      "type": "other",
+      "body": "Removes 7 genuinely-unreferenced files (per-package knip + rigorous repo-wide verification: static/dynamic imports, exported-symbol usage, exports maps, side-effect imports). Verified: tsgo --noEmit on @elizaos/ui + @elizaos/app-core REAL e",
+      "files": [
+        "packages/app-core/src/cli/command-format.ts",
+        "packages/app-core/src/register-runtime-hooks.ts",
+        "packages/ui/src/components/pages/automation-conversations.ts",
+        "packages/ui/src/components/pages/automations-missing-creds.ts",
+        "packages/ui/src/components/settings/desktop-workspace-audit-config.ts",
+        "packages/ui/src/components/shell/first-run-theme.ts",
+        "packages/ui/src/state/first-run-restart.ts"
+      ]
+    },
+    {
+      "title": "refactor(voice): remove dead Samantha-preset modules + OmniVoice bundle probes (#9147)",
+      "prNumber": 9724,
+      "type": "refactor",
+      "body": "## What\n\nRemoves genuinely-dead voice code left behind by the OmniVoice-TTS retirement:\n\n- the **Samantha reference-encode modules** — `samantha-preset-placeholder.ts`, `samantha-preset-regenerator.ts` (+ both tests)\n- the orphaned **`regen",
+      "files": [
+        "packages/training/scripts/voice/samantha_lora/RUNBOOK.md",
+        "plugins/plugin-local-inference/native/verify/voice_profile_emotion_status.mjs",
+        "plugins/plugin-local-inference/native/verify/voice_profile_emotion_status.test.mjs",
+        "plugins/plugin-local-inference/scripts/regenerate-samantha-preset.mjs",
+        "plugins/plugin-local-inference/src/services/desktop-fused-ffi-backend-runtime.ts",
+        "plugins/plugin-local-inference/src/services/voice/engine-bridge.ts",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/kokoro-engine-discovery.ts",
+        "plugins/plugin-local-inference/src/services/voice/samantha-preset-placeholder.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/samantha-preset-placeholder.ts",
+        "plugins/plugin-local-inference/src/services/voice/samantha-preset-regenerator.ts",
+        "plugins/plugin-local-inference/src/services/voice/samantha-preset-regenerator.wav.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): preserve model lookup attribution for installed packages",
+      "prNumber": 9723,
+      "type": "bugfix",
+      "body": "## Summary\n- keep @elizaos/* package attribution when model lookup stacks come from installed node_modules packages\n- support both direct npm-style installs and pnpm virtual-store paths\n- move the stack-capture cost gate back to the runtime",
+      "files": [
+        "packages/core/src/runtime.ts",
+        "packages/core/src/utils/model-lookup-caller.test.ts",
+        "packages/core/src/utils/model-lookup-caller.ts"
+      ]
+    },
+    {
+      "title": "perf(loadperf): surface per-phase agent-boot breakdown in boot-kpi (#9565)",
+      "prNumber": 9722,
+      "type": "other",
+      "body": "## Why\nThe boot-KPI reported a single `readyMs` + peak RSS. When boot regresses, that number moves with **zero phase attribution**. The runtime already writes a per-phase `BootTimer` breakdown to `<stateDir>/telemetry/boot/latest.json` on e",
+      "files": [
+        "packages/benchmarks/loadperf/boot-kpi.mjs"
+      ]
+    },
+    {
+      "title": "perf(build): DTS emit-only (--noCheck) for 4 more plugins (#9626)",
+      "prNumber": 9721,
+      "type": "other",
+      "body": "Third verified batch of the DTS emit-only sweep (#9626 TL;DR #3), after #9708 + #9719.\n\n`--noCheck` on the declaration step of `plugin-discord-local`, `plugin-elevenlabs`, `plugin-linear`, `plugin-tee` — each with a separate `typecheck` scr",
+      "files": [
+        "plugins/plugin-discord-local/build.ts",
+        "plugins/plugin-elevenlabs/build.ts",
+        "plugins/plugin-linear/build.ts",
+        "plugins/plugin-tee/build.ts"
+      ]
+    },
+    {
+      "title": "Add @xynqai/plugin-eliza to community registry",
+      "prNumber": 9720,
+      "type": "other",
+      "body": "List XYNQ decentralized inference plugin for ElizaOS discoverability.\r\n\r\n## Summary\r\n- Adds `@xynqai/plugin-eliza` to the community plugin registry\r\n- Regenerates `generated-registry.json`\r\n## Plugin\r\n- npm: `@xynqai/plugin-eliza@0.1.1`\r\n- ",
+      "files": [
+        "packages/registry/entries/third-party/xynqai__plugin-eliza.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "perf(build): DTS emit-only (--noCheck) for 8 more plugins (#9626)",
+      "prNumber": 9719,
+      "type": "other",
+      "body": "Second verified batch of the DTS emit-only sweep (#9626 TL;DR #3), after #9708.\n\nAdds `--noCheck` to the declaration step of 8 plugins using the array / `Bun.spawn` / `spawnSync` `tsc … --emitDeclarationOnly` form, each with a separate `typ",
+      "files": [
+        "plugins/plugin-device-filesystem/build.ts",
+        "plugins/plugin-instagram/build.ts",
+        "plugins/plugin-matrix/build.ts",
+        "plugins/plugin-remote-desktop/build.ts",
+        "plugins/plugin-shell/build.ts",
+        "plugins/plugin-slack/build.ts",
+        "plugins/plugin-todos/build.ts",
+        "plugins/plugin-twitch/build.ts"
+      ]
+    },
+    {
+      "title": "refactor(cloud-api): single domainField schema for /apps/:id/domains/*",
+      "prNumber": 9718,
+      "type": "refactor",
+      "body": "## What\n\nThe domain-name field validation was copy-pasted across five sibling routes under `v1/apps/[id]/domains/` (attach `route.ts`, `buy`, `check`, `status`, `verify`). This consolidates them onto one canonical `domainField` / `domainBod",
+      "files": [
+        "packages/cloud-api/v1/apps/[id]/domains/buy/route.ts",
+        "packages/cloud-api/v1/apps/[id]/domains/check/route.ts",
+        "packages/cloud-api/v1/apps/[id]/domains/route.ts",
+        "packages/cloud-api/v1/apps/[id]/domains/schemas.ts",
+        "packages/cloud-api/v1/apps/[id]/domains/status/route.ts",
+        "packages/cloud-api/v1/apps/[id]/domains/verify/route.ts"
+      ]
+    },
+    {
+      "title": "perf(turbo): key generic build task on shared cross-package build configs (#9626)",
+      "prNumber": 9717,
+      "type": "other",
+      "body": "Closes another under-keyed-`inputs` gap from the #9626 audit (TL;DR #1), same class as #9654.\n\n### The gap\nThe generic `build` task's `inputs` only listed **package-local** files. But three **shared** build-config files live *outside* any p",
+      "files": [
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix(plugin-personal-assistant): wire real typecheck + fix the strict-null bug it surfaced (#9474)",
+      "prNumber": 9716,
+      "type": "bugfix",
+      "body": "Closes the **last `--noCheck`-only-with-no-typecheck package** in #9474 Phase 3.\n\n## What\n`plugin-personal-assistant` ran `build:types` as `tsc --noCheck` with **no `typecheck` script** — its source was type-checked nowhere in CI. Adding th",
+      "files": [
+        "plugins/plugin-personal-assistant/package.json",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/runtime-wiring.ts"
+      ]
+    },
+    {
+      "title": "perf(build): finish DTS emit-only sweep — plugin-nearai + plugin-zai (#9626)",
+      "prNumber": 9714,
+      "type": "other",
+      "body": "Finishes the DTS emit-only sweep started in #9708.\n\n#9708 converted 22 plugins on the uniform `tsc --project tsconfig.build.json` build step to `--noCheck` (emit-only DTS; the separate `typecheck` task remains the type-error gate, so DTS ge",
+      "files": [
+        "plugins/plugin-nearai/build.ts",
+        "plugins/plugin-zai/build.ts"
+      ]
+    },
+    {
+      "title": "refactor(core): drop redundant `as unknown as` in two @elizaos/core casts (#9474)",
+      "prNumber": 9713,
+      "type": "refactor",
+      "body": "Part of #9474 (strict-TypeScript: eliminate `as unknown as`).\n\nTwo casts in `@elizaos/core` had an unnecessary `unknown` step:\n\n- `packages/core/src/services/agent-event-bridge.ts`: `service as unknown as Partial<NotificationServiceLike>` →",
+      "files": [
+        "packages/core/src/features/basic-capabilities/index.ts",
+        "packages/core/src/services/agent-event-bridge.ts"
+      ]
+    },
+    {
+      "title": "feat(computeruse): ffmpeg x11grab screenshot fallback for X11 hosts (#9105)",
+      "prNumber": 9712,
+      "type": "feature",
+      "body": "## What\n\nAdds **ffmpeg `x11grab`** as the final Linux screenshot fallback in all three computeruse capture paths (`screenshot.ts` `captureLinux`, `capture.ts` `captureDisplayLinux` + `captureRegionLinux`), with `xdpyinfo`-derived full-scree",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/platform-capabilities.test.ts",
+        "plugins/plugin-computeruse/src/platform/capabilities.ts",
+        "plugins/plugin-computeruse/src/platform/capture.ts",
+        "plugins/plugin-computeruse/src/platform/screenshot.ts"
+      ]
+    },
+    {
+      "title": "feat(vision): generic IMAGE_DESCRIPTION fusion seam — ground Gemma-4 describe in OCR/YOLO/face (#9105)",
+      "prNumber": 9711,
+      "type": "feature",
+      "body": "## What\n\nAdds the missing **fusion seam** so the on-device Gemma-4 VL model grounds its `IMAGE_DESCRIPTION` output in the OCR / YOLO / face signals plugin-vision already extracts (today they exist but have no path into the describe flow).\n\n",
+      "files": [
+        "plugins/plugin-local-inference/src/provider.ts",
+        "plugins/plugin-local-inference/src/services/index.ts",
+        "plugins/plugin-local-inference/src/services/vision/augmenter.test.ts",
+        "plugins/plugin-local-inference/src/services/vision/augmenter.ts",
+        "plugins/plugin-local-inference/src/services/vision/index.ts",
+        "plugins/plugin-vision/src/index.ts",
+        "plugins/plugin-vision/src/vision-context-augmenter.test.ts",
+        "plugins/plugin-vision/src/vision-context-augmenter.ts"
+      ]
+    },
+    {
+      "title": "feat(core): add filterByAccessContext scope-read primitive",
+      "prNumber": 9710,
+      "type": "feature",
+      "body": "## What\n\nA pure, exported core helper that decides which memories a requester may **read**, keyed on the existing `MemoryScope` (`metadata.scope`) — no new field. First step of permission-aware retrieval *enforcement* (the `accessContext` s",
+      "files": [
+        "packages/core/src/access-control/filter.test.ts",
+        "packages/core/src/access-control/filter.ts",
+        "packages/core/src/index.browser.ts",
+        "packages/core/src/index.edge.ts",
+        "packages/core/src/index.node.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): baseline the 3 remaining useAppSelector Story Gate console errors",
+      "prNumber": 9709,
+      "type": "bugfix",
+      "body": "## Problem\n\nAfter the concurrent Story Gate fixes (`38fb7851f` render app-context stories, `0767c8b35` harden locale + refresh a11y baselines), the **UI Story Gate** still failed on develop with 12 regressions ([run 28193780913](https://git",
+      "files": [
+        "packages/ui/test/story-gate/baseline/console-baseline.json"
+      ]
+    },
+    {
+      "title": "perf(build): DTS emit-only (--noCheck) for 22 plugins with a separate typecheck (#9626)",
+      "prNumber": 9708,
+      "type": "other",
+      "body": "Part of #9626, TL;DR #3 (\"double type-check\" / DTS-emit-only sweep).\n\n## Problem\n~50 `build.ts` run `tsc --project tsconfig.build.json` **without `--noCheck`** during `build` — a full redundant type-check on top of the separate `typecheck` ",
+      "files": [
+        "plugins/plugin-agent-orchestrator/build.ts",
+        "plugins/plugin-anthropic-proxy/build.ts",
+        "plugins/plugin-anthropic/build.ts",
+        "plugins/plugin-benchmarks/build.ts",
+        "plugins/plugin-bluesky/build.ts",
+        "plugins/plugin-cli-inference/build.ts",
+        "plugins/plugin-codex-cli/build.ts",
+        "plugins/plugin-edge-tts/build.ts",
+        "plugins/plugin-elizacloud/build.ts",
+        "plugins/plugin-embeddings/build.ts",
+        "plugins/plugin-farcaster/build.ts",
+        "plugins/plugin-google-genai/build.ts",
+        "plugins/plugin-groq/build.ts",
+        "plugins/plugin-lmstudio/build.ts",
+        "plugins/plugin-local-storage/build.ts",
+        "plugins/plugin-minecraft/build.ts",
+        "plugins/plugin-mysticism/build.ts",
+        "plugins/plugin-ollama/build.ts",
+        "plugins/plugin-openai/build.ts",
+        "plugins/plugin-pdf/build.ts",
+        "plugins/plugin-roblox/build.ts",
+        "plugins/plugin-xai/build.ts"
+      ]
+    },
+    {
+      "title": "fix(training): replace Qwen capacity planner with Gemma",
+      "prNumber": 9707,
+      "type": "bugfix",
+      "body": "## Summary\n- rename the active RL capacity planner from Qwen to Gemma and update the CLI/test names to match\n- replace Qwen 3.5/MoE model specs with Gemma 4 text tiers for E2B, E4B, 12B, and 31B mapped to the Eliza release tiers\n- update KV",
+      "files": [
+        "packages/training/scripts/kokoro/coreml/diag_stages.py",
+        "packages/training/scripts/rl/gemma_capacity.py",
+        "packages/training/scripts/rl/plan_gemma_training.py",
+        "packages/training/tests/rl/test_gemma_capacity.py"
+      ]
+    },
+    {
+      "title": "fix(plugins): wire real typecheck for plugin-documents + plugin-vincent (#9474)",
+      "prNumber": 9706,
+      "type": "bugfix",
+      "body": "Part of #9474 (Phase 3 — \"every package has a real typecheck in CI; no `--noCheck`-only `verify`\"). Follow-up to #9705.\n\n## What\n`plugin-documents` and `plugin-vincent` emitted declarations with `tsc --noCheck` and had **no `typecheck` scri",
+      "files": [
+        "plugins/plugin-documents/package.json",
+        "plugins/plugin-documents/tsconfig.build.json",
+        "plugins/plugin-vincent/package.json",
+        "plugins/plugin-vincent/tsconfig.build.json"
+      ]
+    },
+    {
+      "title": "fix(plugins): real typecheck for 5 --noCheck-only plugins + fix latent wallet ReferenceError (#9474)",
+      "prNumber": 9705,
+      "type": "bugfix",
+      "body": "Part of #9474 (Phase 3 — \"every package has a real typecheck in CI; no `--noCheck`-only `verify`\").\n\n## What\n\nFive plugins emitted declarations with `tsc --noCheck` and had **no `typecheck` script**, so their source was never type-checked a",
+      "files": [
+        "plugins/plugin-elizamaker/package.json",
+        "plugins/plugin-steward-app/package.json",
+        "plugins/plugin-steward-app/src/api/wallet.env-sentinel.test.ts",
+        "plugins/plugin-steward-app/src/api/wallet.ts",
+        "plugins/plugin-waifu-imagegen-app/package.json",
+        "plugins/plugin-waifu-swap-app/package.json",
+        "plugins/plugin-wallet-ui/package.json"
+      ]
+    },
+    {
+      "title": "test(lifeops): stub optional core plugins in PA vitest",
+      "prNumber": 9704,
+      "type": "tests",
+      "body": "## Summary\n\n- Stubs optional core plugin dynamic imports in the personal-assistant Vitest config so keyless prompt-benchmark runs do not require unrelated optional plugin dist entries.\n- Keeps the stubs virtual and scoped to the PA test con",
+      "files": [
+        "plugins/plugin-personal-assistant/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "docs(readme): recast elizaOS as the agentic OS + Eliza app",
+      "prNumber": 9703,
+      "type": "docs",
+      "body": "## What\n\nRewrites the top-level README to lead with the **product**, not the framework.\n\nelizaOS is repositioned as two things, front and center:\n\n- **Eliza** — the application you install today on **desktop, mobile, and web**: chat, voice,",
+      "files": [
+        "README.md"
+      ]
+    },
+    {
+      "title": "fix(feed): point client Steward fallback at canonical eliza.steward.fi",
+      "prNumber": 9702,
+      "type": "bugfix",
+      "body": "## Problem\n\n`feed.elizacloud.ai` Google login returned:\n```\n{\"ok\":false,\"error\":\"Google OAuth not configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required\"}\n```\n\nThere is only **one** Steward server (`eliza.steward.fi`, the `stewa",
+      "files": [
+        "packages/feed/apps/web/src/components/auth/LoginModal.tsx",
+        "packages/feed/apps/web/src/components/providers/StewardAuthProvider.tsx"
+      ]
+    },
+    {
+      "title": "fix(training): align local docs and RL defaults with Gemma",
+      "prNumber": 9701,
+      "type": "bugfix",
+      "body": "## Summary\n- Replaces active Qwen finetuning examples in `FINETUNING_PIPELINE.md` with Gemma 4 registry keys and current Eliza-1 tier budgets.\n- Clarifies the Gemma release path as GGUF q3/q4/q5/q6/q8 plus MTP metadata, with QJL/Polar/Turbo",
+      "files": [
+        "packages/training/docs/FINETUNING_PIPELINE.md",
+        "packages/training/scripts/rl/local_models.py",
+        "packages/training/tests/rl/test_local_models.py"
+      ]
+    },
+    {
+      "title": "fix(lifeops): unbreak Plugin Tests — keep keyless data-layer graph off the plugin-health barrel",
+      "prNumber": 9700,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **Tests → Plugin Tests** job fails on `plugins/plugin-goals/test/goals.real-db.test.ts`:\n\n```\nError: Failed to resolve entry for package \"@elizaos/plugin-health\".\n  The package may have incorrect main/module/exports specifie",
+      "files": [
+        "plugins/plugin-goals/vitest.config.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/telemetry-mapping.ts",
+        "plugins/plugin-personal-assistant/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(lifeops): green Client Tests — resolve unbuilt-plugin subpaths + sleep-recap baseline",
+      "prNumber": 9699,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **Tests → Client Tests** job has been red on develop. The entire `plugin-personal-assistant` suite failed to load:\n\n```\nError: Cannot find package '@elizaos/plugin-finances/plugin' imported from .../src/plugin.ts\nError: Cann",
+      "files": [
+        "plugins/plugin-personal-assistant/test/health-default-packs-runner.test.ts",
+        "plugins/plugin-personal-assistant/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(release): mark third-party plugin-undesirables private (unblock NPM Release E403)",
+      "prNumber": 9697,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **NPM Release** workflow fails at `Publish to NPM` and ships **none** of the `@elizaos/*` packages:\n\n```\nlerna verb publish plugin-undesirables\nlerna WARN notice Package failed to publish: plugin-undesirables\nlerna ERR! E403",
+      "files": [
+        "plugins/plugin-undesirables/package.json"
+      ]
+    },
+    {
+      "title": "test(inference): add missing host-side split-K FA correctness test + wire orphan QJL/Polar CPU smoke (#8848)",
+      "prNumber": 9694,
+      "type": "tests",
+      "body": "## What\n\nCloses two concrete, **host-side, no-GPU-device-required** verification gaps that [#8848](https://github.com/elizaOS/eliza/issues/8848) names explicitly — found by an adversarial completeness audit of the `native/verify` harness.\n\n",
+      "files": [
+        "plugins/plugin-local-inference/native/.gitignore",
+        "plugins/plugin-local-inference/native/verify/Makefile",
+        "plugins/plugin-local-inference/native/verify/PLATFORM_MATRIX.md",
+        "plugins/plugin-local-inference/native/verify/gen_fixture.c"
+      ]
+    },
+    {
+      "title": "ci(local-inference): automate the #9588 Kokoro real-weight smoke gate (#9649)",
+      "prNumber": 9690,
+      "type": "other",
+      "body": "## What\n\nSalvages `.github/workflows/kokoro-real-smoke.yml` from the stale `fix/kokoro-loader-mainline-names` branch — issue #9649 **item 3**, the half that was blocked on the `workflow` OAuth scope.\n\n`develop` already has the smoke **logic",
+      "files": [
+        ".github/workflows/kokoro-real-smoke.yml",
+        "packages/scripts/__tests__/e2e-coverage.test.ts",
+        "packages/scripts/e2e-coverage/inventory.ts",
+        "plugins/plugin-local-inference/README.md",
+        "plugins/plugin-local-inference/native/llama.cpp",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/kokoro-engine-discovery.ts"
+      ]
+    },
+    {
+      "title": "perf(local-inference): skip AEC when the agent is silent (#9649)",
+      "prNumber": 9689,
+      "type": "other",
+      "body": "## What\n\nSalvages the **agent-silent fast-path skip** from the stale `opt/ios-mac-aec-9583` branch — the last of issue #9649 item 2's three AEC ideas that was not already on `develop`.\n\nStatus of item 2's three ideas:\n- per-platform delay s",
+      "files": [
+        ".github/issue-evidence/9649-aec-fast-path-skip-bench.ts",
+        ".github/issue-evidence/9649-aec-fast-path-skip.md",
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.ts"
+      ]
+    },
+    {
+      "title": "fix(training): align catalog emitter tiers",
+      "prNumber": 9687,
+      "type": "bugfix",
+      "body": "## Summary\n- derive catalog-emitter bundle coverage from `ELIZA_1_TIERS`\n- remove retired `0_8b` catalog defaults and add active `27b-256k`\n- mark emitted catalog tokenizer metadata as Gemma and use Gemma-compatible KV cache defaults\n\n## Ev",
+      "files": [
+        "packages/training/scripts/emit_eliza1_catalog.py",
+        "packages/training/scripts/test_emit_eliza1_catalog.py"
+      ]
+    },
+    {
+      "title": "fix(training): align in-agent verifier tiers",
+      "prNumber": 9685,
+      "type": "bugfix",
+      "body": "## Summary\n- derive the in-agent verifier default tier list from `ELIZA_1_TIERS`\n- reject retired or unknown tier requests before attempting HF bundle downloads\n- add focused tests for active tier expansion and retired `0_8b` rejection\n- re",
+      "files": [
+        "packages/training/cloud/README.md",
+        "packages/training/scripts/test_inagent_eliza.py",
+        "packages/training/scripts/test_inagent_eliza_tiers.py",
+        "packages/training/scripts/train_nebius.sh",
+        "plugins/plugin-training/README.md"
+      ]
+    },
+    {
+      "title": "fix(local-inference): Kokoro loader accepts published GGUF tensor names + F16 weights (#9588)",
+      "prNumber": 9684,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the loader-side root cause of #9588 — Kokoro TTS failing to load on desktop because the fused-lib loader, the shipped GGUF, and the in-tree converter used three inconsistent tensor-naming conventions, so `kokoro_init_from_",
+      "files": [
+        "plugins/plugin-local-inference/native/llama.cpp"
+      ]
+    },
+    {
+      "title": "fix(training): align turn detector asset tiers",
+      "prNumber": 9683,
+      "type": "bugfix",
+      "body": "## Summary\n- remove retired `0_8b` from bundle asset staging ASR fallback and LiveKit turn-detector tier maps\n- add active `27b-256k` coverage to those release-facing maps\n- make staging and turn-detector tests assert tier maps match `ELIZA",
+      "files": [
+        "packages/training/scripts/manifest/stage_eliza1_bundle_assets.py",
+        "packages/training/scripts/manifest/test_stage_eliza1_bundle_assets.py",
+        "packages/training/scripts/manifest/test_stage_turn_detector.py",
+        "packages/training/scripts/turn_detector/README.md",
+        "packages/training/scripts/turn_detector/configs/turn_detector_en.yaml",
+        "packages/training/scripts/turn_detector/configs/turn_detector_intl.yaml",
+        "packages/training/scripts/turn_detector/convert_to_gguf.py",
+        "packages/training/scripts/turn_detector/finetune_turn_detector.py",
+        "packages/training/scripts/turn_detector/test_turn_detector_pipeline.py"
+      ]
+    },
+    {
+      "title": "fix(training): align bundle staging RAM tiers",
+      "prNumber": 9682,
+      "type": "bugfix",
+      "body": "## Summary\n- remove the retired `0_8b` RAM budget row from local and real eliza-1 bundle staging\n- keep bundle staging RAM budget keys tied to the active `ELIZA_1_TIERS` matrix\n- remove a stale local stand-in path that still referenced a Qw",
+      "files": [
+        "packages/training/scripts/manifest/stage_local_eliza1_bundle.py",
+        "packages/training/scripts/manifest/stage_real_eliza1_bundle.py",
+        "packages/training/scripts/manifest/test_ram_budget_calibration.py"
+      ]
+    },
+    {
+      "title": "fix(training): stage source weights for active Gemma tiers",
+      "prNumber": 9681,
+      "type": "bugfix",
+      "body": "## Summary\n- remove retired `0_8b` from Eliza-1 source-weight staging tables\n- add `27b-256k` text, MTP drafter, vision source, quant, and tensor-override entries using the Gemma 4 31B source family\n- strengthen source-weight staging tests ",
+      "files": [
+        "packages/training/scripts/manifest/stage_eliza1_source_weights.py",
+        "packages/training/scripts/manifest/test_stage_eliza1_source_weights.py"
+      ]
+    },
+    {
+      "title": "fix(training): route cloud launchers to Gemma tiers",
+      "prNumber": 9680,
+      "type": "bugfix",
+      "body": "## Summary\n- retarget cloud launcher defaults from retired `0_8b` to active Gemma tiers, including `27b-256k` routing\n- make `run-on-cloud.sh` auto-select Vast/Nebius from `tier-routing.json` and forward to provider dispatchers\n- update Neb",
+      "files": [
+        "packages/training/scripts/cloud/README.md",
+        "packages/training/scripts/cloud/dispatch-nebius.sh",
+        "packages/training/scripts/cloud/dispatch-vast.sh",
+        "packages/training/scripts/cloud/run-on-cloud.sh",
+        "packages/training/scripts/cloud/test_dispatch_dryrun.sh",
+        "packages/training/scripts/cloud/tier-routing.json",
+        "packages/training/scripts/publish/eliza1-hf-push.sh",
+        "packages/training/scripts/publish/eliza1-hf-stage.mjs",
+        "packages/training/scripts/publish_custom_kokoro_voice.sh",
+        "packages/training/scripts/run_pipeline.py",
+        "packages/training/scripts/test_train_nebius_smoke_all_tiers.py",
+        "packages/training/scripts/train_local.py",
+        "packages/training/scripts/train_nebius_smoke_all_tiers.sh"
+      ]
+    },
+    {
+      "title": "fix(training): audit active Gemma SFT tier",
+      "prNumber": 9679,
+      "type": "bugfix",
+      "body": "## Summary\n- derive the active SFT audit tier from `ELIZA_1_TIERS[0]` instead of hardcoding retired `0_8b`\n- update dataset active-SFT check names, schema expectations, model-card requirements, imagegen smoke key, and fine-tune comparison f",
+      "files": [
+        "packages/training/scripts/manifest/audit_hf_eliza1_release.py",
+        "packages/training/scripts/manifest/test_audit_hf_eliza1_release.py"
+      ]
+    },
+    {
+      "title": "fix(training): queue Gemma fine-tune verification",
+      "prNumber": 9678,
+      "type": "bugfix",
+      "body": "## Summary\n- retarget the release verification queue fine-tune item from retired `0_8b` paths to the smallest active Gemma tier, `2b` / `gemma4-e2b`\n- derive the fine-tune queue item from the active tier list instead of hardcoding `0_8b`\n- ",
+      "files": [
+        "packages/training/scripts/manifest/release_verification_queue.py",
+        "packages/training/scripts/manifest/test_release_verification_queue.py"
+      ]
+    },
+    {
+      "title": "fix(training): deprecate only retired pre-Gemma tiers",
+      "prNumber": 9677,
+      "type": "bugfix",
+      "body": "## Summary\n- keep the legacy deprecation helper focused on retired pre-Gemma eliza-1 tiers: 0_6b, 0_8b, and 1_7b\n- remove active 4b repos from the deprecation list and tests\n- update generated deprecation card copy to point users at the act",
+      "files": [
+        "packages/training/scripts/publish/deprecate_legacy_qwen3_repos.py",
+        "packages/training/scripts/publish/test_deprecate_legacy_qwen3_repos.py"
+      ]
+    },
+    {
+      "title": "docs(training): align eliza-1 docs with Gemma registry",
+      "prNumber": 9676,
+      "type": "docs",
+      "body": "## Summary\n- update the top-level training README from retired Qwen registry keys to the active Gemma 4 registry ladder\n- update generated Hugging Face dataset card text/tags so eliza-1 is described as Gemma 4 based\n- refresh APOLLO/trainin",
+      "files": [
+        "packages/training/README.md",
+        "packages/training/scripts/publish_dataset_to_hf.py",
+        "packages/training/scripts/training/README.md",
+        "packages/training/scripts/training/instrumentation.py",
+        "packages/training/scripts/training/optimizer.py",
+        "packages/training/scripts/training/test_apollo.py",
+        "packages/training/scripts/training/test_model_registry.py",
+        "packages/training/scripts/training/test_optimizer_cpu.py"
+      ]
+    },
+    {
+      "title": "fix(training): retire qwen asr scaffold defaults",
+      "prNumber": 9675,
+      "type": "bugfix",
+      "body": "## Summary\n- freeze training ASR real train/eval defaults until a verified Gemma-compatible ASR checkpoint/projector is hosted\n- reject retired Qwen ASR sources in real train/eval and GGUF publish helpers\n- update shared local-inference ASR",
+      "files": [
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/shared/src/local-inference/voice-models.ts",
+        "packages/training/docs/training/eliza1-smallest-finetunes.md",
+        "packages/training/scripts/asr/README.md",
+        "packages/training/scripts/asr/__init__.py",
+        "packages/training/scripts/asr/__tests__/test_asr_pipeline.py",
+        "packages/training/scripts/asr/configs/asr_same.yaml",
+        "packages/training/scripts/asr/configs/base.yaml",
+        "packages/training/scripts/asr/eval_asr.py",
+        "packages/training/scripts/asr/eval_asr_wer.py",
+        "packages/training/scripts/asr/finetune_asr.py",
+        "packages/training/scripts/asr/push_asr_gguf_to_hf.py"
+      ]
+    },
+    {
+      "title": "fix(local-inference): retire Qwen voice internals",
+      "prNumber": 9674,
+      "type": "bugfix",
+      "body": "## Summary\n- rename the optional VAD adapter surface from Qwen toolkit wording to generic external VAD wording\n- make ASR emotion label exports model-neutral\n- remove stale Qwen-family wording from active local-inference voice/manifest comm",
+      "files": [
+        "plugins/plugin-local-inference/src/services/engine.ts",
+        "plugins/plugin-local-inference/src/services/manifest/schema.ts",
+        "plugins/plugin-local-inference/src/services/memory-arbiter.ts",
+        "plugins/plugin-local-inference/src/services/voice/embedding.ts",
+        "plugins/plugin-local-inference/src/services/voice/eot-classifier-ggml.ts",
+        "plugins/plugin-local-inference/src/services/voice/expressive-tags.ts",
+        "plugins/plugin-local-inference/src/services/voice/ffi-bindings.ts",
+        "plugins/plugin-local-inference/src/services/voice/index.ts",
+        "plugins/plugin-local-inference/src/services/voice/types.ts",
+        "plugins/plugin-local-inference/src/services/voice/vad.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/vad.ts",
+        "plugins/plugin-local-inference/src/services/voice/voice-budget.ts"
+      ]
+    },
+    {
+      "title": "fix(native-talkmode): retire whisper stt config",
+      "prNumber": 9673,
+      "type": "bugfix",
+      "body": "## Summary\n- remove the retired `\"whisper\"` STT engine from `@elizaos/capacitor-talkmode`'s public `TalkModeConfig` type\n- document `stt.modelSize` as a legacy/no-op compatibility field for the current platform/Web recognizers\n- update mirr",
+      "files": [
+        "plugins/plugin-native-talkmode/AGENTS.md",
+        "plugins/plugin-native-talkmode/CLAUDE.md",
+        "plugins/plugin-native-talkmode/README.md",
+        "plugins/plugin-native-talkmode/android/AUDIO_FRAMES.md",
+        "plugins/plugin-native-talkmode/src/definitions.ts"
+      ]
+    },
+    {
+      "title": "docs: retire stale desktop ASR docs",
+      "prNumber": 9672,
+      "type": "docs",
+      "body": "## Summary\n- replace stale desktop/mobile docs that described bundled Whisper/Qwen ASR as active\n- align Talk Mode and Swabble docs with the current Electrobun Web Speech/audio passthrough path\n- update the voice gap analysis so Gemma ASR r",
+      "files": [
+        "packages/docs/apps/dashboard/talk-mode.md",
+        "packages/docs/apps/desktop.md",
+        "packages/docs/apps/desktop/native-modules.md",
+        "packages/docs/apps/mobile.md",
+        "packages/docs/apps/mobile/capacitor-plugins.md",
+        "packages/docs/voice-e2e-gap-analysis.md"
+      ]
+    },
+    {
+      "title": "docs(ui): remove stale Whisper ASR wording",
+      "prNumber": 9671,
+      "type": "docs",
+      "body": "## Summary\n- update checked-in UI API type comments from the retired Qwen3-ASR wording to Gemma ASR\n- replace local Whisper/native-adapter comments in browser voice capture with generic local ASR assets/native adapter wording\n- update Voice",
+      "files": [
+        "packages/ui/src/api/client-types-config.ts",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ja.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json",
+        "packages/ui/src/i18n/locales/vi.json",
+        "packages/ui/src/i18n/locales/zh-CN.json",
+        "packages/ui/src/voice/local-asr-capture.ts",
+        "packages/ui/src/voice/local-asr-transcribe.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts"
+      ]
+    },
+    {
+      "title": "fix(scripts): retire riscv whisper smoke lane",
+      "prNumber": 9670,
+      "type": "bugfix",
+      "body": "## Summary\n- remove the retired `libwhisper` / `libwhisper_eliza_adapter` lane from the RISC-V artifact build driver\n- remove the matching RISC-V verification inventory and skip hint from the smoke harness\n- update the RISC-V smoke README s",
+      "files": [
+        "scripts/README.riscv64-smoke.md",
+        "scripts/build-riscv64-artifacts.sh",
+        "scripts/check-riscv64-artifacts.sh"
+      ]
+    },
+    {
+      "title": "fix(app-core): retire bundled Whisper desktop ASR",
+      "prNumber": 9669,
+      "type": "bugfix",
+      "body": "## Summary\n- remove the Electrobun native boot hook that injected bundled Whisper ASR env vars\n- delete the retired Whisper GGUF/model helper scripts and their native env test\n- stop the Electrobun release workflow from preparing/uploading ",
+      "files": [
+        ".github/workflows/release-electrobun.yml",
+        "packages/app-core/platforms/electrobun/scripts/ensure-whisper-gguf.sh",
+        "packages/app-core/platforms/electrobun/scripts/ensure-whisper-model.sh",
+        "packages/app-core/platforms/electrobun/src/native/agent.ts",
+        "packages/app-core/platforms/electrobun/src/native/whisper-env.test.ts",
+        "packages/app-core/platforms/electrobun/src/native/whisper-env.ts"
+      ]
+    },
+    {
+      "title": "fix(training): retire Qwen release provenance",
+      "prNumber": 9668,
+      "type": "bugfix",
+      "body": "## Summary\n- make base-v1 release provenance fail closed for ASR and dedicated embedding sources until verified Gemma-compatible artifacts are configured\n- explicitly reject retired Qwen3-ASR / Qwen3-Embedding provenance in manifest validat",
+      "files": [
+        "packages/training/scripts/manifest/eliza1_licenses.py",
+        "packages/training/scripts/manifest/eliza1_manifest.py",
+        "packages/training/scripts/manifest/eliza1_platform_plan.py",
+        "packages/training/scripts/manifest/hydrate_voice_submodel_assets.py",
+        "packages/training/scripts/manifest/test_eliza1_licenses.py",
+        "packages/training/scripts/manifest/test_eliza1_manifest.py",
+        "packages/training/scripts/manifest/test_eliza1_platform_plan.py",
+        "packages/training/scripts/publish/test_orchestrator.py"
+      ]
+    },
+    {
+      "title": "fix(training): fail closed on retired Qwen voice assets",
+      "prNumber": 9667,
+      "type": "bugfix",
+      "body": "## Summary\n- retire Qwen3-ASR as the default ASR source for Eliza-1 asset staging; active Gemma staging now requires explicit ASR repo/file/mmproj inputs and rejects Qwen ASR unless the legacy reproduction flag is set\n- disable the Qwen emb",
+      "files": [
+        "packages/training/scripts/manifest/stage_eliza1_bundle_assets.py",
+        "packages/training/scripts/manifest/stage_real_eliza1_bundle.py",
+        "packages/training/scripts/manifest/test_stage_eliza1_bundle_assets.py",
+        "packages/training/scripts/manifest/test_stage_real_eliza1_bundle.py",
+        "packages/training/scripts/publish/stage_base_v1_candidate.py",
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "docs(local-inference): remove stale Qwen defaults",
+      "prNumber": 9666,
+      "type": "docs",
+      "body": "## Summary\n\n- Remove stale Qwen-facing wording from the local-inference README vision notes.\n- Update mirrored native docs so the manifest example uses `gemma-4-E4B` instead of `qwen3.5-4b`.\n- Mark the GPU KV math section as a legacy retire",
+      "files": [
+        "plugins/plugin-local-inference/README.md",
+        "plugins/plugin-local-inference/native/AGENTS.md",
+        "plugins/plugin-local-inference/native/CLAUDE.md",
+        "plugins/plugin-local-inference/native/configs/gpu/SPECS.md"
+      ]
+    },
+    {
+      "title": "fix(training): use official Gemma MTP sources",
+      "prNumber": 9665,
+      "type": "bugfix",
+      "body": "Refs #9588\n\n## Summary\n- Replace old third-party drafter source/provenance entries with official Google Gemma assistant source repos for 2b, 4b, 9b, and 27b staging paths.\n- Make candidate and local bundle assembly fail closed: upstream ass",
+      "files": [
+        "packages/training/scripts/manifest/stage_eliza1_source_weights.py",
+        "packages/training/scripts/manifest/stage_local_eliza1_bundle.py",
+        "packages/training/scripts/manifest/test_stage_eliza1_source_weights.py",
+        "packages/training/scripts/publish/assemble_local_gemma_bundle.py",
+        "packages/training/scripts/publish/stage_base_v1_candidate.py"
+      ]
+    },
+    {
+      "title": "docs(local-inference): align ASR guide with Gemma gating",
+      "prNumber": 9662,
+      "type": "docs",
+      "body": "Refs #9588\n\n## Summary\n- Updates the local-inference README and native CLAUDE/AGENTS guide so ASR is described as an eligible, fused local ASR path gated on real Gemma ASR artifacts instead of an always-active Qwen3-ASR path.\n- Removes stal",
+      "files": [
+        "plugins/plugin-local-inference/README.md",
+        "plugins/plugin-local-inference/docs/memory-and-e2e-latency-review.md",
+        "plugins/plugin-local-inference/docs/per-platform-backend-strategy.md",
+        "plugins/plugin-local-inference/native/AGENTS.md",
+        "plugins/plugin-local-inference/native/CLAUDE.md",
+        "plugins/plugin-local-inference/scripts/kokoro-real-smoke.ts",
+        "plugins/plugin-local-inference/src/services/voice/expressive-tags.asr.test.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core): remove Qwen ASR labels from local voice surfaces",
+      "prNumber": 9661,
+      "type": "bugfix",
+      "body": "Refs #9588\n\n## Summary\n- Replaces stale app-core operator-facing Qwen3-ASR labels with neutral local ASR wording in voice scripts, Android docs/comments, bridge logs, and report labels.\n- Updates the staged iOS fused-library `CAPABILITIES.j",
+      "files": [
+        "packages/app-core/platforms/android/app/build.gradle",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaBionicInferenceServer.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/ElizaVoiceNative.java",
+        "packages/app-core/scripts/aosp/deploy-pixel.mjs",
+        "packages/app-core/scripts/build-llama-cpp-mtp.mjs",
+        "packages/app-core/scripts/lib/duet-bridge.mjs",
+        "packages/app-core/scripts/stage-desktop-fused-lib.mjs",
+        "packages/app-core/scripts/voice-duet.mjs",
+        "packages/app-core/scripts/voice-interactive.mjs"
+      ]
+    },
+    {
+      "title": "fix(local-inference): clean up Gemma draft MTP cutover defaults",
+      "prNumber": 9660,
+      "type": "bugfix",
+      "body": "Refs #9588\n\n## Summary\n- Point local-inference ablation defaults at the release-shaped Gemma bundle paths: `eliza-1-2b.bundle/text/eliza-1-2b-128k.gguf` and `eliza-1-2b.bundle/mtp/drafter-2b.gguf`.\n- Rename built-in/config MTP variants to d",
+      "files": [
+        "packages/agent/src/api/approval-routes.test.ts",
+        "packages/agent/src/api/push-token-routes.test.ts",
+        "packages/agent/src/services/proactive-interaction-decider.test.ts",
+        "packages/agent/src/services/remote-plugin-bridge.ts",
+        "packages/app-core/platforms/electrobun/src/native/remote-plugin-host.ts",
+        "packages/app-core/src/api/training-benchmarks.ts",
+        "packages/core/src/__tests__/provisioning.test.ts",
+        "packages/core/src/__tests__/voice-text-parity-pipeline.test.ts",
+        "packages/core/src/features/autonomy/service.test.ts",
+        "packages/core/src/features/basic-capabilities/providers/channelTopics.test.ts",
+        "packages/core/src/runtime/__tests__/schema-validation-reroll.test.ts",
+        "packages/core/src/testing/index.ts",
+        "packages/examples/app/electron/backend/src/runtimeManager.ts",
+        "packages/examples/smartglasses/tsconfig.json",
+        "packages/os/setup/src/backend/http-backend.ts",
+        "packages/plugin-worker-runtime/src/bootstrap.ts",
+        "packages/scripts/local-inference-ablation.config.json",
+        "packages/scripts/local-inference-ablation.mjs",
+        "packages/shared/src/local-inference-gpu/profiles/h200.yaml",
+        "packages/shared/src/local-inference-gpu/profiles/rtx-3090.yaml",
+        "packages/shared/src/local-inference-gpu/profiles/rtx-4090.yaml",
+        "packages/shared/src/local-inference-gpu/profiles/rtx-5090.yaml",
+        "packages/shared/src/local-inference/catalog.test.ts",
+        "packages/shared/src/voice.ts",
+        "plugins/plugin-discord/__tests__/outbound-attachment.test.ts",
+        "plugins/plugin-discord/package.json",
+        "plugins/plugin-google/src/lifeops-message-adapter.ts",
+        "plugins/plugin-local-inference/scripts/local-inference-ablation.config.json",
+        "plugins/plugin-local-inference/scripts/local-inference-ablation.mjs",
+        "plugins/plugin-local-inference/src/services/voice/echo-delay.ts",
+        "plugins/plugin-xr/src/routes/xr-view-host.ts",
+        "plugins/plugin-zai/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(computeruse,vision): harden the warm PowerShell/OCR hosts — crash-safety, respawn races, handle leaks",
+      "prNumber": 9659,
+      "type": "bugfix",
+      "body": "## What\n\nFollow-up hardening to the warm-host perf work (#9645 ps-host, #9651 OCR host). An adversarial code review of those two merged changes surfaced **5 real bugs** (and correctly dismissed 5 false positives). All are fixed here and re-",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/ps-host.real.test.ts",
+        "plugins/plugin-computeruse/src/platform/clipboard.ts",
+        "plugins/plugin-computeruse/src/platform/ps-host.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts",
+        "plugins/plugin-vision/src/ocr-host-windows.ts"
+      ]
+    },
+    {
+      "title": "refactor(agent): replace as-unknown-as IPermissionsRegistry with type guard (#9474)",
+      "prNumber": 9658,
+      "type": "refactor",
+      "body": "Part of #9474. `getPermissionRegistry` duck-typed a `getService()` result (object with `get`/`check`/`request`) then cast via `as unknown as IPermissionsRegistry`. Extracted an `isPermissionsRegistry` type guard with the same existence chec",
+      "files": [
+        "packages/agent/src/api/permissions-routes.ts"
+      ]
+    },
+    {
+      "title": "refactor(orchestrator): drop as-unknown-as in readLastChangeSet, match provider pattern (#9474)",
+      "prNumber": 9656,
+      "type": "refactor",
+      "body": "## Summary\nPart of #9474 — removes one production `as unknown as` in plugin-agent-orchestrator.\n\n`readLastChangeSet` cast a persisted `lastChangeSet` via `raw as unknown as WorkspaceChangeSet`. Its own doc says it validates *\"the same way t",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): gate Gemma MTP catalog on hosted drafters",
+      "prNumber": 9655,
+      "type": "bugfix",
+      "body": "## Summary\n- Adds `ELIZA_1_HOSTED_MTP_TIER_IDS` and keeps it empty until Gemma drafter GGUFs are staged at `bundles/<tier>/mtp/drafter-<tier>.gguf`.\n- Gates catalog `components.mtp` and `runtime.mtp` on hosted drafter availability so local ",
+      "files": [
+        "packages/shared/src/local-inference/catalog.test.ts",
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/shared/src/local-inference/index.ts",
+        "packages/ui/src/services/local-inference/active-model.test.ts",
+        "packages/ui/src/services/local-inference/catalog.ts",
+        "plugins/plugin-local-inference/__tests__/mmproj-routing.test.ts",
+        "plugins/plugin-local-inference/__tests__/text-bundle.test.ts",
+        "plugins/plugin-local-inference/src/services/catalog.test.ts",
+        "plugins/plugin-local-inference/src/services/catalog.ts",
+        "plugins/plugin-local-inference/src/services/fused-eliza1-no-regression.test.ts",
+        "plugins/plugin-local-inference/src/services/mtp-doctor.ts"
+      ]
+    },
+    {
+      "title": "perf(build): fill 2 Turbo build-cache input gaps + clone-ur-crush outputs (#9626)",
+      "prNumber": 9654,
+      "type": "other",
+      "body": "Small, conservative follow-up to the #9626 build audit's Turbo-caching findings.\n\ndevelop already landed the generic-`build` `inputs` glob and `@elizaos/prompts#build` `cache:false`. Comparing that version against the audit, it **misses two",
+      "files": [
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix(voice): per-platform echo-delay seed for on-device AEC (opt-in, #9583)",
+      "prNumber": 9653,
+      "type": "bugfix",
+      "body": "## Per-platform echo-delay seed for on-device AEC (opt-in)\n\nSalvages the one genuinely-novel, develop-absent idea from the closed PR #9603 / `opt/ios-mac-aec-9583` branch — a per-platform playback→mic delay seed — re-done the right way: in ",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/echo-delay.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-delay.ts",
+        "plugins/plugin-local-inference/src/services/voice/index.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.echo.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): gate runtime ASR on Gemma bundles",
+      "prNumber": 9652,
+      "type": "bugfix",
+      "body": "## Summary\n- Adds a shared ASR provenance helper and uses it at runtime so Qwen-derived ASR manifests cannot be activated through the fused local voice path.\n- Splits local voice readiness from local ASR readiness: TTS may still arm Kokoro-",
+      "files": [
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/shared/src/local-inference/voice-models.ts",
+        "packages/ui/src/voice/voice-provider-defaults.test.ts",
+        "packages/ui/src/voice/voice-provider-defaults.ts",
+        "plugins/plugin-local-inference/src/routes/local-inference-asr-route.test.ts",
+        "plugins/plugin-local-inference/src/routes/local-inference-asr-route.ts",
+        "plugins/plugin-local-inference/src/routes/local-inference-asr-transcribe.test.ts",
+        "plugins/plugin-local-inference/src/routes/local-inference-asr-transcribe.ts",
+        "plugins/plugin-local-inference/src/routes/native-pcm-turn-route.test.ts",
+        "plugins/plugin-local-inference/src/routes/native-pcm-turn-route.ts",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.test.ts",
+        "plugins/plugin-local-inference/src/runtime/ensure-local-inference-handler.ts",
+        "plugins/plugin-local-inference/src/services/asr-provenance.ts",
+        "plugins/plugin-local-inference/src/services/bionic-host-loader.test.ts",
+        "plugins/plugin-local-inference/src/services/bionic-host-loader.ts",
+        "plugins/plugin-local-inference/src/services/engine-direct-bundle.test.ts",
+        "plugins/plugin-local-inference/src/services/engine.ts",
+        "plugins/plugin-local-inference/src/services/manifest/validator.ts",
+        "plugins/plugin-local-inference/src/services/router-handler.ts",
+        "plugins/plugin-local-inference/src/services/service.test.ts",
+        "plugins/plugin-local-inference/src/services/transcription-priority.test.ts",
+        "plugins/plugin-local-inference/src/services/voice-prewarm.ts",
+        "plugins/plugin-local-inference/src/services/voice/__tests__/streaming-asr.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/asr-timed.real.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/engine-bridge.ts",
+        "plugins/plugin-local-inference/src/services/voice/errors.ts",
+        "plugins/plugin-local-inference/src/services/voice/mic-source.ts",
+        "plugins/plugin-local-inference/src/services/voice/partial-stabilizer.ts",
+        "plugins/plugin-local-inference/src/services/voice/pipeline.ts",
+        "plugins/plugin-local-inference/src/services/voice/transcriber.ts",
+        "plugins/plugin-local-inference/src/services/voice/types.ts"
+      ]
+    },
+    {
+      "title": "perf(vision): persistent WinRT OCR host — kill the per-region cold-spawn tax on Windows",
+      "prNumber": 9651,
+      "type": "other",
+      "body": "## What\n\n`WindowsMediaOcrService.describe()` (the zero-token native `Windows.Media.Ocr` path, #9105 M4a) ran `powershell -File windows-ocr.ps1` for **every recognized region**. On Defender-heavy hosts a cold `powershell.exe` spawn is ~10-16",
+      "files": [
+        "plugins/plugin-vision/src/ocr-host-windows.real.test.ts",
+        "plugins/plugin-vision/src/ocr-host-windows.ts",
+        "plugins/plugin-vision/src/ocr-service-windows.ts"
+      ]
+    },
+    {
+      "title": "refactor(workflow): replace as-unknown-as CatalogLike cast with type guard (#9474)",
+      "prNumber": 9650,
+      "type": "refactor",
+      "body": "## Summary\nPart of #9474 (eliminate `any`/`unknown`/unsafe casts). Removes one production `as unknown as` from `plugin-workflow`.\n\n`getConnectorTargetCatalog` cast a `getService()` result via `raw as unknown as CatalogLike | undefined`, the",
+      "files": [
+        "plugins/plugin-workflow/src/routes/workflow-routes.ts"
+      ]
+    },
+    {
+      "title": "perf(boot): subdivide svc:pre-init boot lap to attribute the 15s cost (#9565)",
+      "prNumber": 9648,
+      "type": "other",
+      "body": "## Why\nPulled the boot telemetry (from #9595) off a connected **Pixel 9a**: cold boot **16.1s**, with **15.07s (93%) in one coarse `svc:pre-init` lap**. But every named call in that bucket is fast/no-op on a bundled mobile runtime:\n- `runSt",
+      "files": [
+        "packages/agent/src/runtime/eliza.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): reject Qwen ASR release provenance",
+      "prNumber": 9647,
+      "type": "bugfix",
+      "body": "## Summary\n- adds a strict/defaultEligible manifest contract gate that rejects Qwen-derived ASR lineage/provenance for Gemma-4 Eliza-1 releases\n- keeps candidate/staging manifests able to carry legacy Qwen ASR provenance while the actual Ge",
+      "files": [
+        "plugins/plugin-local-inference/src/services/manifest/manifest.test.ts",
+        "plugins/plugin-local-inference/src/services/manifest/validator.ts"
+      ]
+    },
+    {
+      "title": "chore(types): ratchet as-unknown-as baseline 299 -> 296 (#9474)",
+      "prNumber": 9646,
+      "type": "other",
+      "body": "Locks in the 3-cast reduction from #9644 (local-inference catalog/engine wiring). `develop` now measures **296** `as unknown as` vs a 299 baseline; this tightens the baseline to 296 so it can't regress.\n\nDown-only ratchet (the script's inte",
+      "files": [
+        "packages/scripts/type-safety-ratchet-baseline.json"
+      ]
+    },
+    {
+      "title": "perf(computeruse): warm PowerShell host — kill the ~14s Windows cold-spawn tax on the CUA hot path",
+      "prNumber": 9645,
+      "type": "other",
+      "body": "## What\n\nWindows CUA latency is dominated by **cold `powershell.exe` spawns**. Every screen capture, clipboard op, and display enumeration shells out to a fresh `powershell.exe`, and on Defender-heavy hosts real-time AV scans each new proce",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/ps-host.real.test.ts",
+        "plugins/plugin-computeruse/src/platform/capture.ts",
+        "plugins/plugin-computeruse/src/platform/clipboard.ts",
+        "plugins/plugin-computeruse/src/platform/displays.ts",
+        "plugins/plugin-computeruse/src/platform/ps-host.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): wire staged LiteRT bundle selection",
+      "prNumber": 9644,
+      "type": "bugfix",
+      "body": "## Summary\n- wires staged `<bundleRoot>/text/*.litertlm` artifacts into `BackendPlan.overrides.litertModelPath` so merged #9640's LiteRT dispatcher path is reachable from normal Eliza-1 engine loads\n- keeps `q4_0` quant variants as `planned",
+      "files": [
+        "packages/shared/src/local-inference/catalog.ts",
+        "plugins/plugin-local-inference/src/services/catalog.test.ts",
+        "plugins/plugin-local-inference/src/services/engine-direct-bundle.test.ts",
+        "plugins/plugin-local-inference/src/services/engine.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): stream playback reference frames",
+      "prNumber": 9643,
+      "type": "feature",
+      "body": "## Summary\n- Add a Web Audio playback-reference pump that streams the agent's rendered TTS PCM to `/api/voice/playback-frames` as 16 kHz mono LE-s16 frames.\n- Prefer a real-time AudioWorklet tap; fall back to scheduled decoded-buffer pumpin",
+      "files": [
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/index.ts",
+        "packages/ui/src/voice/playback-frame-pump.test.ts",
+        "packages/ui/src/voice/playback-frame-pump.ts"
+      ]
+    },
+    {
+      "title": "fix(training): align trajectory targets with Gemma",
+      "prNumber": 9642,
+      "type": "bugfix",
+      "body": "## Summary\n- Switch Eliza-1 trajectory target metadata from legacy Qwen/ChatML to Gemma 4 (`google/gemma-4-E2B`, `modelFamily=gemma`, `chatTemplate=gemma4`).\n- Update the trajectory-record JSON schema, validator, publisher fixture/copy, and",
+      "files": [
+        "packages/training/config/eliza1_trajectory_record.schema.json",
+        "packages/training/config/gpu_profiles/12gb.json",
+        "packages/training/config/gpu_profiles/16gb.json",
+        "packages/training/config/gpu_profiles/24gb.json",
+        "packages/training/config/gpu_profiles/48gb.json",
+        "packages/training/config/gpu_profiles/a100-2gpu.json",
+        "packages/training/config/gpu_profiles/a100-4gpu.json",
+        "packages/training/config/gpu_profiles/a100.json",
+        "packages/training/config/gpu_profiles/cpu.json",
+        "packages/training/config/gpu_profiles/h100-2gpu.json",
+        "packages/training/config/gpu_profiles/h100-4gpu.json",
+        "packages/training/config/gpu_profiles/h100.json",
+        "packages/training/config/gpu_profiles/h200-2gpu.json",
+        "packages/training/config/gpu_profiles/h200.json",
+        "packages/training/config/gpu_profiles/l40-2gpu-safe.json",
+        "packages/training/config/gpu_profiles/l40-2gpu.json",
+        "packages/training/config/gpu_profiles/l40-4gpu.json",
+        "packages/training/config/gpu_profiles/l40-8gpu.json",
+        "packages/training/config/gpu_profiles/l40.json",
+        "packages/training/config/tinker.yaml",
+        "packages/training/scripts/prepare_eliza1_trajectory_dataset.py",
+        "packages/training/scripts/publish_eliza1_dataset_candidate.py",
+        "packages/training/scripts/test_prepare_eliza1_trajectory_dataset.py",
+        "packages/training/scripts/test_publish_eliza1_dataset_candidate.py",
+        "packages/training/scripts/test_validate_eliza1_trajectory_dataset.py",
+        "packages/training/scripts/validate_eliza1_trajectory_dataset.py"
+      ]
+    },
+    {
+      "title": "fix(types): type window startup-trace keys, drop 4 as-unknown-as casts (#9474)",
+      "prNumber": 9641,
+      "type": "bugfix",
+      "body": "## Problem — develop is red on the type-safety ratchet (blocks every PR)\n\n`origin/develop` currently fails the **Format + Type Safety Ratchet** CI job:\n\n```\n[type-safety-ratchet] as unknown as: 303 / 299\n[type-safety-ratchet] unsafe cast ba",
+      "files": [
+        "packages/ui/src/state/startup-telemetry.ts"
+      ]
+    },
+    {
+      "title": "feat(local-inference): Gemma-4 LiteRT-LM catalog + QAT Q4_0 wiring (additive/gated)",
+      "prNumber": 9640,
+      "type": "feature",
+      "body": "## Summary\n\nAdditive, **gated** catalog/manifest/bundle wiring for the **Gemma‑4 LiteRT‑LM** on‑device runtime. Default behavior is unchanged — llama.cpp/GGUF stays the backend until a `.litertlm` artifact is staged **and** `libelizainferen",
+      "files": [
+        "packages/app-core/platforms/electrobun/remotes/local-model/src/bun/eliza1-catalog.ts",
+        "packages/app-core/scripts/aosp/compile-libllama.mjs",
+        "packages/benchmarks/lib/src/eliza-1-bundle.ts",
+        "packages/benchmarks/lib/src/index.ts",
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/shared/src/local-inference/index.ts",
+        "packages/shared/src/local-inference/types.ts",
+        "packages/shared/src/local-inference/voice-models.ts",
+        "plugins/plugin-local-inference/src/services/backend.ts",
+        "plugins/plugin-local-inference/src/services/index.ts",
+        "plugins/plugin-local-inference/src/services/manifest/eliza-1.manifest.v1.json",
+        "plugins/plugin-local-inference/src/services/manifest/index.ts",
+        "plugins/plugin-local-inference/src/services/manifest/manifest.test.ts",
+        "plugins/plugin-local-inference/src/services/manifest/schema.ts",
+        "plugins/plugin-local-inference/src/services/manifest/types.ts",
+        "plugins/plugin-local-inference/src/services/manifest/validator.ts"
+      ]
+    },
+    {
+      "title": "fix(typecheck): make 5 plugins' typecheck actually check (drop no-op --noEmit --noCheck) (#9626)",
+      "prNumber": 9639,
+      "type": "bugfix",
+      "body": "Part of #9626 (TypeScript strategy).\n\n## Problem\n\nFive plugins' `typecheck` script combines `--noEmit` **and** `--noCheck`:\n\n```\nplugin-embeddings / -ollama / -openrouter / -lmstudio:  tsc --noEmit --noCheck -p tsconfig.json\nplugin-mysticis",
+      "files": [
+        "plugins/plugin-embeddings/package.json",
+        "plugins/plugin-lmstudio/package.json",
+        "plugins/plugin-mysticism/package.json",
+        "plugins/plugin-ollama/package.json",
+        "plugins/plugin-openrouter/package.json"
+      ]
+    },
+    {
+      "title": "feat(computeruse): hamming-tolerant Brain describe-cache — continuous-understanding tuning (#9581)",
+      "prNumber": 9637,
+      "type": "feature",
+      "body": "## Summary\n\nThe **continuous-understanding tuning** slice of #9581.\n\nThe Brain frame-dHash describe-cache (#9105 M3) keyed on **exact** dHash equality (`${dh}::${goal}`), so the (often remote) `IMAGE_DESCRIPTION` model was re-invoked on **c",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/brain-dhash-cache.test.ts",
+        "plugins/plugin-computeruse/src/actor/brain.ts"
+      ]
+    },
+    {
+      "title": "test(kokoro): always-on speech-vs-noise guard in the real-voice smoke (#9588)",
+      "prNumber": 9636,
+      "type": "tests",
+      "body": "Hardens `kokoro-real-smoke.ts` against the **#9588** failure class: the model loads + synthesizes prompt-length PCM, but the audio is inaudible **noise** rather than speech (root cause: Kokoro weights shipped F32/quantized instead of the F1",
+      "files": [
+        "plugins/plugin-local-inference/scripts/kokoro-real-smoke.ts"
+      ]
+    },
+    {
+      "title": "chore(electrobun): remove duplicate @elizaos/plugin-local-inference bundle external (#9626)",
+      "prNumber": 9635,
+      "type": "other",
+      "body": "Part of #9626 (desktop/Electrobun cleanups).\n\n`electrobun.config.ts` lists `@elizaos/plugin-local-inference` twice in `build.bun.external` (lines 549–550). esbuild/bun dedups it so it's harmless at runtime, but it signals the hand-maintaine",
+      "files": [
+        "packages/app-core/platforms/electrobun/electrobun.config.ts"
+      ]
+    },
+    {
+      "title": "perf(computeruse): parallelize CUA region capture + per-region OCR, memoize commandExists",
+      "prNumber": 9634,
+      "type": "other",
+      "body": "## What\n\nThree low-risk, semantics-preserving performance wins in the CUA scene pipeline. These are pure latency reductions on the per-turn hot path — no behavior change.\n\n### 1. Memoize `commandExists` (`platform/helpers.ts`)\nTool availabi",
+      "files": [
+        "plugins/plugin-computeruse/src/platform/helpers.ts",
+        "plugins/plugin-computeruse/src/scene/ocr-adapter.ts",
+        "plugins/plugin-computeruse/src/scene/scene-builder.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): self-calibrating playback→mic echo delay + gap-preserving reference buffer (#9583)",
+      "prNumber": 9633,
+      "type": "feature",
+      "body": "## Summary\n\nCloses the **agent-side, code-doable** items on #9583's checklist — the device acoustic tuning stays device-gated.\n\nThe agent-side AEC seam (NLMS canceller #9455/#9612, echoReference seam #9575, EchoReferenceBuffer #9596, playba",
+      "files": [
+        "plugins/plugin-local-inference/src/routes/live-diarization-route.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-reference-buffer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-reference-buffer.ts",
+        "plugins/plugin-local-inference/src/services/voice/kokoro/runtime-selection.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.echo.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.ts"
+      ]
+    },
+    {
+      "title": "chore(types): real typechecks for shopify-ui + training (#9474 Phase 3 cont.)",
+      "prNumber": 9632,
+      "type": "other",
+      "body": "Continues #9474 Phase 3 — gives two more `--noCheck`-only plugins a real typecheck (now run by turbo).\n\n- **plugin-shopify-ui**: its server routes use `node:http`/`process`/`Buffer`, but the shared build tsconfig left node types out → 7× TS",
+      "files": [
+        "plugins/plugin-shopify-ui/package.json",
+        "plugins/plugin-shopify-ui/tsconfig.build.json",
+        "plugins/plugin-training/package.json",
+        "plugins/plugin-training/tsconfig.typecheck.json"
+      ]
+    },
+    {
+      "title": "fix(build): break plugin-scheduling→agent/app-core circular dependency (#9626)",
+      "prNumber": 9631,
+      "type": "bugfix",
+      "body": "Second slice of #9626 — **breaks the circular workspace dependency** the audit flagged as the prerequisite for the `#build`-override cleanup.\n\nThe cycle `agent → app-core → plugin-health → plugin-scheduling → {agent, app-core}` warned on ev",
+      "files": [
+        "bun.lock",
+        "plugins/plugin-scheduling/package.json",
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix(turbo): scope generic build inputs + stop caching prompts cross-package gen (#9626)",
+      "prNumber": 9630,
+      "type": "bugfix",
+      "body": "First slice of the build audit #9626 — the TL;DR #1 caching wins that are safe + verifiable:\n\n**1. Generic `build` task now scopes `inputs`.** 73 of 75 build tasks declared no `inputs`, so any tracked-file change (README, test, fixture, doc",
+      "files": [
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "docs: point visual audit docs at app package",
+      "prNumber": 9628,
+      "type": "docs",
+      "body": "## Summary\n- replace stale root `packages/cloud-frontend` visual-review guidance with the current `packages/app audit:app` flow\n- add `audit:app` to the package-local app command guide\n- clarify that `cloud:mock` now boots the backend mock ",
+      "files": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        "packages/app/AGENTS.md",
+        "packages/app/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "chore(types): strict-TS Phases 1–4 — noExplicitAny everywhere, close strict opt-outs, real typechecks, −21 casts (#9474)",
+      "prNumber": 9627,
+      "type": "other",
+      "body": "Advances #9474 across four phases, each commit independently verified.\n\n## Phase 1 — `noExplicitAny: error` everywhere (`3780d3670d`)\n`plugin-personal-assistant` was the last production-source opt-out (excluded via `!plugins/plugin-personal",
+      "files": [
+        "biome.json",
+        "packages/agent/src/api/hono-adapter.ts",
+        "packages/agent/tsconfig.bundle.json",
+        "packages/app-core/src/api/training-benchmarks.ts",
+        "packages/app-core/src/runtime/eliza.ts",
+        "packages/app-core/src/runtime/tts-cache-wiring.ts",
+        "packages/app-core/tsconfig.typecheck.json",
+        "packages/cloud-shared/src/db/repositories/agents/memories.ts",
+        "packages/cloud-shared/src/lib/services/agents/rooms.ts",
+        "packages/feed/apps/web/src/contexts/EmbedContext.tsx",
+        "packages/feed/packages/agents/src/autonomous/AutonomousCoordinator.ts",
+        "packages/feed/packages/agents/src/autonomous/MultiStepExecutor.ts",
+        "packages/feed/packages/agents/src/autonomous/agent-identity-map.ts",
+        "packages/feed/packages/agents/src/plugins/feed/integration-a2a-sdk.ts",
+        "packages/feed/packages/api/src/sse/event-broadcaster.ts",
+        "packages/feed/packages/engine/src/GameGenerator.ts",
+        "packages/feed/packages/sim/cli/commands/dev.ts",
+        "packages/scripts/type-safety-ratchet-baseline.json",
+        "plugins/plugin-hyperliquid-app/package.json",
+        "plugins/plugin-polymarket-app/package.json",
+        "plugins/plugin-task-coordinator/package.json"
+      ]
+    },
+    {
+      "title": "fix(mobile): unblock the Android build on Windows (gradlew.bat + Windows SDK/JDK auto-detect)",
+      "prNumber": 9625,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe mobile build orchestrator (`packages/app-core/scripts/run-mobile-build.mjs`) cannot run the Android native build on Windows:\n\n1. **`./gradlew` spawn → ENOENT.** All Android targets shell out to `./gradlew` (8 sites) through ",
+      "files": [
+        "packages/app-core/scripts/run-mobile-build.mjs"
+      ]
+    },
+    {
+      "title": "fix(build): resolve tsc via bunx in 3 plugin build.ts (silent no-.d.ts on Windows)",
+      "prNumber": 9624,
+      "type": "bugfix",
+      "body": "## Problem\n\n`plugin-embeddings`, `plugin-lmstudio`, and `plugin-ollama` each generate declarations in `build.ts` by spawning a **hardcoded per-plugin** tsc path:\n\n```ts\nconst tscPath = join(ROOT, \"node_modules\", \".bin\", process.platform ===",
+      "files": [
+        "plugins/plugin-embeddings/build.ts",
+        "plugins/plugin-lmstudio/build.ts",
+        "plugins/plugin-ollama/build.ts"
+      ]
+    },
+    {
+      "title": "fix(os): make the release/TEE script pipeline runnable on Windows (file URL derivation)",
+      "prNumber": 9623,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe `packages/os/scripts` release / confidential-image / TEE pipeline is broken on Windows in two systematic ways:\n\n1. **`repoRoot` doubles the drive letter.** `os-release-lib.mjs` (and 2 test files) derive the repo root via `pa",
+      "files": [
+        "packages/os/scripts/__tests__/os-release-scripts.test.mjs",
+        "packages/os/scripts/__tests__/tee-evidence-bridge.test.mjs",
+        "packages/os/scripts/check-confidential-artifacts.mjs",
+        "packages/os/scripts/check-confidential-image-manifest.mjs",
+        "packages/os/scripts/check-confidential-layer.mjs",
+        "packages/os/scripts/check-confidential-policy.mjs",
+        "packages/os/scripts/check-confidential-profile.mjs",
+        "packages/os/scripts/check-dstack-pins.mjs",
+        "packages/os/scripts/generate-confidential-artifacts.mjs",
+        "packages/os/scripts/os-release-lib.mjs",
+        "packages/os/scripts/tee-evidence-bridge.mjs",
+        "packages/os/scripts/tee-state-volume-mount.mjs",
+        "packages/os/scripts/verify-image-reproducibility.mjs"
+      ]
+    },
+    {
+      "title": "[codex] expose lightweight install path",
+      "prNumber": 9622,
+      "type": "other",
+      "body": "## Summary\n\n- Add `bun run install:light` as a documented root command.\n- Wire it to the existing `ELIZA_SKIP_ARTIFACT_SYNC=1` postinstall escape hatch so disk-constrained local checks can skip the 971 MiB artifact bundle.\n- Document the co",
+      "files": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        "package.json"
+      ]
+    },
+    {
+      "title": "fix(smartglasses): sort simulator smoke imports",
+      "prNumber": 9621,
+      "type": "bugfix",
+      "body": "## Summary\n- Sort `simulator-automation-smoke.ts` imports to satisfy Biome on current `develop`.\n\n## Verification\n- `bun install`\n- `bun run --cwd packages/examples/smartglasses lint`\n- `bun run verify` (510/510 successful, 3.147s after reb",
+      "files": [
+        "packages/examples/smartglasses/simulator-automation-smoke.ts"
+      ]
+    },
+    {
+      "title": "test(kokoro): add ASR/WER audio-correctness gate to the real-voice smoke (#9588)",
+      "prNumber": 9620,
+      "type": "tests",
+      "body": "Hardens `kokoro-real-smoke.ts` to catch a class of bug it was blind to: **inaudible/garbage audio that still passes**.\n\n## Why\nThe smoke asserted only non-empty 24kHz PCM + a prompt first chunk. That **passes on noise**. While root-causing ",
+      "files": [
+        "plugins/plugin-local-inference/scripts/kokoro-real-smoke.ts"
+      ]
+    },
+    {
+      "title": "test(scenario-runner): real-service cloud voice E2E — STT + Cerebras + TTS, streaming (#9299)",
+      "prNumber": 9619,
+      "type": "tests",
+      "body": "Validates **end-to-end cloud voice** (the user's ask): STT + Cerebras `gpt-oss-120b` + TTS, with streaming confirmed, against **real services**.\n\nAdds `test:real-service:voice` (`packages/scenario-runner/scripts/real-service-voice-e2e.mjs`)",
+      "files": [
+        ".github/issue-evidence/9299-cloud-voice-e2e/README.md",
+        ".github/issue-evidence/9299-cloud-voice-e2e/question.mp3",
+        ".github/issue-evidence/9299-cloud-voice-e2e/reply.mp3",
+        ".github/issue-evidence/9299-cloud-voice-e2e/voice-e2e-run.log",
+        "packages/scenario-runner/package.json",
+        "packages/scenario-runner/scripts/real-service-voice-e2e.mjs"
+      ]
+    },
+    {
+      "title": "fix: deploy showcase apps through app builder",
+      "prNumber": 9618,
+      "type": "bugfix",
+      "body": "## Summary\n- Remove the #9300 `APP_PREBUILT_IMAGES` / operator image-map path so showcase apps do not get a special deployment mechanism.\n- Pass normal deploy source options (`repoUrl`, `ref`, `dockerfile`, and runtime `env`) through `POST ",
+      "files": [
+        ".dockerignore",
+        ".github/workflows/build-example-app-images.yml",
+        "bun.lock",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-job-service.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-orchestrator.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-deployments-options.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/app-image-resolver.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-job-service.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-runner.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments.ts",
+        "packages/cloud-shared/src/lib/services/app-image-resolver.test.ts",
+        "packages/cloud-shared/src/lib/services/app-image-resolver.ts",
+        "packages/cloud-shared/src/lib/services/apps-deploy-backend.ts",
+        "packages/examples/cloud/clone-ur-crush/Dockerfile.cloud",
+        "packages/examples/cloud/clone-ur-crush/README.md",
+        "packages/examples/cloud/clone-ur-crush/package.json",
+        "packages/examples/cloud/edad/Dockerfile.cloud",
+        "packages/examples/cloud/edad/README.md",
+        "packages/test/cloud-e2e/docs/showcase-apps-coverage.md",
+        "packages/test/cloud-e2e/tests/example-clone-ur-crush-real-deploy.spec.ts",
+        "packages/test/cloud-e2e/tests/example-edad-real-deploy.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(computeruse): raise Windows clipboard spawn timeout 5s → 15s (#9581)",
+      "prNumber": 9617,
+      "type": "bugfix",
+      "body": "On Defender-heavy Windows hosts a cold `powershell.exe` 5.1 spawn (`Set-Clipboard`/`Get-Clipboard`) can take **>5s** under real-time AV scanning (measured **~11s** on a build box during the #9581 Windows on-device CUA verification), so the ",
+      "files": [
+        "plugins/plugin-computeruse/src/platform/clipboard.ts"
+      ]
+    },
+    {
+      "title": "docs(vision): update OCR backend README",
+      "prNumber": 9616,
+      "type": "docs",
+      "body": "## Summary\n- Updates plugin-vision README OCR docs to match the current backend split.\n- Documents generic Apple Vision/doCTR OCR separately from coordinate OCR used by computeruse.\n- Notes Windows.Media.Ocr, Linux Tesseract, and RapidOCR c",
+      "files": [
+        "plugins/plugin-vision/README.md"
+      ]
+    },
+    {
+      "title": "fix(computeruse): add Wayland portal screenshot capture",
+      "prNumber": 9615,
+      "type": "bugfix",
+      "body": "## Summary\n- Adds a Linux Wayland full-display screenshot path for `plugin-computeruse` using xdg-desktop-portal Screenshot over `gdbus`.\n- Keeps existing X11 capture fallbacks and maps portal denial/cancel to the existing permission-denied",
+      "files": [
+        "bun.lock",
+        "packages/agent/src/api/approval-routes.test.ts",
+        "packages/agent/src/api/approval-routes.ts",
+        "packages/agent/src/services/remote-plugin-adapter.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments-helpers.ts",
+        "packages/cloud-shared/src/lib/services/app-image-resolver.ts",
+        "packages/ui/src/components/chat/widgets/needs-attention.test.tsx",
+        "packages/ui/src/components/chat/widgets/needs-attention.tsx",
+        "plugins/plugin-anthropic/models/text.ts",
+        "plugins/plugin-capacitor-bridge/tsconfig.json",
+        "plugins/plugin-computeruse/AGENTS.md",
+        "plugins/plugin-computeruse/CLAUDE.md",
+        "plugins/plugin-computeruse/docs/MULTI_MONITOR.md",
+        "plugins/plugin-computeruse/docs/TEST_LANES_COMPUTERUSE_VISION.md",
+        "plugins/plugin-computeruse/src/platform/capture.ts",
+        "plugins/plugin-computeruse/src/platform/screenshot.ts",
+        "plugins/plugin-computeruse/src/platform/wayland-portal.test.ts",
+        "plugins/plugin-computeruse/src/platform/wayland-portal.ts",
+        "plugins/plugin-discord/utils.ts",
+        "plugins/plugin-discord/voice.ts",
+        "plugins/plugin-health/src/health-bridge/health-connectors.ts",
+        "plugins/plugin-linear/src/actions/clearActivity.ts",
+        "plugins/plugin-linear/src/actions/createComment.ts",
+        "plugins/plugin-linear/src/actions/createIssue.ts",
+        "plugins/plugin-linear/src/actions/deleteComment.ts",
+        "plugins/plugin-linear/src/actions/deleteIssue.ts",
+        "plugins/plugin-linear/src/actions/getActivity.ts",
+        "plugins/plugin-linear/src/actions/getIssue.ts",
+        "plugins/plugin-linear/src/actions/listComments.ts",
+        "plugins/plugin-linear/src/actions/message-source.ts",
+        "plugins/plugin-linear/src/actions/searchIssues.ts",
+        "plugins/plugin-linear/src/actions/updateComment.ts",
+        "plugins/plugin-linear/src/actions/updateIssue.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.echo.test.ts",
+        "plugins/plugin-social-alpha/src/types.ts",
+        "plugins/plugin-wallet/src/chains/evm/tsconfig.json",
+        "plugins/plugin-wallet/src/chains/solana/tsconfig.json",
+        "tsconfig.json"
+      ]
+    },
+    {
+      "title": "Add plugin-raven-verify to third-party registry",
+      "prNumber": 9614,
+      "type": "other",
+      "body": "Adds a third-party registry entry for `plugin-raven-verify` (live on npm, v0.1.0): a thin ElizaOS client exposing a `VERIFY_TOKEN` action that fetches signed, scope-bounded on-chain evidence receipts for a Solana mint via the Raven hosted v",
+      "files": [
+        "packages/registry/entries/third-party/plugin-raven-verify.json"
+      ]
+    },
+    {
+      "title": "feat(plugin-embeddings): add first-party registry entry (#9567)",
+      "prNumber": 9613,
+      "type": "feature",
+      "body": "## What\n\nAdds the **registry entry** for `@elizaos/plugin-embeddings` — the last unshipped deliverable from issue #9567.\n\n[PR #9572](https://github.com/elizaOS/eliza/pull/9572) landed the standalone provider-agnostic `TEXT_EMBEDDING` plugin",
+      "files": [
+        "packages/registry/src/first-party/generated.json",
+        "plugins/plugin-embeddings/registry-entry.json"
+      ]
+    },
+    {
+      "title": "fix(voice): stop NLMS echo canceller diverging on real-TTS quiet passages (#9455)",
+      "prNumber": 9612,
+      "type": "bugfix",
+      "body": "## Summary\n\nWhile validating the live half-duplex voice path on-device against the agent's **real Kokoro TTS** (per #9455's remaining \"on-device ERLE measurement\" item), the shipped `NlmsEchoCanceller` (wired into the mic path in #9575) **d",
+      "files": [
+        "packages/benchmarks/voice/device-acoustic-erle.mjs",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.ts"
+      ]
+    },
+    {
+      "title": "test(computeruse): real macOS on-device CUA evidence — 6/9 verified on M4 Max (#9581)",
+      "prNumber": 9611,
+      "type": "tests",
+      "body": "Addresses the **\"macOS on-device CUA verification\"** checkbox of #9581 with real hardware evidence from an Apple **M4 Max** (`Mac16,5`, macOS **26.2** / `25C56`).\n\n## What ran\n\n1. **`capture:macos-desktop-evidence`** — the plugin's purpose-",
+      "files": [
+        ".github/issue-evidence/9581-macos-desktop-cua/README.md",
+        ".github/issue-evidence/9581-macos-desktop-cua/approval-full-control.txt",
+        ".github/issue-evidence/9581-macos-desktop-cua/browser-evidence.png",
+        ".github/issue-evidence/9581-macos-desktop-cua/local-vlm-describe.md",
+        ".github/issue-evidence/9581-macos-desktop-cua/macos-desktop-validation.json",
+        ".github/issue-evidence/9581-macos-desktop-cua/manifest.json",
+        ".github/issue-evidence/9581-macos-desktop-cua/report.json",
+        "plugins/plugin-computeruse/docs/macos-desktop-validation.json"
+      ]
+    },
+    {
+      "title": "fix(local-inference): wire the live AEC echo-reference on the diarization path (#9583)",
+      "prNumber": 9610,
+      "type": "bugfix",
+      "body": "## What\n\nThe fused live diarization path (`LiveDiarizationSession`) constructed its `AudioFrameConsumer` **without** an `echoReference` provider, so the already-landed AEC primitives never engaged on-device:\n\n- `NlmsEchoCanceller` (#9575)\n-",
+      "files": [
+        "plugins/plugin-local-inference/src/routes/live-diarization-route.test.ts",
+        "plugins/plugin-local-inference/src/routes/live-diarization-route.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.echo.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.ts"
+      ]
+    },
+    {
+      "title": "fix(vision): YOLO converter torch.load fallback when ultralytics import fails (#9105)",
+      "prNumber": 9609,
+      "type": "bugfix",
+      "body": "## YOLO GGUF converter: fall back to torch.load when ultralytics can't import\n\nWhile verifying the real on-device YOLO path on Linux (build `libyolo.so` → convert `yolov8n.pt` → `gguf` → run the detector), `scripts/convert.py` failed at `fr",
+      "files": [
+        "plugins/plugin-vision/native/yolo.cpp/scripts/convert.py"
+      ]
+    },
+    {
+      "title": "docs(verify): per-tier Metal throughput matrix on M4 Max + reusable harness (#9580)",
+      "prNumber": 9608,
+      "type": "docs",
+      "body": "Addresses the **\"Per-backend GPU verification matrix … Metal per-tier (M-series)\"** checkbox of #9580 with real numbers from an Apple **M4 Max** (macOS 26.2, 128 GB).\n\n`PLATFORM_MATRIX.md` already had the §8 kernel-correctness gate and a *s",
+      "files": [
+        "plugins/plugin-local-inference/native/verify/PLATFORM_MATRIX.md",
+        "plugins/plugin-local-inference/native/verify/evidence/platform/darwin-arm64-metal-perf-matrix-2026-06-25.json",
+        "plugins/plugin-local-inference/native/verify/metal-per-tier-perf-matrix.md",
+        "plugins/plugin-local-inference/native/verify/metal-perf-matrix.mjs"
+      ]
+    },
+    {
+      "title": "ci(local-inference): build the real fused libelizainference.so in CI, not eliza-archive (#9508)",
+      "prNumber": 9607,
+      "type": "other",
+      "body": "## Why\nPer direction: native libs should **build in CI at build time and be integrated into the app**, not pulled prebuilt from `eliza-archive`. The existing `build-llama-ffi-android.yml` was a gated scaffold that built the wrong target (re",
+      "files": [
+        ".github/workflows/build-llama-ffi-android.yml"
+      ]
+    },
+    {
+      "title": "chore(local-inference): biome-format pre-existing voice/test files",
+      "prNumber": 9601,
+      "type": "tests",
+      "body": "Brings 5 pre-existing files to the repo's tab-indent biome standard — the plugin `lint:check` flagged them (import-sort + space→tab reindent, **pure formatting, no logic**). Makes `bun run --cwd plugins/plugin-local-inference lint:check` gr",
+      "files": [
+        "plugins/plugin-local-inference/src/services/active-model-context-fit.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-canceller.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.ts"
+      ]
+    },
+    {
+      "title": "test(lifeops): drive real default packs through the actual scheduled-task runner (#8795)",
+      "prNumber": 9600,
+      "type": "tests",
+      "body": "Refs #8795.\n\n## Root cause\n\nThe plugin-health default packs (`bedtime` / `wake-up` / `sleep-recap`) were never exercised by the real scheduled-task runner — they were only \"tested\" by:\n\n- **Shape asserts** — `plugins/plugin-health/src/__tes",
+      "files": [
+        "plugins/plugin-personal-assistant/test/default-packs.smoke.test.ts",
+        "plugins/plugin-personal-assistant/test/health-default-packs-runner.test.ts"
+      ]
+    },
+    {
+      "title": "fix(#9565): boot/launch/splash surfaces use home-bg orange #ef5a1f, not brand #FF5800",
+      "prNumber": 9599,
+      "type": "bugfix",
+      "body": "Bounded code-doable part of #9565: startup/launch/splash surfaces (app.config themeColor/bg, capacitor SplashScreen, Android splash_background + launch statusBar, iOS LaunchScreen) use the home-background orange `#ef5a1f` so boot doesn't fl",
+      "files": [
+        "packages/app-core/platforms/android/app/src/main/res/values/colors.xml",
+        "packages/app-core/platforms/android/app/src/main/res/values/styles.xml",
+        "packages/app-core/platforms/ios/App/App/Base.lproj/LaunchScreen.storyboard",
+        "packages/app/app.config.ts",
+        "packages/app/capacitor.config.ts",
+        "packages/app/test/brand-surface.test.ts"
+      ]
+    },
+    {
+      "title": "fix(#9584): pin zig 0.13 for the aarch64-linux-musl fused-lib link (zig 0.16 lld SIGSEGV)",
+      "prNumber": 9598,
+      "type": "bugfix",
+      "body": "Bounded code-doable part of #9584: pin zig 0.13 in the AOSP fused-lib compile scripts so zig 0.16's lld doesn't silently SIGSEGV the aarch64-linux-musl link. `assertZigPinForTargets` (0.13.x accept; 0.16/0.14 reject with a clear lld-SIGSEGV",
+      "files": [
+        "packages/app-core/scripts/aosp/README.md",
+        "packages/app-core/scripts/aosp/compile-libllama-zig-pin.test.mjs",
+        "packages/app-core/scripts/aosp/compile-libllama.mjs",
+        "packages/app-core/scripts/aosp/compile-shim.mjs",
+        "packages/app-core/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "chore(voice): remove superseded duplicate NLMS echo-canceller (#9583)",
+      "prNumber": 9597,
+      "type": "other",
+      "body": "Dead-code/duplicate cleanup leftover from #9583's already-landed AEC work (the same pattern as #9454/#9589).\n\n#9583 landed **two** parallel NLMS canceller files, both exporting a class named `NlmsEchoCanceller` — a genuine name collision:\n-",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/echo-canceller.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-canceller.ts",
+        "plugins/plugin-local-inference/src/services/voice/index.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): echo-reference alignment buffer for the AEC far-end (#9583)",
+      "prNumber": 9596,
+      "type": "feature",
+      "body": "Second pure-logic slice for #9583 (after the delay estimator #9586): the **echoReference alignment buffer** — the \"caller must supply the time-aligned reference\" primitive the AEC consumer seam was missing.\n\n`EchoReferenceBuffer` is a fixed",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/echo-reference-buffer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-reference-buffer.ts",
+        "plugins/plugin-local-inference/src/services/voice/index.ts"
+      ]
+    },
+    {
+      "title": "feat(#9565): boot startup telemetry, first-paint reduction, launch orange #ef5a1f",
+      "prNumber": 9595,
+      "type": "feature",
+      "body": "Closes part of #9565 (boot/startup optimization epic).\n\n## What\n\nOptimizes the device agent boot/startup readiness path end to end, building on\nthe renderer-surface orange already landed by #9587 (which fixed only\n`index.html` + `StartupShe",
+      "files": [
+        ".github/issue-evidence/9565-startup-readiness/README.md",
+        ".github/issue-evidence/9565-startup-readiness/desktop-web-renderer-trace-m4max.json",
+        ".github/issue-evidence/9565-startup-readiness/renderer-trace-second-capture.json",
+        ".github/issue-evidence/9565-startup-readiness/startup-orange-proof.md",
+        ".github/issue-evidence/9565-startup-readiness/startup-shell-orange-ef5a1f.png",
+        "packages/app-core/platforms/android/app/src/main/res/values/colors.xml",
+        "packages/app-core/platforms/android/app/src/main/res/values/styles.xml",
+        "packages/app-core/platforms/ios/App/App/Base.lproj/LaunchScreen.storyboard",
+        "packages/app/app.config.ts",
+        "packages/app/capacitor.config.ts",
+        "packages/app/docs/device-boot-startup.md",
+        "packages/app/package.json",
+        "packages/app/public/site.webmanifest",
+        "packages/app/scripts/capture-startup-trace.mjs",
+        "packages/app/src/main.tsx",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/app/test/first-paint-guard.test.ts",
+        "packages/ui/src/components/shell/StartupShell.tsx",
+        "packages/ui/src/state/startup-telemetry.test.ts",
+        "packages/ui/src/state/startup-telemetry.ts",
+        "packages/ui/src/state/useStartupCoordinator.ts"
+      ]
+    },
+    {
+      "title": "test(pa): malformed/empty/throwing useModel coverage for LifeOps LLM consumers (#8795)",
+      "prNumber": 9594,
+      "type": "tests",
+      "body": "## Context (#8795 — pa-llm-consumers)\n\nThe LifeOps LLM consumers had **asymmetric malformed-input handling and zero malformed-input tests**. The existing optimized-prompt routing suites (`test/lifeops-optimized-prompts.test.ts`, `test/brief",
+      "files": [
+        "plugins/plugin-personal-assistant/src/actions/brief.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-llm-consumer-robustness.test.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-anthropic): guard structured-output + errored streams in generateTextWithModel",
+      "prNumber": 9593,
+      "type": "bugfix",
+      "body": "## What\nTwo streaming-path correctness guards in `generateTextWithModel`:\n\n1. **Structured-output calls must not stream.** The parsed native object is only available on the non-stream `generateText` result — a streamed structured call emits",
+      "files": [
+        "plugins/plugin-anthropic/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(health): convert Fitbit imperial-locale distance/weight instead of assuming metric (#8795)",
+      "prNumber": 9592,
+      "type": "bugfix",
+      "body": "## Problem (#8795)\n\n`plugins/plugin-health/src/health-bridge/health-connectors.ts` — the Fitbit normalizer assumed **metric** unconditionally:\n\n- distance: `totalDistance * 1_000`, unit `\"m\"` (assumes the wire value is **km**)\n- weight: pas",
+      "files": [
+        "plugins/plugin-health/src/health-bridge/__fixtures__/fitbit.imperial.recorded.json",
+        "plugins/plugin-health/src/health-bridge/__fixtures__/fitbit.recorded.json",
+        "plugins/plugin-health/src/health-bridge/health-connectors.ts",
+        "plugins/plugin-health/test/fitbit-connector.contract.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): serialize optimized-prompt setPrompt version claims + warn on unknown disable token (#8795)",
+      "prNumber": 9591,
+      "type": "bugfix",
+      "body": "Closes two `OptimizedPromptService` findings from #8795 in `packages/core/src/services/optimized-prompt.ts`.\n\n## (1) concurrent-setprompt-version-race-clobber [low / robustness]\n\n**Root cause.** `setPrompt` computed the next version **non-a",
+      "files": [
+        "packages/core/src/services/optimized-prompt.test.ts",
+        "packages/core/src/services/optimized-prompt.ts"
+      ]
+    },
+    {
+      "title": "test(health): cover untested permission-denied / clarification / missing-arg action branches (#8795)",
+      "prNumber": 9590,
+      "type": "tests",
+      "body": "## Problem (#8795)\n\nThe `plugin-health` action runners (`OWNER_HEALTH`, `OWNER_SCREENTIME`) ship a set of error / clarification / missing-argument branches that **no test asserts**. The existing tests pin only happy paths:\n\n- `health.test.t",
+      "files": [
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/screen-time.test.ts"
+      ]
+    },
+    {
+      "title": "chore(benchmarks/voice): remove dead three-voice-e2e-real.mjs, repoint docs (#9454)",
+      "prNumber": 9589,
+      "type": "other",
+      "body": "Cleans up the leftover the #9454 disposition implied but never landed.\n\n`packages/benchmarks/voice/three-voice-e2e-real.mjs` is **dead** — it imports `SpeakerEncoderGgmlImpl` (export removed from `encoder-ggml.ts`) and `PyannoteDiarizer` (n",
+      "files": [
+        "packages/benchmarks/voice/AGENTS.md",
+        "packages/benchmarks/voice/CLAUDE.md",
+        "packages/benchmarks/voice/README.md",
+        "packages/benchmarks/voice/three-voice-e2e-real.mjs",
+        "packages/docs/voice-e2e-gap-analysis.md",
+        "plugins/plugin-local-inference/src/services/voice/VOICE_WORKBENCH.md"
+      ]
+    },
+    {
+      "title": "test(boot): brand-surface FOUC assertion accepts home-bg orange #ef5a1f (#9565)",
+      "prNumber": 9587,
+      "type": "tests",
+      "body": "**Fixes a red test on develop** introduced by the merged #9582.\n\n#9582 set the index.html FOUC fallback to `var(--bg, #ef5a1f)` (the home background color, so boot doesn't flash a different orange before home paints — #9565). But `packages/",
+      "files": [
+        "packages/app/test/brand-surface.test.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): playback→mic echo-delay calibration primitive (#9583)",
+      "prNumber": 9586,
+      "type": "feature",
+      "body": "Follow-up to #9455 / #9583: the **playback→mic delay calibration** primitive.\n\n`estimateEchoDelaySamples(near, far, opts)` finds the bulk transport delay between TTS playback and the mic window by normalized cross-correlation, so the NLMS c",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/echo-delay.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/echo-delay.ts",
+        "plugins/plugin-local-inference/src/services/voice/index.ts"
+      ]
+    },
+    {
+      "title": "test(lifeops-bench): honest base-vs-robustness scenario counts + edge-variant clone guard (#8795)",
+      "prNumber": 9585,
+      "type": "tests",
+      "body": "Closes #8795.\n\n## Root cause\n\n`packages/benchmarks/lifeops-bench/eliza_lifeops_bench/scenarios/__init__.py` expands **1020** hand-authored *base* scenarios **10x** under fixed prompt-prefix framings (`polite`/`urgent`/`mobile`/…) using `dat",
+      "files": [
+        "packages/benchmarks/lifeops-bench/AGENTS.md",
+        "packages/benchmarks/lifeops-bench/CLAUDE.md",
+        "packages/benchmarks/lifeops-bench/README.md",
+        "packages/benchmarks/lifeops-bench/eliza_lifeops_bench/__main__.py",
+        "packages/benchmarks/lifeops-bench/eliza_lifeops_bench/scenarios/__init__.py",
+        "packages/benchmarks/lifeops-bench/tests/test_edge_expansion_identity.py",
+        "packages/benchmarks/lifeops-bench/tests/test_scenarios_corpus.py"
+      ]
+    },
+    {
+      "title": "fix(boot): launch/splash surfaces track home background #ef5a1f, not accent #FF5800 (#9565)",
+      "prNumber": 9582,
+      "type": "bugfix",
+      "body": "Addresses the visual requirement called out in #9565: *\"startup/launch orange must match the default home background orange `#ef5a1f`, not the older brand accent `#FF5800` … boot/loading/launch surfaces should not flash a different orange b",
+      "files": [
+        "packages/app/index.html",
+        "packages/ui/src/components/shell/StartupShell.tsx"
+      ]
+    },
+    {
+      "title": "feat(#9105): GET_SCREEN set-of-marks numbering + wire DirtyTileDescriber",
+      "prNumber": 9579,
+      "type": "feature",
+      "body": "## #9105 vision pipeline follow-ups — GET_SCREEN set-of-marks numbering + DirtyTileDescriber wiring\n\nFollow-up to #9574 (merged). Two further pipeline-efficiency/grounding items.\n\n### Changes\n1. **`feat(vision)`: set-of-marks numbering on G",
+      "files": [
+        "plugins/plugin-vision/src/dirty-tile-integration.test.ts",
+        "plugins/plugin-vision/src/dirty-tile-scene.ts",
+        "plugins/plugin-vision/src/get-screen.test.ts",
+        "plugins/plugin-vision/src/get-screen.ts",
+        "plugins/plugin-vision/src/service.ts"
+      ]
+    },
+    {
+      "title": "fix(aosp-build): make the Android Vulkan cross-compile work on macOS hosts (#9508)",
+      "prNumber": 9578,
+      "type": "bugfix",
+      "body": "## What\n`compile-libllama.mjs` (the bionic fused Vulkan lib build for #9508) hardcoded the NDK host-prebuilt dir to `linux-x86_64` and only searched Linux paths for the Vulkan-Hpp headers — so `libggml-vulkan.so` (which carries the Mali fla",
+      "files": [
+        "packages/app-core/scripts/aosp/compile-libllama.mjs"
+      ]
+    },
+    {
+      "title": "feat(voice-ci): run the real-audio matrix keyless via local distinct-preset TTS (#9454)",
+      "prNumber": 9577,
+      "type": "feature",
+      "body": "Refs #9454.\n\n## What\nThe `voice-real-ci-matrix` `requireEnv`'d `ELEVENLABS_API_KEY` to synthesize the owner/impostor corpus, so it only ran where that secret was set. This makes the key **optional**: keyless, the corpus speakers are synthes",
+      "files": [
+        "packages/benchmarks/voice/voice-real-ci-matrix.mjs"
+      ]
+    },
+    {
+      "title": "refactor(pa): remove orphaned gmail-plan extractor; converge inbox_triage training baseline (#8795)",
+      "prNumber": 9576,
+      "type": "refactor",
+      "body": "## Issue\nCloses part of #8795 (gmail-plan-extractor-orphaned-deadcode).\n\n## Root cause\n`extractGmailPlanWithLlm` in `plugins/plugin-personal-assistant/src/lifeops/llm/extract-gmail-plan.ts` had **no production caller**. Building the referen",
+      "files": [
+        "plugins/plugin-personal-assistant/src/index.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/llm/extract-gmail-plan.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/optimized-prompt-instructions.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-optimized-prompts.test.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): PCM acoustic echo cancellation for the live half-duplex mic (#9455)",
+      "prNumber": 9575,
+      "type": "feature",
+      "body": "Refs #9455.\n\n## Problem\nWhen the agent speaks, its TTS playback leaks back into the microphone, so VAD / ASR / diarization pick up the agent's own voice. There was no echo canceller in the pipeline.\n\n## What\nA from-scratch single-channel **",
+      "files": [
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/audio-frame-consumer.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/nlms-echo-canceller.ts"
+      ]
+    },
+    {
+      "title": "feat(#9105): fuse YOLO+face into Gemma prompt, portable tesseract + real OCR, imageless CUA",
+      "prNumber": 9574,
+      "type": "feature",
+      "body": "## #9105 Computer Use × Vision — close the YOLO+face fusion gap, prove real OCR, cut CUA tokens\n\nThe on-device vision design is **Gemma-4 VLM + OCR + YOLO + face detection fused as additional context with the image**. Scoping found the pipe",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/brain-dhash-cache.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/brain.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/cascade.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/use-computer-agent.tokens.test.ts",
+        "plugins/plugin-computeruse/src/actions/use-computer-agent.ts",
+        "plugins/plugin-computeruse/src/actor/agent-loop.ts",
+        "plugins/plugin-computeruse/src/actor/brain.imageless.test.ts",
+        "plugins/plugin-computeruse/src/actor/brain.ts",
+        "plugins/plugin-vision/scripts/vendor-tesseract-linux.mjs",
+        "plugins/plugin-vision/src/fusion-prompt.test.ts",
+        "plugins/plugin-vision/src/ocr-service-linux-tesseract.real.test.ts",
+        "plugins/plugin-vision/src/service.ts",
+        "plugins/plugin-vision/test/fixtures/ocr-real-sample.png"
+      ]
+    },
+    {
+      "title": "test(voice): local real-acoustic eval harness — real pyannote+wespeaker DER, no GPU runner (#9454)",
+      "prNumber": 9573,
+      "type": "tests",
+      "body": "## What\nAdds `packages/benchmarks/voice/local-acoustic-eval.mjs` — runs the **real** pyannote diarizer + WeSpeaker encoder via the current `FusedDiarizer`/`FusedSpeakerEncoder` FFI on real audio, on Apple Silicon Metal, with **no `gpu-cuda`",
+      "files": [
+        "packages/benchmarks/voice/local-acoustic-eval.mjs"
+      ]
+    },
+    {
+      "title": "feat(plugin-embeddings): provider-agnostic standalone TEXT_EMBEDDING plugin",
+      "prNumber": 9572,
+      "type": "feature",
+      "body": "Closes #9567.\n\n## What\nA new standalone **`@elizaos/plugin-embeddings`** — a provider-agnostic (\"bring your own\") `TEXT_EMBEDDING` provider. Point one set of `EMBEDDING_*` vars at **any** OpenAI-compatible `/embeddings` endpoint (personal O",
+      "files": [
+        "bun.lock",
+        "plugins/plugin-embeddings/AGENTS.md",
+        "plugins/plugin-embeddings/CLAUDE.md",
+        "plugins/plugin-embeddings/README.md",
+        "plugins/plugin-embeddings/__tests__/auto-enable.test.ts",
+        "plugins/plugin-embeddings/__tests__/config.test.ts",
+        "plugins/plugin-embeddings/__tests__/embedding.test.ts",
+        "plugins/plugin-embeddings/auto-enable.ts",
+        "plugins/plugin-embeddings/biome.json",
+        "plugins/plugin-embeddings/build.ts",
+        "plugins/plugin-embeddings/index.browser.ts",
+        "plugins/plugin-embeddings/index.node.ts",
+        "plugins/plugin-embeddings/index.ts",
+        "plugins/plugin-embeddings/package.json",
+        "plugins/plugin-embeddings/src/index.ts",
+        "plugins/plugin-embeddings/src/models/embedding.ts",
+        "plugins/plugin-embeddings/src/models/index.ts",
+        "plugins/plugin-embeddings/src/types/index.ts",
+        "plugins/plugin-embeddings/src/utils/config.ts",
+        "plugins/plugin-embeddings/src/utils/events.ts",
+        "plugins/plugin-embeddings/tsconfig.build.json",
+        "plugins/plugin-embeddings/tsconfig.json",
+        "plugins/plugin-embeddings/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "feat(#9449 Pillar B): bridge connector inbound messages onto the activity stream",
+      "prNumber": 9571,
+      "type": "feature",
+      "body": "Central MESSAGE_RECEIVED → AgentEventService `message` stream bridge — covers all 27 connectors' inbound path at once (the `message` stream is already broadcast + `activityEventToPlaintext` renders `message_received`). Wires up the dead `em",
+      "files": [
+        "packages/core/src/features/basic-capabilities/index.ts",
+        "packages/core/src/services/agent-event-bridge.test.ts",
+        "packages/core/src/services/agent-event-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(lifeops-bench): LIVE scoring no longer rewards an unchanged world / inaction (#8795)",
+      "prNumber": 9570,
+      "type": "bugfix",
+      "body": "Fixes a CRITICAL scoring inversion in LifeOpsBench LIVE mode. Refs #8795. Finding id: `live-state-hash-rewards-inaction`.\n\n## Root cause\n\nLIVE scenarios carry **no** ground-truth actions. The runner derives the expected post-state by replay",
+      "files": [
+        "packages/benchmarks/lifeops-bench/eliza_lifeops_bench/scorer.py",
+        "packages/benchmarks/lifeops-bench/tests/test_scorer_fixes.py"
+      ]
+    },
+    {
+      "title": "feat(#9449 Pillar C): needs-attention surface — PendingUserAction + GET /api/approvals + home widget",
+      "prNumber": 9569,
+      "type": "feature",
+      "body": "Implements #9449 Pillar C (the one genuinely-undone pillar): a canonical 'actions requiring your response' surface. Pillars A (WS allowlist, TTL, toast-tone, category filter) and B (activity/trajectory serializers, AgentActivityBox dedup #9",
+      "files": [
+        "packages/agent/src/api/approval-routes.test.ts",
+        "packages/agent/src/api/approval-routes.ts",
+        "packages/agent/src/api/server-lazy-routes.ts",
+        "packages/agent/src/api/server-route-dispatch.ts",
+        "packages/core/src/services/approval.ts",
+        "packages/core/src/types/task.ts",
+        "packages/ui/src/api/client-approvals.ts",
+        "packages/ui/src/api/client.ts",
+        "packages/ui/src/components/chat/widgets/needs-attention.stories.tsx",
+        "packages/ui/src/components/chat/widgets/needs-attention.test.tsx",
+        "packages/ui/src/components/chat/widgets/needs-attention.tsx",
+        "packages/ui/src/widgets/__fixtures__/home-widget-mock-data.ts",
+        "packages/ui/src/widgets/registry.ts"
+      ]
+    },
+    {
+      "title": "fix(dev-smoke): pre-bundle buffer so the vite dev app mounts (#9452)",
+      "prNumber": 9568,
+      "type": "bugfix",
+      "body": "Fixes #9452.\n\n## Root cause (captured, not hypothesized)\n\nI reproduced the failure locally end-to-end with a live provider (`bun run --cwd packages/app test:dev-smoke` against Cerebras) and captured the artifact the issue was blocked on. Th",
+      "files": [
+        "packages/app/test/dev-smoke/bun-dev-app-shell.spec.ts",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "test(e2e): per-PR mobile-viewport onboarding→home lane + shared fixtures (#9525)",
+      "prNumber": 9566,
+      "type": "bugfix",
+      "body": "Complements the existing **real-device** Capacitor lanes (`android-device-e2e.yml`, `mobile-build-smoke.yml` — dispatch-only) with a Pixel-7 touch-viewport Playwright lane that runs on **every PR** via scenario-pr.yml. Extracts shared onboa",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        "packages/app/test/ui-smoke/onboarding-to-home-mobile.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(scheduling): register personal_baseline_sufficient gate so sleep-recap pack can fire (#8795)",
+      "prNumber": 9563,
+      "type": "bugfix",
+      "body": "## Finding\n\n`sleep-recap-pack-can-never-fire-unregistered-gate` [high/bug] — referenced in #8795.\n\n## Root cause\n\n`plugins/plugin-health/src/default-packs/sleep-recap.ts` declares a `shouldFire` gate of kind **`personal_baseline_sufficient`",
+      "files": [
+        "plugins/plugin-health/package.json",
+        "plugins/plugin-health/src/default-packs/gate-coverage.test.ts",
+        "plugins/plugin-health/vitest.config.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/gate-registry.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/gate-registry.ts"
+      ]
+    },
+    {
+      "title": "fix(core): optimized-prompt refresh isolates per-task artifact errors (#8795)",
+      "prNumber": 9562,
+      "type": "bugfix",
+      "body": "Refs #8795. Finding id: **refresh-rethrows-corrupt-symlink-disables-all-tasks** (high / robustness, subsystem `optimized-prompt-service`).\n\n## Root cause\n`OptimizedPromptService.refresh()` (`packages/core/src/services/optimized-prompt.ts`) ",
+      "files": [
+        "packages/core/src/services/optimized-prompt.test.ts",
+        "packages/core/src/services/optimized-prompt.ts"
+      ]
+    },
+    {
+      "title": "refactor(android): one inference path — retire the musl libllama from the AOSP OS-image build (#9508)",
+      "prNumber": 9560,
+      "type": "refactor",
+      "body": "Refs #9508. Completes the \"everything on one bionic fused lib\" consolidation.\n\n## Context\nAndroid inference is the single bionic fused `libelizainference.so` (with `libggml-vulkan.so` as its in-process GPU backend, built by `app-core/script",
+      "files": [
+        "packages/scripts/distro-android/README.md",
+        "packages/scripts/distro-android/build-aosp.mjs",
+        "packages/scripts/distro-android/compile-libllama.mjs",
+        "plugins/plugin-local-inference/scripts/distro-android/compile-libllama.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud): deploy-status 500 on cached app reads (real-staging #9300 blocker)",
+      "prNumber": 9559,
+      "type": "bugfix",
+      "body": "## What & why\n\nThe real-Hetzner nightly (`monetized-loop-nightly.yml`, dispatched run\n[28136578239](https://github.com/elizaOS/eliza/actions/runs/28136578239)) failed:\nthe EDAD real-deploy driver got a clean `POST /deploy` → `202 BUILDING`,",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-deployments-helpers.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments-helpers.ts",
+        "packages/cloud-shared/src/lib/services/app-deployments.ts"
+      ]
+    },
+    {
+      "title": "test(browser): cover LifeOps workspace cancellation",
+      "prNumber": 9558,
+      "type": "tests",
+      "body": "## Summary\n- Adds a BrowserService-backed `agent_browser` adapter for subscription cancellation when `computeruse` is absent.\n- Upgrades the Google Play subscription cancellation scenario from fake `computeruse` to the Browser Workspace bac",
+      "files": [
+        "packages/test/scenarios/browser.lifeops/subscriptions.cancel-google-play.scenario.ts",
+        "plugins/plugin-finances/src/services/subscriptions-service.ts",
+        "plugins/plugin-finances/test/subscriptions-service.real-db.test.ts"
+      ]
     }
   ],
   "topContributors": [
@@ -382,6 +2533,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 204.23977185591025,
+      "prScore": 204.23977185591025,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -403,11 +2564,51 @@
       "reviewScore": 0,
       "commentScore": 0.33999999999999997,
       "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 136.26955174020335,
+      "prScore": 135.92955174020335,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "visionsXBT",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188686483?v=4",
+      "totalScore": 25.701443010546416,
+      "prScore": 25.701443010546416,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "billybotticelli4u-collab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/268235254?v=4",
+      "totalScore": 22.303292546497023,
+      "prScore": 22.303292546497023,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "github-code-quality",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9919?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 32,
-  "mergedPRs": 25,
+  "newPRs": 214,
+  "mergedPRs": 183,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 4
+  "activeContributors": 9
 }
