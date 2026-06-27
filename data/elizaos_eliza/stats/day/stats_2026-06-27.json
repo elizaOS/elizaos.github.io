@@ -1,0 +1,264 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-27T00:00:00.000Z",
+    "intervalEnd": "2026-06-28T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-27 to 2026-06-28, elizaos/eliza had 28 new PRs (8 merged), 0 new issues, and 7 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7rYsdE",
+      "title": "test(handoff): e2e the success switch — mock import store + provision-to-running (PR6)",
+      "author": "standujar",
+      "number": 9856,
+      "body": "Stacked on #9846 (PR4).\n\nPR6 of the seamless-provision handoff — the **e2e**: make the SUCCESS handoff reachable + asserted in the cloud e2e harness. Previously the handoff e2e was unreachable (the mock control-plane served no `/conversations/import` route, and the existing spec asserted the handoff does NOT happen).\n\n## How\n- **cloud-mocks control-plane** (`server.ts` + `store.ts`): add a mock `/conversations/import|messages` store with idempotent skip-all import (mirrors the real agent route `conversation-routes.ts:1623`).\n- **New `app-client-handoff-success.spec.ts`**: creates a shared front, seeds a 4-message transcript, provisions a separate dedicated to `running`, runs the **real** `startCloudAgentHandoff`, and asserts the success contract — `status===\"switched\"`, `imported===4`, `onSwitch` fired with the dedicated base, transcript copied in order, conversation id stable, + idempotent replay (re-run inserts 0).\n- **`cloud-api-dev.mjs`**: an **e2e-scoped** `ELIZA_CLOUD_AGENT_BASE_DOMAIN` override nulling the unreachable dedicated subdomain so the reachable `bridge_url` wins in the local mock stack (gated by `isE2eTestMode`, no prod leak).\n\n## What this e2e CAUGHT\nIt surfaced a **load-bearing prod bug** the unit tests (which mock the create) couldn't: `POST /agents` hardcoded `reuseExistingNonTerminal: true`, so create-both's 2nd create returned the shared instead of a separate dedicated → the handoff never actually fired in prod. **Fixed in #9854** (forceCreate). This is exactly why the e2e earns its keep.\n\n## Tests\nRan green: `app-client-handoff-success` → `1 passed`, \"imported 4/4 message(s)\". Passed /clean + /review (PASS).\n\n## Follow-up\nWith #9854 (forceCreate) landed, this spec can be updated to drive the **real** create-both path (instead of inserting the dedicated row directly) — proving the full prod path e2e.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-27T22:28:40Z",
+      "mergedAt": null,
+      "additions": 440,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rKT7J",
+      "title": "fix(computeruse): repair macOS window listing; complete #9581 on-device CUA input coverage (9/9)",
+      "author": "lalalune",
+      "number": 9820,
+      "body": "## What\n\nCompletes the first remaining item of #9581 — **macOS on-device CUA verification to full input coverage** — and fixes the two real macOS bugs that were blocking it.\n\nThe macOS desktop CUA evidence harness was stuck at **6/9** with `accessibilityPermission`, `mouseKeyboardInput`, and `windowListFocus` reported as `requires_device_evidence`. They were **not** actually blocked on a permission — `AXIsProcessTrusted` / System Events `UI elements enabled` were `true` the whole time. They were blocked by two genuine bugs in `windows-list.ts`.\n\n## Root causes + fixes (`plugins/plugin-computeruse/src/platform/windows-list.ts`)\n\n1. **macOS window listing was 100% broken.** `listWindowsDarwin` / `getActiveWindow` read `(id of w as text)`, but System Events `window` elements have **no `id`** — reading it throws `-1728`/`-1700` for every window, the surrounding `try` swallowed it, and `listWindows()` returned `[]` on every macOS host. So `get_window_position` / `switch_to_window` failed with \"Window not found\", which the harness mis-attributed to missing Accessibility.\n   - Now enumerated via `CGWindowListCopyWindowInfo` (Swift, ~0.5s incl. compile; needs only Screen Recording for titles) with a System Events fallback for hosts without the Swift toolchain. Windows are identified by title scoped to the owning app — the only term the process-level AppleScript targeting can act on.\n\n2. **`runDarwinWindowScript` timed out + was mis-classified.** It walked `every window of` **every non-matching process** through the accessibility tree before reaching the target; on a busy desktop that blew the 5s `osascript` timeout, and `ETIMEDOUT` matches the accessibility-error classifier → bogus \"Accessibility denied\".\n   - Now a two-pass match: process name first (fast, no AX walk), window title only as fallback.\n\n## Harness robustness (`scripts/capture-macos-desktop-evidence.mjs`)\n\nDirectly after synthetic keyboard input, TextEdit's **application** Apple Event dispatch (`get text of front document`) is transiently blocked and hangs to its timeout — even though the typed text is already present in the **accessibility tree**. The input proof now reads the text-area AX `value` (exactly what a CUA agent observes on screen), keeping the document read only as a fallback; the cleanup close retries past the same transient block so runs don't leak stale windows.\n\n## Evidence — 9/9 `passed`\n\nCaptured on Apple **M4 Max** (`Mac16,5`, macOS `26.2` build `25C56`):\n\n```\nbun run --cwd plugins/plugin-computeruse capture:macos-desktop-evidence   # status: passed\nbun run --cwd plugins/plugin-computeruse validate:platform-evidence -- \\\n  ../../.github/issue-evidence/9581-macos-desktop-cua/macos-desktop-validation.json --require-complete\n# → [macos-desktop-evidence] 9 checks validated (passed)\n```\n\nAll nine checks pass; `accessibilityPermission`, `mouseKeyboardInput`, `windowListFocus` flip to `passed`. Artifacts under `.github/issue-evidence/9581-macos-desktop-cua/` include a **screen recording** (`input-proof.mp4`) of the agent driving a controlled TextEdit window (`mouse_move → click → key_combo(cmd+a) → type`, AX-verified) plus the validated manifest/report and `NOTES.md`.\n\n## Tests\n\n- `bun run --cwd plugins/plugin-computeruse typecheck` — clean.\n- `bun run --cwd plugins/plugin-computeruse test` — green; added `parseDarwinWindowOutput` regression tests guarding the owner|||title parse so the empty-list bug can't silently return.\n\nRefs #9581.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-26T23:02:20Z",
+      "mergedAt": "2026-06-27T03:34:51Z",
+      "additions": 439,
+      "deletions": 149
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rWw_X",
+      "title": "feat(handoff): silent in-place re-point on switch — no flash, no WS drop, no draft loss (PR3)",
+      "author": "standujar",
+      "number": 9845,
+      "body": "Stacked on #9844 (PR2 freeze).\n\nPR3 of the seamless-provision handoff — the **invisible re-point**: make the shared→dedicated switch visually invisible (no full-screen `StartupScreen` flash, no wiped composer draft, no `SWITCH_AGENT`/coordinator re-entry).\n\n## The problem\nToday the handoff's `onSwitch` → `switchAgentProfile` → `clearAllChatDrafts` (wipes composer) + `SWITCH_AGENT` → coordinator `ready→polling-backend` (not shell-paintable) → `App.tsx:2057` swaps the shell for `<StartupScreen/>`; and `setBaseUrl` unconditionally `disconnectWs`. = full-screen flash + dropped WS + lost draft.\n\n## How\n- New `ElizaClient.repointBaseUrl(base)` — flips the base + persistence (extracted `persistBaseUrl`, byte-identical to `setBaseUrl`'s body) **without** the unconditional `disconnectWs`, swapping the WS in place. Global `setBaseUrl`/`disconnectWs` untouched.\n- New `cloud/handoff/silent-repoint.ts` — persists the dedicated active-server + profile, `setToken`, `repointBaseUrl`. **NO** `clearAllChatDrafts`, **NO** `switchAgentProfile`, **NO** `SWITCH_AGENT`. Chat stays mounted on the same conversation id (transcript already copied by PR2's supervisor).\n- The handoff `onSwitch` points at this silent path; every other caller keeps the global switch.\n- Removed the shipped `isCloudAgentWaking` banner (+ its tests + sole consumer); the Settings row keeps its local resume chip; the chat progress toast (`CloudHandoffBanner`) stays.\n\n## ⚠️ Known WARN (from /clean + /review — surfaced honestly)\nThe in-place WS-swap is currently **inert on cloud bases**: both the shared REST adapter and `*.elizacloud.ai` are treated as connected-without-WS, so `connectWs()` no-ops (`client-base.ts:1082`). So the ~40 lines of socket teardown are dead-weight on these bases today — they no-op safely (no crash, no flap). The re-point's real \"invisible\" wins (no `StartupScreen` flash, no draft clear, no `SWITCH_AGENT`, global path untouched) hold **independent** of the WS swap. **Reviewer's call** whether to prune the WS handling now or keep it for when a base does use WS.\n\n## Safety + tests\nGated behind `preferSharedCloudTier` (default off → byte-identical; global `setBaseUrl`/`switchAgentProfile` unchanged for all other callers). 21 tests (silent-repoint + controller, incl. asserting the handoff switch does NOT clear drafts / does NOT dispatch `SWITCH_AGENT`) + `tsc` clean. Passed /clean + /review (No FAIL; 2 cleanups applied).\n\nNot in scope: delete-shared (PR4), billing (PR5).\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-27T18:51:13Z",
+      "mergedAt": null,
+      "additions": 353,
+      "deletions": 145
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rWR-i",
+      "title": "feat(handoff): create dedicated alongside shared + arm the existing handoff (PR1)",
+      "author": "standujar",
+      "number": 9843,
+      "body": "Builds on #9838 (the `preferSharedCloudTier` flag, now merged to develop).\n\nPR1 of the seamless-provision handoff: when the app creates a SHARED bridge agent (behind `preferSharedCloudTier`), also background-provision a **separate dedicated** agent and arm the existing handoff to switch to it when ready.\n\n## Bug this fixes (why the handoff never fired)\n`startCloudAgentHandoff` keyed the readiness probe to the **same** agentId as the shared conversation source — but a shared agent is container-free and never grows a dedicated `bridge_url`, so the probe could never resolve (pre-#9838 the branch was skipped; post-#9838 it'd time out forever). Fix: a separate `dedicatedAgentId` target — the probe polls the dedicated agent, the conversation source stays the shared one.\n\n## How\n- `startCloudAgentHandoff` gains optional `dedicatedAgentId`; readiness probe polls `dedicatedAgentId ?? agentId`.\n- When the flag is ON + a shared agent is created: background-create a dedicated agent (normal always-on create, once, outside the retry thunk), then arm the existing `runCloudAgentHandoff` with shared=source + dedicated=target.\n- The handoff spine (`runConversationHandoff` / supervisor / import) is reused untouched. Switch stays the existing **visible** one — invisible re-point is a later PR.\n\n## Safety\nFlag OFF → byte-identical (no second create, no arm), locked by a flag-off test. `dedicatedAgentId` defaults to `agentId` so pre-existing callers are unchanged.\n\n## Tests\n48 pass (supervisor, select-or-provision, new handoff-target test, full first-run controller suite). Biome + tsgo clean on the 4 changed files.\n\nNot in scope (later PRs): invisible re-point, freeze-on-shared, delete-shared, billing.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-27T18:02:35Z",
+      "mergedAt": null,
+      "additions": 279,
+      "deletions": 47
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rXN1m",
+      "title": "feat(handoff): delete the shared bridge after a successful switch (PR4)",
+      "author": "standujar",
+      "number": 9846,
+      "body": "Stacked on #9845 (PR3 invisible re-point).\n\nPR4 of the seamless-provision handoff — **delete the transient shared bridge after a SUCCESSFUL switch**.\n\n## What\nOnce the user is switched to the dedicated and the transcript is copied, delete the shared agent + its `shared_runtime_history` (one DELETE cascades both — `eliza-sandbox.ts:867`). The shared was a transient bridge; this cleans it up so we don't leak a row per agent.\n\n## The safety guarantee (it's destructive)\nThe delete fires **ONLY** on a confirmed successful switch — `switched`/`switched-empty`, which `runConversationHandoff` returns only AFTER both `await importToPersonal` + `await switchToPersonal` (the silent re-point) resolve. On `timed-out`/`failed`/thrown → the hook never fires (the user is still on the shared bridge). Threaded through the retry so only the success leg deletes. Fire-and-forget: a failed delete only logs a leaked-row warning — degrades to a leak, **never** to data loss or an un-switched user. **/review verdict: \"provably gated — the shared is never deleted while the user still depends on it\" (traced end-to-end).**\n\n## Bug caught + fixed\n`deleteCloudCompatAgent` resolves its base from the client's **mutable** `baseUrl` — but by delete-time the client already re-pointed to the dedicated → would mis-route. Fix: a **base-pinned** `deleteSharedBridgeAgent(agentId, { cloudApiBase, authToken })`.\n\n## Tests\n56/56 pass — delete fires on `switched`/`switched-empty`, does NOT fire on `timed-out`/`failed`/thrown, fires only on the retry success leg, swallows a delete rejection. Flag-off byte-identical.\n\n## Known follow-ups (from /clean + /review, non-blocking)\n- The delete uses bare `fetch()`, not the Capacitor native-HTTP path → on **mobile** builds the cleanup may fail and leak the shared row (harmless: fire-and-forget, user is on the dedicated). Worth fixing across the whole handoff `fetch` family.\n- Non-2xx body discarded in the leaked-row warning; the exclusion-based success gate is open to future status members; one test under-proves the async rejection swallow.\n\nPassed /clean + /review (No FAIL). Not in scope: billing (PR5), e2e mock (PR6).\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-27T19:39:06Z",
+      "mergedAt": null,
+      "additions": 251,
+      "deletions": 37
+    }
+  ],
+  "codeChanges": {
+    "additions": 580,
+    "deletions": 1428,
+    "files": 43,
+    "commitCount": 36
+  },
+  "completedItems": [
+    {
+      "title": "fix(computeruse): repair macOS window listing; complete #9581 on-device CUA input coverage (9/9)",
+      "prNumber": 9820,
+      "type": "bugfix",
+      "body": "## What\n\nCompletes the first remaining item of #9581 — **macOS on-device CUA verification to full input coverage** — and fixes the two real macOS bugs that were blocking it.\n\nThe macOS desktop CUA evidence harness was stuck at **6/9** with ",
+      "files": [
+        ".github/issue-evidence/9581-macos-desktop-cua/NOTES.md",
+        ".github/issue-evidence/9581-macos-desktop-cua/README.md",
+        ".github/issue-evidence/9581-macos-desktop-cua/input-proof.mp4",
+        ".github/issue-evidence/9581-macos-desktop-cua/input-proof.png",
+        ".github/issue-evidence/9581-macos-desktop-cua/macos-desktop-validation.json",
+        ".github/issue-evidence/9581-macos-desktop-cua/manifest.json",
+        ".github/issue-evidence/9581-macos-desktop-cua/report.json",
+        ".github/issue-evidence/9581-macos-desktop-cua/screenshot-primary.png",
+        "plugins/plugin-computeruse/scripts/capture-macos-desktop-evidence.mjs",
+        "plugins/plugin-computeruse/src/__tests__/windows-list.test.ts",
+        "plugins/plugin-computeruse/src/platform/windows-list.ts"
+      ]
+    },
+    {
+      "title": "fix(core): Allow TemplateType (functions) in CharacterInput for template definitions",
+      "prNumber": 9839,
+      "type": "bugfix",
+      "body": "# Fix: Allow TemplateType (functions) in CharacterInput for template definitions\r\n\r\n## Problem\r\nThe `Character` interface accepts `TemplateType` (string or function-based templates), but `CharacterInput` restricts templates to `Record<strin",
+      "files": [
+        "packages/core/src/character.ts"
+      ]
+    },
+    {
+      "title": "feat(app): flag-gated shared-tier cloud agent on first-run",
+      "prNumber": 9838,
+      "type": "feature",
+      "body": "## What\nPhase 0 of the seamless-provision MVP: a **flag-gated tier flip** so the app can request a **SHARED** (container-free, in-Worker, instant) cloud agent on first-run instead of the default **DEDICATED always-on** one — the user chats ",
+      "files": [
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/config/boot-config-store.ts",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/state/useFirstRunCallbacks.ts"
+      ]
+    },
+    {
+      "title": "registry: add plugin-x402-endpoints (third-party)",
+      "prNumber": 9837,
+      "type": "other",
+      "body": "Adds a third-party community registry entry for **plugin-x402-endpoints**.\n\n**What it is:** an ElizaOS plugin exposing the x402-endpoints catalogue — 28 paid data endpoints (official EU/global registries: GLEIF, VIES, BODACC, EUR-Lex, Compa",
+      "files": [
+        "packages/registry/entries/third-party/plugin-x402-endpoints.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "chore(cloud): remove in-dashboard quick-chat, keep web-ui pairing",
+      "prNumber": 9835,
+      "type": "other",
+      "body": "## What\nRemove the in-dashboard quick-chat (`AgentChatPage`, route `dashboard/agents/:id/chat`) — a self-admitted \"lightweight JSON-RPC bridge chat\" convenience. The real chat lives in the app.\n\n## Why\nPart of the cloud-site cull: the dashb",
+      "files": [
+        "packages/ui/src/cloud/instances/AgentChatPage.tsx",
+        "packages/ui/src/cloud/instances/AgentDetailPage.tsx",
+        "packages/ui/src/cloud/instances/components/agent-actions.tsx",
+        "packages/ui/src/cloud/instances/components/eliza-agents-table.tsx",
+        "packages/ui/src/cloud/instances/index.ts",
+        "packages/ui/src/cloud/shell/CloudRouterShell.tsx"
+      ]
+    },
+    {
+      "title": "chore(ui): remove dead cloud-ui image-gen components",
+      "prNumber": 9834,
+      "type": "other",
+      "body": "## What\nRemove the dead `cloud-ui/components/image-gen/*` components — orphaned barrel-only re-exports with **zero JSX consumers and zero external consumers** across `packages` + `plugins`.\n\n## Why\nImage generation belongs to the agent + ap",
+      "files": [
+        "packages/ui/src/cloud-ui/components/image-gen/empty-state.stories.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/empty-state.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/enhanced-loading.stories.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/enhanced-loading.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/index.ts",
+        "packages/ui/src/cloud-ui/components/image-gen/loading-state.stories.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/loading-state.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/prompt-input.stories.tsx",
+        "packages/ui/src/cloud-ui/components/image-gen/prompt-input.tsx",
+        "packages/ui/src/cloud-ui/index.ts",
+        "packages/ui/src/index.ts"
+      ]
+    },
+    {
+      "title": "test(plugin-elizacloud): align cloud URL canonicalization",
+      "prNumber": 9832,
+      "type": "tests",
+      "body": "## Summary\n- Align stale shared/plugin test expectations with the current apex Eliza Cloud URL canonicalizer.\n- Update plugin docs so the documented default Cloud API base matches the canonical apex URL.\n\n## Why\nDevelop CI is failing shared",
+      "files": [
+        "packages/shared/src/local-inference/hf-proxy.test.ts",
+        "plugins/plugin-elizacloud/AGENTS.md",
+        "plugins/plugin-elizacloud/CLAUDE.md",
+        "plugins/plugin-elizacloud/README.md",
+        "plugins/plugin-elizacloud/__tests__/cloud-billing-routes.test.ts",
+        "plugins/plugin-elizacloud/__tests__/unit/home-remote-runner-access-url.test.ts"
+      ]
+    },
+    {
+      "title": "fix(feed): complete Steward OAuth login (read code from URL fragment) + remove Farcaster",
+      "prNumber": 9831,
+      "type": "bugfix",
+      "body": "## Login bounce fix\nSteward's PKCE callback returns the one-time exchange code in the URL **fragment** (`setRedirectFragment` → `url.hash`: `#code=…&state=…`) to keep it out of server logs / Referer / history. The feed callback page read it",
+      "files": [
+        "packages/feed/apps/web/src/app/auth/callback/[provider]/page.tsx",
+        "packages/feed/apps/web/src/components/auth/LoginModal.tsx"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 276.30177677920983,
+      "prScore": 276.30177677920983,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 109.15636318348932,
+      "prScore": 109.15636318348932,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 103.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 103.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 87.51358642780077,
+      "prScore": 87.17358642780077,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 33.30813122712422,
+      "prScore": 33.10813122712422,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "noobshow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
+      "totalScore": 27.459879734614027,
+      "prScore": 27.459879734614027,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digitalweb33333-creator",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/292161622?v=4",
+      "totalScore": 26.43944301054642,
+      "prScore": 26.43944301054642,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 28,
+  "mergedPRs": 8,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 7
+}
