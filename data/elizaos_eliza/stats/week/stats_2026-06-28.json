@@ -1,0 +1,1287 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-28T00:00:00.000Z",
+    "intervalEnd": "2026-07-05T00:00:00.000Z",
+    "intervalType": "week"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-06-28 to 2026-07-05, elizaos/eliza had 65 new PRs (69 merged), 27 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABG8x-lw",
+      "title": "fix(cloud): dedicated agents fall back to local_inference → 'provider issue' on every chat (cloud text-inference not wired in container)",
+      "author": "NubsCarson",
+      "number": 9887,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nEvery chat to a **dedicated cloud agent** returns the canned fallback:\n```json\n{\"text\":\"Sorry, I'm having a provider issue\",\"agentName\":\"Eliza\",\"failureKind\":\"local_inference\"}\n```\nin ~130ms, on every message. `failureKind: \"local_inference\"` (`classifyChatFailure` → `isLocalInferenceError`, `packages/agent/src/api/chat-routes.ts:1528`) means the agent **attempted local/on-device inference and errored** instead of using the cloud inference plane. For a dedicated *cloud* agent that should never happen — it implies cloud text-generation isn't wired in the container, so it falls back to a local model that isn't present (or hits ENOSPC).\n\n`isLocalInferenceError` matches: `local inference | local model | on-device | device bridge | llama | gguf | no local model | model download | enospc | no space left | disk full`.\n\n## Launch impact\n\n**P1 / likely launch blocker.** If this reproduces on every freshly-provisioned dedicated agent, no dedicated-agent chat works (the user-visible symptom is the phone showing \"Sorry, I'm having a provider issue\" forever). Confirmed live on-device (Seeker) + via the management API.\n\n## Repro\n\n1. Provision a dedicated agent (`POST /api/v1/eliza/agents {agentName, dockerImage:\"ghcr.io/elizaos/eliza:sha-7032a6a\", autoProvision:true}`) → it reaches `status: running`, healthy heartbeat, base `200`.\n2. `POST /api/v1/eliza/agents/:id/api/conversations/:cid/messages {text:\"hi\"}` → `200` with `{\"text\":\"Sorry, I'm having a provider issue\",\"failureKind\":\"local_inference\"}`.\n\n## What's ruled OUT (already chased)\n\n- **Stale image** — no. A brand-new agent on the **current** prod image (`sha-7032a6a`) fails identically. (Pre-existing agents were on stale immutable images `sha-2e08c1d`/`sha-7a5d4f9`, but image is not the cause.)\n- **Revoked injected key** — the failure is `local_inference` (tried local), not an auth/cloud error, so it's not \"cloud key 401 → fallback\".\n- **Tailnet/provisioning outage** — separate issue (CP `tailscaled` had died → fleet-wide provision wedge), already fixed; agents now provision + reach `200`. This `local_inference` failure is underneath that and persists after recovery.\n- **#8769** (cloud containers use cloud **embeddings** not local gte-small) is **MERGED** — but that was embeddings; **text generation** still appears to attempt local inference here.\n\n## Root-cause direction (needs agent-container env/logs — I don't have node SSH)\n\nLikely the container's **text** model provider isn't pointed at cloud (missing `ELIZAOS_CLOUD_ENABLED` / `ELIZAOS_CLOUD_*_MODEL` overrides / cloud key for generation), so generation falls through to a local llama/gguf path that errors. Open questions for whoever has container access:\n1. Is `ELIZAOS_CLOUD_ENABLED=true` + the cloud model overrides + cloud inference key actually injected into the agent container env at provision time?\n2. Does this reproduce for an agent provisioned via the **normal app first-run / shared→dedicated handoff** flow, or only via the bare management-API create? (i.e. is the cloud-config injection create-path-dependent?)\n3. The matcher also hits `enospc/disk full` — are the agent nodes (esp. `eliza-core-prod-2` / 178.63.251.122) low on disk? That would make a generation/model write fail with a disk error that classifies as `local_inference`.\n\nEarlier this session a fresh agent passed `Say PONG` 20/20 on `sha-7032a6a`, so either something regressed or the working path differs from the one above.\n\n## Affected\n- nubs's dedicated agents (now re-provisioned to a single fresh `316438e9` on `sha-7032a6a`, healthy infra, still failing `local_inference`).\n\nRelated: #8769 (merged), tracker #8434. Filed by phone-agent from on-device verification on Seeker.\n",
+      "createdAt": "2026-06-28T06:39:09Z",
+      "closedAt": "2026-06-28T17:22:14Z",
+      "state": "CLOSED",
+      "commentCount": 16
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABG8iVcA",
+      "title": "Voice: name-aware \"hey <character>\" wake word — activate voice + inline reply in transcript mode, battery-efficient cross-platform",
+      "author": "lalalune",
+      "number": 9880,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nMake **\"hey &lt;character name&gt;\"** a first-class, battery-efficient, cross-platform wake word that:\n\n1. **Activates voice when it is not already on** — saying the wake word opens a listening window that stays open until the agent responds (already partially landed; see *Current state*).\n2. **Works inside transcription mode** — while the app is recording a long-form transcript (replies suppressed), the wake word makes the agent **respond inline once** and the conversation **continues as a parallel chat inside the transcript**, without exiting transcription.\n3. **Follows the character's name** — the user can rename the character in settings; the wake phrase tracks that name (`\"hey eliza\"` → rename to *Ada* → `\"hey ada\"`), zero config.\n4. Uses **native acceleration on Android, iOS, Linux, macOS, Windows** and is cheap enough to run always-on on battery.\n\nThis issue captures the full design, the backend decision, the work breakdown, and the validation matrix (unit → state fuzz → real audio → iOS simulator → physical device), with recorded **video + audio** evidence.\n\n---\n\n## Current state (what already exists)\n\n**Detection backends — two of them:**\n\n- **openWakeWord** (`plugins/plugin-local-inference/src/services/voice/wake-word.ts`, `wake-word-ggml.ts`) — a dedicated tiny GGML hotword model (mel filterbank → 96-dim embedding → per-phrase classifier head), fused into `libelizainference` (`eliza_inference_wakeword_*`). **~0.23 ms / 80 ms frame on native CPU**, native acceleration across all platforms via the fused lib. Default head `OPENWAKEWORD_DEFAULT_HEAD = \"hey-eliza\"` (`wake-word.ts:74`). A real \"hey eliza\" head has been trained and verified end-to-end; training pipeline lives in `packages/training/scripts/wakeword/` (`train_eliza1_wakeword_head.py`, `synthesize_wakeword_corpus.py` — **TTS-synthesized corpus**, `convert_openwakeword_to_gguf.py`). **Constraint: phrases are not zero-shot — each needs a trained classifier head.**\n- **Swabble** (`plugins/plugin-native-swabble/`) — a Capacitor plugin that runs **continuous native OS ASR** (`SFSpeechRecognizer` / Android `SpeechRecognizer` / Web Speech / desktop Whisper.cpp) and fuzzy-matches the transcript against `triggers: string[]`. **Arbitrary phrases (incl. a renamed character) work zero-shot**, but continuous full ASR is **not battery-efficient for always-on**, and it already emits a typed `wakeWord` event (`{ wakeWord, command, transcript, postGap, confidence? }`).\n\n**UI / orchestration already landed (PRs in this branch lineage):**\n- `packages/ui/src/voice/wake-listen-window.ts` — pure state machine: `idle → open → awaiting-response → idle`, idle timeout + safety cap + re-arm.\n- `packages/ui/src/voice/useWakeListenWindow.ts` — subscribes to the Swabble `wakeWord` event, drives the hands-free mic, stays inert under always-on.\n- Wired into `packages/ui/src/components/shell/useShellController.ts`.\n- Settings: `VoiceConfigView.tsx` `WakeWordSection` (triggers default hardcoded `[\"eliza\"]`), `VoiceSection.tsx` wake toggle.\n\n**Transcription mode (the surface feature 2 plugs into):**\n- Client suppresses replies by *never sending* a transcription-intent final — it accumulates into `TranscriptSessionAccumulator` (`packages/ui/src/voice/transcript-session.ts`).\n- Server safety net: `transcriptionModeActive(message)` + the `core.transcription_mode` evaluator (`packages/core/src/services/message.ts:1689,2939`) returns `IGNORE` + `clearReply` when `metadata.transcriptionMode === true`.\n- `ContinuousChatOverlay` `ThreadLine` already renders interleaved user/assistant bubbles — an inline reply needs **no new UI**.\n\n---\n\n## Backend decision\n\n| | openWakeWord (GGML, fused) | Swabble (native OS ASR) |\n|---|---|---|\n| Always-on battery | ✅ ~0.23 ms/frame, native CPU | ❌ continuous full ASR |\n| Cross-platform incl. Linux/Windows desktop | ✅ fused `libelizainference` | ⚠️ Electrobun/Whisper bridge only |\n| Native acceleration | ✅ Metal/Vulkan/CUDA/CPU | OS ASR (mobile), CPU desktop |\n| Arbitrary/renamed phrase zero-shot | ❌ needs trained head | ✅ |\n| Already wired into voice pipeline | ✅ engine.ts | ❌ opt-in, unwired into pipeline |\n\n**Decision — a two-stage name-aware wake:**\n\n- **Stage A (always-on, cheap, battery):** openWakeWord generic detector (or native VAD) runs continuously. This is the only thing burning power at idle.\n- **Stage B (confirmation, on candidate):** when Stage A fires, open a **short ASR window** (we already have STT/ASR + fused transcription) and **fuzzy-match the transcript against the current character name** (`\"hey <name>\"`). This gives **zero-shot, rename-following** name support while keeping idle cost at Stage-A levels.\n- **Head fast-path:** if a trained head exists for the current name (shipped `hey-eliza`, or auto-trained via `synthesize_wakeword_corpus.py` + `train_eliza1_wakeword_head.py`), Stage B is skipped — pure-openWakeWord, lowest latency.\n- **Swabble** stays as the **fallback detector** where the fused FFI is unavailable (e.g. some browsers), reusing its existing `wakeWord` event.\n\nThis unifies both backends behind one `WakeController` whose default phrase is **derived from the character name** (`s.characterData?.name` → `agentStatus?.agentName` → `\"eliza\"`, per `App.tsx:1523`).\n\n---\n\n## Work breakdown\n\n### A. Name-aware triggers\n- Derive the default wake trigger from the live character name (`useAppSelector(s => s.characterData?.name ...)`), so renames propagate. `VoiceConfigView.tsx` default `[\"eliza\"]` becomes name-derived.\n- A pure **name-matcher** (`packages/ui/src/voice/wake-name-match.ts`): normalizes + fuzzy-matches `\"hey <name>\"`, `\"<name>\"`, `\"hey, <name>\"`, handles homophones/ASR slop (Levenshtein ≤ threshold), exposed for Stage-B confirmation and Swabble triggers.\n- On rename, update the persisted Swabble `triggers` if they still equal the old name (don't clobber a user-customized phrase).\n\n### B. Transcript-mode inline reply (\"parallel chat\")\n- In `useShellController` transcription branch: when an utterance **matches the wake phrase**, send it as a **reply-eliciting** turn (`VOICE_DM`, *without* `metadata.transcriptionMode`) instead of silently accumulating — the agent replies and speaks once.\n- Record both the user's wake turn and the assistant reply **into the transcript session** as speaker-labeled segments, so the parallel chat appears inline in the transcript and the finalized record.\n- Transcription **does not exit** — the re-listen loop resumes recording after the reply.\n- New pure helper + `transcription-exit.ts`-style detection so it is unit-testable.\n\n### C. Wake activation when voice is off\n- Already landed via `wake-listen-window` / `useWakeListenWindow`; extend so the same wake event drives (a) open-mic-if-off, and (b) the transcript inline-reply path when transcription is active.\n\n### D. Detection pipeline (`WakeController`)\n- Stage A openWakeWord/VAD always-on → Stage B ASR-confirm vs character name → emit unified wake event.\n- Head fast-path + Swabble fallback selection by platform/capability.\n- Optional: auto-train a head for the current name via the existing TTS corpus pipeline (follow-up; gated by training availability).\n\n---\n\n## Testing, validation & verification matrix\n\n| Tier | What | How |\n|---|---|---|\n| **Unit** | `wake-listen-window` reducer, `wake-name-match` (homophones, accents, slop), transcript inline-reply branch, name-rename propagation | vitest, frozen clock |\n| **State fuzz** | random event sequences over the wake + transcription state machines (wake during open/awaiting/transcription/always-on, double-wake, exit-phrase races) — assert invariants (mic never stuck open, transcription never silently exits, exactly-one inline reply per wake) | property/fuzz test (mirrors `ContinuousChatOverlay.fuzz.test.tsx`) |\n| **Real audio (synthesized)** | TTS renders \"hey &lt;name&gt;\" → openWakeWord scores the PCM → assert detection; TTS→ASR→name-match round-trip; barge-in latency | extend `plugins/plugin-local-inference/src/services/voice/e2e-harness.test.ts` |\n| **Real audio (acoustic loop)** | play \"hey eliza\" through the **Mac speakers**, capture via the **Mac microphone**, assert wake fires end-to-end | host harness + ffmpeg avfoundation capture |\n| **iOS simulator** | boot the app in the booted iPhone 16 Pro simulator, drive the wake/transcript UI, screen-record | `xcrun simctl` + app build |\n| **Physical device** | install on the paired iPhone 16 Pro Max, exercise on-device openWakeWord + mic, screen-record with audio | device build + `xcrun devicectl` |\n| **Recorded evidence** | **video WITH audio** of each tier passing | ffmpeg screen+mic capture (Mac), simulator/device screen recording; artifacts under `.github/issue-evidence/` |\n\n---\n\n## Acceptance criteria\n\n- [ ] Wake phrase defaults to the character name and updates on rename (test).\n- [ ] Saying the wake word with the mic off opens a listening window that closes once the agent responds (test + video).\n- [ ] In transcription mode, the wake word yields exactly one inline agent reply (spoken), recorded into the transcript, **without exiting transcription** (test + video).\n- [ ] Idle always-on detection runs on the battery-efficient openWakeWord path; Swabble only as fallback (documented + measured).\n- [ ] Cross-platform: validated on macOS host + iOS simulator + physical iPhone; Android/Linux/Windows paths documented and unit-covered.\n- [ ] State-fuzz suite green; mic-never-stuck and exactly-one-reply invariants hold.\n- [ ] Recorded video+audio evidence attached for unit/real-audio/sim/device tiers.\n\n---\n\n## Non-goals (this issue)\n\n- Shipping trained wake heads for every possible name (auto-train pipeline is a follow-up; Stage-B ASR covers arbitrary names today).\n- Re-architecting TTS/ASR — reuse the existing fused stack.\n",
+      "createdAt": "2026-06-28T04:33:03Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 7
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABG8Egzw",
+      "title": "Planner confabulation/exhaustion: 3 structural root-cause follow-ups (multi-bot arena)",
+      "author": "NubsCarson",
+      "number": 9874,
+      "repository": "elizaos/eliza",
+      "body": "Follow-ups from the arena confabulation incident (prompt+routing patches shipped in the linked PR). These are the deeper *structural* causes, deferred deliberately rather than patched:\n\n1. **Don't force `requiresTool` on bot-to-bot crosstalk.** The false-ack seed fired because the simple→requiresTool promotion ran on a message addressed to *another bot* (not the agent/owner). Suppress the promotion when the inbound message's addressee is a non-owner bot.\n\n2. **Reaction-stub truncation drops message content in context.** A reacted-to message was reduced to `*Added <emoji> to: \"…\"*` in the planner context, so the model fused a dangling ack with a truncated user statement and back-rationalized a task. Context-build should preserve the reacted message's text.\n\n3. **Safe forced-tool-exhaustion reply (deferred Fix 2).** When a turn is forced to call a tool the model legitimately can't satisfy, it currently errors into a generic 'hit a snag'. Surfacing the planner's free-text is unsafe (native `raw.text` can be a pre-tool thought — guarded by the `does not capture native text fallback` test). A safe version must gate through `userSafeFinalMessage` (rejects reasoning/leak/fabrication) before surfacing.\n\nThese are the durable class fixes; the shipped PR neutralizes the *observed* failure.",
+      "createdAt": "2026-06-28T01:07:14Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABG8in-A",
+      "title": "fix(cloud-frontend): /app-auth/authorize crashes — useAuth() called outside a populated <StewardProvider auth=…> (blocks all monetized-app sign-in)",
+      "author": "NubsCarson",
+      "number": 9881,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe Eliza Cloud OAuth authorize page (`/app-auth/authorize`) crashes for unauthenticated visitors with:\n\n> Something went wrong — `useAuth must be used within a <StewardProvider> with an `auth` prop.`\n\nThis blocks **all** monetized-app OAuth sign-in: a new user who clicks \"sign in with Eliza Cloud\" on any deployed monetized app can never complete auth. P0 for the monetized-app / 10-user launch.\n\n## Repro (live)\n\n1. Deploy a monetized app (e.g. the agent-home `text-my-ex` app) — registered, `appId` valid, `/api/config` returns it.\n2. Open the app, click **Sign in with Eliza Cloud**.\n3. Redirects to `https://elizacloud.ai/app-auth/authorize?app_id=<uuid>&redirect_uri=<app>&state=<s>`.\n4. Page renders the error boundary: *\"useAuth must be used within a `<StewardProvider>` with an `auth` prop.\"*\n\n## Root cause\n\n- `packages/ui/src/cloud-ui/components/auth/authorize-content.tsx:3` imports `{ StewardLogin, useAuth } from \"@stwd/react\"` and calls `useAuth()` (~line 75).\n- `@stwd/react`'s `useAuth()` requires an ancestor `<StewardProvider auth={…}>` with a **non-null `auth` prop**.\n- The `/app-auth/authorize` route is registered as a **public page**: `packages/ui/src/cloud/public-pages/register.ts:160` (`path: \"app-auth/authorize\"`).\n- `<StewardProvider>` is only rendered with a populated `auth` prop inside the **authenticated** shell: `packages/ui/src/cloud/shell/StewardProviderRuntime.tsx:270`.\n- An unauthenticated visitor on the public authorize route therefore has no `<StewardProvider auth=…>` ancestor → `useAuth()` throws → error boundary.\n\nThe authorize page is intrinsically a *public, pre-auth* page that nonetheless depends on the Steward auth context to drive the OAuth grant — that's the architectural mismatch.\n\n## Proposed fix direction\n\nRender the public `/app-auth/authorize` route inside a `<StewardProvider>` seeded with a **public/unauthenticated** Steward auth instance (the same provider-discovery path the login page already uses — see `packages/ui/src/cloud/public-pages/pages/login/steward-login-section.tsx`), so `useAuth()` resolves on public pages. Apply to any public page that calls `@stwd/react` hooks. Verify via the `audit:cloud` loop + a real OAuth round-trip from a deployed app.\n\n## Lane\n\ncloud-frontend (`packages/ui/src/cloud*`), deployed to `elizacloud.ai` — cloud-agent owns the fix + deploy. Filed from vps-agent (root-caused while testing the monetized-app build flow end-to-end). Linked from launch tracker #8434.\n",
+      "createdAt": "2026-06-28T04:35:39Z",
+      "closedAt": "2026-06-28T05:02:58Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABG_RtyA",
+      "title": "orchestrator: no live multi-account CI, untestable timing code, and a 3,931-line UI monolith — make the coding orchestrator verifiable end-to-end",
+      "author": "lalalune",
+      "number": 9960,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe coding orchestrator (`plugins/plugin-agent-orchestrator`) is feature-complete on paper but is **not verified end-to-end with real Claude/Codex accounts in CI**, and its reliability rests on a deep mat of ad-hoc timer/race/orphan-recovery code that is the dominant flakiness source. The multi-account selection brain (`account-pool.ts`) and the spawn-injection bridge (`coding-account-bridge.ts`) are well built and unit-tested — but every \"rotation across ≥2 real accounts of each provider\" claim is asserted **only against a fake `acpx` binary**. Real OAuth refresh, real per-account `CODEX_HOME`/`auth.json` materialization, and real subscription auth have zero automated proof.\n\nThis matters now because the orchestrator is the spine of every coding-sub-agent flow, and we cannot ship it as \"rock-solid\" while (a) its lifecycle/loop-guard logic is only unit-tested in pieces and never under concurrent multi-task load, (b) there is no CI lane that spawns a real Claude or Codex subscription, (c) there is no mechanism to feed refreshable account credentials into GitHub Actions, and (d) the account-connect surface is a desktop Settings dialog disjoint from the orchestrator, so a misconfigured pool silently degrades to single-account.\n\n## Critical assessment (current state)\n\n**1. Reliability debt is concentrated in untestable timing code.** The spawn/route layer is dominated by ad-hoc retry, orphan reconciliation, SIGTERM grace windows, and loop-guards: 50 `setTimeout`/`setInterval` sites across the plugin; `acp-service.ts` has 36 catch blocks and `sub-agent-router.ts` 33; 108 `flaky|retry|race|loop|best-effort|eventually|debounce|backoff` markers in those two files alone. The router carries **two independent runaway-loop backstops** (`DEFAULT_ROUND_TRIP_CAP`, 32; `DEFAULT_STATE_LOST_RESPAWN_CAP`, 3) plus a manual \"roll the round-trip counter back when a `task_complete` is suppressed\" reconciliation and a documented TOCTOU window. AcpService reconciles \"stale orphans\" on start and resumes orphaned sessions with a grace window for sessions that \"may not have written state yet.\" `codex-auth.ts` adds its own 30s stale-lock + 30-retry file lock around the OAuth token cache. None of these timing paths is exercised by a deterministic test under load — they are the textbook origin of intermittent failures.\n\n**2. Multi-account E2E exists but is not in CI and has no credential feed.** `grep` of `.github/workflows` confirms the offline composed E2E (`test:e2e:multi-account`), the live smoke (`ORCHESTRATOR_LIVE=1`), and the live multi-account gate (`ORCHESTRATOR_LIVE_MULTI_ACCOUNT=1`) appear in **zero** workflows. The only scheduled orchestrator job runs a single `GROQ_API_KEY` model — it never spawns a real Claude or Codex subscription. There is also no mechanism to feed refreshable credentials into Actions: `codex-auth.ts` holds the OAuth client id + refresh logic, but nothing exports/refreshes those tokens into CI secrets.\n\n**3. The account login UI is a Settings dialog, not a test/E2E harness, and is disjoint from the orchestrator.** `AddAccountDialog.tsx` (rendered inside `AccountList.tsx`, which `settings/ProviderPanels.tsx` mounts) is real and reachable — but it is surfaced nowhere in the orchestrator views. There is no \"log in with N accounts, confirm ≥1 Codex + ≥1 Claude connected and healthy, export for CI\" flow. `selectCodingAccount()` returns `null` and silently falls back to single-account when the bridge/account is absent, so a misconfigured pool is invisible.\n\n**4. The orchestrator UI is a 3,931-line monolith.** `OrchestratorWorkbench.tsx` (3,931 lines) blocks the mandated screenshot/manual-review loop and makes per-account / per-session status, stall/force-stop state, and account-health surfacing hard to add or verify.\n\nNet: the architecture is sound and the ideal is documented; the gap is **verification**.\n\n## Evidence in code\n\n- `plugins/plugin-agent-orchestrator/src/services/acp-service.ts:456` — orphan-recovery grace window: \"a freshly-spawned session may not have written its state file yet\"; timing-dependent reconciliation on every start. 36 catch blocks in this file.\n- `plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts:371` — documented TOCTOU window: \"two retry sessions both passed the check\" in the verify-retry handoff path. 33 catch blocks in this file.\n- `plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts:697` — manual \"roll the round-trip counter back when a `task_complete` event is suppressed\" — the heart of the runaway-loop guard.\n- `plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts:41-42` / `:452-453` / `:478` — `DEFAULT_ROUND_TRIP_CAP=32` and `DEFAULT_STATE_LOST_RESPAWN_CAP=3`, held as separate per-session state (`roundTripCap` / `stateLostRespawnCap`) with an env override (`ACPX_SUB_AGENT_ROUND_TRIP_CAP` at `:478`): two independent loop backstops.\n- `plugins/plugin-codex-cli/src/codex-auth.ts:8-11` — `OAUTH_CLIENT_ID`, `LOCK_STALE_MS=30_000`, `LOCK_RETRY_MAX=30`; the OAuth client id + refresh logic a CI credential-refresh harness must drive (and another concurrency surface).\n- `packages/app-core/src/services/account-pool.ts:152` — `AccountPool.select`: strategy + session affinity + burst-spread (1,078-line file). Well-built selection brain, only unit-tested, never under live multi-task load.\n- `plugins/plugin-agent-orchestrator/src/services/coding-account-selection.ts:103` / `:148-167` — `MULTI_ACCOUNT_AGENT_TYPES = {claude, codex, opencode}`; `selectCodingAccount()` doc states \"Returns null (single-account fallback)\" and the body returns `null` on missing bridge / catch / no account — no readiness assertion.\n- `packages/app-core/src/services/coding-account-bridge.ts:245-254` — `buildEnvPatch`: claude→`CLAUDE_CODE_OAUTH_TOKEN`, codex→per-account `CODEX_HOME`/`auth.json` (materialized at `:173-203`). The spawn-injection contract that needs live proof.\n- `plugins/plugin-agent-orchestrator/scripts/compose-multi-account-e2e.ts:10` / `:47-66` — offline composed E2E: real `AccountPool` + bridge + `AcpService.spawnSession`, but \"the only stand-in is the coding-agent binary itself (a tiny fake 'acpx').\" The only automated multi-account proof — and it stubs the actual CLI.\n- `plugins/plugin-agent-orchestrator/__tests__/unit/multi-account-spawn.test.ts:323` — \"rotates consecutive spawns across distinct accounts (least-used)\" using a mocked `NativeAcpClient` (`:55`); proves wiring, not real auth.\n- `.github/workflows/benchmark-orchestrator-scheduled.yml:64`,`:71-76` — the only scheduled orchestrator CI run uses a single `GROQ_API_KEY` with a secret-presence gate; no Claude/Codex subscription, no pool, no rotation. `grep` for `ORCHESTRATOR_LIVE` / `test:e2e:multi-account` / `CODEX_HOME` / `saveAccount` across `.github/workflows` = **zero matches**.\n- `packages/agent/src/api/accounts-routes.ts:553` / `:598` — `/api/accounts/*` HTTP surface (oauth start/status-SSE/cancel, api-key add, refresh-usage). Login plumbing exists, but no CI/test-harness consumer confirms ≥1 Codex + ≥1 Claude healthy and exports for Actions.\n- `packages/ui/src/components/accounts/AccountList.tsx:157` — renders `AddAccountDialog`; `AccountList` is mounted in `packages/ui/src/components/settings/ProviderPanels.tsx:242`,`:312`, surfaced in **no** orchestrator view.\n- `plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx` — 3,931-line orchestrator UI monolith; no per-account/per-session health surfacing; too large for the mandated `audit:app` loop.\n- `plugins/plugin-agent-orchestrator/docs/multi-account-orchestration.md:14-22` — marks every layer (pool, OAuth flows, REST API, settings UI, orchestrator) \"✅\", but neither the live E2E nor the composed offline E2E is in CI, so the doc overstates verification posture.\n\n## Scope & work order\n\nHigh-confidence first.\n\n- [ ] **Reliability — single lifecycle state machine.** Consolidate the two runaway-loop backstops in `sub-agent-router.ts` (`roundTripCap` + `stateLostRespawnCap`, the manual counter roll-back at `:697`, and the TOCTOU at `:371`) into one explicit pure transition function, modeled the way the supervisor/watchdog already do pure `runSupervisorTick` (`task-supervisor-service.ts:88`) / `detectStalledSessions` (`task-watchdog-service.ts:45`). Add a fuzz/property test asserting no event ordering produces a double-post, an early force-stop, or a leaked session.\n- [ ] **Multi-account CI lane (additive, secret-gated).** Add a workflow that runs `test:e2e:multi-account` on every PR (fake `acpx`, zero secrets) AND a scheduled `ORCHESTRATOR_LIVE_MULTI_ACCOUNT=1` job against ≥1 real Codex + ≥1 real Claude account, skipping cleanly (exit 0 + `::notice::`) when secrets are absent — copy `benchmark-orchestrator-scheduled.yml`'s secret-presence gate (`:71-76`).\n- [ ] **Credential feed into Actions.** Build a credential-refresh path that exports the connected Claude (`CLAUDE_CODE_OAUTH_TOKEN`) and Codex (`CODEX_HOME` `auth.json`: access/refresh/account_id) blobs into GH Actions secrets and refreshes them on a schedule, reusing the refresh logic in `codex-auth.ts` + `packages/agent/src/auth/oauth-flow.ts`. Store the minimal account JSON the pool reads so CI can seed 2× Claude + 2× Codex into a temp state dir and run real rotation.\n- [ ] **Account-readiness harness.** Add a CLI/route that asserts the pool has ≥1 healthy Codex AND ≥1 healthy Claude (≥2 each for local rotation) using `coding-account-bridge`'s per-provider total/enabled/healthy report. Fail loudly instead of the silent single-account fallback in `coding-account-selection.ts:148-167`.\n- [ ] **Sub-agent / room / task / multi-task correctness tests** (fake transport; template = the `multi-account-spawn.test.ts` `NativeAcpClient` mock at `:55`): (1) spawn→route→`task_complete`→evaluator summary; (2) room message routed to active sub-agent via `interruption-decider.ts` (deliver/queue/interrupt/ignore); (3) multi-task supervisor digest correctness across rooms; (4) concurrent multi-task isolation — two tasks, two accounts, distinct sessions, no cross-talk, correct round-trip accounting.\n- [ ] **Orchestrator UI (medium).** Decompose `OrchestratorWorkbench.tsx` into a live-data wrapper + presentational sub-views, then add a per-account/per-session panel surfacing selected account, account health (ok/rate-limited/needs-reauth/invalid from `AccountPool`), stall/force-stop state, and a connect-accounts entry point (reuse `AccountList`/`AddAccountDialog`). Run the `audit:app` screenshot + manual-review loop.\n- [ ] **Error handling (medium).** Audit the 36 catch blocks in `acp-service.ts` and 33 in `sub-agent-router.ts`; collapse log-and-continue swallows that mask spawn/auth failures into explicit surfaced errors — propagate the pool's existing needs-reauth / rate-limited / invalid distinctions instead of best-effort no-ops.\n\n## Acceptance criteria\n\n- A property/fuzz test over the consolidated router state machine passes: no event ordering yields a double-post, early force-stop, or leaked session.\n- `test:e2e:multi-account` runs on every PR (no secrets, fake `acpx`) and is green.\n- A scheduled live lane spawns ≥1 real Codex + ≥1 real Claude subscription, rotates across distinct accounts, and skips cleanly (exit 0 + `::notice::`) when secrets are absent.\n- A credential-refresh job keeps the CI account blobs live and is proven by a green live run after a scheduled refresh.\n- The readiness harness fails loudly when fewer than ≥1 healthy Codex + ≥1 healthy Claude are present; no silent single-account fallback.\n- The four sub-agent/room/task/multi-task correctness tests exist and pass deterministically against a fake transport.\n- `OrchestratorWorkbench.tsx` is decomposed; the orchestrator surface shows per-account health + pool readiness; `audit:app` produces a `good` verdict for the touched views.\n\n## Required evidence (per PR_EVIDENCE.md)\n\n- **Real-LLM trajectory** — REQUIRED for the live lane: a scenario-runner / live-orchestrator run against real Claude + Codex subscriptions showing distinct-account rotation (JSON report + native jsonl).\n- **Backend logs** — REQUIRED: structured `[ClassName]` logs showing real per-account `CODEX_HOME`/`auth.json` materialization, `CLAUDE_CODE_OAUTH_TOKEN` injection, and the readiness assertion firing.\n- **Before/after screenshots + video walkthrough** — REQUIRED for the UI decomposition + account-health panel (`audit:app` output).\n- **Audio walkthrough** — N/A (no voice/TTS/STT surface in scope).\n\n## Related\n\n- #9626 (build bloat/duplication audit — same verification-debt theme)\n- #9853 (cloud apps multi-tenant hardening — overlapping credential/secret handling)\n- #9874 (planner confabulation follow-ups — orchestrator loop correctness)\n- #8434 (cloud launch tracker — depends on a reliable orchestrator)",
+      "createdAt": "2026-06-28T23:31:08Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7rigKw",
+      "title": "chore(repo): packages reorg + #9899 inference hot-path + adaptive-view consolidation",
+      "author": "lalalune",
+      "number": 9917,
+      "body": "## Summary\n\nLands the in-progress **repo restructure** (`packages/cloud-api` → `packages/cloud/api`, `packages/cloud-shared` → `packages/cloud/shared`, etc.) together with two feature lines that were developed on top of the new layout:\n\n- **#9899 — inference hot-path single-cache auth + Tier-2 optimistic billing** (flag-gated, default OFF). Tier-1 collapses pre-forward auth+org+moderation into one KV read for API-key inference; Tier-2 adds optimistic off-path billing with a durable KV pending-charge backstop + cron sweep. Hardened after a 4-lens adversarial review (free-on-cache-failure, auto-suspension IAC gap, lower-only balance hint, sweep single-flight, fail-safe threshold). cloud-shared (210 files) + cloud-api (34 files) suites green; both typecheck + biome clean. Design + residuals: `packages/cloud/api/docs/inference-hot-path.md`.\n- **Adaptive-view consolidation** across app plugins (feed, polymarket, screenshare, vincent, facewear, smartglasses, messages, phone, hyperliquid, shopify) — one adaptive view per surface, dead duplicates removed.\n\n## Why a PR (not a direct push)\n\nThis is a repo-wide reorg + 21 commits diverged from `develop`. Opening as a PR so CI validates the whole move before it lands, and so the reorg is reviewable. It supersedes the develop-only structure the current red CI jobs (Windows plugin-task-coordinator, Story Gate, Zero-Key, Server Tests) ran against — those lanes re-run here against the new layout.\n\n## Notes for reviewers\n\n- Large diff: most of it is path moves (`cloud-api`→`cloud/api`, `cloud-shared`→`cloud/shared`) + view-file renames, not logic changes.\n- The #9899 cloud work is the substantive new code; the rest is structural.\n- A few commits are reorg WIP snapshots committed to avoid losing working-tree work; squash on merge as desired.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-28T19:46:40Z",
+      "mergedAt": "2026-06-28T21:27:44Z",
+      "additions": 3264219,
+      "deletions": 84488
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rjosT",
+      "title": "refactor(personal-assistant): replace LifeOpsService mixin god-class with namespaced sub-service composition",
+      "author": "lalalune",
+      "number": 9927,
+      "body": "## What\n\nReplaces the 27-deep `LifeOpsService` class-mixin chain with **namespaced sub-service composition**. The mixin system is removed entirely.\n\n### Before\n`service.ts` composed 26 `withX` mixins via a 27-deep generic chain. TypeScript can't track type identity past ~6 chained generic mixins (TS2589 instantiation-depth), so every mixin carried an `as unknown as MixinClass<>` return cast and an `as unknown as <X>MixinDependencies` dependency cast; `service.ts` added a `Constructor<StatusMixinDependencies>` cast and 4 `Omit<>` collision deconflicts plus a `noUnsafeDeclarationMerging` interface merge. ~39 load-bearing casts in one package, hiding real cross-domain type drift.\n\n### After\n- **`LifeOpsContext`** (`lifeops-context.ts`) — the shared state/infra surface (runtime, repository, identity, ownership, generic audit, logging, events), derived via `Pick<LifeOpsServiceBase>` so it can't drift.\n- **26 domain sub-services** under `lifeops/domains/*-service.ts`, each `class XDomain { constructor(ctx, deps) }` — cast-free, taking cross-domain dependencies as typed `deps` (no `this`-casts). The **browser↔screentime cycle** is broken via DI; the **reminders hub** (~5500 LOC) is one domain that its 5 consumers (definitions/goals/workflows/x/status) inject.\n- **`LifeOpsService`** is now a single **concrete** `class extends LifeOpsServiceBase` holding the 26 domains, 263 flat delegators (preserving every existing call site byte-identically), and 26 typed **namespace getters** (`service.goals.x()`, `service.gmail.y()`, …). A concrete class surfaces every method directly, so the interface-merge, the 4 `Omit<>`s, and all assembly casts are gone.\n\n## Why\nThe mixin god-class was not ideally factored: 22.9k LOC of 27 domains melted onto one class via a cast-laden inheritance chain whose casts were a genuine workaround for TS depth limits + method-name collisions. Composition removes the depth limit, the collisions, and the casts, and gives real domain separation.\n\n## Result\n- Repo-wide `as unknown as` **117 → 82** (−35); the plugin's mixin/assembly casts went from ~39 to **2** documented bridge casts for genuine pre-existing cross-package type drift (`LifeOpsGoalRecord` narrow re-decl; `LifeOpsDerivedEvent` vs `LifeOpsWorkflowEvent`). Domains are cast-free. Type-safety ratchet baseline lowered 117 → 82 to lock it in.\n- **No behaviour change** — pure structural refactor; the flat public surface is preserved.\n\n## Verification\n- `tsgo` typecheck: **0 errors** in `src/lifeops/` (and `src/`).\n- `vitest run src/lifeops/`: **16 files / 112 tests pass**.\n- Each of the 8 commits is an independently-green slice (foundation → leaf domains → cross-dep domains → cycle break → reminders hub → dependent cluster → facade collapse → residual-cast cleanup).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-28T22:13:16Z",
+      "mergedAt": null,
+      "additions": 23250,
+      "deletions": 20563
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rhc3_",
+      "title": "Fix/training gemma docs v2",
+      "author": "lalalune",
+      "number": 9908,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!--\r\nDEFINITION OF DONE — full standard: PR_EVIDENCE.md\r\n- This PR targets `develop` and is rebased/merged onto the LATEST origin/develop\r\n  with ZERO conflicts (`git fetch origin && git rebase origin/develop`, then\r\n  `bun install && bun run verify`).\r\n- A reviewer can confirm this works WITHOUT reading the code, from the Evidence below.\r\n-->\r\n\r\n# Sync with develop\r\n\r\n<!--\r\n- [ ] Rebased/merged onto the latest origin/develop; zero conflicts\r\n- [ ] `bun run verify` passes post-sync; relevant tests pass\r\n-->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n# Evidence (prove the real thing happened — see PR_EVIDENCE.md)\r\n\r\n<!--\r\nAttach each that applies, or write \"N/A — <reason>\". Don't leave blank.\r\nDrop files in .github/issue-evidence/<issue#>-<slug>.<ext> and reference them here.\r\n-->\r\n\r\n## Real LLM-call trajectory\r\n\r\n<!--\r\nFor agent/action/provider/prompt/model changes — a REAL (live model) run, not the\r\ndeterministic proxy. Produce with:\r\n  packages/scenario-runner/bin/eliza-scenarios run <scenario> --report <out.json>\r\nLink the JSON report / run viewer / native jsonl, or write N/A — <reason>.\r\n-->\r\n\r\n## Backend + frontend logs\r\n\r\n<!--\r\nBackend: structured logger lines ([ClassName] …) showing the code path firing end to end.\r\nFrontend: console + network trace showing the request/response and state change.\r\nPaste here and file under .github/issue-evidence/, or write N/A — <reason>.\r\n-->\r\n\r\n## Screenshots (before / after) + video walkthrough\r\n\r\n<!--\r\nFull-page before AND after for any UI change. A video click-through of the flow:\r\n  bun run test:e2e:record                 (general E2E recordings)\r\n  bun run --cwd packages/app audit:app    (app + cloud UI — REQUIRED for UI changes)\r\n### Before\r\n### After\r\n### Walkthrough video\r\nOr write N/A — <reason>.\r\n-->\r\n\r\n## Audio / voice walkthrough\r\n\r\n<!--\r\nFor voice / transcript / TTS / STT / omnivoice changes — captured audio of the\r\nreal round-trip plus a narrated walkthrough. Or write N/A — <reason>.\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-28T17:37:03Z",
+      "mergedAt": "2026-06-28T17:57:53Z",
+      "additions": 19871,
+      "deletions": 4579
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rj3le",
+      "title": "Chore/packages reorg",
+      "author": "lalalune",
+      "number": 9934,
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!--\r\nDEFINITION OF DONE — full standard: PR_EVIDENCE.md\r\n- This PR targets `develop` and is rebased/merged onto the LATEST origin/develop\r\n  with ZERO conflicts (`git fetch origin && git rebase origin/develop`, then\r\n  `bun install && bun run verify`).\r\n- A reviewer can confirm this works WITHOUT reading the code, from the Evidence below.\r\n-->\r\n\r\n# Sync with develop\r\n\r\n<!--\r\n- [ ] Rebased/merged onto the latest origin/develop; zero conflicts\r\n- [ ] `bun run verify` passes post-sync; relevant tests pass\r\n-->\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n# Evidence (prove the real thing happened — see PR_EVIDENCE.md)\r\n\r\n<!--\r\nAttach each that applies, or write \"N/A — <reason>\". Don't leave blank.\r\nDrop files in .github/issue-evidence/<issue#>-<slug>.<ext> and reference them here.\r\n-->\r\n\r\n## Real LLM-call trajectory\r\n\r\n<!--\r\nFor agent/action/provider/prompt/model changes — a REAL (live model) run, not the\r\ndeterministic proxy. Produce with:\r\n  packages/scenario-runner/bin/eliza-scenarios run <scenario> --report <out.json>\r\nLink the JSON report / run viewer / native jsonl, or write N/A — <reason>.\r\n-->\r\n\r\n## Backend + frontend logs\r\n\r\n<!--\r\nBackend: structured logger lines ([ClassName] …) showing the code path firing end to end.\r\nFrontend: console + network trace showing the request/response and state change.\r\nPaste here and file under .github/issue-evidence/, or write N/A — <reason>.\r\n-->\r\n\r\n## Screenshots (before / after) + video walkthrough\r\n\r\n<!--\r\nFull-page before AND after for any UI change. A video click-through of the flow:\r\n  bun run test:e2e:record                 (general E2E recordings)\r\n  bun run --cwd packages/app audit:app    (app + cloud UI — REQUIRED for UI changes)\r\n### Before\r\n### After\r\n### Walkthrough video\r\nOr write N/A — <reason>.\r\n-->\r\n\r\n## Audio / voice walkthrough\r\n\r\n<!--\r\nFor voice / transcript / TTS / STT / omnivoice changes — captured audio of the\r\nreal round-trip plus a narrated walkthrough. Or write N/A — <reason>.\r\n-->\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-28T22:45:07Z",
+      "mergedAt": null,
+      "additions": 5878,
+      "deletions": 8711
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rZz7E",
+      "title": "fix(app): harden desktop Cloud shell recovery",
+      "author": "NubsCarson",
+      "number": 9869,
+      "body": "## Summary\n\nThis PR hardens the desktop/mobile shell for Cloud-first startup and limited Cloud-agent bases:\n\n- removes the separate native desktop pill window path; the in-canvas chat pill remains the single desktop surface\n- wires external Cloud API bases into Electrobun renderers early and avoids local desktop RPC fallbacks for configured external bases\n- recovers localhost/dev shells with stale local-backend state into first-run/Cloud selection instead of wedging on `Booting up...`\n- gates full app-shell routes when the active base is a shared/dedicated Cloud chat adapter, avoiding unsupported `/api/views`, `/api/apps/runs`, `/api/workbench/todos`, `/api/approvals`, `/api/lifeops/inbox`, `/api/computer-use/approvals`, `/api/coding-agents`, and `/api/orchestrator/*` calls\n- prevents localhost `:2138` Cloud sign-in from probing `/api/cloud/status` when no local backend exists\n- polishes chat overlay, springboard/home ordering and image-backed tiles, route back behavior, and related startup failure UI\n\n## Why\n\nThe reproduced browser logs were three separate problems:\n\n1. Local Vite shell running without app-core behind it returned same-origin `/api/*` 502s.\n2. A selected Cloud agent base is a limited chat adapter, not a full app-shell runtime, so desktop widgets/hydration were polling unsupported routes and creating CORS/404 noise.\n3. The `My Eliza Cloud key isn't authorized for inference` message was traced in #8434 to a revoked key on a throwaway validation agent; that remains a cloud/phone provisioning self-heal follow-up, not a desktop UI route issue.\n\nThis PR fixes the desktop/UI-side causes and leaves the provisioning guard to the cloud/phone lane.\n\n## Validation\n\n- `bunx @biomejs/biome check packages/ui/src/api/app-shell-capabilities.ts packages/ui/src/api/app-shell-capabilities.test.ts packages/ui/src/hooks/useAvailableViews.ts packages/ui/src/hooks/useAvailableViews.test.tsx packages/ui/src/widgets/WidgetHost.tsx packages/ui/src/widgets/WidgetHost.test.tsx packages/ui/src/components/shell/ComputerUseApprovalOverlay.tsx packages/ui/src/first-run/use-first-run-controller.ts packages/ui/src/state/startup-phase-hydrate.ts packages/ui/src/state/useChatSend.ts packages/ui/src/state/useCloudState.ts`\n- `bun run --cwd packages/ui test -- src/api/app-shell-capabilities.test.ts src/hooks/useAvailableViews.test.tsx src/App.cloud-shell.test.tsx src/state/startup-coordinator.test.ts src/state/startup-phase-poll.test.ts src/state/startup-phase-restore.desktop-rpc.test.ts src/state/useChatLifecycle.readiness.test.ts src/widgets/WidgetHost.test.tsx src/state/useChatSend.test.tsx src/state/startup-phase-hydrate.view-interact.test.ts src/state/startup-phase-hydrate.navigate-frame.test.ts src/first-run/use-first-run-controller.remote.test.tsx src/first-run/use-first-run-controller.test.tsx src/first-run/use-first-run-controller.local.test.tsx` — 14 files / 137 tests\n- `bun run --cwd packages/app-core/platforms/electrobun test -- src/lifecycle/api-base-owner.test.ts` — 6 tests\n- `bun run --cwd packages/app test -- test/brand-surface.test.ts` — 10 tests\n- `bun run --cwd packages/ui test:home-screen-e2e` — passed; generated artifacts cleaned from worktree\n- `git diff --check`\n- Playwright localhost smoke on `http://localhost:2138`:\n  - fresh first-run shell rendered `Eliza Cloud / This device / Advanced` with no captured app-shell API failures\n  - dedicated Cloud-agent base in localStorage produced no unsupported app-shell route polling\n  - Cloud button click reached `Sign in to Eliza Cloud / Open sign-in page` with no `/api/cloud/status` 502\n\n## Coordination Notes\n\n- Tracked on #8434 as `[desktop-codex]`.\n- #9842 is still open/unmerged at the time of this PR; prod reportedly runs that fix branch, but `develop` does not yet carry it.\n- #9853 cloud apps hardening stack is separate and still has failing/pending checks.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-28T00:36:59Z",
+      "mergedAt": "2026-06-28T06:11:25Z",
+      "additions": 2609,
+      "deletions": 733
+    }
+  ],
+  "codeChanges": {
+    "additions": 16248,
+    "deletions": 6255,
+    "files": 398,
+    "commitCount": 313
+  },
+  "completedItems": [
+    {
+      "title": "fix: wrap cloud connectors settings section",
+      "prNumber": 9860,
+      "type": "bugfix",
+      "body": "## Summary\n- add a CloudConnectorsSettingsSection adapter for the in-app Settings registry\n- keep the standalone dashboard/settings/connections cloud route on the raw CloudConnectorsSection because CloudRouterShell already provides query an",
+      "files": [
+        "packages/ui/src/cloud/connectors/index.ts",
+        "packages/ui/src/cloud-ui/components/drawer.tsx",
+        "packages/ui/src/cloud/connectors/discord-gateway-connection.tsx",
+        "packages/ui/src/cloud/register-all.ts",
+        "packages/ui/src/cloud/settings/index.ts",
+        "packages/ui/src/cloud/settings/register-cloud-settings.test.ts",
+        "packages/ui/src/cloud/settings/register-cloud-settings.ts",
+        "packages/ui/src/components/config-ui/ui-renderer.tsx",
+        "packages/ui/src/components/pages/SettingsView.tsx",
+        "packages/ui/src/components/settings/CloudOverviewSection.tsx",
+        "packages/ui/src/components/settings/settings-sections.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): fail-closed isolated-DB provisioning + remove dead silent-downgrade code (#9853 P1.4)",
+      "prNumber": 9859,
+      "type": "bugfix",
+      "body": "**#9853 P1 — item 4.** Audit verdict was *partial / already-fail-closed on the live path* — so this PR closes the **latent** re-introduction risk, not an exploitable live bug.\n\n## Current state (confirmed)\n\nThe live deploy path is safe: `cl",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/user-database-provision-fail-closed.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-runner.ts",
+        "packages/cloud-shared/src/lib/services/user-database.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): enforce reserved env-var denylist on the app-deploy route (#9853 P1.2)",
+      "prNumber": 9858,
+      "type": "bugfix",
+      "body": "**#9853 P1 — item 2 of the pre-GA apps hardening.** First of the small per-item PRs.\n\n## Gap (confirmed against current develop)\n\nThe **dedicated-agent** deploy path enforces a platform-reserved env-var denylist — `findReservedManagedElizaE",
+      "files": [
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-orchestrator.ts",
+        "packages/cloud-shared/src/lib/services/managed-eliza-config.ts",
+        "packages/cloud-shared/src/lib/services/reserved-env-keys.test.ts",
+        "packages/cloud-shared/src/lib/services/reserved-env-keys.ts"
+      ]
+    },
+    {
+      "title": "chore(handoff): remove dead phase-mirror + fix orphan profile/listener-leak + test the delete (review follow-up)",
+      "prNumber": 9857,
+      "type": "bugfix",
+      "body": "Stacked on #9854 (the forceCreate fix).\n\nCleanup/hardening from the **holistic /review** of the handoff stack — reviewing the 6 PRs as one unit surfaced cross-PR issues the per-PR reviews couldn't see.\n\n## Fixes\n1. **[dead code] Remove the ",
+      "files": [
+        "packages/ui/src/App.navigate-view-wiring.test.tsx",
+        "packages/ui/src/api/client-cloud-delete-shared-bridge.test.ts",
+        "packages/ui/src/cloud/handoff/run-cloud-agent-handoff.test.ts",
+        "packages/ui/src/cloud/handoff/run-cloud-agent-handoff.ts",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/types.ts",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useLifecycleState.test.ts",
+        "packages/ui/src/state/useLifecycleState.ts"
+      ]
+    },
+    {
+      "title": "test(handoff): e2e the success switch — mock import store + provision-to-running (PR6)",
+      "prNumber": 9856,
+      "type": "tests",
+      "body": "Stacked on #9846 (PR4).\n\nPR6 of the seamless-provision handoff — the **e2e**: make the SUCCESS handoff reachable + asserted in the cloud e2e harness. Previously the handoff e2e was unreachable (the mock control-plane served no `/conversatio",
+      "files": [
+        "packages/scripts/cloud/admin/dev/cloud-api-dev.mjs",
+        "packages/test/cloud-e2e/tests/app-client-handoff-success.spec.ts",
+        "packages/test/cloud-mocks/src/control-plane/server.ts",
+        "packages/test/cloud-mocks/src/control-plane/store.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): sub-agent build relay — single ack + don't drop deliverable on stopReason error",
+      "prNumber": 9855,
+      "type": "bugfix",
+      "body": "Two fixes to the coding sub-agent build-relay path (native ACP transport), from a live incident where 'make a website' triple-posted 'working on it now.' then falsely said 'hit a snag' on a build that actually succeeded + published.\n\n**1. S",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/progress-cadence.test.ts",
+        "plugins/plugin-agent-orchestrator/src/index.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts"
+      ]
+    },
+    {
+      "title": "fix(handoff): force a separate dedicated agent in create-both (honor forceCreate, bypass reuse guard)",
+      "prNumber": 9854,
+      "type": "bugfix",
+      "body": "Stacked on #9846 (PR4).\n\nFix a load-bearing bug the e2e (PR6) surfaced: **the create-both flow couldn't actually create a SEPARATE dedicated agent.** `POST /api/v1/eliza/agents` hardcoded `reuseExistingNonTerminal: true`, so the 2nd create ",
+      "files": [
+        "packages/cloud-api/__tests__/eliza-agents-create-idempotency.test.ts",
+        "packages/cloud-api/v1/eliza/agents/route.ts",
+        "packages/ui/src/api/client-cloud-direct-auth.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts"
+      ]
+    },
+    {
+      "title": "Fix macOS traffic-light overlap on content pages",
+      "prNumber": 9852,
+      "type": "bugfix",
+      "body": "## Summary\n- mark content layout roots with a stable class for desktop shell CSS hooks\n- inset page content in macOS Electrobun hidden-titlebar windows so headings clear traffic lights\n- apply the existing titlebar-padding hook to ShellHead",
+      "files": [
+        "packages/ui/src/components/shell/ShellHeaderControls.tsx",
+        "packages/ui/src/layouts/content-layout/content-layout.tsx",
+        "packages/ui/src/styles/electrobun-mac-window-drag.css"
+      ]
+    },
+    {
+      "title": "[codex] Avoid AI SDK runtime import in core browser path",
+      "prNumber": 9851,
+      "type": "other",
+      "body": "## Summary\n- remove the runtime `ai` package import from core's failure-reply detector\n- keep rate-limit/auth classification by structurally reading AI SDK-compatible `statusCode`, `status`, `lastError`, and `errors` fields\n\n## Why\n`@elizao",
+      "files": [
+        "packages/core/src/services/message/fallback-reply.ts"
+      ]
+    },
+    {
+      "title": "[codex] Simplify desktop dev env flags",
+      "prNumber": 9850,
+      "type": "other",
+      "body": "## Summary\n- remove duplicate desktop dev env checks in dev-platform.mjs\n- document ELIZA_DESKTOP_PILL as the canonical pill disable knob while keeping the legacy disable alias\n\n## Why\nMilady now bridges branded MILADY_DESKTOP_* variables b",
+      "files": [
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.ts",
+        "packages/app-core/scripts/dev-platform.mjs"
+      ]
+    },
+    {
+      "title": "[codex] Quiet expected desktop dev startup warnings",
+      "prNumber": 9849,
+      "type": "other",
+      "body": "## Summary\n- lower expected desktop-dev startup noise from warning/error paths where the condition is recoverable or optional\n- keep real failures visible while avoiding false-positive warning scans during local desktop boot\n- align compani",
+      "files": [
+        "packages/agent/src/diagnostics/integration-observability.ts",
+        "packages/agent/src/services/registry-client-network.ts",
+        "packages/app-core/platforms/electrobun/src/native/desktop.ts",
+        "packages/app-core/scripts/dev-platform.mjs",
+        "packages/app-core/src/runtime/voice-warmup.ts",
+        "plugins/plugin-companion/tsconfig.json",
+        "plugins/plugin-registry/src/api/app-plugins-routes.ts",
+        "plugins/plugin-screenshare/tsconfig.json"
+      ]
+    },
+    {
+      "title": "[codex] Break agent app-core turbo build cycle",
+      "prNumber": 9848,
+      "type": "other",
+      "body": "## Summary\n- add the missing package-task dependency edge needed for app-core/agent build ordering\n- update the lock metadata touched by that dependency graph change\n\n## Why\nThe agent/app-core turbo graph can otherwise form an ordering cycl",
+      "files": [
+        "bun.lock",
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "[codex] De-dupe local inference hub refreshes",
+      "prNumber": 9847,
+      "type": "other",
+      "body": "## Summary\n- coalesce concurrent local-inference hub refreshes so repeated callers share one in-flight request\n- add timeout coverage for the local inference client path\n- avoid duplicate registry refresh work in the app plugin registry ser",
+      "files": [
+        "packages/ui/src/api/client-base-timeout.test.ts",
+        "packages/ui/src/api/client-local-inference.ts",
+        "plugins/plugin-local-inference/src/services/registry.ts"
+      ]
+    },
+    {
+      "title": "feat(handoff): delete the shared bridge after a successful switch (PR4)",
+      "prNumber": 9846,
+      "type": "feature",
+      "body": "Stacked on #9845 (PR3 invisible re-point).\n\nPR4 of the seamless-provision handoff — **delete the transient shared bridge after a SUCCESSFUL switch**.\n\n## What\nOnce the user is switched to the dedicated and the transcript is copied, delete t",
+      "files": [
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/cloud/handoff/run-cloud-agent-handoff.test.ts",
+        "packages/ui/src/cloud/handoff/run-cloud-agent-handoff.ts",
+        "packages/ui/src/first-run/use-first-run-controller.ts"
+      ]
+    },
+    {
+      "title": "feat(handoff): silent in-place re-point on switch — no flash, no WS drop, no draft loss (PR3)",
+      "prNumber": 9845,
+      "type": "feature",
+      "body": "Stacked on #9844 (PR2 freeze).\n\nPR3 of the seamless-provision handoff — the **invisible re-point**: make the shared→dedicated switch visually invisible (no full-screen `StartupScreen` flash, no wiped composer draft, no `SWITCH_AGENT`/coordi",
+      "files": [
+        "packages/ui/src/api/client-base-websocket.test.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/cloud/handoff/silent-repoint.test.ts",
+        "packages/ui/src/cloud/handoff/silent-repoint.ts",
+        "packages/ui/src/components/settings/CloudAgentsSection.test.tsx",
+        "packages/ui/src/components/settings/CloudAgentsSection.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/state/types.ts",
+        "packages/ui/src/state/useLifecycleState.test.ts"
+      ]
+    },
+    {
+      "title": "feat(handoff): freeze + queue outgoing during the switch window so no message is lost (PR2)",
+      "prNumber": 9844,
+      "type": "feature",
+      "body": "Stacked on #9843 (PR1 create-both).\n\nPR2 of the seamless-provision handoff — the **correctness-critical freeze**: GUARANTEE that no message the user sends during the handoff copy+switch window is lost.\n\n## The bug\nDuring the handoff the cli",
+      "files": [
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts"
+      ]
+    },
+    {
+      "title": "feat(handoff): create dedicated alongside shared + arm the existing handoff (PR1)",
+      "prNumber": 9843,
+      "type": "feature",
+      "body": "Builds on #9838 (the `preferSharedCloudTier` flag, now merged to develop).\n\nPR1 of the seamless-provision handoff: when the app creates a SHARED bridge agent (behind `preferSharedCloudTier`), also background-provision a **separate dedicated",
+      "files": [
+        "packages/ui/src/api/client-cloud-handoff-target.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts"
+      ]
+    },
+    {
+      "title": "fix(app): absolute Vite base for web SPA so deep cloud routes (/auth/cli-login, /app-auth, /payment/:id) load",
+      "prNumber": 9842,
+      "type": "bugfix",
+      "body": "## The bug (live prod regression)\n\n\\`https://elizacloud.ai/auth/cli-login?session=…\\` — the **\"Sign in with Eliza Cloud\"** device-login handoff from the Eliza app — renders only a blank/loading shell. Console shows:\n\n\\`\\`\\`\nRefused to apply",
+      "files": [
+        "packages/app/package.json",
+        "packages/app/scripts/verify-chunk-safety.mjs",
+        "packages/app/src/renderer-build-stamp.ts",
+        "packages/app/vite.config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): label the add-credits input + brand the buy-credits CTA",
+      "prNumber": 9841,
+      "type": "bugfix",
+      "body": "Cloud billing UX (the non-dev \"paying feels broken\" wall from the audit): add a visible `<Label>` to the add-credits amount input (was placeholder-only `0.00`), and route the grey `#e1e1e1` \"Buy credits\" + invite CTAs through `BrandButton v",
+      "files": [
+        "packages/ui/src/cloud/billing/components/billing-tab.tsx",
+        "packages/ui/src/cloud/organization/invite-member-dialog.tsx",
+        "packages/ui/src/cloud/organization/members-tab.tsx"
+      ]
+    },
+    {
+      "title": "fix(chat): 44px touch targets + 16px text on the mobile composer",
+      "prNumber": 9840,
+      "type": "bugfix",
+      "body": "Mobile chat-composer usability: raise send/attach/mic/talk to **44px** and floor composer text to **16px** — but only on touch, via Tailwind `pointer-coarse:` + the existing `min-h-touch`/`min-w-touch`/`text-base` tokens, so the **desktop c",
+      "files": [
+        "packages/ui/src/components/composites/chat/chat-composer.tsx"
+      ]
+    },
+    {
+      "title": "chore(cloud): remove standalone documents route, redirect to agents",
+      "prNumber": 9836,
+      "type": "docs",
+      "body": "## What\nRemove the standalone Documents (Knowledge) route from the cloud dashboard (`dashboard/documents`). Knowledge management lives in the app.\n\n## Why\nPart of the cloud-site cull. The cloud documents route (per-character: list / upload-",
+      "files": [
+        "packages/ui/src/cloud/documents/DocumentsRoute.tsx",
+        "packages/ui/src/cloud/documents/DocumentsSection.tsx",
+        "packages/ui/src/cloud/documents/components/document-list.tsx",
+        "packages/ui/src/cloud/documents/components/document-query.tsx",
+        "packages/ui/src/cloud/documents/components/document-upload.tsx",
+        "packages/ui/src/cloud/documents/components/documents-page-client.tsx",
+        "packages/ui/src/cloud/documents/index.ts",
+        "packages/ui/src/cloud/documents/lib/agents.ts",
+        "packages/ui/src/cloud/documents/lib/documents.ts",
+        "packages/ui/src/cloud/register-all.test.ts",
+        "packages/ui/src/cloud/register-all.ts",
+        "packages/ui/src/cloud/shell/CloudRouterShell.tsx"
+      ]
+    },
+    {
+      "title": "chore(training): drop dead distill plumbing + fix stale docstring (#9580 / #9921 follow-up)",
+      "prNumber": 9938,
+      "type": "bugfix",
+      "body": "## What\n\nFollow-up to the merged #9921, from an adversarial re-review of that change.\n\n1. **`train_nebius.sh` — fail fast before provisioning.** `run_distill_remote()` was made to hard-error in #9921 (the in-repo distiller is gone), but the",
+      "files": [
+        "packages/training/scripts/run_pipeline.py",
+        "packages/training/scripts/train_nebius.sh"
+      ]
+    },
+    {
+      "title": "fix(build): capture root tsconfigs in turbo globalDependencies (cache correctness) (#9626)",
+      "prNumber": 9937,
+      "type": "bugfix",
+      "body": "## What\n\nA Turbo **cache-correctness** fix for #9626: the repo-root TypeScript configs are build inputs for every package, but neither `globalDependencies` nor any task input captured them — so editing a root compiler option replayed **stal",
+      "files": [
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix(views): make the orchestrator/task-coordinator/screenshare GUI smoke specs pass on the consolidated views",
+      "prNumber": 9933,
+      "type": "bugfix",
+      "body": "The tri-modal view consolidation (PR #9917, on develop) made /orchestrator, /task-coordinator, and /screenshare render the consolidated adaptive views, but the 3 GUI smoke specs (the Zero-Key app browser job) were still written for the pre-",
+      "files": [
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts",
+        "packages/app/test/ui-smoke/screenshare-gui-interactions.spec.ts",
+        "packages/app/test/ui-smoke/task-coordinator-gui-interactions.spec.ts",
+        "plugins/plugin-task-coordinator/src/OrchestratorView.tsx",
+        "plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx"
+      ]
+    },
+    {
+      "title": "chore(cloud): enable INFERENCE_HOT_PATH_CACHE in STAGING only (measure the #9899 latency win)",
+      "prNumber": 9931,
+      "type": "other",
+      "body": "Flips the inference hot-path cache ON in **staging only** to get a real latency measurement of shaw's #9899 fix (prod is still slow-path; fix is merged but flag-OFF everywhere).\n\n- **Staging only** — prod + default untouched (prod cutover s",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "docs: screen recordings of #9874/#9580/#9581 verification through a UI",
+      "prNumber": 9930,
+      "type": "docs",
+      "body": "## What\n\nScreen recordings demonstrating the three non-UI fixes (#9874, #9580, #9581) **succeeding through a user interface** — addressing the \"screen recordings of all final work\" requirement for the backend/infra lanes (the UI-facing #988",
+      "files": [
+        ".github/issue-evidence/verification-recordings/9580-cuda-bench.txt",
+        ".github/issue-evidence/verification-recordings/9580-cuda-generation.txt",
+        ".github/issue-evidence/verification-recordings/9580-cuda-inference.mp4",
+        ".github/issue-evidence/verification-recordings/9581-cuda-vlm.mp4",
+        ".github/issue-evidence/verification-recordings/9581-paddleocr.mp4",
+        ".github/issue-evidence/verification-recordings/9874-planner-tests.mp4",
+        ".github/issue-evidence/verification-recordings/README.md",
+        ".github/issue-evidence/verification-recordings/cuda-vlm-raw/EVIDENCE.md",
+        ".github/issue-evidence/verification-recordings/cuda-vlm-raw/description-clean.txt",
+        ".github/issue-evidence/verification-recordings/final-state-all-pass.png",
+        ".github/issue-evidence/verification-recordings/walkthrough-9874-9580-9581-vlm.mp4"
+      ]
+    },
+    {
+      "title": "chore(cloud): remove superseded AUTH_COMBINED_FASTPATH auth fast path",
+      "prNumber": 9926,
+      "type": "other",
+      "body": "",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/api-keys.ts",
+        "packages/cloud/shared/src/db/schemas/relations.ts",
+        "packages/cloud/shared/src/lib/auth.ts",
+        "packages/cloud/shared/src/lib/cache/keys.ts",
+        "packages/cloud/shared/src/lib/services/api-keys-combined-auth.test.ts",
+        "packages/cloud/shared/src/lib/services/api-keys.ts"
+      ]
+    },
+    {
+      "title": "docs(voice): Linux-native + Pixel 9a wake-word verification evidence (#9880)",
+      "prNumber": 9925,
+      "type": "docs",
+      "body": "## What\n\nAdds two new **on-device / native** verification tiers for the \"hey eliza\" wake word (#9880), complementing the existing macOS + iOS evidence already in `.github/issue-evidence/9880-wake-word/`. Evidence-only — no source change.\n\n#",
+      "files": [
+        ".github/issue-evidence/9880-wake-word/linux-native/LINUX-WAKEWORD-RESULTS.md",
+        ".github/issue-evidence/9880-wake-word/linux-native/reproduce.sh",
+        ".github/issue-evidence/9880-wake-word/linux-native/results-table.txt",
+        ".github/issue-evidence/9880-wake-word/linux-native/wakeword_trace.c",
+        ".github/issue-evidence/9880-wake-word/pixel9a-device/DEVICE-NOTES.md",
+        ".github/issue-evidence/9880-wake-word/pixel9a-device/listening-state.jpg",
+        ".github/issue-evidence/9880-wake-word/pixel9a-device/voice-activation.mp4"
+      ]
+    },
+    {
+      "title": "fix(vision): make PaddleOcrService work against paddleocr 3.x (#9581)",
+      "prNumber": 9924,
+      "type": "bugfix",
+      "body": "## What\n\nFixes a real bug found while closing #9581's engine-gated verification step: **`PaddleOcrService` is non-functional against a current `pip install paddleocr`.**\n\n`pip install paddleocr` now resolves to **3.x** (3.7.0 / paddlepaddle",
+      "files": [
+        ".github/issue-evidence/9581-paddleocr/PADDLEOCR-VERIFY.md",
+        ".github/issue-evidence/9581-paddleocr/after-fixed-wrapper-output.json",
+        ".github/issue-evidence/9581-paddleocr/before-old-wrapper-output.json",
+        ".github/issue-evidence/9581-paddleocr/overlay.png",
+        ".github/issue-evidence/9581-paddleocr/test-image.png",
+        "plugins/plugin-vision/src/ocr-service-paddleocr.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): repair cloud test gate after #9917 reorg (was silently false-green)",
+      "prNumber": 9923,
+      "type": "bugfix",
+      "body": "## The bug (live, not flag-gated)\n\nThe #9917 package reorg moved `packages/cloud-shared` → `packages/cloud/shared` and `packages/cloud-api` → `packages/cloud/api`, but `packages/scripts/test-cloud-run.mjs` (the `test:cloud` gate behind `clo",
+      "files": [
+        "packages/scripts/test-cloud-run.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): reconcile coverage after app-bundled removal",
+      "prNumber": 9922,
+      "type": "bugfix",
+      "body": "## Summary\n- scope the root HMR browser matrix to plugin views that are actually in the app Vite root graph, while keeping static source-probe coverage in lockstep\n- remove stale HMR probes/count assumptions for app-bundled views removed fr",
+      "files": [
+        "packages/app/test/hmr-coverage.test.ts",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/scenario-runner/vitest.config.ts",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "plugins/plugin-app-control/src/views/ViewManagerView.render.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(training): remove dead refs to deleted MTP-drafter distillation scripts (#9580)",
+      "prNumber": 9921,
+      "type": "bugfix",
+      "body": "## What\n\nRemoves the dead references to the **deleted** MTP-drafter training scripts (`distill_mtp_drafter.py`, `distill_dflash_drafter.py`, `mtp/validate_drafter.py`) across the training pipeline. Closes the one crisp doable-here item flag",
+      "files": [
+        "packages/training/docs/training/eliza1-smallest-finetunes.md",
+        "packages/training/scripts/kokoro/__tests__/conftest.py",
+        "packages/training/scripts/manifest/release_process_guard.py",
+        "packages/training/scripts/manifest/stage_local_eliza1_bundle.py",
+        "packages/training/scripts/manifest/stage_real_eliza1_bundle.py",
+        "packages/training/scripts/run_pipeline.py",
+        "packages/training/scripts/train_nebius.sh"
+      ]
+    },
+    {
+      "title": "perf(cloud): flag-gated cold-auth fast path — 1 combined lookup vs 2 round-trips (AUTH_COMBINED_FASTPATH, off by default)",
+      "prNumber": 9919,
+      "type": "other",
+      "body": "## Why\n\nAPI-key auth on a **cold** Cloudflare Worker isolate does **two sequential** Hyperdrive→Railway-Postgres round-trips on a cache miss:\n\n1. `apiKeysService.validateApiKey(key)` → find active key by hash\n2. `usersService.getWithOrganiz",
+      "files": [
+        "packages/cloud-shared/src/db/repositories/api-keys.ts",
+        "packages/cloud-shared/src/db/schemas/relations.ts",
+        "packages/cloud-shared/src/lib/auth.ts",
+        "packages/cloud-shared/src/lib/cache/keys.ts",
+        "packages/cloud-shared/src/lib/services/api-keys-combined-auth.test.ts",
+        "packages/cloud-shared/src/lib/services/api-keys.ts"
+      ]
+    },
+    {
+      "title": "Main",
+      "prNumber": 9918,
+      "type": "other",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!--\r\nDEFINITION OF DONE — full standard: PR_EVIDENCE.md\r\n- This PR",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/ui-story-gate.yml",
+        "packages/agent/assets/view-heroes/background.png",
+        "packages/agent/src/__tests__/game-tui-mounted-surfaces.test.tsx",
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/src/runtime/eliza-cloud-config.test.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/test/api/accounts-routes.test.ts",
+        "packages/app-core/src/api/dev-route-catalog.ts",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/app/vite.config.ts",
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/docker-sandbox-headscale-route.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/cache.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/cache.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/types.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/core/build.ts",
+        "packages/core/src/index.browser.ts",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-browser-computeruse-progress.scenario.ts",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "packages/ui/.storybook/main.ts",
+        "packages/ui/src/api/app-shell-capabilities.ts",
+        "packages/ui/src/cloud/public-pages/pages/app-auth/app-authorize-page.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/app-auth/app-authorize-page.tsx",
+        "packages/ui/src/components/pages/ElizaOsAppsView.tsx",
+        "packages/ui/src/components/shell/LoadingScreen.tsx",
+        "packages/ui/src/components/views/DynamicViewLoader.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/hooks/useDefaultProviderPresets.test.tsx",
+        "packages/ui/src/services/local-inference/active-model.test.ts",
+        "packages/ui/test/stubs/host-external.ts",
+        "plugins/plugin-agent-orchestrator/tsconfig.build.json",
+        "plugins/plugin-anthropic/__tests__/native-plumbing.shape.test.ts",
+        "plugins/plugin-anthropic/models/text.ts",
+        "plugins/plugin-app-control/src/actions/view-command-matcher.ts",
+        "plugins/plugin-local-inference/build.ts",
+        "plugins/plugin-local-inference/package.json",
+        "plugins/plugin-wallet-ui/tsconfig.build.json"
+      ]
+    },
+    {
+      "title": "chore(repo): packages reorg + #9899 inference hot-path + adaptive-view consolidation",
+      "prNumber": 9917,
+      "type": "other",
+      "body": "## Summary\n\nLands the in-progress **repo restructure** (`packages/cloud-api` → `packages/cloud/api`, `packages/cloud-shared` → `packages/cloud/shared`, etc.) together with two feature lines that were developed on top of the new layout:\n\n- *",
+      "files": [
+        ".dockerignore",
+        ".github/CODEOWNERS",
+        ".github/actions/cloud-setup-test-env/action.yml",
+        ".github/issue-evidence/9145-remote-app-deploy.md",
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apps-deploy-e2e.yml",
+        ".github/workflows/arm-apps-daemon.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-e2e.yml",
+        ".github/workflows/cloud-gateway-discord.yml",
+        ".github/workflows/cloud-gateway-webhook.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/deploy-apps-worker.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/e1-chip.yml",
+        ".github/workflows/elizaos-openagent-ai-soc.yml",
+        ".github/workflows/elizaos-os-release.yml",
+        ".github/workflows/external-api-live-drift.yml",
+        ".github/workflows/hetzner-e2e.yml",
+        ".github/workflows/monetized-loop-nightly.yml",
+        ".github/workflows/release-electrobun.yml",
+        ".github/workflows/sandbox-live-smoke.yml",
+        ".github/workflows/terraform-apps-data-plane.yml",
+        ".github/workflows/terraform-apps-shared.yml",
+        ".github/workflows/terraform-apps-state-rm.yml",
+        ".github/workflows/terraform-control-plane.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/windows-ci.yml",
+        ".gitignore",
+        ".gitleaks.toml",
+        ".gitleaksignore",
+        ".gitmodules",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "WINDOWS.md",
+        "biome.json",
+        "bun.lock",
+        "docs/cloud-into-eliza/CUTOVER-RUNBOOK.md",
+        "knip.json",
+        "lerna.json",
+        "package.json",
+        "packages/agent/docs/capability-router-remote-plugins.md",
+        "packages/agent/docs/e2b-capability-routing.md",
+        "packages/agent/package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): negative-cache failed AI-pricing catalog fetch — stop per-request cerebras-404 re-fetch (prod latency)",
+      "prNumber": 9915,
+      "type": "bugfix",
+      "body": "Port to main of #9914 (develop). **Found by tailing prod:** every `/v1/chat/completions` re-fetches the retired Cerebras public catalog (now 404) **2× per request** because `getCachedExternalEntries` only caches successful results — a throw",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing/cache.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/cache.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/types.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): negative-cache failed AI-pricing catalog fetch (per-request dead-endpoint re-fetch)",
+      "prNumber": 9914,
+      "type": "bugfix",
+      "body": "## Found by tailing prod (wrangler tail)\nEvery `/v1/chat/completions` logs `[AI Pricing] external catalog fetch failed; using cached/seed pricing` **twice**. The pricing path re-fetches the **retired Cerebras public catalog** (`/public/v1/m",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing/cache.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/cache.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/types.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): avoid cloud first-run CORS post",
+      "prNumber": 9913,
+      "type": "bugfix",
+      "body": "## Summary\n- Port the develop first-run CORS fix to main.\n- Add the small app-shell capability helper needed on main.\n- Skip POST /api/first-run when the selected cloud agent base is a shared REST adapter or dedicated *.elizacloud.ai runtim",
+      "files": [
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/ui/.storybook/main.ts",
+        "packages/ui/src/api/app-shell-capabilities.ts",
+        "packages/ui/src/components/views/DynamicViewLoader.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/test/stubs/host-external.ts",
+        "plugins/plugin-anthropic/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): port #9539 — pricing-catalog 404 must not 500 inference (LIVE prod bug)",
+      "prNumber": 9910,
+      "type": "bugfix",
+      "body": "## Live prod bug\n`POST https://api.elizacloud.ai/api/v1/chat/completions` is **500-ing in prod right now**:\n```\n{\"error\":{\"message\":\"Request failed for https://api.cerebras.ai/public/v1/models?format=openrouter: 404\",\"type\":\"api_error\"}}\n``",
+      "files": [
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.test.ts",
+        "packages/cloud-shared/src/lib/services/ai-pricing/providers/gateway.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud-api): measure pre-forward TTFT via X-Eliza-Preforward-Ms header (#9899)",
+      "prNumber": 9909,
+      "type": "other",
+      "body": "## Why\nDedicated-agent chat is slow (~6.5s). Measured: TTFT through `api.elizacloud.ai` = ~6.5s vs **cerebras-direct = 0.24s** for the same model — 100% of the overhead is cloud-api **pre-forward** work (the serial auth → rate-limit → moder",
+      "files": [
+        "packages/cloud-api/v1/chat/completions/route.ts"
+      ]
+    },
+    {
+      "title": "Fix/training gemma docs v2",
+      "prNumber": 9908,
+      "type": "bugfix",
+      "body": "<!-- Use this template by filling in information and copying and pasting relevant items out of the HTML comments. -->\r\n\r\n# Relates to\r\n\r\n<!-- LINK TO ISSUE OR TICKET -->\r\n\r\n<!--\r\nDEFINITION OF DONE — full standard: PR_EVIDENCE.md\r\n- This PR",
+      "files": [
+        ".github/issue-evidence/9105-ocr-vision-engine-decision-2026-06-28.md",
+        ".github/issue-evidence/9880-wake-word/README.md",
+        ".github/issue-evidence/9880-wake-word/ios-device-backend-timeout.png",
+        ".github/issue-evidence/9880-wake-word/ios-device-booting.png",
+        ".github/issue-evidence/9880-wake-word/ios-device-build-proof.txt",
+        ".github/issue-evidence/9880-wake-word/ios-device-local-1.png",
+        ".github/issue-evidence/9880-wake-word/ios-simulator-voice-listening.png",
+        ".github/issue-evidence/9880-wake-word/realaudio-controller-validation.log",
+        ".github/issue-evidence/9880-wake-word/realaudio-controller-validation.mp4",
+        ".github/issue-evidence/9880-wake-word/realaudio-results-card.png",
+        ".github/issue-evidence/9880-wake-word/realaudio-validation.log",
+        ".github/issue-evidence/9880-wake-word/realaudio-wake-validation.mp4",
+        ".github/issue-evidence/9880-wake-word/unit-tests.log",
+        ".github/issue-evidence/9880-wake-word/validate-wake-controller-realaudio.mjs",
+        ".github/issue-evidence/9880-wake-word/validate-wake-realaudio.mjs",
+        ".github/issue-evidence/9880-wake-word/wakeword-detection-verify.sh",
+        ".github/issue-evidence/9880-wake-word/wakeword-detection.log",
+        ".gitignore",
+        "bun.lock",
+        "packages/agent/assets/view-heroes/files.png",
+        "packages/agent/package.json",
+        "packages/agent/scripts/build-mobile-bundle.mjs",
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/src/api/views-registry.kinds.test.ts",
+        "packages/agent/src/runtime/core-plugins.ts",
+        "packages/agent/tsconfig.json",
+        "packages/app-core/platforms/ios/App/App/AppDelegate.swift",
+        "packages/app-core/scripts/assert-required-bundled-packages.test.ts",
+        "packages/app-core/scripts/copy-runtime-node-modules.ts",
+        "packages/app/src/mobile-plugin-views.ts",
+        "packages/app/test/core-view-action-surface-coverage.test.ts",
+        "packages/app/test/core-view-interaction-coverage.test.ts",
+        "packages/app/test/ui-smoke/browser-skills-agent-bridge.spec.ts",
+        "packages/app/test/ui-smoke/chat-clear-swipe.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/plugin-view-agent-bridge-inventory.spec.ts",
+        "packages/app/test/ui-smoke/settings-sections-interactions.spec.ts",
+        "packages/app/test/ui-smoke/shell-view-agent-bridge-inventory.spec.ts",
+        "packages/app/test/ui-smoke/view-switching-core-matrix.spec.ts",
+        "packages/app/test/ui-smoke/view-switching-core-matrix.ts",
+        "packages/app/test/view-switching-core-matrix-coverage.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-dedicated-bootstrap.test.ts",
+        "packages/cloud-shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud-shared/src/lib/services/shared-runtime/dedicated-bootstrap.test.ts",
+        "packages/cloud-shared/src/lib/services/shared-runtime/dedicated-bootstrap.ts",
+        "packages/cloud-shared/src/lib/services/shared-runtime/resolve-shared-agent.ts",
+        "packages/core/src/cloud-routing.test.ts",
+        "packages/core/src/features/documents/service.ts",
+        "packages/core/src/types/plugin.ts",
+        "packages/native/plugins/wakeword-cpp/AGENTS.md"
+      ]
+    },
+    {
+      "title": "fix(agent): force cloud topology for managed cloud containers (fixes local_inference)",
+      "prNumber": 9905,
+      "type": "bugfix",
+      "body": "## Problem\nDedicated cloud-agent chat returns `failureKind:\"local_inference\"` (\"Sorry, I'm having a provider issue\") on every message. Root-caused live (#9887): the provisioned `eliza.json` is correct (`deploymentTarget:{runtime:cloud}` + c",
+      "files": [
+        "packages/agent/src/runtime/eliza-cloud-config.test.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/core/src/index.browser.ts",
+        "packages/ui/.storybook/main.ts",
+        "packages/ui/src/components/views/DynamicViewLoader.tsx",
+        "packages/ui/test/stubs/host-external.ts",
+        "plugins/plugin-anthropic/__tests__/native-plumbing.shape.test.ts",
+        "plugins/plugin-anthropic/models/text.ts",
+        "plugins/plugin-wallet-ui/tsconfig.build.json"
+      ]
+    },
+    {
+      "title": "fix(cloud-api): refund credit reservation on streaming provider error (money bug)",
+      "prNumber": 9904,
+      "type": "bugfix",
+      "body": "## The bug (real money)\nStreaming `/v1/chat/completions` and `/v1/messages` reserve credits **upfront** (`reserveCredits`) and only refund through the settler. The settler was wired to `streamText`'s `onFinish` (success) and `onAbort` (clie",
+      "files": [
+        "packages/cloud-api/v1/chat/completions/route.ts",
+        "packages/cloud-api/v1/messages/route.ts"
+      ]
+    },
+    {
+      "title": "fix: stabilize dedicated cloud handoff and agent task acks",
+      "prNumber": 9902,
+      "type": "bugfix",
+      "body": "Closes #9887.\n\n## Summary\n- Suppress simple-to-tool promotion for bot-to-bot crosstalk and preserve full reacted-to message text in context.\n- Generate one clean orchestrator spawn ack via the small text model and relay terminal sub-agent f",
+      "files": [
+        "packages/app/scripts/verify-chunk-safety.mjs",
+        "packages/cloud-api/auth/create-anonymous-session/route.test.ts",
+        "packages/cloud-api/mcp/route.ts",
+        "packages/cloud-api/v1/coding-containers/route.test.ts",
+        "packages/cloud-api/v1/coding-containers/route.ts",
+        "packages/cloud-api/v1/containers/route.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs-delete-enqueue.test.ts",
+        "packages/core/src/__tests__/messages-format.test.ts",
+        "packages/core/src/runtime/__tests__/addressed-to.test.ts",
+        "packages/core/src/runtime/__tests__/message-handler.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/addressed-to.ts",
+        "packages/core/src/runtime/message-handler.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/types/primitives.ts",
+        "packages/core/src/utils.ts",
+        "packages/shared/src/config/boot-config-store.ts",
+        "packages/ui/src/cloud/connectors/discord-gateway-connection.tsx",
+        "packages/ui/src/components/settings/settings-sections.ts",
+        "packages/ui/src/config/boot-config-store.test.ts",
+        "packages/ui/src/config/boot-config-store.ts",
+        "packages/ui/src/first-run/use-first-run-controller.test.tsx",
+        "packages/ui/src/first-run/use-first-run-controller.ts",
+        "packages/ui/src/state/useFirstRunCallbacks.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/progress-cadence.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/spawn-ack.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-failure-evaluator.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/sandbox-gating.test.ts",
+        "plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-failure.ts",
+        "plugins/plugin-agent-orchestrator/src/index.ts",
+        "plugins/plugin-discord/discord-reactions.ts",
+        "plugins/plugin-facewear/src/index.ts",
+        "plugins/plugin-feed/src/index.ts",
+        "plugins/plugin-local-inference/src/routes/voice-models-routes.ts",
+        "plugins/plugin-local-inference/src/services/voice/wake-word-staging.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/wake-word-staging.ts",
+        "plugins/plugin-shell/tsconfig.build.json",
+        "plugins/plugin-shell/tsconfig.json",
+        "plugins/plugin-trajectory-logger/src/index.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): port #9882 app-auth/authorize StewardProvider fix to main (prod sign-in crash)",
+      "prNumber": 9898,
+      "type": "bugfix",
+      "body": "## Why\n`elizacloud.ai/app-auth/authorize` (third-party monetized-app sign-in, e.g. `nubilio.org/apps/*`) crashes in **production** with:\n```\nError: useAuth must be used within a <StewardProvider> with an `auth` prop.\n  at AuthorizeContent (",
+      "files": [
+        "packages/ui/src/cloud/public-pages/pages/app-auth/app-authorize-page.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/app-auth/app-authorize-page.tsx"
+      ]
+    },
+    {
+      "title": "fix: exclude orchestrator test scenarios from production build",
+      "prNumber": 9895,
+      "type": "bugfix",
+      "body": "## Summary\n- excludes plugin-agent-orchestrator `test/**` files from its production declaration build on `main`\n- matches the existing `develop` build config so scenario-runner fixtures are not compiled during Cloudflare deploy workspace bu",
+      "files": [
+        ".github/workflows/ui-story-gate.yml",
+        "packages/agent/assets/view-heroes/background.png",
+        "packages/agent/src/__tests__/game-tui-mounted-surfaces.test.tsx",
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/test/api/accounts-routes.test.ts",
+        "packages/app-core/src/api/dev-route-catalog.ts",
+        "packages/app/test/ui-smoke/apps-session-route-cases.ts",
+        "packages/app/test/ui-smoke/tts-stt-e2e.spec.ts",
+        "packages/app/vite.config.ts",
+        "packages/core/build.ts",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-browser-computeruse-progress.scenario.ts",
+        "packages/scripts/e2e-coverage/manifest.ts",
+        "packages/ui/src/components/pages/ElizaOsAppsView.tsx",
+        "packages/ui/src/components/shell/LoadingScreen.tsx",
+        "packages/ui/src/hooks/useDefaultProviderPresets.test.tsx",
+        "packages/ui/src/services/local-inference/active-model.test.ts",
+        "plugins/plugin-agent-orchestrator/tsconfig.build.json",
+        "plugins/plugin-app-control/src/actions/view-command-matcher.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): fix managed runtime routing import",
+      "prNumber": 9894,
+      "type": "bugfix",
+      "body": "## Summary\n\n- apply the #9893 import-path fix to `develop`\n- import `buildDefaultElizaCloudServiceRouting` from `@elizaos/shared/contracts/service-routing` instead of the root `@elizaos/shared` barrel\n\n## Why\n\n#9891 has the same import path",
+      "files": [
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): hotfix managed runtime routing import",
+      "prNumber": 9893,
+      "type": "bugfix",
+      "body": "## Summary\n\n- fix the managed runtime config hotfix import path for CI\n- import `buildDefaultElizaCloudServiceRouting` from its concrete shared contracts subpath instead of the root `@elizaos/shared` barrel\n\n## Why\n\n#9892 merged the managed",
+      "files": [
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): hotfix managed runtime routing config",
+      "prNumber": 9892,
+      "type": "bugfix",
+      "body": "## Summary\n\n- hotfix `main` with the same managed Docker runtime config fix as #9891\n- write canonical `deploymentTarget` and Eliza Cloud `serviceRouting` into `/root/.eliza/eliza.json` for newly provisioned managed agents\n- add a topology ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/docker-sandbox-headscale-route.test.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): write managed runtime routing config",
+      "prNumber": 9891,
+      "type": "bugfix",
+      "body": "## Summary\n\n- write canonical `deploymentTarget` and `serviceRouting` into managed Docker agents' `/root/.eliza/eliza.json`\n- keep the existing cloud credential/base URL payload, including agent id\n- add a regression test that resolves the ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/docker-sandbox-headscale-route.test.ts",
+        "packages/cloud-shared/src/lib/services/docker-sandbox-provider.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): hotfix stable agent image route export",
+      "prNumber": 9890,
+      "type": "bugfix",
+      "body": "## Summary\n- cherry-pick #9888 onto `main` so the stable cloud-agent image ships `@elizaos/plugin-local-inference/local-inference-routes`\n- cherry-pick #9889 onto `main` so future local-inference changes trigger `Build Agent Image`\n\n## Why\n",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "plugins/plugin-local-inference/build.ts",
+        "plugins/plugin-local-inference/package.json"
+      ]
+    },
+    {
+      "title": "ci(agent-image): rebuild on local-inference changes",
+      "prNumber": 9889,
+      "type": "other",
+      "body": "## Summary\n- include plugins/plugin-local-inference/** in the Build Agent Image push path filter\n- keeps future local-inference runtime/export fixes from missing the cloud-agent image publisher\n\n## Why\nThe agent image workflow already build",
+      "files": [
+        ".github/workflows/build-agent-image.yml"
+      ]
+    },
+    {
+      "title": "fix(local-inference): ship route subpath export",
+      "prNumber": 9888,
+      "type": "bugfix",
+      "body": "## Summary\n- add `src/local-inference-routes.ts` as a Bun build entrypoint so `dist/local-inference-routes.js` is emitted\n- add an explicit `./local-inference-routes` package export matching the agent runtime import\n- add a build-time impor",
+      "files": [
+        "plugins/plugin-local-inference/build.ts",
+        "plugins/plugin-local-inference/package.json"
+      ]
+    },
+    {
+      "title": "fix(cloud-frontend): mount StewardProvider on public /app-auth/authorize so sign-in doesn't crash (#9881)",
+      "prNumber": 9882,
+      "type": "bugfix",
+      "body": "**Fixes #9881 — P0, blocks all monetized-app OAuth sign-in.** Root-caused by vps-agent while testing the monetized-app flow end-to-end; confirmed live (headless render of prod `/app-auth/authorize` → \"useAuth must be used within a `<Steward",
+      "files": [
+        "packages/ui/src/cloud/public-pages/pages/app-auth/app-authorize-page.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/app-auth/app-authorize-page.tsx"
+      ]
+    },
+    {
+      "title": "fix(plugin-elizacloud): self-heal CloudAuth when an injected API key is revoked (401-blind agent)",
+      "prNumber": 9876,
+      "type": "bugfix",
+      "body": "## Problem\nA dedicated cloud agent trusts its injected `ELIZAOS_CLOUD_API_KEY` optimistically at boot and validates it **once** in the background. If the cloud was unreachable at that moment (`\"skipping validation; key used as-is\"`) or the ",
+      "files": [
+        "plugins/plugin-elizacloud/__tests__/cloud-auth-revalidation.test.ts",
+        "plugins/plugin-elizacloud/src/services/cloud-auth.ts"
+      ]
+    },
+    {
+      "title": "fix(core): ban phantom task-execution claims in the planner policy",
+      "prNumber": 9875,
+      "type": "bugfix",
+      "body": "## Problem\n\nLive repro from a multi-bot arena chat: the agent **confabulated a task it was never given** and then contradicted itself. From a user *statement* (\"i fixed this issue for it saying its the response handler model\"), the planner ",
+      "files": [
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts"
+      ]
+    },
+    {
+      "title": "test(cloud): pin the eliza-sandbox trusted/untrusted bridge SSRF invariant (#9853 follow-up)",
+      "prNumber": 9873,
+      "type": "tests",
+      "body": "**#9853 follow-up (surfaced in #9864's review) — analysis result: already secure, so this is test-only.**\n\nThe concern was that eliza-sandbox's untrusted bridge URL might share an unguarded fetch with trusted-mesh calls. On investigation, *",
+      "files": [
+        "packages/cloud-shared/src/lib/services/eliza-sandbox-bridge-ssrf.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): gate the Apps deploy image on the container allowlist (#9853 follow-up)",
+      "prNumber": 9872,
+      "type": "bugfix",
+      "body": "**#9853 follow-up (surfaced in #9862's review).** The Apps/Product-2 deploy path `resolveImageRef` (`app-deploy-runner.ts`) resolved the deploy image from `app.metadata.imageTag` / `APP_DEFAULT_IMAGE` and ran it on shared docker nodes with ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-deploy-runner.test.ts",
+        "packages/cloud-shared/src/lib/services/app-deploy-runner.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): make a stale provisioning-daemon heartbeat LOUD, not silent (#9853 P2.7)",
+      "prNumber": 9871,
+      "type": "feature",
+      "body": "**#9853 P2 — item 7.** The provisioning daemon already writes a Redis heartbeat and cloud-api already **fails closed** when it's stale — but **silently**: nobody is paged, so container-stop billing cleanup and per-tenant DB isolation (both ",
+      "files": [
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health-monitor.test.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-worker-health-monitor.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): a deploy can't report success without a reachable public URL (#9853 P2.8)",
+      "prNumber": 9870,
+      "type": "feature",
+      "body": "**#9853 P2 — item 8.** A deploy could mark `apps.deployment_status='deployed'` even if the app's public URL wasn't actually serving (container up + Caddy route added ≠ app reachable).\n\n- New `app-reachability.ts` (node-only): `isReachableSt",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/app-reachability.test.ts",
+        "packages/cloud-shared/src/lib/services/__tests__/container-job-executors.test.ts",
+        "packages/cloud-shared/src/lib/services/app-reachability.ts",
+        "packages/cloud-shared/src/lib/services/container-executor-deps.ts",
+        "packages/cloud-shared/src/lib/services/container-job-executors.ts"
+      ]
+    },
+    {
+      "title": "fix(app): harden desktop Cloud shell recovery",
+      "prNumber": 9869,
+      "type": "bugfix",
+      "body": "## Summary\n\nThis PR hardens the desktop/mobile shell for Cloud-first startup and limited Cloud-agent bases:\n\n- removes the separate native desktop pill window path; the in-canvas chat pill remains the single desktop surface\n- wires external",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/agent/src/__tests__/plugin-view-llm-mock-coverage.test.ts",
+        "packages/agent/src/__tests__/view-user-journeys.ts",
+        "packages/agent/src/services/pending-prompts/service.test.ts",
+        "packages/app-core/platforms/electrobun/src/api-base.ts",
+        "packages/app-core/platforms/electrobun/src/bridge/electrobun-direct-rpc.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.test.ts",
+        "packages/app-core/platforms/electrobun/src/desktop-pill-config.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/platforms/electrobun/src/lifecycle/api-base-owner.test.ts",
+        "packages/app-core/platforms/electrobun/src/lifecycle/api-base-owner.ts",
+        "packages/app-core/platforms/electrobun/src/onboarding-overlay-window.ts",
+        "packages/app-core/platforms/electrobun/src/pill-window.test.ts",
+        "packages/app-core/platforms/electrobun/src/pill-window.ts",
+        "packages/app-core/platforms/electrobun/src/preload.js",
+        "packages/app-core/platforms/electrobun/src/rpc-schema.ts",
+        "packages/app/scripts/ios-onboarding-smoke.mjs",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/app/test/electrobun-packaged/packaged-app-helpers.ts",
+        "packages/app/test/ui-smoke/assistant-home-flow.spec.ts",
+        "packages/app/test/ui-smoke/cloud-provisioning-startup.spec.ts",
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/remote-capability-view.spec.ts",
+        "packages/app/test/ui-smoke/screenshare-gui-interactions.spec.ts",
+        "packages/app/test/ui-smoke/task-coordinator-gui-interactions.spec.ts",
+        "packages/app/test/ui-smoke/terminal-plugin-view-command-contract.spec.ts",
+        "packages/app/test/ui-smoke/view-manager-actual-flow.spec.ts",
+        "packages/app/test/view-interaction-coverage.test.ts",
+        "packages/scripts/type-safety-ratchet-baseline.json",
+        "packages/scripts/type-safety-ratchet.mjs",
+        "packages/ui/src/App.cloud-shell.test.tsx",
+        "packages/ui/src/App.navigate-view-wiring.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/api/app-shell-capabilities.test.ts",
+        "packages/ui/src/api/app-shell-capabilities.ts",
+        "packages/ui/src/api/auth-client.ts",
+        "packages/ui/src/api/client-agent-desktop-status.test.ts",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/api/client-chat-conversation-defaults.test.ts",
+        "packages/ui/src/api/client-chat.ts",
+        "packages/ui/src/api/desktop-external-api-base.test.ts",
+        "packages/ui/src/api/desktop-external-api-base.ts",
+        "packages/ui/src/api/desktop-http-transport.ts",
+        "packages/ui/src/api/i18n-locale-client.ts",
+        "packages/ui/src/components/apps/app-identity.helpers.test.ts",
+        "packages/ui/src/components/apps/app-identity.helpers.ts",
+        "packages/ui/src/components/chat/widgets/inbox-unread.test.tsx",
+        "packages/ui/src/components/chat/widgets/inbox-unread.tsx",
+        "packages/ui/src/components/chat/widgets/needs-attention.test.tsx"
+      ]
+    },
+    {
+      "title": "docs(cloud): refresh stale build-service comments + public-path allowlist re-audit (#9853 P3.13)",
+      "prNumber": 9868,
+      "type": "docs",
+      "body": "**#9853 P3 — item 13.** Two parts.\n\n**(a) Stale comments refreshed** (`app-deployments.ts`): the \"when a real build/upload service lands, this becomes the integration boundary\" header was future-tense but the build/deploy pipeline has shipp",
+      "files": [
+        "packages/cloud-shared/src/lib/services/app-deployments.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): re-enable promo duplicate-redemption guard (#9853 P3.12)",
+      "prNumber": 9867,
+      "type": "bugfix",
+      "body": "**#9853 P3 — item 12.** The per-org BSC promo duplicate-redemption guard in `direct-wallet-payments.ts` (`createPayment`) was **commented out** (\"temporarily disabled — allow repeat $5 bonus on $10 buys\"), so the one-time $5 promo bonus cou",
+      "files": [
+        "packages/cloud-shared/src/lib/services/__tests__/direct-wallet-payments.integration.test.ts",
+        "packages/cloud-shared/src/lib/services/direct-wallet-payments.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): env kill-switch for feature flags (#9853 P3.11)",
+      "prNumber": 9866,
+      "type": "feature",
+      "body": "**#9853 P3 — item 11.** Cloud feature flags were hardcoded `enabled: true` with no runtime override (can't disable a feature mid-incident).\n\n`isFeatureEnabled()` (the single central accessor in `feature-flags.ts`) now honors env overrides v",
+      "files": [
+        "packages/cloud-shared/src/lib/config/feature-flags.test.ts",
+        "packages/cloud-shared/src/lib/config/feature-flags.ts"
+      ]
+    },
+    {
+      "title": "ci(cloud): gate tenant isolation — wire REVOKE-CONNECT proof + static pk-only-read check (#9853 P1.6)",
+      "prNumber": 9865,
+      "type": "other",
+      "body": "**#9853 P1 — item 6.** Both isolation-CI gaps.\n\n**Gap A — REVOKE-CONNECT proof wired:** the orphaned `verify-tenant-db-isolation.ts` (provisions APP_A/APP_B, asserts cross-tenant `REVOKE CONNECT`) is now a `verify:tenant-isolation` script +",
+      "files": [
+        ".github/workflows/apps-deploy-e2e.yml",
+        ".github/workflows/cloud-tests.yml",
+        "packages/cloud-shared/package.json",
+        "packages/cloud-shared/scripts/__fixtures__/tenant-scope/scoped.ts",
+        "packages/cloud-shared/scripts/__fixtures__/tenant-scope/unscoped.ts",
+        "packages/cloud-shared/scripts/check-tenant-scope.ts",
+        "packages/cloud-shared/scripts/verify-tenant-db-isolation.ts",
+        "packages/cloud-shared/src/db/repositories/__tests__/tenant-scope-gate.test.ts",
+        "packages/cloud-shared/src/db/repositories/app-credit-balances.ts",
+        "packages/cloud-shared/src/db/repositories/apps.ts",
+        "packages/cloud-shared/src/lib/services/tenant-db/direct-pg-executor.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): IP-pinned safeFetch to close SSRF/DNS-rebinding window (#9853 P1.3)",
+      "prNumber": 9864,
+      "type": "bugfix",
+      "body": "**#9853 P1 — item 3.** One IP-pinned `safeFetch` to close the TOCTOU/DNS-rebinding window: `assertSafeOutboundUrl` validated DNS then returned a *hostname* URL, and ~9 sinks `fetch()`'d it (re-resolving at connect → pivot into `169.254.169.",
+      "files": [
+        "packages/cloud-shared/src/lib/mcp/mcp-upstream-forward.ts",
+        "packages/cloud-shared/src/lib/security/outbound-url.ts",
+        "packages/cloud-shared/src/lib/security/safe-fetch.test.ts",
+        "packages/cloud-shared/src/lib/security/safe-fetch.ts",
+        "packages/cloud-shared/src/lib/services/advertising/media-utils.ts",
+        "packages/cloud-shared/src/lib/services/app-promotion-assets.ts",
+        "packages/cloud-shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud-shared/src/lib/services/seo.ts",
+        "packages/cloud-shared/src/lib/services/waifu-webhook.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): close rate-limit gaps + free-grant sybil cap (#9853 P1.1)",
+      "prNumber": 9863,
+      "type": "bugfix",
+      "body": "**#9853 P1 — item 1.** Closes the three confirmed gaps (code only; the prod `REDIS_RATE_LIMITING` flip is a separate ops step — limiters fall open until then).\n\n1. **Global IP backstop** limiter in `createApp()` before `authMiddleware` (600",
+      "files": [
+        "packages/cloud-api/auth/create-anonymous-session/route.test.ts",
+        "packages/cloud-api/auth/create-anonymous-session/route.ts",
+        "packages/cloud-api/src/bootstrap-app.ts",
+        "packages/cloud-shared/src/lib/middleware/rate-limit-hono-cloudflare.ts",
+        "packages/cloud-shared/src/lib/runtime/request-context.ts",
+        "packages/cloud-shared/src/lib/services/signup-grant-guard.test.ts",
+        "packages/cloud-shared/src/lib/services/signup-grant-guard.ts",
+        "packages/cloud-shared/src/lib/services/wallet-signup.ts",
+        "packages/cloud-shared/src/lib/steward-sync.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): opt-in digest-pin gate for container image allowlist (#9853 P1.5)",
+      "prNumber": 9862,
+      "type": "feature",
+      "body": "**#9853 P1 — item 5.** Adds an **opt-in** digest-pin requirement layered on the existing image allowlist.\n\n- `containersEnv.requireDigestPinnedImages()` — true only when `CONTAINER_IMAGE_REQUIRE_DIGEST===\"true\"` (with `ELIZA_`/`CONTAINERS_`",
+      "files": [
+        "packages/cloud-api/v1/coding-containers/route.test.ts",
+        "packages/cloud-api/v1/coding-containers/route.ts",
+        "packages/cloud-api/v1/containers/route.test.ts",
+        "packages/cloud-api/v1/containers/route.ts",
+        "packages/cloud-shared/src/lib/config/containers-env.ts",
+        "packages/cloud-shared/src/lib/services/coding-containers.test.ts",
+        "packages/cloud-shared/src/lib/services/coding-containers.ts"
+      ]
+    },
+    {
+      "title": "fix(discord): stop per-message guild REST fetch that stalls large servers",
+      "prNumber": 9861,
+      "type": "bugfix",
+      "body": "handleMessage did `await message.guild.fetch()` on every guild message — a REST GET /guilds/{id} per message when message.guild is already populated from the gateway. In a large, busy guild that per-message fetch storm saturates discord.js'",
+      "files": [
+        "plugins/plugin-discord/messages.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 471.6322292892556,
+      "prScore": 426.8942292892556,
+      "issueScore": 44.3,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 468.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 468,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 286.39238611173107,
+      "prScore": 268.65438611173107,
+      "issueScore": 12.3,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 68.26667462710823,
+      "prScore": 68.26667462710823,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=e0d4e0c6385403319241eb46ba647b49083d4a05&v=4",
+      "totalScore": 30.04577463163418,
+      "prScore": 30.04577463163418,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 18.54203450814222,
+      "prScore": 16.34203450814222,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "github-advanced-security",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/57789?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 65,
+  "mergedPRs": 69,
+  "newIssues": 27,
+  "closedIssues": 2,
+  "activeContributors": 7
+}

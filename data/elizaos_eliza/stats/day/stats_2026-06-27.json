@@ -5,8 +5,21 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-06-27 to 2026-06-28, elizaos/eliza had 28 new PRs (8 merged), 0 new issues, and 7 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-06-27 to 2026-06-28, elizaos/eliza had 36 new PRs (8 merged), 1 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABG7nFIQ",
+      "title": "Cloud apps: multi-tenant hardening & completion before GA (audit work order)",
+      "author": "NubsCarson",
+      "number": 9853,
+      "repository": "elizaos/eliza",
+      "body": "## Cloud apps — multi-tenant hardening & completion before GA\n\nWork order from a deep audit of the **apps / container-deploy / per-tenant-DB** path. The architecture is solid and well-tested in pieces; this is the checklist to take it from *\"staging canary (allowlisted orgs)\"* to *\"safe for self-serve external users.\"*\n\n**Ground rules for whoever picks this up (cloud agent):**\n- Implement + verify **everything in staging** first. The container-deploy and DB-isolation paths only fully exercise when the **provisioning node daemon is armed** — arm it in staging before testing.\n- Each item below: re-confirm the exact file:line in the current tree before changing (the audit was a snapshot).\n- Land as small, reviewable PRs grouped by the sections below. P1 items are the gate before opening to non-allowlisted users.\n\n---\n\n### P1 — security gates (do first; required before any external / self-serve user)\n\n1. **Rate limiting everywhere it's missing** — global, anonymous-session minting, and the metered inference paths; add sybil control on the free-credit grant. *Today these are unthrottled, so a loop against the anon/inference path is unbounded cost.* **Effort: M**\n2. **Enforce the reserved/managed env-var denylist on BOTH container-deploy routes.** The denylist exists but is only applied on one route; the other lets a caller's `environmentVars` override managed keys (e.g. the metered-identity / cloud token). Strip reserved keys on both. **Effort: S**\n3. **Centralize outbound fetch behind one IP-pinned SSRF guard** (`safeFetch` that pins the resolved IP for the actual request). Current validate-then-fetch is TOCTOU → DNS-rebinding pivot into the cloud/metadata network. **Effort: M**\n4. **Close the Worker-path \"isolated DB\" silent fallback.** Isolated-DB only truly isolates on the node-daemon path (real `CREATE ROLE`/`REVOKE CONNECT`); the pure-Worker path silently falls back to a shared DB (isolation by UUID only). Either finish the per-tenant DDL TODO in the Worker path, or **hard-fail \"isolated\" when the daemon isn't armed** — never silently degrade to shared. **Effort: M–L**\n5. **Digest-pin the production image allowlist** and tighten the default GHCR orgs — no trailing-`*` namespace trust, no mutable `:latest`. **Effort: S**\n6. **CI gate against unscoped tenant DB reads** + run the existing isolation-verify script in CI. Tenant isolation currently rests on every handler remembering to pass `organization_id`; one slip = cross-tenant read. **Effort: S–M**\n\n> The first three (1–3) are the hard gate. Do not open beyond the org allowlist until they're in.\n\n### P2 — completion (make the gated path actually real)\n\n7. **Arm + health-monitor the provisioning daemon as a hard dependency** (alert if down). The container-stop billing cleanup AND real DB isolation both silently break when it isn't running. **Effort: M**\n8. **Wire Caddy ingress into the deploy success criteria** so a deploy cannot report success without a reachable public URL. **Effort: S–M**\n9. **One end-to-end staging test of the full user chain**: create app → build → isolated DB → live URL. Today it's only covered in disconnected pieces; the \"user's own code\" build leg is least exercised. **Effort: L**\n10. **Finish the consumer payout/redemption side** (currently \"temporarily unavailable\") and **replace the Cloudflare registrar dev stub** before charging for custom domains in prod. These are live money paths that charge but don't fully deliver yet. **Effort: M**\n\n### P3 — cleanup\n\n11. **Env kill-switch for feature flags** (they're hardcoded `enabled: true` with no runtime override — no way to disable a feature mid-incident). **Effort: S**\n12. **Confirm/re-enable the promo duplicate-redemption guard** on the free-credit path (currently commented out → repeat bonus possible). **Effort: S**\n13. **Refresh stale comments** (the \"no build service yet\" header is now wrong) and **re-audit the public-path prefix allowlist**, especially `/api/internal` and `/api/webhooks` that lean on per-handler secret checks (one mis-scoped `startsWith` exposes a subtree). **Effort: S–M**\n\n---\n\n**Bottom line:** strong, well-architected foundation — atomic credit deduction, hashed keys, a real (design-correct) per-tenant DB isolation, prebuilt-image deploy with quota/billing, good unit/integration coverage. The gap is the distance between *\"works on the armed-daemon path in staging\"* and *\"safe for arbitrary external users.\"* P1 closes that gap.\n",
+      "createdAt": "2026-06-27T22:11:26Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 5
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOMT5cIs7rYsdE",
@@ -16,7 +29,7 @@
       "body": "Stacked on #9846 (PR4).\n\nPR6 of the seamless-provision handoff — the **e2e**: make the SUCCESS handoff reachable + asserted in the cloud e2e harness. Previously the handoff e2e was unreachable (the mock control-plane served no `/conversations/import` route, and the existing spec asserted the handoff does NOT happen).\n\n## How\n- **cloud-mocks control-plane** (`server.ts` + `store.ts`): add a mock `/conversations/import|messages` store with idempotent skip-all import (mirrors the real agent route `conversation-routes.ts:1623`).\n- **New `app-client-handoff-success.spec.ts`**: creates a shared front, seeds a 4-message transcript, provisions a separate dedicated to `running`, runs the **real** `startCloudAgentHandoff`, and asserts the success contract — `status===\"switched\"`, `imported===4`, `onSwitch` fired with the dedicated base, transcript copied in order, conversation id stable, + idempotent replay (re-run inserts 0).\n- **`cloud-api-dev.mjs`**: an **e2e-scoped** `ELIZA_CLOUD_AGENT_BASE_DOMAIN` override nulling the unreachable dedicated subdomain so the reachable `bridge_url` wins in the local mock stack (gated by `isE2eTestMode`, no prod leak).\n\n## What this e2e CAUGHT\nIt surfaced a **load-bearing prod bug** the unit tests (which mock the create) couldn't: `POST /agents` hardcoded `reuseExistingNonTerminal: true`, so create-both's 2nd create returned the shared instead of a separate dedicated → the handoff never actually fired in prod. **Fixed in #9854** (forceCreate). This is exactly why the e2e earns its keep.\n\n## Tests\nRan green: `app-client-handoff-success` → `1 passed`, \"imported 4/4 message(s)\". Passed /clean + /review (PASS).\n\n## Follow-up\nWith #9854 (forceCreate) landed, this spec can be updated to drive the **real** create-both path (instead of inserting the dedicated row directly) — proving the full prod path e2e.\n",
       "repository": "elizaos/eliza",
       "createdAt": "2026-06-27T22:28:40Z",
-      "mergedAt": null,
+      "mergedAt": "2026-06-28T04:47:31Z",
       "additions": 440,
       "deletions": 1
     },
@@ -33,6 +46,30 @@
       "deletions": 149
     },
     {
+      "id": "PR_kwDOMT5cIs7rZEO7",
+      "title": "fix: wrap cloud connectors settings section",
+      "author": "odilitime",
+      "number": 9860,
+      "body": "## Summary\n- add a CloudConnectorsSettingsSection adapter for the in-app Settings registry\n- keep the standalone dashboard/settings/connections cloud route on the raw CloudConnectorsSection because CloudRouterShell already provides query and cloud i18n there\n- register the Settings section with the adapter so useCloudT resolves under CloudI18nProvider\n\n## Verification\n- bun run --cwd eliza/packages/ui typecheck (run from /Users/user1/Sites/milady3, passed)\n- bunx vitest run apps/app/test/package-mode-aliases.test.ts (Milady integration regression, passed)\n- bunx @biomejs/biome check apps/app/test/package-mode-aliases.test.ts eliza/packages/ui/src/cloud/connectors/index.ts (passed)\n- git diff --check origin/develop...HEAD (clean branch, passed)\n\nMilady integration PR: https://github.com/milady-ai/milady/pull/2200",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-27T23:14:06Z",
+      "mergedAt": "2026-06-28T04:29:15Z",
+      "additions": 421,
+      "deletions": 158
+    },
+    {
+      "id": "PR_kwDOMT5cIs7rZORi",
+      "title": "fix(cloud): IP-pinned safeFetch to close SSRF/DNS-rebinding window (#9853 P1.3)",
+      "author": "NubsCarson",
+      "number": 9864,
+      "body": "**#9853 P1 — item 3.** One IP-pinned `safeFetch` to close the TOCTOU/DNS-rebinding window: `assertSafeOutboundUrl` validated DNS then returned a *hostname* URL, and ~9 sinks `fetch()`'d it (re-resolving at connect → pivot into `169.254.169.254`/`10.x`/headscale mesh).\n\n- New `security/safe-fetch.ts`: resolves+validates DNS once (reusing the refactored `outbound-url` validators — no duplicate SSRF logic), and on **Node** pins the TCP socket to the validated IP via an `http(s)` `lookup` hook that re-runs `isForbiddenIpAddress` (Host header + TLS servername stay the hostname). Manual redirect handling re-validates + re-pins **every hop**.\n- **Honest caveat:** on workerd, `fetch()` can't pin an arbitrary IP — it re-validates immediately before each manual fetch; the residual Worker-side window is documented in `canPinSockets()`. Node sinks (provisioning webhooks run in the daemon) get true pinning.\n- Migrated the genuine validate-then-fetch-same-URL sinks (mcp-upstream-forward, provisioning webhook, media-utils, app-promotion, seo, waifu-webhook). **Deliberately left:** content-safety/seo-IndexNow/ad-media (validate-only — the URL is fetched by a downstream provider, not locally) and `eliza-sandbox` (~20 sites that *intentionally* target private mesh/docker IPs — safeFetch rejects private IPs by design; needs a mesh-aware allowlist refactor → separate follow-up).\n\n**Reviewer caveats (from self-review):** no socket-level integration test (not runnable in CI — validation rejects loopback; coverage is at the seams: lookup hook, per-hop re-resolution, fail-closed); `nodePinnedFetch` reimplements fetch over `node:http(s).request` — scrutinize stream body wiring + bodyless-status Response construction (CI typecheck is the gate); `redirect:'error'` now throws our Error vs the platform TypeError (callers handle generically). Pure redirect/lookup logic validated standalone.\n\nRefs #9853 (P1 item 3). The `eliza-sandbox` trusted-private-IP SSRF hardening is a recommended separate item.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-06-27T23:37:47Z",
+      "mergedAt": "2026-06-28T03:42:25Z",
+      "additions": 397,
+      "deletions": 28
+    },
+    {
       "id": "PR_kwDOMT5cIs7rWw_X",
       "title": "feat(handoff): silent in-place re-point on switch — no flash, no WS drop, no draft loss (PR3)",
       "author": "standujar",
@@ -40,40 +77,16 @@
       "body": "Stacked on #9844 (PR2 freeze).\n\nPR3 of the seamless-provision handoff — the **invisible re-point**: make the shared→dedicated switch visually invisible (no full-screen `StartupScreen` flash, no wiped composer draft, no `SWITCH_AGENT`/coordinator re-entry).\n\n## The problem\nToday the handoff's `onSwitch` → `switchAgentProfile` → `clearAllChatDrafts` (wipes composer) + `SWITCH_AGENT` → coordinator `ready→polling-backend` (not shell-paintable) → `App.tsx:2057` swaps the shell for `<StartupScreen/>`; and `setBaseUrl` unconditionally `disconnectWs`. = full-screen flash + dropped WS + lost draft.\n\n## How\n- New `ElizaClient.repointBaseUrl(base)` — flips the base + persistence (extracted `persistBaseUrl`, byte-identical to `setBaseUrl`'s body) **without** the unconditional `disconnectWs`, swapping the WS in place. Global `setBaseUrl`/`disconnectWs` untouched.\n- New `cloud/handoff/silent-repoint.ts` — persists the dedicated active-server + profile, `setToken`, `repointBaseUrl`. **NO** `clearAllChatDrafts`, **NO** `switchAgentProfile`, **NO** `SWITCH_AGENT`. Chat stays mounted on the same conversation id (transcript already copied by PR2's supervisor).\n- The handoff `onSwitch` points at this silent path; every other caller keeps the global switch.\n- Removed the shipped `isCloudAgentWaking` banner (+ its tests + sole consumer); the Settings row keeps its local resume chip; the chat progress toast (`CloudHandoffBanner`) stays.\n\n## ⚠️ Known WARN (from /clean + /review — surfaced honestly)\nThe in-place WS-swap is currently **inert on cloud bases**: both the shared REST adapter and `*.elizacloud.ai` are treated as connected-without-WS, so `connectWs()` no-ops (`client-base.ts:1082`). So the ~40 lines of socket teardown are dead-weight on these bases today — they no-op safely (no crash, no flap). The re-point's real \"invisible\" wins (no `StartupScreen` flash, no draft clear, no `SWITCH_AGENT`, global path untouched) hold **independent** of the WS swap. **Reviewer's call** whether to prune the WS handling now or keep it for when a base does use WS.\n\n## Safety + tests\nGated behind `preferSharedCloudTier` (default off → byte-identical; global `setBaseUrl`/`switchAgentProfile` unchanged for all other callers). 21 tests (silent-repoint + controller, incl. asserting the handoff switch does NOT clear drafts / does NOT dispatch `SWITCH_AGENT`) + `tsc` clean. Passed /clean + /review (No FAIL; 2 cleanups applied).\n\nNot in scope: delete-shared (PR4), billing (PR5).\n",
       "repository": "elizaos/eliza",
       "createdAt": "2026-06-27T18:51:13Z",
-      "mergedAt": null,
+      "mergedAt": "2026-06-28T04:47:27Z",
       "additions": 353,
       "deletions": 145
-    },
-    {
-      "id": "PR_kwDOMT5cIs7rWR-i",
-      "title": "feat(handoff): create dedicated alongside shared + arm the existing handoff (PR1)",
-      "author": "standujar",
-      "number": 9843,
-      "body": "Builds on #9838 (the `preferSharedCloudTier` flag, now merged to develop).\n\nPR1 of the seamless-provision handoff: when the app creates a SHARED bridge agent (behind `preferSharedCloudTier`), also background-provision a **separate dedicated** agent and arm the existing handoff to switch to it when ready.\n\n## Bug this fixes (why the handoff never fired)\n`startCloudAgentHandoff` keyed the readiness probe to the **same** agentId as the shared conversation source — but a shared agent is container-free and never grows a dedicated `bridge_url`, so the probe could never resolve (pre-#9838 the branch was skipped; post-#9838 it'd time out forever). Fix: a separate `dedicatedAgentId` target — the probe polls the dedicated agent, the conversation source stays the shared one.\n\n## How\n- `startCloudAgentHandoff` gains optional `dedicatedAgentId`; readiness probe polls `dedicatedAgentId ?? agentId`.\n- When the flag is ON + a shared agent is created: background-create a dedicated agent (normal always-on create, once, outside the retry thunk), then arm the existing `runCloudAgentHandoff` with shared=source + dedicated=target.\n- The handoff spine (`runConversationHandoff` / supervisor / import) is reused untouched. Switch stays the existing **visible** one — invisible re-point is a later PR.\n\n## Safety\nFlag OFF → byte-identical (no second create, no arm), locked by a flag-off test. `dedicatedAgentId` defaults to `agentId` so pre-existing callers are unchanged.\n\n## Tests\n48 pass (supervisor, select-or-provision, new handoff-target test, full first-run controller suite). Biome + tsgo clean on the 4 changed files.\n\nNot in scope (later PRs): invisible re-point, freeze-on-shared, delete-shared, billing.\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-27T18:02:35Z",
-      "mergedAt": null,
-      "additions": 279,
-      "deletions": 47
-    },
-    {
-      "id": "PR_kwDOMT5cIs7rXN1m",
-      "title": "feat(handoff): delete the shared bridge after a successful switch (PR4)",
-      "author": "standujar",
-      "number": 9846,
-      "body": "Stacked on #9845 (PR3 invisible re-point).\n\nPR4 of the seamless-provision handoff — **delete the transient shared bridge after a SUCCESSFUL switch**.\n\n## What\nOnce the user is switched to the dedicated and the transcript is copied, delete the shared agent + its `shared_runtime_history` (one DELETE cascades both — `eliza-sandbox.ts:867`). The shared was a transient bridge; this cleans it up so we don't leak a row per agent.\n\n## The safety guarantee (it's destructive)\nThe delete fires **ONLY** on a confirmed successful switch — `switched`/`switched-empty`, which `runConversationHandoff` returns only AFTER both `await importToPersonal` + `await switchToPersonal` (the silent re-point) resolve. On `timed-out`/`failed`/thrown → the hook never fires (the user is still on the shared bridge). Threaded through the retry so only the success leg deletes. Fire-and-forget: a failed delete only logs a leaked-row warning — degrades to a leak, **never** to data loss or an un-switched user. **/review verdict: \"provably gated — the shared is never deleted while the user still depends on it\" (traced end-to-end).**\n\n## Bug caught + fixed\n`deleteCloudCompatAgent` resolves its base from the client's **mutable** `baseUrl` — but by delete-time the client already re-pointed to the dedicated → would mis-route. Fix: a **base-pinned** `deleteSharedBridgeAgent(agentId, { cloudApiBase, authToken })`.\n\n## Tests\n56/56 pass — delete fires on `switched`/`switched-empty`, does NOT fire on `timed-out`/`failed`/thrown, fires only on the retry success leg, swallows a delete rejection. Flag-off byte-identical.\n\n## Known follow-ups (from /clean + /review, non-blocking)\n- The delete uses bare `fetch()`, not the Capacitor native-HTTP path → on **mobile** builds the cleanup may fail and leak the shared row (harmless: fire-and-forget, user is on the dedicated). Worth fixing across the whole handoff `fetch` family.\n- Non-2xx body discarded in the leaked-row warning; the exclusion-based success gate is open to future status members; one test under-proves the async rejection swallow.\n\nPassed /clean + /review (No FAIL). Not in scope: billing (PR5), e2e mock (PR6).\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-06-27T19:39:06Z",
-      "mergedAt": null,
-      "additions": 251,
-      "deletions": 37
     }
   ],
   "codeChanges": {
     "additions": 580,
     "deletions": 1428,
     "files": 43,
-    "commitCount": 36
+    "commitCount": 48
   },
   "completedItems": [
     {
@@ -256,9 +269,9 @@
       "summary": null
     }
   ],
-  "newPRs": 28,
+  "newPRs": 36,
   "mergedPRs": 8,
-  "newIssues": 0,
+  "newIssues": 1,
   "closedIssues": 0,
   "activeContributors": 7
 }
