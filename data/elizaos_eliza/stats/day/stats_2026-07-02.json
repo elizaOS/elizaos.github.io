@@ -1,0 +1,2124 @@
+{
+  "interval": {
+    "intervalStart": "2026-07-02T00:00:00.000Z",
+    "intervalEnd": "2026-07-03T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-07-02 to 2026-07-03, elizaos/eliza had 119 new PRs (111 merged), 0 new issues, and 8 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7s9qB3",
+      "title": "release: promote develop → production (money-integrity wave, monetization rails, auth overhaul, live rate limiting)",
+      "author": "NubsCarson",
+      "number": 11150,
+      "body": "## Production promote: develop → main (444 commits)\n\nProd has been running a **manually-promoted develop frontend** (`d2b8782`, via local `wrangler pages deploy`) against a **day-old Worker and schema** since ~00:00Z — any main push regresses the frontend; the skew only grows. This PR makes prod durable and lockstep: merging triggers `cloud-deploy-backend` (migrate-db) **and** `cloud-cf-deploy` (Worker `--env production`, both Pages `--branch=main`) from the same main push.\n\nFull runbook: `PROD_PROMOTE_RUNBOOK.md` in the deploy-lane worktree + condensed in elizaOS/eliza#10561 (comment 4862165568). Analysis: 4-agent delta/hazard/mechanics/validation pass over `main..develop`.\n\n### Pre-merge checklist (why this is DRAFT)\n- [x] **REDIS_URL present in prod Worker env** — verified 2026-07-02 ~05:50Z via `wrangler secret list --env production` (223 secrets; REDIS_URL + MCP cache Redis present). The #10620 fail-closed rate-limit guard will pass. (Presence-verified; a dead URL degrades to fail-open limiting, not an outage.)\n- [x] develop merges into main clean (`git merge-tree --write-tree`: no conflicts; the 2 main-only CodeQL commits reconcile with their develop-parity equivalents)\n- [x] Staging validated on this code lineage (sign-in renders, onboarding renders, 0 CORS, API health ok — #10561 00:55Z + 01:55Z evidence)\n- [ ] **Deploy window**: robots take ONE deploy at a time (#11108). At merge time, hold develop deploy runs until the main run completes (the cloud/laptop agent session runs the escort and will cover this — ping in #10561).\n- [ ] **Watch `migrate-db` go green** on the main push (cloud-deploy-backend). If it fails, the Worker still ships → roll the Worker back (re-dispatch env=production from `23f33ccc`) or hotfix the DB before traffic notices.\n- [ ] Post-deploy validation: automated harness (bundle-hash flip, 5 sign-in options render, 0 CORS, `api/health` ok) + the 2-minute real sign-in → message → credits-deduct manual pass. Abort/rollback signals in the runbook (Pages = CF dashboard rollback, proven 06-25).\n\n### What ships (headlines)\n- **Money-integrity wave**: creator-earnings idempotency across all money routes; 3 payout double-pay windows closed; Stripe refund/chargeback clawbacks (non-negative); atomic crypto top-up; upfront credit reservation vs `max_tokens`; org-credit gates on agent resume; per-app API key scoping; per-org agent/container caps. Zero-balance orgs start getting **correct rejections** — visible behavior change.\n- **Monetization rails**: miniapp Stripe/OxaPay credit rails + compliance-review gate + admin-approved USDC payouts; ad SSP; influencer marketplace w/ escrow; managed frontend hosting; agent-driven custom domains.\n- **Auth/onboarding overhaul**: apex lands authed users on the console (#11031, already hand-promoted); same-origin API proxy; OAuth redirect + Suspense crash + session-loop fixes; apex-401 root fix (#11004); reworked first-run onboarding; pre-auth polling gated (#11084).\n- **Rate limiting goes live** in prod (#10620) — pre-check above clears the fail-closed guard.\n- Optional secrets degrade gracefully if unset: `OXAPAY_MERCHANT_API_KEY`, `ELIZA_AD_TAG_SECRET`, `ELIZA_FRONTEND_HOST_SUFFIX`, `APP_REVIEW_MODEL`. `FAL_KEY` is present-but-invalid (#11005) — independent ops fix, not gated on this PR.\n\n### Migrations\n9 additive migrations (0155–0163: withdrawal idempotency, frontend hosting, compliance gate w/ backfill, influencer + ad tables, domains anti-squat unique swap). Auto-applied by migrate-db on the main push; old code ignores the new tables, so a code rollback needs no schema rollback.\n\n**Draft until @NubsCarson + @lalalune call it.** Merging this = production deploy.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-02T04:34:18Z",
+      "mergedAt": "2026-07-02T06:02:25Z",
+      "additions": 546925,
+      "deletions": 147020
+    },
+    {
+      "id": "PR_kwDOMT5cIs7s7rYI",
+      "title": "test(ui,app,agent): onboarding/voice/background/interaction QA follow-ups + de-larp (#11083 follow-up)",
+      "author": "lalalune",
+      "number": 11103,
+      "body": "## Summary\n\nFollow-up hardening for the onboarding/chat/voice/gesture/background epic\n(**PR #11083, merged** as `a9be4f48c70a`). A 6-agent audit of that epic surfaced\na set of residual gaps + test-honesty issues; this PR closes the\nlocally-achievable, verifiable ones. Branched fresh off `develop` (9 commits, 0\nbehind), so it layers cleanly on top of the merged epic **and** develop's\nsubsequent shader refinement (#11088/#11102).\n\n## What's in it\n\n**Voice / #10700 — converse-mode fuzz dimension.** The shell send/voice/new-chat\nfuzz declared converse (VAD/semantic end-of-turn commit→send) a *deferred*\ndimension. Added it: the fuzz now drives converse capture through the **real**\n`TurnAggregator` (a complete final commits synchronously → VOICE_DM send) and\nasserts `lastTurnVoice` clears on every new-chat; a dedicated test proves a\ncomplete converse final sends a VOICE_DM (not a plain DM) + a negative (pure\ndisfluency commits but the respond-gate drops it). Also corrected the header's\nmock disclosure (sendChatText is the separately-pinned send-queue leaf).\n\n**Background / #10694 residuals.**\n- **Redo now persists across reload** (deliverable was \"undo + redo, bounded,\n  persisted\" — redo was in-memory only).\n- **Killed the e2e store-mirror larp:** extracted one pure, browser-safe reducer\n  (`state/background-history.ts`, `applyBackgroundSet/Undo/Redo`) used by BOTH\n  `useDisplayPreferences` and the e2e fixture — the fixture no longer hand-mirrors\n  the history semantics, so drift is impossible. Added a direct reducer unit test.\n\n**Voice-test honesty / #10726.** Retired the tautological WER assertion in the\nChromium voice lanes (the mock ASR echoes the expected phrase → WER structurally\n0, can never regress). The load-bearing \"a real WAV reached ASR\" assert stays;\nWER accuracy is scored only in the real-recognizer tiers.\n\n**Chat UI regression gates.**\n- **#10698:** computed-style gate that message bubbles have **no** per-message\n  fill (the backdrop-blur gate bans blur, not a fill) — 12 bubbles asserted\n  transparent.\n- **#10706:** real CDP-touch **pull-down** opens the NotificationCenter sheet\n  (was jsdom-synthetic only). Also fixed a real bug: `run-home-screen-e2e` called\n  an orphaned `swipeRight()` helper (only `swipeLeft` survived a develop rebase),\n  crashing the whole home CI lane with a ReferenceError.\n- **#10713:** the per-message COPY test now reads `navigator.clipboard.readText()`\n  back and asserts the bytes, not just the \"Copied\" label.\n\n**Interaction de-larp / #10722.**\n- **Real drag-to-reorder launcher e2e:** a genuine Framer `Reorder.Item` pointer\n  drag that fires reorder telemetry, changes the tile order, persists to\n  `LAUNCHER_STORAGE_KEY`, and drops/duplicates no ids (verified live: 0→23\n  reorder events, 25 unique ids). The mock-based `Launcher.gestures.test` and\n  `use-pull-gesture.test` are relabelled as explicitly **logic-only** (they no\n  longer overstate gesture-pipeline coverage).\n- **View-capability gate de-larped:** it was vacuously true (passed on any\n  `VIEW_ACTION_MAP` entry — every view has one) and blind to the 8 spatial views\n  (which instrument via `agent=` → `data-agent-id`, not `useAgentElement`, so they\n  passed as 0-control for free — `documents` actually has 8 registrations counted\n  as 0). Replaced with a proportional **density** gate over both DOM + spatial\n  dialects (`>= ceil(controls / 4)` registrations), calibrated with headroom over\n  the densest real view, plus a teeth/positive-control test that FAILS an\n  8-control/1-registration source. Render-based coverage stays with the running-\n  shell crawler (`@elizaos/agent` must not import 14 leaf view packages).\n- **WebKit lane:** opt-in (`PLAYWRIGHT_WEBKIT=1`) Safari-engine project in the\n  ui-smoke config, scoped to the permission-free pointer/focus/text-input specs.\n\n**CI.** `app-real-e2e.yml` now exports `ELIZA_CHROME_PATH` (resolved from the\nchromium it already installs) so the nightly live-streaming lane stops\nself-skipping forever.\n\n## Evidence (verified against this develop base)\n\n- **Unit:** `packages/ui` touched suites **38/38** (background-history reducer,\n  redo-persist round-trip, converse fuzz) + `packages/agent` view-capability\n  **20/20**. ui + app typecheck clean (one pre-existing develop-wide\n  `plugin-local-inference` dist-staleness error, untouched here).\n- **E2E (real browser, green on this base):** launcher drag-reorder\n  (`run-launcher-e2e` — real Framer drag → telemetry + persistence + no dup ids),\n  home-screen pull-down (`run-home-screen-e2e`), chat-sheet no-fill\n  (`run-chat-sheet-e2e`). Committed screenshots + walkthrough webms.\n\n### Honest deferrals (N/A with reason — not larped)\n- **#10710** full minimal-redesign + `ELIZA_AUDIT_APP_STRICT` flip — a separate\n  redesign epic needing the `audit:app` 5-loop on a fully-built app. The \"card\n  chrome\" in AutomationsFeed/CameraPageView/Launcher is **functional component\n  shape** (launcher tiles, camera shutter, badges), not gratuitous card wrappers,\n  so a blind strip would regress the design.\n- **#10706 desktop-native tray notification** — a separate electrobun feature.\n- **#9525 android-device-e2e dispatch** + audit-strict debt-seed — operator/CI\n  actions (need a completed device run / a clean full-audit run to seed).\n- **Live-Cerebras BACKGROUND scenario** — the scenario-runner harness can't boot\n  locally (pre-existing `@elizaos/plugin-discord/user-account-scraper` +\n  `plugin-local-inference` dist staleness; CI builds first). The BACKGROUND NL→\n  plan→payload path is covered by deterministic tests over the **real**\n  `inferBackgroundPlan`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-02T02:16:11Z",
+      "mergedAt": "2026-07-02T02:58:29Z",
+      "additions": 59067,
+      "deletions": 1906
+    },
+    {
+      "id": "PR_kwDOMT5cIs7s9dyl",
+      "title": "refactor(ui,app): strip default-visible views to the minimal eliza aesthetic — flat surfaces, borderless controls, strict audit gate ON (#10710)",
+      "author": "lalalune",
+      "number": 11148,
+      "body": "Closes #10710.\n\n## What this does\n\nThe full audit-and-strip pass over every default-visible view (system/release ViewKind), plus the gate work the issue's acceptance criteria require. Six parallel strip passes (character, documents, automations, apps/shell, settings/misc, training) + shared-primitive de-chroming + a polish round driven by three audit loops.\n\n**Stripped:** structural borders, wrapper background fills, divider lines, card radii, decorative chips/count badges, and helper-text slop across: launcher/apps grid (dock solid-dark card → translucent wash; borderless tiles), automations (stat cards → plain figures; filter pills → borderless text tabs), documents (chips → middot text; borderless scope tabs; fixed illegible accent-fg label), character (editor panels/experience workspace/hub/roster/timeline), training/fine-tuning, secrets/config/settings residuals, stream, media gallery, wallet, pairing/startup-failure/bug-report shells, memories, chat overlay container chrome (HeaderButton → borderless icon-only; composer divider removed). Shared primitives: SegmentedControl outer box, PagePanelFeatureEmpty medallion border, sidebar toggle border + right-edge hairline.\n\n**Kept (semantic):** warn/error/destructive boxes, focus rings, active-selection states, drag/drop zones, progress bars, modal/glass scrims (self-contained contrast over wallpaper), bottom-line input affordances, functional browser toolbars, graph-meaning node outlines.\n\n**Fixed while in here:**\n- Triple \"Fine-Tuning\" launcher tile (TAB_PATHS `fine-tuning` + `advanced` + the plugin-training `training` view id) — deduped via CANONICAL_ID; verified in pixels (one tile).\n- Stream \"Go Live\" was a green CTA → accent (orange is the only accent; Stop stays danger).\n- Native checkboxes/radios rendered UA blue → `:root { accent-color: var(--accent) }`.\n- Radius gate: admits 3px (base.css collapses all --radius-* tokens to 3px) and 32px (the chat capsule's animated collapsed radius — it was flagging ALL 348 findings).\n- CI strict flip (#10970 operator steps): `ELIZA_AUDIT_APP_STRICT=1` + `ELIZA_AUDIT_APP_STRICT_NEEDS_WORK=1` with empty debt.\n- Minimalism ratchet refreshed: 41 entries (launcher family, documents, automations, fine-tuning, memories, stream all cleared from the debt record).\n- Clicksafe probes for /apps, /views, /rolodex, /polymarket, /shopify — all five were failing on develop tip itself (verified on a clean develop worktree); re-anchored on real testids/toolbars + fixed the smokePolymarketStatus fixture missing its required `account` block.\n\n## Numbers (audit: 349-test matrix, 5 viewports, rest+hover)\n\n| | before | after |\n|---|---|---|\n| verdicts | 136 good / 212 needs-eyeball | **307 good / 41 needs-eyeball** (0 needs-work, 0 broken) |\n| radius violations | 348/348 findings | **0** |\n| blue | 0 | 0 |\n| launcher density (desktop/mobile, ceiling 45) | 89.5 / 303.8 | **6.2 / 24.3** |\n| fine-tuning | 52.5 / 145.8 | 9.3 / 30.4 |\n| automations | 37.0 / 145.8 | 6.2 / 24.3 |\n| documents | 27.8 / 109.4 | 6.2 / 24.3 |\n\n**Strict-gated run (both flags on, empty debt): 349/349 passed.** Remaining 41 needs-eyeball = baselined developer views + plugin app views (sibling scope) + 3 single-viewport builtin entries (browser/relationships mobile — functional toolbars / a form select on 390px).\n\n## Evidence — `.github/issue-evidence/10710-strip-default-views/`\n\nBefore/after full-page screenshots (desktop+mobile, 18 views each), complete strict-run report.json + final-tree re-run, 100 filled manual-review verdicts (every default view `good`, eyeballed by hand), regenerated launcher walkthrough webm + per-step captures. Real-LLM trajectory: N/A — presentation/CSS + test-harness change, no model/action/prompt path. Backend logs: N/A — no server code path.\n\n## Verification\n\n- Full `packages/ui` suite: **5107 passed** (twice: post-strip, post-polish); post-develop-merge full-suite run hit a develop-side WidgetHost worker crash that reproduces on clean develop tip (bisect+fix in flight separately) — not from this branch.\n- Per-group scoped runs during the strips: character 26, documents 2, automations 42, apps/shell 89, settings/misc 99, training 40 — all green; plugin-wallet-ui 39; launcher-curation 11.\n- e2e: launcher e2e green (fresh walkthrough recorded); fixed clicksafe probes pass in ~1s each (were 3-minute timeouts, failing on develop too).\n- typecheck (tsgo) + biome 2.5.1 clean on every touched file. Known pre-existing environmental red: packages/app strict typecheck fails on the plugin-local-inference dist gap (develop-wide, documented).\n\nKnown out-of-scope finding for the icon-artwork owner: several launcher icon assets contain blue pixels (invisible to the CSS audit).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-02T04:19:39Z",
+      "mergedAt": "2026-07-02T04:20:04Z",
+      "additions": 38430,
+      "deletions": 1522
+    },
+    {
+      "id": "PR_kwDOMT5cIs7s6izD",
+      "title": "feat(ui): floating-chat onboarding lock + programmable GLSL shader background + interaction/QA de-larp (#9952, #10694, #10722, #10434)",
+      "author": "lalalune",
+      "number": 11083,
+      "body": "## Summary\n\nFloating-chat onboarding + interaction/background QA epic. This branch makes the\nin-chat first-run onboarding a true **modal lock**, ships the missing headline\nfeature of the app background (**arbitrary programmable GLSL shader**), removes\ndead avatar plumbing, and de-larps several interaction/testing gaps surfaced by a\n6-agent audit of the whole cluster (#9952, #10694, #10722, #10712, #9950, #10434,\nplus the closed #10697/#10698/#10699/#10700/#10706/#10708/#10709/#10711/#10713/\n#10715/#10717/#10720/#10322/#9525 which were verified real, not larp).\n\nIt is rebased clean onto `develop` (0 behind). Two of the pre-rebase commits\noverlapped work that merged on develop in the meantime (#10694 undo/redo via\n#10771/#10960; topic gestures via #10988) — those were reconciled: develop's\nundo/redo kept, this branch's **superior** TopicGroup fix (`touch-pan-y` +\n`suppressClickRef` — fixes a tap double-toggle develop's `touch-none` leaves\nlive) kept, the duplicate redo button dropped.\n\n## What's in this PR\n\n### Onboarding lock (#9952) — the user-flagged defect\ndevelop still ships a **dismissable** onboarding chat with a **live composer**\nduring setup. This makes the floating chat a modal onboarding surface while\nfirst-run is pending:\n- opens pinned **FULL**; composer locked (textarea disabled → \"Choose an option\n  to continue\"; attach/mic/PTT/send disabled; prefill/dictation/slash side-doors\n  hard-guarded; the AppContext send backstop drops any non-`__first_run__:` value);\n- **undismissable** — every collapse path (Escape, outside-tap, grabber\n  pull-down/drag, header clear/launcher, conversation swipe, and — new here — the\n  `TUTORIAL_CHAT_CONTROL_EVENT` rest/reset/prefill seam) is a no-op;\n- **auto-collapses once** on the completion falling edge, revealing home.\n\nContract documented in `first-run/IN_CHAT_ONBOARDING_DESIGN.md`; covered by\n`ContinuousChatOverlay.firstrun.test.tsx` (9 tests).\n\n### Programmable GLSL shader background (#10694)\ndevelop already had undo/redo; this adds the arbitrary programmable shader mode:\n- `ProgrammableShaderBackground` renders a GLSL fragment via **raw three.js**\n  (already a dep; no new deps) behind a full safety sandbox for untrusted GPU\n  code: compile-validate before showing, clamped uniforms, frame-time watchdog,\n  WebGL context-loss recovery, reduced-motion static frame, and a color-field\n  fallback on any failure (a bad shader can never white-screen or hang the app);\n- `BackgroundConfig` gains a `glsl` mode (source + presetId + typed/clamped\n  uniforms); `normalizeBackgroundConfig` collapses a hostile/oversized/absent\n  source to the color field on load;\n- 5-preset GLSL library (aurora/lava/plasma/waves/nebula, bounded loops only);\n- BACKGROUND action drives it from chat: named presets (+ synonyms), a generic\n  \"animated shader\" → default, and relative tweaks (slower/brighter/bigger),\n  with precedence so \"red brighter\" stays red and \"molten\" beats a bare color.\n\n### Dead-route removal (#10434 follow-up)\n#10434 removed the 3D companion but left the `/api/avatar/vrm` +\n`/api/avatar/background` upload/serve routes, the dead client methods, and the\nstartup existence probes that only produced onboarding 404 noise. All removed;\nlive built-in avatar-index selection untouched.\n\n### Interaction / testing de-larp\n- **#10722 gestures** (already on branch, verified real): real CDP\n  `Input.dispatchTouchEvent`, and the two production bugs it exposed\n  (TopicGroup tap no-op, HomeScreen swallowing horizontal pans) fixed.\n- **#10722 XR claim de-larped:** removed the WEBXR_PLATFORMS.md \"validated\n  end-to-end / read back two textured quads\" overclaim (no test opens an\n  immersive session or reads pixels; `enterImmersiveScene` has no caller) and\n  added an explicit \"NOT yet validated\" section. (The sibling tui-pty \"vacuous\n  skip\" finding was a **false negative** — the real-PTY suite IS wired into CI\n  via test.yml's Real-PTY step and passes locally; left as-is.)\n- **#9950 aesthetic gate** (already on branch): the density probe's\n  catch-to-zero silently satisfied the minimalism budget/ratchet (a probe crash\n  read as \"perfectly minimal → pass\"). Now recorded as a `densityProbeFailures`\n  finding and the budget/ratchet skip a failed probe, so a crash can't\n  manufacture a pass.\n- **#10712 streaming** (already on branch): force-added the four gitignored\n  live-run Cerebras logs the evidence README cites.\n\n## Evidence\n\n- **Tests, real + green (run in this worktree):**\n  - `plugin-app-control` **1271/1271** (incl. the new BACKGROUND preset/tweak/\n    precedence inference + emit tests).\n  - `packages/ui` touched suites **339/339** — shader-schema (clamp/NaN/hostile/\n    while-loop/hex), preset-library integrity, ProgrammableShaderBackground\n    fallback + no-crash-on-garbage, persistence glsl round-trip + hostile-source\n    collapse, AppBackground glsl render + fallback, a **400-step set/undo/redo\n    storm fuzz** across shader/image/glsl, the onboarding firstrun lock (9), and\n    the existing background/undo-redo suites.\n  - `agent` real-PTY TUI smoke passes locally (`test:tui-pty`).\n- **Real-LLM streaming trajectory (#10712):** committed SSE frame captures\n  (`thinking→running_action→token×N`, monotonic lengths 47→85→133) +\n  green/red live-run logs under `.github/issue-evidence/10712-live-streaming-thinking/`.\n- **Screenshots / recordings:** the gesture, home-screen, background, and chat\n  `__e2e__` output artifacts (png/webm) committed on-branch.\n- **Typecheck/lint:** `packages/ui` + `plugins/plugin-app-control` typecheck +\n  biome clean.\n\n### N/A (with reasons — honest, not skipped)\n- **Live Cerebras BACKGROUND-shader scenario:** `N/A here` — the scenario-runner\n  harness can't boot in this local worktree (`@elizaos/plugin-discord/\n  user-account-scraper` subpath unresolved from plugin-personal-assistant — a\n  pre-existing develop-wide plugin dist-staleness issue; neither plugin touched\n  here). The BACKGROUND shader NL→plan→payload→renderer path is covered by\n  deterministic tests that exercise the **real** `inferBackgroundPlan` routing\n  (not a mock); the live suite is the designated #10694 live-lane deliverable,\n  runnable in CI where the workspace is built.\n- **Isolated-browser shader e2e + `audit:app` 5-loop:** `N/A here` — need a full\n  built app + headless-Chromium WebGL lane; tracked for the app visual-audit\n  lane. Unit + component + story-gate + fuzz cover the shader in this PR.\n\n## Known follow-ups (separate issues, out of this PR's coherent scope)\nSurfaced by the audit, not blocking this bundle: #10710 (strip default views to\nminimal + strict audit), the #10700 converse-mode voice fuzz dimension, the\n#10699 real-browser transcribe-button click e2e, and the #10706 desktop-native\nnotification treatment.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-02T00:47:48Z",
+      "mergedAt": "2026-07-02T00:52:51Z",
+      "additions": 38251,
+      "deletions": 31383
+    },
+    {
+      "id": "PR_kwDOMT5cIs7s8_bW",
+      "title": "feat(ui,app,desktop): desktop-native Notifications entry opens the notification center (#10706)",
+      "author": "lalalune",
+      "number": 11130,
+      "body": "Salvaged from a rate-limited session's worktree (fervent-knuth). Contains:\n- desktop-native \"Notifications\" entry wiring the notification center (#10706)\n- #10694 background-scenario live-run evidence bundle\n\nReview + finish in progress; will be verified before ready.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-02T03:48:50Z",
+      "mergedAt": "2026-07-02T04:38:56Z",
+      "additions": 35050,
+      "deletions": 3
+    }
+  ],
+  "codeChanges": {
+    "additions": 217502,
+    "deletions": 11492,
+    "files": 942,
+    "commitCount": 270
+  },
+  "completedItems": [
+    {
+      "title": "fix(cloud): invalidate app cache after compliance review — stale review_status payment gate",
+      "prNumber": 11213,
+      "type": "bugfix",
+      "body": "**Found via the Fable-5 live-staging e2e sweep** (charter #11157 launch-hardening). Money/compliance path — flagging `[cloud-money]`/`[cloud-audit]` to review/own per the charter split; I root-caused + fixed + proved it live.\n\n### Bug\n`runA",
+      "files": [
+        "packages/cloud/shared/src/lib/services/app-review.ts"
+      ]
+    },
+    {
+      "title": "test(cloud): pin the #11155 dispute-reinstatement netting — re-delivery idempotency + partial-dispute regressions",
+      "prNumber": 11212,
+      "type": "tests",
+      "body": "Complementary hardening for merged #11185 (which closed #11155): two real-PGlite regressions its suite didn't cover — (1) re-delivered `funds_reinstated` events must not drive the netted clawback tally negative (would flip the bug into an o",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/credits-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ui,app): #11174 review follow-ups — no-dock launcher spec + notification-panel Escape deferral",
+      "prNumber": 11211,
+      "type": "bugfix",
+      "body": "PR #11174 was reviewed MERGE-WITH-FIX with exactly two required fixes, but it was squash-merged (188b73ec0da) before they landed. This follow-up applies both:\n\n## 1. `launcher-interaction.spec.ts` updated to the no-dock contract\nThe keyless",
+      "files": [
+        "packages/app/test/ui-smoke/launcher-interaction.spec.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): model-backed sub-agent interruption decision (#11028)",
+      "prNumber": 11210,
+      "type": "feature",
+      "body": "Addresses the interruption residual from **#11028**: the mid-task interrupt/queue/deliver/ignore decision was 100% regex.\n\n## Why\n\n`decideInterruption` already accepts an optional `shouldRespond` verdict, but `active-session-forward.ts` nev",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/interruption-decider.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/active-session-forward.ts",
+        "plugins/plugin-agent-orchestrator/src/services/interruption-decider.ts"
+      ]
+    },
+    {
+      "title": "fix(cockpit): keep TaskInspector's w-80 rail on desktop — mobile-only class override (post-#11159 audit)",
+      "prNumber": 11209,
+      "type": "bugfix",
+      "body": "Post-merge audit of #11159 reproduced a **live desktop regression** on develop: the mobile-drawer change passed `className=\"flex\"` to `TaskInspector` unconditionally, suppressing its `flex w-80` fallback. In the session pane's flex **row** ",
+      "files": [
+        "plugins/plugin-task-coordinator/src/CockpitSessionPane.test.tsx",
+        "plugins/plugin-task-coordinator/src/CockpitSessionPane.tsx"
+      ]
+    },
+    {
+      "title": "fix(cockpit): keep the desktop w-80 inspector rail in the session pane",
+      "prNumber": 11207,
+      "type": "bugfix",
+      "body": "## What\n\nFollow-up to #11159. That PR's stated intent was \"Desktop is unchanged\", but the `TaskInspector` mount in `CockpitSessionPane.tsx` passed `className=\"flex\"` unconditionally, overriding the component's default `\"flex w-80\"` and sile",
+      "files": [
+        "plugins/plugin-task-coordinator/src/CockpitSessionPane.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): /v1/chat reserves for the real output ceiling, not the 500-token default (#11169 part 2)",
+      "prNumber": 11206,
+      "type": "bugfix",
+      "body": "Part 2 of #11169.\n\n## Problem (MED — money under-reservation / evasion)\n`/v1/chat` (`packages/cloud/api/v1/chat/route.ts`) called `creditsService.reserve` with **no `estimatedOutputTokens`** → `DEFAULT_OUTPUT_TOKENS` (500), while the model ",
+      "files": [
+        "packages/cloud/api/__tests__/chat-stream-credit-leak.test.ts",
+        "packages/cloud/api/v1/chat/route.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): task-store delete/write race — tombstone + dirty tracking inside the queued op (#11028)",
+      "prNumber": 11205,
+      "type": "bugfix",
+      "body": "Follow-up to #11197 (refs #11028), from post-merge review of the task-store concurrency fix. Two defects in the `FileTaskStore` read-merge-write as merged, both reproduced by regression tests that **fail on current develop**:\n\n## 1. Deleted",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/orchestrator-task-store.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-store.ts"
+      ]
+    },
+    {
+      "title": "fix(core): fail closed when pinned SSRF transport cannot load + real socket-level pinning tests",
+      "prNumber": 11204,
+      "type": "bugfix",
+      "body": "## Summary\n\nFollow-up hardening to #11178 (DNS pinning in the SSRF guard; see also #11147).\n\n1. **Fail closed on pinned-transport load failure.** `loadNodePinnedFetchDefaults()` previously did `.catch(() => null)` and memoized the null — an",
+      "files": [
+        "packages/core/src/network/fetch-guard.fail-closed.test.ts",
+        "packages/core/src/network/fetch-guard.ts",
+        "packages/core/src/network/pinned-fetch.integration.test.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): honest lifecycle matrix — downloader-parity auth + transient-status handling (#10727)",
+      "prNumber": 11203,
+      "type": "bugfix",
+      "body": "## Summary\n\nRe-verifies the #10727 local-model lifecycle matrix on a Linux host, separates **real publish gaps** from **tool bugs**, fixes the tool bugs, and lands a fresh honest matrix + ops checklist as evidence.\n\n### Tool bugs fixed\n\n1. ",
+      "files": [
+        ".github/issue-evidence/10727-local-model-lifecycle-matrix-linux-2026-07-02.md",
+        "plugins/plugin-local-inference/scripts/local-model-lifecycle-matrix.ts",
+        "plugins/plugin-local-inference/src/services/lifecycle-remote-checks.test.ts",
+        "plugins/plugin-local-inference/src/services/lifecycle-remote-checks.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): don't suppress coding tasks phrased as a to-do (#11028)",
+      "prNumber": 11202,
+      "type": "bugfix",
+      "body": "From the 2026-07 orchestrator audit follow-ups (**#11028**).\n\n## Bug\n\n`looksLikePersonalLifeOpsTask` gated the TASKS action's `validate()` purely on the phrase `add|create|make|open|save|set … (a) to-do/task/reminder/note`. So a coding requ",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/create-task.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(ui/chat): overlay draft persistence + retry on failed turns (platform parity) + de-larp STOP test",
+      "prNumber": 11200,
+      "type": "bugfix",
+      "body": "## Summary\n\nCloses the last cross-platform parity gaps between the desktop ChatView and the ambient overlay (mobile/web/default-desktop), plus a compound window-filter bug found while testing.\n\n- **Composer draft persistence on the overlay:",
+      "files": [
+        "packages/ui/src/components/composites/chat/chat-composer.stop.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/shell-state.test.ts",
+        "packages/ui/src/components/shell/shell-state.ts"
+      ]
+    },
+    {
+      "title": "fix(android): run the Mali flash-attn gate before staging into jniLibs (post-#11173 audit)",
+      "prNumber": 11199,
+      "type": "bugfix",
+      "body": "Post-merge audit finding on #11173: the fail-closed Mali gate in `stage-elizavoice-lib.mjs` fired only **after** the vulkan sibling set was already stripped + copied into the shipping `jniLibs` dir — a red run exits 1 but leaves the rejecte",
+      "files": [
+        "packages/app-core/scripts/stage-elizavoice-lib.mjs"
+      ]
+    },
+    {
+      "title": "fix(voice): truthful AEC echo-reference status + live-path wiring (#9583)",
+      "prNumber": 11198,
+      "type": "bugfix",
+      "body": "## Summary\n\n`GET /api/voice/audio-frames/status` reported `aec.echoReferenceWired = consumer != null || options.echoReference != null` (`live-diarization-session.ts`) — true the moment the fused consumer built, even if **no far-end playback",
+      "files": [
+        "plugins/plugin-local-inference/src/routes/live-diarization-route.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.echo.test.ts",
+        "plugins/plugin-local-inference/src/services/voice/live-diarization-session.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): task-store concurrency + delete correctness (#11028)",
+      "prNumber": 11197,
+      "type": "bugfix",
+      "body": "Three durable-task-store fixes from the 2026-07 orchestrator audit follow-ups (**#11028**). All self-contained in `orchestrator-task-store.ts` + covered by unit tests.\n\n## Fixes\n\n1. **FileTaskStore lost cross-process updates.** It loaded th",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/orchestrator-task-store.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-store.ts"
+      ]
+    },
+    {
+      "title": "feat(benchmarks): gemma-4-31b replaces gpt-oss-120b as the Cerebras eval default",
+      "prNumber": 11196,
+      "type": "feature",
+      "body": "## What\n\nCuts the benchmark/eval layer over to `gemma-4-31b` as the default Cerebras model, completing the cutover #10695 started on the app side:\n\n- **Eval tiers:** `packages/benchmarks/lib/src/model-tiers.ts` + python `eliza_lifeops_bench",
+      "files": [
+        ".github/issue-evidence/10199-gemma-4-31b-cutover/context-window-probe.md",
+        ".github/issue-evidence/10199-gemma-4-31b-cutover/interrupt-bench-cerebras-report-2026-07-01.json",
+        ".github/issue-evidence/10199-gemma-4-31b-cutover/interrupt-bench-cerebras-report-2026-07-01.md",
+        ".github/issue-evidence/10199-gemma-4-31b-cutover/live-test-lanes.md",
+        ".github/issue-evidence/8795-gemma4-lifeops-legs/leg2-inbox_triage-artifact-v1.json",
+        ".github/workflows/benchmark-orchestrator-scheduled.yml",
+        ".github/workflows/cerebras-nightly.yml",
+        ".github/workflows/hyperliquid-bench-live.yml",
+        "packages/app-core/test/app/streaming-visible-text.live.e2e.test.ts",
+        "packages/benchmarks/AGENTS.md",
+        "packages/benchmarks/CLAUDE.md",
+        "packages/benchmarks/HyperliquidBench/__main__.py",
+        "packages/benchmarks/ORCHESTRATOR_SUBAGENT_BENCHMARK_RUNBOOK.md",
+        "packages/benchmarks/OSWorld/AGENTS.md",
+        "packages/benchmarks/OSWorld/CLAUDE.md",
+        "packages/benchmarks/OSWorld/scripts/python/run_multienv_eliza.py",
+        "packages/benchmarks/OSWorld/tests/test_run_multienv_eliza.py",
+        "packages/benchmarks/README.md",
+        "packages/benchmarks/agentbench/elizaos_agentbench/cli.py",
+        "packages/benchmarks/agentbench/run_benchmark.py",
+        "packages/benchmarks/agentbench_matrix/code_agent_matrix.py",
+        "packages/benchmarks/app-eval/agent_command.py",
+        "packages/benchmarks/app-eval/code_agent_coding.py",
+        "packages/benchmarks/app-eval/llm_judge.py",
+        "packages/benchmarks/bfcl/__main__.py",
+        "packages/benchmarks/bfcl/models.py",
+        "packages/benchmarks/clawbench/clawbench/multi_harness_runner.py",
+        "packages/benchmarks/docs/BENCHMARK_PARITY_ASSESSMENT.md",
+        "packages/benchmarks/docs/README.md",
+        "packages/benchmarks/docs/SMITHERS_INTEGRATION.md",
+        "packages/benchmarks/eliza-1/scripts/harness_runner.py",
+        "packages/benchmarks/eliza-1/src/index.ts",
+        "packages/benchmarks/eliza-1/src/modes/cerebras.ts",
+        "packages/benchmarks/eliza-adapter/eliza_adapter/client.py",
+        "packages/benchmarks/eliza-adapter/eliza_adapter/server_manager.py",
+        "packages/benchmarks/eliza-adapter/eliza_adapter/tau_bench.py",
+        "packages/benchmarks/framework/scripts/harness_runner.py",
+        "packages/benchmarks/hermes-adapter/hermes_adapter/bfcl.py",
+        "packages/benchmarks/hermes-adapter/hermes_adapter/client.py",
+        "packages/benchmarks/hermes-adapter/hermes_adapter/env_runner.py",
+        "packages/benchmarks/hermes-adapter/hermes_adapter/gauntlet.py",
+        "packages/benchmarks/hermes-adapter/hermes_adapter/tau_bench.py",
+        "packages/benchmarks/hermes-adapter/hermes_adapter/woobench.py",
+        "packages/benchmarks/hermes-adapter/tests/test_client.py",
+        "packages/benchmarks/interrupt-bench/AGENTS.md",
+        "packages/benchmarks/interrupt-bench/CLAUDE.md",
+        "packages/benchmarks/interrupt-bench/README.md",
+        "packages/benchmarks/interrupt-bench/scripts/cerebras-smoke.ts",
+        "packages/benchmarks/interrupt-bench/src/llm-cerebras.ts",
+        "packages/benchmarks/interrupt-bench/src/runner.ts"
+      ]
+    },
+    {
+      "title": "ci(deploy-apps-worker): keep the host-lock wait under the SSH command_timeout (post-#11165 polish)",
+      "prNumber": 11195,
+      "type": "other",
+      "body": "One-number polish from the post-merge review of #11165: the deploy step's `flock -w 900` (15m) exceeds its own `command_timeout: 10m`, so a lock-starved run dies as an opaque SSH kill instead of the intended `::error::another apps-worker de",
+      "files": [
+        ".github/workflows/deploy-apps-worker.yml"
+      ]
+    },
+    {
+      "title": "test(cloud-e2e): group-i links real owned characters — 31/31 green vs live staging",
+      "prNumber": 11191,
+      "type": "tests",
+      "body": "Part of the launch e2e sweep (charter #11157, board #10561). Ran group-i-apps-lifecycle against the **live staging** Worker+DB.\n\n### Result: 30/31 → **31/31 green** (verified twice)\nThe only failure was `sets linked_character_ids` (Expected",
+      "files": [
+        "packages/cloud/api/test/e2e/group-i-apps-lifecycle.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): persist Stripe Connect capability booleans so fiat payouts aren't permanently rejected (#11172)",
+      "prNumber": 11190,
+      "type": "bugfix",
+      "body": "Closes #11172.\n\n## Problem (HIGH — launch-blocking for the fiat payout rail)\nThe Connect `account.updated` webhook derived `status` from the capability booleans but **dropped the booleans**. `payouts_enabled` defaults false (migration 0150)",
+      "files": [
+        "packages/cloud/api/__tests__/stripe-connect-webhook-route.test.ts",
+        "packages/cloud/api/v1/earnings/payout/stripe-connect/webhook/route.ts",
+        "packages/cloud/shared/src/lib/services/stripe-connect-payout.test.ts",
+        "packages/cloud/shared/src/lib/services/stripe-connect-payout.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): never mark paid direct-wallet deposits failed_chain on transient RPC errors",
+      "prNumber": 11189,
+      "type": "bugfix",
+      "body": "Fixes #11154 (MED, launch-critical money loss).\n\n## The bug\n\n`processBroadcastBatch` — the cron that auto-confirms direct-wallet deposits stuck in `broadcast` — classified verify errors with a narrow **transient allowlist** (`/not found|not",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/direct-wallet-payments.integration.test.ts",
+        "packages/cloud/shared/src/lib/services/direct-wallet-payments.ts"
+      ]
+    },
+    {
+      "title": "ci(cloud-cf-deploy): serialize branch deploys per ref (fixes robot-fleet thrash, removes manual escort)",
+      "prNumber": 11188,
+      "type": "bugfix",
+      "body": "Closes #11108.\n\n## Problem\nCloud CF Deploy runs on the shared-host `hetzner-robot` fleet. The current concurrency uses a **per-commit group** (`…-${{ github.sha }}`) so every develop push spawns an independent deploy run, and they run **con",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "fix(ui): clamp relationships graph container to viewport on mobile",
+      "prNumber": 11186,
+      "type": "bugfix",
+      "body": "Fixes #11145 (a #10722 QA-sweep KNOWN-BUG the specs routed around).\n\n**Symptom:** `[data-graph-container]` at `/apps/relationships` tracked the zoomed SVG's width — measured 1188px on a 412px Pixel-7 viewport — blowing out horizontal page l",
+      "files": [
+        "packages/app/test/ui-smoke/apps-personal-assistant-decomposed-interactions.spec.ts",
+        "packages/ui/src/components/pages/RelationshipsGraphPanel.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): net won-dispute reinstatements out of the clawback tally (#11155)",
+      "prNumber": 11185,
+      "type": "bugfix",
+      "body": "Fixes #11155 (MED, money path).\n\n## Bug\n\n`getClawedBackUsdForPaymentIntent` (`packages/cloud/shared/src/lib/services/credits.ts`) summed only `type='clawback'` rows tagged with the payment intent. It ignored the positive `type='refund'` rei",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/credits-reconcile.test.ts",
+        "packages/cloud/shared/src/lib/services/credits.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): enable git long paths on vault-ci windows leg",
+      "prNumber": 11183,
+      "type": "bugfix",
+      "body": "## Problem\nThe `windows-latest` leg of **vault-ci** is a genuine red on develop (not queue starvation). It fails at `actions/checkout` before any test runs:\n\n```\nerror: unable to create file .github/issue-evidence/9967-swabble-androidtest/a",
+      "files": [
+        ".github/workflows/vault-ci.yaml"
+      ]
+    },
+    {
+      "title": "docs([phone-ui]): sync CLAUDE.md/AGENTS.md with the cockpit + strict-schema work",
+      "prNumber": 11182,
+      "type": "docs",
+      "body": "Fixes #11179. Docs-only launch hygiene — a Fable-5 accuracy sweep of the `[phone-ui]` lane found the CLAUDE.md/AGENTS.md pairs drifted after this session's merged cockpit + strict-schema changes. No code touched; all four CLAUDE.md ↔ AGENTS",
+      "files": [
+        "packages/examples/code/AGENTS.md",
+        "packages/examples/code/CLAUDE.md",
+        "packages/examples/code/README.md",
+        "packages/ui/AGENTS.md",
+        "packages/ui/CLAUDE.md",
+        "plugins/plugin-openai/AGENTS.md",
+        "plugins/plugin-openai/CLAUDE.md",
+        "plugins/plugin-task-coordinator/AGENTS.md",
+        "plugins/plugin-task-coordinator/CLAUDE.md"
+      ]
+    },
+    {
+      "title": "fix(cloud): claim escrow before generic refund so it cannot double-spend vs a racing payout (#11167)",
+      "prNumber": 11181,
+      "type": "bugfix",
+      "body": "Fixes #11167 — **HIGH, money path: maintainer merge please (do not self-merge).** `[cloud-money]`\n\n## Bug\n\nThe generic `refund()` in `packages/cloud/shared/src/lib/services/influencer-marketplace.ts` — routing `rejectBooking` (`allowedFrom=",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/influencer-marketplace.test.ts",
+        "packages/cloud/shared/src/lib/services/influencer-marketplace.ts"
+      ]
+    },
+    {
+      "title": "fix(core): connect SSRF fetches through pinned DNS",
+      "prNumber": 11178,
+      "type": "bugfix",
+      "body": "Fixes #11147.\\n\\n## Summary\\n- make \fetchWithSsrfGuard keep the \resolvePinnedHostname* result and pass its pinned lookup into the actual transport when a pinned transport is available\\n- add a Node/Bun HTTP(S) pinned transport (\nodePinnedFe",
+      "files": [
+        "packages/agent/src/api/media-runtime.ts",
+        "packages/core/src/media/fetch.ts",
+        "packages/core/src/network/fetch-guard.test.ts",
+        "packages/core/src/network/fetch-guard.ts",
+        "packages/core/src/network/index.ts",
+        "packages/core/src/network/node-pinned-fetch.ts",
+        "packages/core/src/network/ssrf.ts"
+      ]
+    },
+    {
+      "title": "fix(ui/platform): getFrontendPlatform detects electrobun desktop (was mis-reporting 'web')",
+      "prNumber": 11177,
+      "type": "bugfix",
+      "body": "`getFrontendPlatform()` gated desktop detection on `window.__ELECTROBUN__`, which the Electrobun shell sets **nowhere** — so the desktop app reported platform `'web'`, mis-reporting frontendPlatform to the server and mis-gating provider ent",
+      "files": [
+        "packages/ui/src/platform/platform-guards.test.ts",
+        "packages/ui/src/platform/platform-guards.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): avoid embedding scans during document fragment boot checks",
+      "prNumber": 11176,
+      "type": "bugfix",
+      "body": "## Problem\n\nOn a self-hosted node (PGlite, ~400MB database), the agent booted into a state where the Node main thread sat at 100% CPU and the HTTP API never answered. Inspector profiling traced the hot path to drizzle's pgvector `mapFromDri",
+      "files": [
+        "packages/agent/src/runtime/__tests__/default-documents.test.ts",
+        "packages/agent/src/runtime/default-documents.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): her-grade QA batch 4 — expired Steward-token heal, Android back closes sheet, jump-to-message on terminal surface",
+      "prNumber": 11175,
+      "type": "bugfix",
+      "body": "## Summary\n\nThree confirmed **major** findings from the her-grade QA sweep, each root-caused and pinned with real tests.\n\n- **Expired Steward token deadlock (#10231 launch-blocker #4):** a returning cloud user whose stored JWT expired boote",
+      "files": [
+        "packages/app/src/main.tsx",
+        "packages/ui/src/components/conversations/ConversationsSidebar.jump.test.tsx",
+        "packages/ui/src/components/conversations/ConversationsSidebar.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/events/index.ts",
+        "packages/ui/src/state/startup-phase-restore.steward-refresh.test.ts",
+        "packages/ui/src/state/startup-phase-restore.ts",
+        "packages/ui/src/state/useCloudState.steward-refresh.test.tsx",
+        "packages/ui/src/state/useCloudState.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): remove launcher featured-views dock, single-pager 50%-threshold swipe, per-surface notifications",
+      "prNumber": 11174,
+      "type": "feature",
+      "body": "## Summary\n\nUI fixes for the launcher + notifications the user flagged as \"messed up and wrong and bad\" on real devices:\n\n1. **Removed the launcher \"featured views\" dock** (the top header). Every view now tiles on the swipeable springboard ",
+      "files": [
+        "packages/ui/src/components/pages/Launcher.gestures.test.tsx",
+        "packages/ui/src/components/pages/Launcher.stories.tsx",
+        "packages/ui/src/components/pages/Launcher.test.tsx",
+        "packages/ui/src/components/pages/Launcher.tsx",
+        "packages/ui/src/components/pages/LauncherSurface.test.tsx",
+        "packages/ui/src/components/pages/__e2e__/launcher-fixture.tsx",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/desktop-edit.png",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/desktop-rest.png",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/launcher-walkthrough.webm",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/launcher.html",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/mobile-edit.png",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/mobile-rest.png",
+        "packages/ui/src/components/pages/__e2e__/run-launcher-e2e.mjs",
+        "packages/ui/src/components/shell/HomeLauncherSurface.composed.test.tsx",
+        "packages/ui/src/components/shell/HomeLauncherSurface.tsx",
+        "packages/ui/src/components/shell/HomeScreen.tsx",
+        "packages/ui/src/components/shell/NotificationCenter.test.tsx",
+        "packages/ui/src/components/shell/NotificationCenter.tsx",
+        "packages/ui/src/components/shell/__e2e__/output-home/01-mobile-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/02-mobile-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/02-mobile-notification-sheet.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/03-mobile-launcher-page2.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/03-mobile-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/04-desktop-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/04-mobile-launcher-page2.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/05-desktop-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/05-desktop-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/06-desktop-edge-buttons-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/06-desktop-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/07-desktop-edge-buttons-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/07-desktop-edge-buttons-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/08-desktop-edge-buttons-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/09-desktop-notification-panel.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/home-screen.html",
+        "packages/ui/src/components/shell/__e2e__/output-home/mobile-launcher-flow.webm",
+        "packages/ui/src/components/shell/__e2e__/run-home-screen-e2e.mjs",
+        "packages/ui/src/hooks/useHorizontalPager.test.tsx",
+        "packages/ui/src/hooks/useHorizontalPager.ts",
+        "packages/ui/src/state/launcher-layout.property.test.ts",
+        "packages/ui/src/state/launcher-layout.test.ts",
+        "packages/ui/src/state/launcher-layout.ts"
+      ]
+    },
+    {
+      "title": "fix(local-inference): unbreak android Vulkan CI configure + close the jniLibs Mali-gate bypass (#9508)",
+      "prNumber": 11173,
+      "type": "bugfix",
+      "body": "## What\n\nPart of #9508 (reopened close-out). Two gaps kept its close criteria unmet:\n\n**1. Android Vulkan CI has never gone green.** `build-llama-ffi-android.yml` → `compile-libllama.mjs` stages the SPIRV *header tree* but never satisfies t",
+      "files": [
+        ".github/issue-evidence/9508-pixel6a-mali-g78-verify/README.md",
+        "packages/app-core/scripts/aosp/compile-libllama.mjs",
+        "packages/app-core/scripts/stage-elizavoice-lib.mjs"
+      ]
+    },
+    {
+      "title": "ci(janitor): force-cancel + per-run verification — reap the runs plain cancel can't (#11045)",
+      "prNumber": 11171,
+      "type": "other",
+      "body": "Refs #11045 (my 05:29 comment claimed this), #10839 updates 12/15.\n\n### The two gaps (both proven live tonight, twice)\n1. **`gh run cancel` can't reap dead-runner runs** — they sit in cancel-requested limbo holding org concurrency slots unt",
+      "files": [
+        ".github/workflows/actions-zombie-janitor.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud): SSP campaign delete refunds off actual spend, not the full budget (#11151)",
+      "prNumber": 11170,
+      "type": "bugfix",
+      "body": "Closes #11151.\n\n## Problem (HIGH — net platform loss)\n`deleteCampaign` (`advertising/index.ts`) refunded unused budget as `credits_allocated * (1 - total_spend/budget_amount)`. But `total_spend` is written **only** by the external-provider ",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/ad-campaign-credit-reconciliation.test.ts",
+        "packages/cloud/shared/src/lib/services/advertising/index.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): remove dead bitrouter image models; re-point image gen at priced atlas/fal models (fixes #11005 500s)",
+      "prNumber": 11168,
+      "type": "bugfix",
+      "body": "## Problem (#11005)\n\nEvery image-generation request that resolved one of the six `billingSource: \"bitrouter\"` entries in `SUPPORTED_IMAGE_MODELS` — **including the default** `google/gemini-2.5-flash-image` — returned a **500**. The image ro",
+      "files": [
+        "packages/cloud/api/v1/apps/[id]/generate-image/route.ts",
+        "packages/cloud/api/v1/generate-image/route.ts",
+        "packages/cloud/shared/src/lib/api/a2a/skills.ts",
+        "packages/cloud/shared/src/lib/models/catalog.ts",
+        "packages/cloud/shared/src/lib/models/model-tiers.test.ts",
+        "packages/cloud/shared/src/lib/models/model-tiers.ts",
+        "packages/cloud/shared/src/lib/providers/image/bitrouter-image-generation.ts",
+        "packages/cloud/shared/src/lib/providers/image/registry.ts",
+        "packages/cloud/shared/src/lib/services/ai-pricing-definitions.ts",
+        "packages/cloud/shared/src/lib/services/ai-pricing/image-generation-pricing.test.ts",
+        "packages/cloud/shared/src/lib/services/ai-pricing/providers/fal.ts",
+        "packages/cloud/shared/src/lib/services/app-promotion-assets.ts",
+        "packages/docs/cloud/api/gallery.mdx",
+        "packages/docs/cloud/api/images.mdx",
+        "packages/docs/cloud/gallery.mdx",
+        "packages/docs/cloud/image-generation.mdx",
+        "packages/docs/cloud/sdks.mdx",
+        "packages/skills/skills/eliza-cloud/references/payments-and-promotion.md",
+        "plugins/plugin-elizacloud/AGENTS.md",
+        "plugins/plugin-elizacloud/CLAUDE.md",
+        "plugins/plugin-elizacloud/README.md",
+        "plugins/plugin-elizacloud/src/utils/config.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): stop AppRunsWidget infinite render loop after #11107 auth gate — vitest worker OOM + hidden home widgets",
+      "prNumber": 11166,
+      "type": "bugfix",
+      "body": "Bisected develop regression: **aa96061383f (#11107)** — the new \\`!authenticated\\` branch runs \\`startTransition(() => setRuns([]))\\` with a fresh \\`[]\\` each pass, while \\`AppRunsWidget\\`'s poll effect keeps an unstable \\`appSetState ?? ((",
+      "files": [
+        "packages/ui/src/components/chat/widgets/agent-orchestrator.tsx",
+        "packages/ui/src/components/shell/__e2e__/home-screen-fixture.auth-stub.ts",
+        "packages/ui/src/components/shell/__e2e__/output-home/01-mobile-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/02-mobile-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/03-mobile-launcher-page2.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/04-desktop-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/05-desktop-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/06-desktop-edge-buttons-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/07-desktop-edge-buttons-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/home-screen.html",
+        "packages/ui/src/components/shell/__e2e__/output-home/mobile-launcher-flow.webm",
+        "packages/ui/src/components/shell/__e2e__/run-home-screen-e2e.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): per-SHA concurrency for deploy-apps-worker (#10839)",
+      "prNumber": 11165,
+      "type": "bugfix",
+      "body": "## What\nGives `deploy-apps-worker.yml` a **per-SHA concurrency group** (`…-${{ github.sha }}`), mirroring the fix cloud-cf-deploy already carries (#10802/#10973). Closes the \"staging apps-daemon dispatches keep getting cancelled with no com",
+      "files": [
+        ".github/workflows/deploy-apps-worker.yml"
+      ]
+    },
+    {
+      "title": "fix(discord): fold-context TTL 10s→90s — bare-@mention after a split question lost the question (#11118)",
+      "prNumber": 11164,
+      "type": "bugfix",
+      "body": "Closes #11118.\n\n## Problem (live)\nIn a mention-only channel a user asked a question across two messages, then sent a bare `@bot` pointer ~40s later — the normal human cadence. The recent-context fold buffer's **10s TTL** had already pruned ",
+      "files": [
+        "plugins/plugin-discord/__tests__/debouncer-recent-context.test.ts",
+        "plugins/plugin-discord/debouncer.ts",
+        "plugins/plugin-discord/discord-events.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): gate compat agent launch on org credit (closes #11152)",
+      "prNumber": 11163,
+      "type": "bugfix",
+      "body": "Closes #11152. `[cloud-money]`\n\n## The gap (third path, same class as #10902/#10905)\n#10902 found the compat `resume`/`restart` routes woke a dedicated agent with no credit check; #10905 gated both → 402. The **`launch`** route is a third p",
+      "files": [
+        "packages/cloud/api/__tests__/compat-agent-credit-gate.test.ts",
+        "packages/cloud/api/compat/agents/[id]/launch/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): bucket unauthenticated rate-limit traffic per-IP, not a global \"public\" key (#11087)",
+      "prNumber": 11162,
+      "type": "bugfix",
+      "body": "Ref #11087 (the design flag it raised, after the self-heal #11085 already merged + deployed).\n\n## Problem\n`getDefaultKey` (`packages/cloud/shared/src/lib/middleware/rate-limit-hono-cloudflare.ts`) returned the literal **`\"public\"`** for any",
+      "files": [
+        "packages/cloud/shared/src/lib/middleware/rate-limit-default-key.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-hono-cloudflare.ts"
+      ]
+    },
+    {
+      "title": "fix(kokoro): download the published F16 GGUF name (Q4 path 404'd on-device)",
+      "prNumber": 11160,
+      "type": "bugfix",
+      "body": "The runtime downloaded `kokoro-82m-v1_0-Q4_K_M.gguf` but `elizaos/eliza-1` only publishes the F16 `kokoro-82m-v1_0.gguf` — the Q4 path **404s**, so on-device kokoro had no model. `llama-quantize` doesn't support the kokoro arch (`key not fo",
+      "files": [
+        "packages/app-core/platforms/electrobun/remotes/local-model/src/bun/eliza1-catalog.ts",
+        "packages/app-core/scripts/aosp/stage-default-models.mjs",
+        "packages/shared/src/local-inference/catalog.ts",
+        "plugins/plugin-aosp-local-inference/src/aosp-local-inference-bootstrap.ts",
+        "plugins/plugin-local-inference/src/services/local-model-lifecycle-matrix.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cockpit): dismissible mobile inspector drawer in the session pane",
+      "prNumber": 11159,
+      "type": "bugfix",
+      "body": "Fixes #11158.\n\nThe cockpit is phone-first, but `CockpitSessionPane` mounted `TaskInspector` with no `className`/`style`/`onClose` → it fell back to the default `flex w-80` (fixed, non-shrinking 320px rail, always visible once a detail loads",
+      "files": [
+        "plugins/plugin-task-coordinator/src/CockpitSessionPane.tsx",
+        "plugins/plugin-task-coordinator/src/OrchestratorWorkbench.tsx"
+      ]
+    },
+    {
+      "title": "fix(openai): strip strict-unsupported schema constraints at the wire choke point",
+      "prNumber": 11156,
+      "type": "bugfix",
+      "body": "Fixes #11153. Follow-up to #11129 (merged) — that fixed one schema; this kills the whole bug class in one place.\n\n### Why centralize\nAny hand-written response/tool schema with a strict-unsupported constraint keyword silently 400s the ENTIRE",
+      "files": [
+        ".github/issue-evidence/11153-central-strict-schema-strip.md",
+        "plugins/plugin-openai/__tests__/sanitize-json-schema.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "release: promote develop → production (money-integrity wave, monetization rails, auth overhaul, live rate limiting)",
+      "prNumber": 11150,
+      "type": "other",
+      "body": "## Production promote: develop → main (444 commits)\n\nProd has been running a **manually-promoted develop frontend** (`d2b8782`, via local `wrangler pages deploy`) against a **day-old Worker and schema** since ~00:00Z — any main push regress",
+      "files": [
+        ".github/CODEOWNERS",
+        ".github/ISSUE_TEMPLATE/bug_report.md",
+        ".github/ISSUE_TEMPLATE/feature_request.md",
+        ".github/codeql/codeql-config.yml",
+        ".github/issue-evidence/10104-failsafe-path-gate/README.md",
+        ".github/issue-evidence/10104-failsafe-path-gate/before-after-gate.txt",
+        ".github/issue-evidence/10104-failsafe-path-gate/issue-10104-evidence.png",
+        ".github/issue-evidence/10104-failsafe-path-gate/self-test.txt",
+        ".github/issue-evidence/10104-touch-matrix-ci/README.md",
+        ".github/issue-evidence/10104-webkit-input-modality/README.md",
+        ".github/issue-evidence/10104-webkit-input-modality/apps-launcher-chromium.png",
+        ".github/issue-evidence/10104-webkit-input-modality/apps-launcher-webkit.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-home-chromium.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-home-webkit.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-open-chromium.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-open-webkit.png",
+        ".github/issue-evidence/10196-views-state/android-cdp-drain.json",
+        ".github/issue-evidence/10196-views-state/android-fresh-device-final.png",
+        ".github/issue-evidence/10196-views-state/android-fresh-logcat.txt",
+        ".github/issue-evidence/10196-views-state/android-fresh-package.txt",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-01-tutorial.png",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-02-chat.png",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-03-help.png",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-04-character.png",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-soak-final.png",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-soak.json",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-soak.md",
+        ".github/issue-evidence/10196-views-state/android-fresh-view-soak.mp4",
+        ".github/issue-evidence/10196-views-state/audit-app-manual-review.md",
+        ".github/issue-evidence/10196-views-state/audit-app-report.json",
+        ".github/issue-evidence/10196-views-state/audit-app-reviewed-contact-sheet.png",
+        ".github/issue-evidence/10196-views-state/audit-views-frontend-log.json",
+        ".github/issue-evidence/10196-views-state/audit-views-heap-series.json",
+        ".github/issue-evidence/10196-views-state/audit-views-logs-loaded.png",
+        ".github/issue-evidence/10196-views-state/audit-views-module-cache-telemetry.json",
+        ".github/issue-evidence/10196-views-state/audit-views-navigation.json",
+        ".github/issue-evidence/10196-views-state/audit-views-network-log.json",
+        ".github/issue-evidence/10196-views-state/audit-views-network-summary.json",
+        ".github/issue-evidence/10196-views-state/audit-views-render-telemetry.json",
+        ".github/issue-evidence/10196-views-state/audit-views-runtime-telemetry.json",
+        ".github/issue-evidence/10196-views-state/audit-views-scorecard.json",
+        ".github/issue-evidence/10196-views-state/audit-views-scorecard.md",
+        ".github/issue-evidence/10196-views-state/audit-views-settings.png",
+        ".github/issue-evidence/10196-views-state/audit-views-soak.json",
+        ".github/issue-evidence/10196-views-state/audit-views-soak.md",
+        ".github/issue-evidence/10196-views-state/audit-views-soak.webm",
+        ".github/issue-evidence/10196-views-state/soak-final.png",
+        ".github/issue-evidence/10196-views-state/view-01-tutorial.png",
+        ".github/issue-evidence/10196-views-state/view-02-chat.png",
+        ".github/issue-evidence/10196-views-state/view-03-help.png"
+      ]
+    },
+    {
+      "title": "feat(prompts): framework security baseline — injection resistance + credential protection for every agent (cloud default ships with none)",
+      "prNumber": 11149,
+      "type": "feature",
+      "body": "## Gap\n\nPrompt-injection resistance and secret-protection exist today only where a character author hand-rolled them. The **cloud default Eliza** — what every new Eliza Cloud signup gets — has **zero**: nothing about \"ignore your previous i",
+      "files": [
+        "packages/prompts/src/index.ts",
+        "packages/prompts/test/prompts.test.js"
+      ]
+    },
+    {
+      "title": "refactor(ui,app): strip default-visible views to the minimal eliza aesthetic — flat surfaces, borderless controls, strict audit gate ON (#10710)",
+      "prNumber": 11148,
+      "type": "refactor",
+      "body": "Closes #10710.\n\n## What this does\n\nThe full audit-and-strip pass over every default-visible view (system/release ViewKind), plus the gate work the issue's acceptance criteria require. Six parallel strip passes (character, documents, automat",
+      "files": [
+        ".github/issue-evidence/10710-strip-default-views/README.md",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-apps.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-automations.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-browser.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-character-select.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-character.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-chat.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-contacts.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-documents.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-fine-tuning.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-help.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-inventory.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-memories.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-relationships.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-settings.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-stream.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-transcripts.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-tutorial.png",
+        ".github/issue-evidence/10710-strip-default-views/after/desktop/builtin-views.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-apps.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-automations.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-browser.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-character-select.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-character.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-chat.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-contacts.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-documents.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-fine-tuning.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-help.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-inventory.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-memories.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-relationships.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-settings.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-stream.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-transcripts.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-tutorial.png",
+        ".github/issue-evidence/10710-strip-default-views/after/mobile/builtin-views.png",
+        ".github/issue-evidence/10710-strip-default-views/after/report-final-328of349.json",
+        ".github/issue-evidence/10710-strip-default-views/after/report.json",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-apps.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-automations.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-browser.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-character-select.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-character.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-chat.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-contacts.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-documents.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-fine-tuning.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-help.png",
+        ".github/issue-evidence/10710-strip-default-views/before/desktop/builtin-inventory.png"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): pin SSRF-vetted DNS answers to the connection — close the rebinding TOCTOU (#11028)",
+      "prNumber": 11146,
+      "type": "bugfix",
+      "body": "## Pin SSRF-vetted DNS answers to the connection (#11028 — DNS-rebinding TOCTOU)\n\n`safeFetch` in the orchestrator's SSRF guard validated a hostname's resolution (`assertUrlAllowed`) and then called `fetch()` — **which resolves DNS again**. ",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/ssrf-guard.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-router.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/ssrf-guard.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): status-correct streaming error chunks + provider-400 passthrough",
+      "prNumber": 11143,
+      "type": "bugfix",
+      "body": "Fixes #11141. Companion to #11129 (the client-side reflection-schema fix) — this is the server-side half of the same live capture: an upstream 400 reached clients as `{\"message\":\"Bad Request\",\"type\":\"rate_limit_error\",\"code\":500}`.\n\n### Two",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-streaming-credit-leak.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts"
+      ]
+    },
+    {
+      "title": "test(core): satisfy Biome in reflection schema invariant",
+      "prNumber": 11142,
+      "type": "tests",
+      "body": "## Summary\\n- Fix the post-#11129 Biome lint regression in \reflection-items.test.ts by giving the array \forEach callback a block body.\\n- No behavior changes; keeps the strict structured-output invariant test intact while making current dev",
+      "files": [
+        "packages/core/src/features/advanced-capabilities/evaluators/reflection-items.test.ts"
+      ]
+    },
+    {
+      "title": "test(cloud-e2e): scope the org-debit ledger count to TEST_ORGANIZATION_ID (#11125 follow-up)",
+      "prNumber": 11140,
+      "type": "tests",
+      "body": "Adversarial review of just-merged #11125 flagged that `countAiRequestDebitsSince` counts debits across ALL orgs — on shared staging the org-debit assertion could be satisfied by unrelated traffic. The e2e preload (`test/e2e/preload.ts:203`)",
+      "files": [
+        "packages/cloud/api/test/e2e/_helpers/ledger.ts"
+      ]
+    },
+    {
+      "title": "fix(ui/chat): her-grade QA batch 3 — 14 majors across gestures, voice, copy/paste, streaming, deep-links + CI lane",
+      "prNumber": 11139,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes 14 confirmed **major** findings from the her-grade QA sweep (each root-caused by reading code first; several guard-tests verified to fail without their fix). Five disjoint file clusters + a CI-lane fix, all with real behav",
+      "files": [
+        "packages/app/src/deep-link-routing.test.ts",
+        "packages/app/src/deep-link-routing.ts",
+        "packages/app/src/main.network-fallback.test.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts",
+        "packages/ui/src/api/client-base-stream-abort.test.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/components/chat/TranscriptViewerOverlay.test.tsx",
+        "packages/ui/src/components/chat/TranscriptViewerOverlay.tsx",
+        "packages/ui/src/components/settings/VoiceSection.tsx",
+        "packages/ui/src/components/settings/VoiceSectionMount.test.tsx",
+        "packages/ui/src/components/settings/VoiceSectionMount.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/__tests__/useShellController.fuzz.test.tsx",
+        "packages/ui/src/components/shell/__tests__/useShellController.test.tsx",
+        "packages/ui/src/components/shell/use-pull-gesture.test.ts",
+        "packages/ui/src/components/shell/use-pull-gesture.ts",
+        "packages/ui/src/components/shell/useShellController.ts",
+        "packages/ui/src/hooks/useContextMenu.test.ts",
+        "packages/ui/src/hooks/useContextMenu.ts",
+        "packages/ui/src/platform/window-shell.test.ts",
+        "packages/ui/src/platform/window-shell.ts",
+        "packages/ui/src/state/AppContext.resync.test.tsx",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/persistence.ts",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/src/state/useResyncReconcile.ts"
+      ]
+    },
+    {
+      "title": "fix(approvals): enforce expiry at the transition boundary in both stores (#11092)",
+      "prNumber": 11138,
+      "type": "bugfix",
+      "body": "## Enforce approval expiry at the transition boundary (#11092)\n\n`purgeExpired()`/`markExpired()` exist in **both twin approval stores** but have **zero production callers** — so a request whose `expiresAt` passed stayed `pending` forever an",
+      "files": [
+        "packages/agent/src/services/approval/service.test.ts",
+        "packages/agent/src/services/approval/store.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/approval-queue.ts",
+        "plugins/plugin-personal-assistant/test/approval-queue.toctou.integration.test.ts"
+      ]
+    },
+    {
+      "title": "fix(build): never ship a stale desktop fused lib to a device (no-stale-pieces)",
+      "prNumber": 11137,
+      "type": "bugfix",
+      "body": "## Why\nA stale staged `libelizainference` is a real dev→device trap and it **bit us for real**: on my Mac the staged fused lib (04:41) was older than a rebuilt one (17:05) in the fork build dir, and it produced **unintelligible Kokoro TTS**",
+      "files": [
+        "packages/app-core/package.json",
+        "packages/app-core/scripts/desktop-build.mjs",
+        "packages/app-core/scripts/stage-desktop-fused-lib-staleness.test.mjs",
+        "packages/app-core/scripts/stage-desktop-fused-lib.mjs",
+        "packages/app-core/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-sdk): admit approving/refunding claim states in InfluencerBookingDto.status (#11116 follow-up)",
+      "prNumber": 11136,
+      "type": "bugfix",
+      "body": "Follow-up to just-merged #11124: the atomic delivered→approving/refunding claim fence means list/get routes can surface a booking mid-claim (or crash-stuck) in `approving`/`refunding` — states outside the SDK DTO's declared union. Two-line ",
+      "files": [
+        "packages/cloud/sdk/src/types.ts",
+        "packages/cloud/shared/src/db/schemas/influencer-marketplace.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/influencer-marketplace.test.ts",
+        "packages/cloud/shared/src/lib/services/influencer-marketplace.ts"
+      ]
+    },
+    {
+      "title": "refactor(ui): flatten residual card chrome to the minimal eliza aesthetic (#10710)",
+      "prNumber": 11134,
+      "type": "refactor",
+      "body": "## Summary\n\nAudit-and-strip pass for #10710 (default-visible views → minimal \"eliza\"\naesthetic), done the hard way: stood up a fresh `develop` worktree with its own\ninstall, ran `audit:app`, and **reviewed the actual rendered pixels of ever",
+      "files": [
+        "packages/ui/src/components/desktop/DesktopTabBar.tsx",
+        "packages/ui/src/components/pages/AutomationsFeed.tsx"
+      ]
+    },
+    {
+      "title": "fix(ui,app-core): #11003 post-merge review findings — drop preventDefault ordering, un-collectable 429-failover test, stale OmniVoice docs",
+      "prNumber": 11133,
+      "type": "bugfix",
+      "body": "Post-merge QA of #11003 (4 independent slice reviews, findings posted [there](https://github.com/elizaOS/eliza/pull/11003#issuecomment-4861988535)) surfaced three concrete issues; this ships the fixes.\n\n## 1. File-drop preventDefault orderi",
+      "files": [
+        "bun.lock",
+        "packages/app-core/package.json",
+        "packages/app-core/test/services/multi-account-upstream-429-failover.test.ts",
+        "packages/ui/src/components/pages/DocumentsView.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "plugins/plugin-local-inference/AGENTS.md",
+        "plugins/plugin-local-inference/CLAUDE.md",
+        "plugins/plugin-local-inference/src/services/voice/VOICE_WORKBENCH.md"
+      ]
+    },
+    {
+      "title": "fix(ui/test): shim Node >=25's broken Web Storage global in the jsdom setup",
+      "prNumber": 11132,
+      "type": "bugfix",
+      "body": "## Shim Node ≥25's broken Web Storage global in the packages/ui jsdom setup\n\nNode ≥25 ships a `localStorage`/`sessionStorage` global that is **non-functional without `--localstorage-file`** (its methods are missing) and **shadows jsdom's St",
+      "files": [
+        "packages/ui/vitest.setup.ts"
+      ]
+    },
+    {
+      "title": "fix(pa,scenario-runner): #9950 routing follow-up — brush-teeth live-scenario reruns + PA action refinements",
+      "prNumber": 11131,
+      "type": "bugfix",
+      "body": "Salvaged from a rate-limited session's worktree (nice-spence, post-#11003). In-flight continuation of the #9950 live-LLM routing work: PA action refinements (life/owner-surfaces/scheduled-task), scenario-runner final-checks, regenerated act",
+      "files": [
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/README.md",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/brush-teeth-basic-after-fix-rerun1.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/brush-teeth-basic-after-fix-rerun2.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/brush-teeth-basic-after-fix.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/brush-teeth-basic-after-routing-fix.report.json",
+        "packages/core/src/generated/action-docs.ts",
+        "packages/prompts/specs/actions/plugins.generated.json",
+        "packages/scenario-runner/src/final-checks/definition-count-final-check.test.ts",
+        "packages/scenario-runner/src/final-checks/index.ts",
+        "plugins/plugin-personal-assistant/scenarios/brush-teeth-basic.json",
+        "plugins/plugin-personal-assistant/scenarios/brush-teeth-repeat-confirm.json",
+        "plugins/plugin-personal-assistant/src/actions/life.ts",
+        "plugins/plugin-personal-assistant/src/actions/owner-surfaces.ts",
+        "plugins/plugin-personal-assistant/src/actions/scheduled-task.ts",
+        "plugins/plugin-personal-assistant/src/plugin.ts",
+        "plugins/plugin-personal-assistant/test/action-structure-audit.test.ts",
+        "plugins/plugin-personal-assistant/test/scenarios/brush-teeth-basic.scenario.ts",
+        "plugins/plugin-personal-assistant/test/scenarios/brush-teeth-repeat-confirm.scenario.ts",
+        "plugins/plugin-personal-assistant/test/scheduled-task-trigger-boundary.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui,app,desktop): desktop-native Notifications entry opens the notification center (#10706)",
+      "prNumber": 11130,
+      "type": "feature",
+      "body": "Salvaged from a rate-limited session's worktree (fervent-knuth). Contains:\n- desktop-native \"Notifications\" entry wiring the notification center (#10706)\n- #10694 background-scenario live-run evidence bundle\n\nReview + finish in progress; wi",
+      "files": [
+        ".github/issue-evidence/10694-background-scenarios/README.md",
+        ".github/issue-evidence/10694-background-scenarios/live-run.log",
+        ".github/issue-evidence/10694-background-scenarios/report.json",
+        ".github/issue-evidence/10694-background-scenarios/run/matrix.json",
+        ".github/issue-evidence/10694-background-scenarios/run/trajectories/546ac3ab-0468-01a2-9d5b-52dfa34bf9cc/tj-c8a59dd6aa060e.json",
+        ".github/issue-evidence/10694-background-scenarios/run/trajectories/546ac3ab-0468-01a2-9d5b-52dfa34bf9cc/tj-c8add3958fd99d.json",
+        ".github/issue-evidence/10694-background-scenarios/run/trajectories/546ac3ab-0468-01a2-9d5b-52dfa34bf9cc/tj-c8b1b579f771bd.json",
+        ".github/issue-evidence/10694-background-scenarios/run/trajectories/546ac3ab-0468-01a2-9d5b-52dfa34bf9cc/tj-c8b4fa6ffe3044.json",
+        ".github/issue-evidence/10694-background-scenarios/run/trajectories/546ac3ab-0468-01a2-9d5b-52dfa34bf9cc/tj-c8b8505940f943.json",
+        ".github/issue-evidence/10694-background-scenarios/run/viewer/data.js",
+        ".github/issue-evidence/10694-background-scenarios/run/viewer/index.html",
+        "packages/app-core/src/runtime/desktop/DesktopTrayRuntime.tsx",
+        "packages/app-core/src/runtime/desktop/tray-menu.test.ts",
+        "packages/app-core/src/runtime/desktop/tray-menu.ts",
+        "packages/app-core/test/eliza-package-paths.ts",
+        "packages/core/src/runtime/__tests__/execute-planned-tool-call.test.ts",
+        "packages/core/src/runtime/execute-planned-tool-call.ts",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ja.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json",
+        "packages/ui/src/i18n/locales/vi.json",
+        "packages/ui/src/i18n/locales/zh-CN.json",
+        "plugins/plugin-app-control/src/actions/background.test.ts",
+        "plugins/plugin-app-control/src/actions/background.ts"
+      ]
+    },
+    {
+      "title": "fix(core): make reflection extraction schemas strict-structured-output safe",
+      "prNumber": 11129,
+      "type": "bugfix",
+      "body": "Fixes #11123.\n\nEvery post-turn reflection/fact-extraction call from an agent on a strict structured-output provider (Cerebras via Eliza Cloud — i.e. every cloud agent on `gpt-oss-120b`-class models — and OpenAI strict) failed with a provide",
+      "files": [
+        ".github/issue-evidence/11123-reflection-strict-schema.md",
+        "packages/core/src/features/advanced-capabilities/evaluators/factExtractor.schema.ts",
+        "packages/core/src/features/advanced-capabilities/evaluators/reflection-items.test.ts",
+        "packages/core/src/features/advanced-capabilities/evaluators/reflection-items.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): serialize task file store first load",
+      "prNumber": 11128,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes one still-real reliability follow-up from #11028: `FileTaskStore.ensureLoaded()` now serializes its first durable hydrate through the existing write queue, matching the session-store pattern. Concurrent first-touch operati",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/orchestrator-task-store.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-store.ts"
+      ]
+    },
+    {
+      "title": "test(cloud-e2e): group-l 9/9 against LIVE staging — the #10423 attribution evidence run",
+      "prNumber": 11125,
+      "type": "tests",
+      "body": "Refs #10423 (the reopen's required proof), #10839 (the env fixes below), #11021 (the two-leg earnings the test now asserts).\n\n### What this is\nThe group-l e2e suite had never been run against the REAL staging Worker + DB. I ran it live and ",
+      "files": [
+        "packages/cloud/api/test/e2e/_helpers/ledger.ts",
+        "packages/cloud/api/test/e2e/group-l-app-charges.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): close influencer escrow double-spend on the delivered money fork (#11116)",
+      "prNumber": 11124,
+      "type": "bugfix",
+      "body": "Closes #11116.\n\n## Summary\nThe influencer-marketplace escrow (#10687) double-spends on the `delivered` money fork. `approveBooking` (release escrow → influencer, key `influencer_booking_<id>`) and `rejectDeliverable` (refund escrow → advert",
+      "files": [
+        "packages/cloud/shared/src/db/schemas/influencer-marketplace.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/influencer-marketplace.test.ts",
+        "packages/cloud/shared/src/lib/services/influencer-marketplace.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): gate the 12 remaining always-on widgets on an authenticated session (#11084 follow-up)",
+      "prNumber": 11122,
+      "type": "bugfix",
+      "body": "## Gate the remaining always-on widgets on an authenticated session (follow-up to #11107, refs #11084)\n\n#11107 gated the main shell pollers; this completes the sweep across the **12 remaining home/chat-sidebar widgets** that fetched on moun",
+      "files": [
+        "packages/ui/src/components/chat/widgets/agent-activity.test.tsx",
+        "packages/ui/src/components/chat/widgets/agent-activity.tsx",
+        "packages/ui/src/components/chat/widgets/browser-status.tsx",
+        "packages/ui/src/components/chat/widgets/calendar-upcoming.test.tsx",
+        "packages/ui/src/components/chat/widgets/calendar-upcoming.tsx",
+        "packages/ui/src/components/chat/widgets/finances-alerts.test.tsx",
+        "packages/ui/src/components/chat/widgets/finances-alerts.tsx",
+        "packages/ui/src/components/chat/widgets/goals-attention.test.tsx",
+        "packages/ui/src/components/chat/widgets/goals-attention.tsx",
+        "packages/ui/src/components/chat/widgets/health-sleep.test.tsx",
+        "packages/ui/src/components/chat/widgets/health-sleep.tsx",
+        "packages/ui/src/components/chat/widgets/inbox-unread.test.tsx",
+        "packages/ui/src/components/chat/widgets/inbox-unread.tsx",
+        "packages/ui/src/components/chat/widgets/model-download.test.tsx",
+        "packages/ui/src/components/chat/widgets/model-download.tsx",
+        "packages/ui/src/components/chat/widgets/music-player.tsx",
+        "packages/ui/src/components/chat/widgets/needs-attention.test.tsx",
+        "packages/ui/src/components/chat/widgets/needs-attention.tsx",
+        "packages/ui/src/components/chat/widgets/relationships-attention.test.tsx",
+        "packages/ui/src/components/chat/widgets/relationships-attention.tsx",
+        "packages/ui/src/components/chat/widgets/wallet-balance.test.tsx",
+        "packages/ui/src/components/chat/widgets/wallet-balance.tsx"
+      ]
+    },
+    {
+      "title": "test(app): unbreak the packages/app HMR-coverage lane (RED on develop)",
+      "prNumber": 11121,
+      "type": "tests",
+      "body": "The plugin-view HMR source-probe matrix (test/hmr-coverage.test.ts) drifted out of lockstep with the GUI VIEW_CASES set and is **red on fresh origin/develop**:\n\n- The **cockpit** GUI view (`/cockpit`) shipped with no HMR probe → *'Add HMR s",
+      "files": [
+        "packages/app/test/hmr/hmr-dependency-levels.spec.ts"
+      ]
+    },
+    {
+      "title": "test(aosp-voice): fuzz the Kokoro TEXT_TO_SPEECH input contract (#9649 follow-up)",
+      "prNumber": 11120,
+      "type": "tests",
+      "body": "Small follow-up to the merged #11106. Exports `extractSpeechText`/`extractSpeechSignal` from the AOSP bootstrap and adds a fuzz/robustness block for the TEXT_TO_SPEECH input-parsing contract every Kokoro request passes through before the na",
+      "files": [
+        "plugins/plugin-aosp-local-inference/__tests__/aosp-kokoro-tts-handler.test.ts",
+        "plugins/plugin-aosp-local-inference/src/aosp-local-inference-bootstrap.ts"
+      ]
+    },
+    {
+      "title": "fix(ui/chat): her-grade QA batch — 4 criticals (onboarding, attachment loss, conv delete, deep-link) + chat-state majors",
+      "prNumber": 11119,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes the four **critical** (data-loss / broken-primary-flow) findings and nine **major** findings from the her-grade QA sweep (31 find-agents + adversarial verification over chat/input/gesture/attachment surfaces). Every fix sh",
+      "files": [
+        "packages/agent/src/api/chat-upload-limits.parity.test.ts",
+        "packages/agent/src/api/media-runtime.test.ts",
+        "packages/agent/src/api/media-runtime.ts",
+        "packages/agent/src/api/server-helpers.ts",
+        "packages/shared/src/chat-upload-limits.test.ts",
+        "packages/shared/src/chat-upload-limits.ts",
+        "packages/shared/src/index.ts",
+        "packages/ui/src/App.chat-overlay-first-run.test.tsx",
+        "packages/ui/src/App.cloud-shell.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/chat/MessageAttachments.test.tsx",
+        "packages/ui/src/components/chat/MessageAttachments.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/first-run/use-first-run-conductor.test.ts",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/useChatCallbacks.draft-handoff.test.tsx",
+        "packages/ui/src/state/useChatCallbacks.hydrate.test.ts",
+        "packages/ui/src/state/useChatCallbacks.select-race.test.tsx",
+        "packages/ui/src/state/useChatCallbacks.ts",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/src/state/useChatState.ts",
+        "packages/ui/src/state/useChatState.unread.test.ts",
+        "packages/ui/src/state/useDataLoaders.ts",
+        "packages/ui/src/utils/image-attachment.reencode.test.ts",
+        "packages/ui/src/utils/image-attachment.test.ts",
+        "packages/ui/src/utils/image-attachment.ts"
+      ]
+    },
+    {
+      "title": "feat(ui,app,desktop): desktop-native notification entry (#10706) + deferred-items resolution",
+      "prNumber": 11117,
+      "type": "feature",
+      "body": "## Summary\n\nClears the deferred items from the onboarding/QA epic (#11083) + its follow-up\n(#11103, merged). This PR ships the one that's fully implementable — the\n**desktop-native notification entry (#10706)** — and documents why the rest ",
+      "files": [
+        "packages/app-core/platforms/electrobun/src/application-menu.test.ts",
+        "packages/app-core/platforms/electrobun/src/application-menu.ts",
+        "packages/app-core/platforms/electrobun/src/index.ts",
+        "packages/app-core/src/runtime/desktop/DesktopSurfaceNavigationRuntime.tsx",
+        "packages/app/src/deep-link-handler.test.ts",
+        "packages/app/src/deep-link-handler.ts",
+        "packages/ui/src/components/shell/NotificationCenter.test.tsx",
+        "packages/ui/src/components/shell/NotificationCenter.tsx",
+        "packages/ui/src/events/index.ts"
+      ]
+    },
+    {
+      "title": "test(ui): deterministic launcher drag-reorder e2e — poll-and-settle protocol (was 1/5 flaky)",
+      "prNumber": 11115,
+      "type": "tests",
+      "body": "Follow-up to #11103 (merged with the flaky assertion): the launcher drag-reorder e2e's \"order actually changed\" assertion failed ~4/5 locally. Root cause: `Reorder.Group axis=\"y\"` on a multi-column CSS grid — a whole row shares one y-center",
+      "files": [
+        "packages/ui/src/components/pages/__e2e__/output-launcher/launcher-walkthrough.webm",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/launcher.html",
+        "packages/ui/src/components/pages/__e2e__/run-launcher-e2e.mjs",
+        "packages/ui/src/components/shell/__e2e__/output-home/01-mobile-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/02-mobile-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/03-mobile-launcher-page2.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/04-desktop-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/06-desktop-edge-buttons-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/home-screen.html",
+        "packages/ui/src/components/shell/__e2e__/output-home/mobile-launcher-flow.webm",
+        "packages/ui/src/components/shell/__e2e__/output/30-state-dictation-in-box.png",
+        "packages/ui/src/components/shell/__e2e__/output/32-state-multiline-input.png",
+        "packages/ui/src/components/shell/__e2e__/output/35-state-no-provider-gate.png",
+        "packages/ui/src/components/shell/__e2e__/output/37-state-pill-tap-opened.png",
+        "packages/ui/src/components/shell/__e2e__/output/39-state-maximized-with-inset.png",
+        "packages/ui/src/components/shell/__e2e__/output/42-state-MAXIMIZED.png",
+        "packages/ui/src/components/shell/__e2e__/output/44-state-CLOSED.png",
+        "packages/ui/src/components/shell/__e2e__/output/51-state-streaming-dots-in-bubble.png",
+        "packages/ui/src/components/shell/__e2e__/output/52-state-multi-send-while-responding.png",
+        "packages/ui/src/components/shell/__e2e__/output/chat-sheet.html"
+      ]
+    },
+    {
+      "title": "fix(test): revive the repo integration lane — subpath-aware core alias, layout-independent globs, discord source pin (#11047)",
+      "prNumber": 11114,
+      "type": "bugfix",
+      "body": "## Revive the repo integration lane (#11047)\n\nThe `packages/test/vitest/integration.config.ts` lane was dead: every `plugins/*/test/**/*.integration.test.ts` it matched could not even load. Three stacked root causes, all fixed:\n\n### 1. Pref",
+      "files": [
+        "packages/test/harness/integration-config-core-subpath-alias.test.ts",
+        "packages/test/vitest/integration.config.ts",
+        "plugins/plugin-personal-assistant/package.json"
+      ]
+    },
+    {
+      "title": "fix(ui,cloud,app): rock-solid in-chat onboarding — confused-user guards, DM-onboarding session security, handoff reload-resume, adversarial e2e/fuzz (#10722)",
+      "prNumber": 11113,
+      "type": "bugfix",
+      "body": "## What\n\nHardens the (already chat-only) onboarding across every seam a confused or adversarial user can reach. No standalone runtime/provider selection screens exist — this PR makes the in-chat flow survive wrong taps, double taps, out-of-",
+      "files": [
+        ".github/issue-evidence/10722-onboarding-confused-user/README.md",
+        ".github/issue-evidence/10722-onboarding-confused-user/after-reload-fresh-onboarding.png",
+        ".github/issue-evidence/10722-onboarding-confused-user/after-reload-home.png",
+        ".github/issue-evidence/10722-onboarding-confused-user/double-click-home.png",
+        ".github/issue-evidence/10722-onboarding-confused-user/first-run-post-failed.png",
+        ".github/issue-evidence/10722-onboarding-confused-user/retry-after-failure-home.png",
+        ".github/issue-evidence/10722-onboarding-confused-user/unit-fuzz-test-run.log",
+        ".github/issue-evidence/10722-onboarding-confused-user/video-double-click-spam-one-post.webm",
+        ".github/issue-evidence/10722-onboarding-confused-user/video-local-onboarding-to-home-launcher.webm",
+        ".github/issue-evidence/10722-onboarding-confused-user/video-mobile-touch-onboarding-to-home.webm",
+        ".github/issue-evidence/10722-onboarding-confused-user/video-post-500-retry-completes.webm",
+        ".github/issue-evidence/10722-onboarding-confused-user/video-reload-mid-onboarding.webm",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/onboarding-confused-user.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/cloud/shared/src/lib/services/eliza-app/onboarding-chat.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-app/onboarding-chat.ts",
+        "packages/os/homepage/public/brand/background/Clouds_Loop_HQ_1080p.mp4",
+        "packages/os/homepage/public/brand/background/Clouds_Loop_Mobile_480p.mp4",
+        "packages/ui/src/cloud/handoff/pending-handoff-store.ts",
+        "packages/ui/src/cloud/handoff/resume-pending-handoff.test.ts",
+        "packages/ui/src/cloud/handoff/resume-pending-handoff.ts",
+        "packages/ui/src/cloud/handoff/silent-repoint.ts",
+        "packages/ui/src/first-run/IN_CHAT_ONBOARDING_DESIGN.md",
+        "packages/ui/src/first-run/first-run-action-channel.test.ts",
+        "packages/ui/src/first-run/first-run-action-channel.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/first-run/use-first-run-conductor.fuzz.test.ts",
+        "packages/ui/src/first-run/use-first-run-conductor.test.ts",
+        "packages/ui/src/first-run/use-first-run-conductor.ts",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/startup-phase-poll.ts"
+      ]
+    },
+    {
+      "title": "feat(vision): Android OCR via ML Kit Text Recognition v2 over the OCR bridge seam (#11001)",
+      "prNumber": 11111,
+      "type": "feature",
+      "body": "## What\n\nCloses #11001. Lands the engine-agnostic OCR bridge seam (salvaged from `feat/9105-tesseract-ship` per #9649 item 1) **together with** its native answerer, so Android agents get real coordinate-OCR through the same `ocr-with-coords",
+      "files": [
+        ".github/issue-evidence/11001-mlkit-ocr-android/README.md",
+        ".github/issue-evidence/11001-mlkit-ocr-android/connectedDebugAndroidTest-emulator-android14.xml",
+        ".github/issue-evidence/11001-mlkit-ocr-android/connectedDebugAndroidTest-pixel6a-android16.xml",
+        "bun.lock",
+        "packages/app-core/package.json",
+        "packages/app-core/platforms/android/app/capacitor.build.gradle",
+        "packages/app-core/platforms/android/capacitor.settings.gradle",
+        "packages/app/package.json",
+        "packages/app/src/main.tsx",
+        "packages/ui/src/bridge/native-plugins.ts",
+        "packages/ui/src/state/ocr-bridge.test.ts",
+        "packages/ui/src/state/ocr-bridge.ts",
+        "plugins/plugin-native-mlkit-text/AGENTS.md",
+        "plugins/plugin-native-mlkit-text/CLAUDE.md",
+        "plugins/plugin-native-mlkit-text/README.md",
+        "plugins/plugin-native-mlkit-text/android/build.gradle",
+        "plugins/plugin-native-mlkit-text/android/src/androidTest/java/ai/eliza/plugins/mlkittext/MlKitTextReaderInstrumentedTest.kt",
+        "plugins/plugin-native-mlkit-text/android/src/main/AndroidManifest.xml",
+        "plugins/plugin-native-mlkit-text/android/src/main/java/ai/eliza/plugins/mlkittext/MlKitTextPlugin.kt",
+        "plugins/plugin-native-mlkit-text/android/src/main/java/ai/eliza/plugins/mlkittext/MlKitTextReader.kt",
+        "plugins/plugin-native-mlkit-text/package.json",
+        "plugins/plugin-native-mlkit-text/rollup.config.mjs",
+        "plugins/plugin-native-mlkit-text/src/definitions.ts",
+        "plugins/plugin-native-mlkit-text/src/index.ts",
+        "plugins/plugin-native-mlkit-text/src/web.test.ts",
+        "plugins/plugin-native-mlkit-text/src/web.ts",
+        "plugins/plugin-native-mlkit-text/tsconfig.json",
+        "plugins/plugin-vision/src/index.ts",
+        "plugins/plugin-vision/src/ocr-bridge.test.ts",
+        "plugins/plugin-vision/src/ocr-bridge.ts",
+        "plugins/plugin-vision/src/ocr-service-android-bridge.test.ts",
+        "plugins/plugin-vision/src/ocr-service-android-bridge.ts",
+        "plugins/plugin-vision/src/routes.ocr.test.ts",
+        "plugins/plugin-vision/src/routes.ts"
+      ]
+    },
+    {
+      "title": "fix(cli-inference): catch non-numeric SDK API-error envelopes (\"Request was aborted.\", \"Missing Tool Result Block\") — #11080 follow-up",
+      "prNumber": 11109,
+      "type": "bugfix",
+      "body": "Post-merge adversarial review of #11080 found the guard's `^API Error:\\s*\\d{3}` anchor misses real envelopes **baked into the shipping claude binary** (verified by stringsing the CLI):\n\n```\nAPI Error: Request was aborted.\nAPI Error: Missing",
+      "files": [
+        "plugins/plugin-cli-inference/__tests__/subscription-limit.test.ts",
+        "plugins/plugin-cli-inference/src/provider-errors.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): gate shell pollers + one-shot loaders on an authenticated session (#11084)",
+      "prNumber": 11107,
+      "type": "bugfix",
+      "body": "## Gate shell pollers + one-shot loaders on an authenticated session (#11084)\n\nAn unauthenticated app shell polled its own `/api/*` endpoints in a no-backoff loop (~2 req/s per idle tab, measured ~35 requests/20s on staging) — every respons",
+      "files": [
+        "packages/ui/src/components/chat/widgets/agent-orchestrator-app-runs.test.tsx",
+        "packages/ui/src/components/chat/widgets/agent-orchestrator.tsx",
+        "packages/ui/src/components/chat/widgets/todo.test.tsx",
+        "packages/ui/src/components/chat/widgets/todo.tsx",
+        "packages/ui/src/components/local-inference/useHomeModelStatus.test.tsx",
+        "packages/ui/src/components/local-inference/useHomeModelStatus.ts",
+        "packages/ui/src/components/shell/ComputerUseApprovalOverlay.auth-gate.test.tsx",
+        "packages/ui/src/components/shell/ComputerUseApprovalOverlay.tsx",
+        "packages/ui/src/hooks/useAuthStatus.ts",
+        "packages/ui/src/state/useDataLoaders.auth-gate.test.tsx",
+        "packages/ui/src/state/useDataLoaders.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): Kokoro is the only on-device TTS — retire OmniVoice (Android repoint + catalog + submodule removal) (#9649)",
+      "prNumber": 11106,
+      "type": "feature",
+      "body": "# feat(voice): Kokoro is the only on-device TTS — retire OmniVoice (Android repoint, catalog, submodule removal)\n\nCloses the OmniVoice-cleanup track of #9649. Continues #9502 (which flipped the TS\nvoice selector to Kokoro-only but left the ",
+      "files": [
+        ".github/issue-evidence/9649-omnivoice-kokoro/FINDINGS.md",
+        ".github/issue-evidence/9649-omnivoice-kokoro/android/emulator-home.png",
+        ".github/issue-evidence/9649-omnivoice-kokoro/ios/sim-home.png",
+        ".github/issue-evidence/9649-omnivoice-kokoro/mac/kokoro-mac-desktop.wav",
+        ".github/issue-evidence/9649-omnivoice-kokoro/mac/say-reference-known-good.wav",
+        ".github/workflows/build-omnivoice.yml",
+        ".github/workflows/convert-omnivoice-singing.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/riscv64-smoke.yml",
+        ".github/workflows/snap-build-test.yml",
+        ".gitignore",
+        ".gitmodules",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "PR_EVIDENCE.md",
+        "WINDOWS.md",
+        "packages/app-core/platforms/electrobun/remotes/local-model/src/bun/eliza1-catalog.ts",
+        "packages/app-core/platforms/electrobun/remotes/local-model/src/dev/phase8-smoke.ts",
+        "packages/app-core/platforms/electrobun/remotes/surface/src/dev/phase4-smoke.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-live-validation.test.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-live-validation.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-pipeline.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-runtime-adapter.ts",
+        "packages/app-core/platforms/electrobun/src/voice/voice-service.test.ts",
+        "packages/app-core/scripts/voice-attribution-smoke.ts",
+        "packages/app/vite.config.ts",
+        "packages/benchmarks/voice/run-fused-parity.mjs",
+        "packages/cloud/shared/src/lib/services/__tests__/tts-cache-key-parity.test.ts",
+        "packages/shared/src/local-inference/catalog.test.ts",
+        "packages/shared/src/local-inference/catalog.ts",
+        "packages/shared/src/local-inference/index.ts",
+        "packages/shared/src/local-inference/types.ts",
+        "packages/shared/src/local-inference/voice-models.test.ts",
+        "packages/shared/src/local-inference/voice-models.ts",
+        "packages/ui/src/components/local-inference/ModelUpdatesPanel.stories.tsx",
+        "packages/ui/src/voice/voice-selftest/fixtures/gen-known-phrase.mjs",
+        "packages/ui/src/voice/voice-selftest/fixtures/known-phrase.ts",
+        "plugins/plugin-aosp-local-inference/README.md",
+        "plugins/plugin-aosp-local-inference/__tests__/aosp-kokoro-tts-handler.test.ts",
+        "plugins/plugin-aosp-local-inference/__tests__/aosp-local-inference-bootstrap.test.ts",
+        "plugins/plugin-aosp-local-inference/src/aosp-local-inference-bootstrap.ts",
+        "plugins/plugin-elizacloud/src/index.ts",
+        "plugins/plugin-elizacloud/src/models/speech.ts",
+        "plugins/plugin-local-inference/README.md",
+        "plugins/plugin-local-inference/__tests__/dac-parity.test.ts",
+        "plugins/plugin-local-inference/native/audio-fixtures/README.md",
+        "plugins/plugin-local-inference/native/audio-fixtures/freeman.wav",
+        "plugins/plugin-local-inference/native/build-omnivoice.mjs",
+        "plugins/plugin-local-inference/native/omnivoice.cpp",
+        "plugins/plugin-local-inference/scripts/asr-real-smoke.ts"
+      ]
+    },
+    {
+      "title": "fix(ui/chat): no-lost-message on new-chat, full-gesture diagonal swipe, app-build phrasing, home-screen runner repair",
+      "prNumber": 11105,
+      "type": "bugfix",
+      "body": "## Summary\n\nFour adversarially-confirmed findings from the her-grade QA sweep (17 find-agents + refutation wave over chat/input/gesture surfaces):\n\n- **No-lost-message on new-chat (#10700's core guarantee):** `interruptActiveChatPipeline` r",
+      "files": [
+        "packages/ui/src/components/shell/__e2e__/run-home-screen-e2e.mjs",
+        "packages/ui/src/components/shell/use-pull-gesture.test.ts",
+        "packages/ui/src/components/shell/use-pull-gesture.ts",
+        "packages/ui/src/state/useChatCallbacks.ts",
+        "packages/ui/src/state/useChatLifecycle.ts",
+        "packages/ui/src/state/useChatSend.send-voice-newchat.race.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acceptance-criteria.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acceptance-criteria.ts"
+      ]
+    },
+    {
+      "title": "fix(ios): real-device boot hang — stale runtime-mode reconcile + un-hangable splash, lane-stamp guard, Capacitor cold-launch eval patch (#11030)",
+      "prNumber": 11104,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes #11030 — a sideload iOS build hangs forever on the \"Booting up…\" splash on a real device. Hand-review of the on-device console logs showed **three independent defects**, each fixed here:\n\n### Leg A — `fix(ui)`: stale persi",
+      "files": [
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-README.md",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-console-relaunch.log",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-console.log",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-01-30s.png",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-02-60s.png",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-03-90s.png",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-04-120s.png",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-05-150s.png",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-06-composer-focused.png",
+        ".github/issue-evidence/11030-ios-boot-fix/device-boot-screenshot-2-150s.png",
+        ".github/issue-evidence/11030-ios-boot-fix/js-eval-error-analysis.md",
+        ".github/issue-evidence/11030-ios-boot-fix/sim-boot-README.md",
+        ".github/issue-evidence/11030-ios-boot-fix/sim-boot-console.log",
+        ".github/issue-evidence/11030-ios-boot-fix/sim-boot-home-clean.png",
+        ".github/issue-evidence/11030-ios-boot-fix/sim-boot-home.png",
+        "bun.lock",
+        "package.json",
+        "packages/app-core/scripts/lib/mobile-lane-stamp.mjs",
+        "packages/app-core/scripts/lib/mobile-lane-stamp.test.mts",
+        "packages/app-core/scripts/lib/mobile-web-build-reuse.mjs",
+        "packages/app-core/scripts/lib/mobile-web-build-reuse.test.mts",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/test/capacitor-ios-boot-eval-guard.test.ts",
+        "packages/app/scripts/ios-sideload-helper.mjs",
+        "packages/app/scripts/mobile-release-preflight.mjs",
+        "packages/ui/src/api/ios-local-agent-transport.ts",
+        "packages/ui/src/first-run/mobile-runtime-mode.test.ts",
+        "packages/ui/src/first-run/mobile-runtime-mode.ts",
+        "packages/ui/src/first-run/reconcile-mobile-runtime-mode.test.ts",
+        "packages/ui/src/first-run/reconcile-mobile-runtime-mode.ts",
+        "packages/ui/src/state/startup-coordinator.test.ts",
+        "packages/ui/src/state/startup-coordinator.ts",
+        "packages/ui/src/state/startup-phase-poll.test.ts",
+        "packages/ui/src/state/startup-phase-poll.ts",
+        "packages/ui/src/state/useStartupCoordinator.ts",
+        "patches/@capacitor%2Fios@8.4.1.patch",
+        "patches/CHECKSUMS.sha256"
+      ]
+    },
+    {
+      "title": "test(ui,app,agent): onboarding/voice/background/interaction QA follow-ups + de-larp (#11083 follow-up)",
+      "prNumber": 11103,
+      "type": "tests",
+      "body": "## Summary\n\nFollow-up hardening for the onboarding/chat/voice/gesture/background epic\n(**PR #11083, merged** as `a9be4f48c70a`). A 6-agent audit of that epic surfaced\na set of residual gaps + test-honesty issues; this PR closes the\nlocally-",
+      "files": [
+        ".github/workflows/app-real-e2e.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/ui-e2e-gate.yml",
+        "packages/agent/src/runtime/view-capability-audit.test.ts",
+        "packages/app/playwright.ui-smoke.config.ts",
+        "packages/app/test/ui-smoke/chat-message-actions.spec.ts",
+        "packages/app/test/ui-smoke/voice-realaudio.spec.ts",
+        "packages/app/test/ui-smoke/voice-selftest-e2e.spec.ts",
+        "packages/scenario-runner/test/scenarios/README.md",
+        "packages/scenario-runner/test/scenarios/deterministic-background-actions.scenario.ts",
+        "packages/ui/src/components/pages/Launcher.gestures.test.tsx",
+        "packages/ui/src/components/pages/__e2e__/background-fixture.tsx",
+        "packages/ui/src/components/pages/__e2e__/output-background/background.html",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-01-default-orange.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-02-swatch-green.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-04-chat-apply-teal.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-06-ui-undo-to-green.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-08-ui-redo-to-teal.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/walkthrough.webm",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/desktop-edit.png",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/desktop-rest.png",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/launcher-walkthrough.webm",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/launcher.html",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/mobile-edit.png",
+        "packages/ui/src/components/pages/__e2e__/output-launcher/mobile-rest.png",
+        "packages/ui/src/components/pages/__e2e__/run-launcher-e2e.mjs",
+        "packages/ui/src/components/shell/__e2e__/output-home/01-mobile-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/02-mobile-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/03-mobile-launcher-page2.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/04-desktop-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/05-desktop-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/06-desktop-edge-buttons-home.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/07-desktop-edge-buttons-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output-home/home-screen.html",
+        "packages/ui/src/components/shell/__e2e__/output-home/mobile-launcher-flow.webm",
+        "packages/ui/src/components/shell/__e2e__/output/21-grabber-real-touch-launcher.png",
+        "packages/ui/src/components/shell/__e2e__/output/22-state-empty.png",
+        "packages/ui/src/components/shell/__e2e__/output/23-state-booting.png",
+        "packages/ui/src/components/shell/__e2e__/output/24-state-recording-listening.png",
+        "packages/ui/src/components/shell/__e2e__/output/25-state-speaking.png",
+        "packages/ui/src/components/shell/__e2e__/output/28-state-image-attached.png",
+        "packages/ui/src/components/shell/__e2e__/output/29-state-mic-clicked-recording.png",
+        "packages/ui/src/components/shell/__e2e__/output/30-state-dictation-in-box.png",
+        "packages/ui/src/components/shell/__e2e__/output/31-state-suggestions-off.png",
+        "packages/ui/src/components/shell/__e2e__/output/32-state-multiline-input.png",
+        "packages/ui/src/components/shell/__e2e__/output/33-state-keyboard-collapsed.png",
+        "packages/ui/src/components/shell/__e2e__/output/34-state-keyboard-full.png",
+        "packages/ui/src/components/shell/__e2e__/output/35-state-no-provider-gate.png",
+        "packages/ui/src/components/shell/__e2e__/output/36-state-pill.png",
+        "packages/ui/src/components/shell/__e2e__/output/37-state-pill-tap-opened.png"
+      ]
+    },
+    {
+      "title": "hardening(ui): drop unbounded GLSL sink + stop WebGL-context rebuild on uniform tweaks (#11088)",
+      "prNumber": 11102,
+      "type": "other",
+      "body": "## GLSL background hardening (#11088, follow-up to #11083)\n\nTwo latent hardening fixes from the post-merge review of the programmable shader background. No rendered-output change → **visual audit N/A** (Fix 1 removes an unreachable path; Fi",
+      "files": [
+        "packages/ui/src/backgrounds/ProgrammableShaderBackground.rebuild.test.tsx",
+        "packages/ui/src/backgrounds/ProgrammableShaderBackground.tsx",
+        "packages/ui/src/backgrounds/useBackgroundApplyChannel.test.tsx",
+        "packages/ui/src/backgrounds/useBackgroundApplyChannel.ts"
+      ]
+    },
+    {
+      "title": "cloud: wire releaseStaleUnverifiedExternals into a daily reclaim cron (#11058)",
+      "prNumber": 11101,
+      "type": "other",
+      "body": "## Wire `releaseStaleUnverifiedExternals` into a reclaim cron (#11058)\n\nFollow-up to #11024/#11051, which landed the squat fix and the reclaim primitives (`releaseDomain` / `releaseStaleUnverifiedExternals(ttlMs)`) on `managedDomainsService",
+      "files": [
+        "packages/cloud/api/__tests__/reclaim-stale-domains-cron.test.ts",
+        "packages/cloud/api/cron/reclaim-stale-domains/route.ts",
+        "packages/cloud/api/src/_router.generated.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/cron/cloudflare-cron.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(core): dedupe non-hour DST fallback cron repeats",
+      "prNumber": 11100,
+      "type": "bugfix",
+      "body": "## Summary\n- Fix the DST fall-back cron dedupe added in #11099 so it uses the actual timezone offset delta instead of assuming every repeated wall-clock span is exactly one hour\n- Cover Australia/Lord_Howe, whose DST fall-back repeats only ",
+      "files": [
+        "packages/core/src/services/triggerScheduling.test.ts",
+        "packages/core/src/services/triggerScheduling.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dst-boundaries.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): dedupe DST fall-back cron double-fire + guard non-representable base (#11046)",
+      "prNumber": 11099,
+      "type": "bugfix",
+      "body": "## DST fall-back cron double-fire + pathological scan cost (#11046)\n\n`computeNextCronRunAtMs` (`packages/core/src/services/triggerScheduling.ts`) scanned wall-clock minutes and matched **both** instants of the ambiguous DST fall-back hour.\n",
+      "files": [
+        "packages/core/src/services/triggerScheduling.test.ts",
+        "packages/core/src/services/triggerScheduling.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dst-boundaries.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): expire steward tokens with malformed exp",
+      "prNumber": 11098,
+      "type": "bugfix",
+      "body": "## Summary\n- Treat Steward JWTs with non-numeric or non-finite `exp` claims as expired\n- Add regression coverage so malformed truthy `exp` values cannot survive the 401 keep-path\n\n## Evidence\n- `bun run --cwd packages/ui test -- src/cloud/s",
+      "files": [
+        "packages/ui/src/cloud/shell/StewardProviderShared.test.ts",
+        "packages/ui/src/cloud/shell/StewardProviderShared.ts"
+      ]
+    },
+    {
+      "title": "test(examples/code): deterministic real-agent app-build e2e (no live LLM)",
+      "prNumber": 11097,
+      "type": "tests",
+      "body": "## What\n\nA **deterministic, keyless** end-to-end test that proves the orchestrator drives a **real** coding agent to build an app — mocking only the model *provider*, not the agent.\n\nThe orchestrator's real `AcpService` spawns the same `pac",
+      "files": [
+        "packages/examples/code/package.json",
+        "packages/examples/code/tests/e2e/README.md",
+        "packages/examples/code/tests/e2e/deterministic-app-build-replay.mjs",
+        "packages/examples/code/tests/e2e/fixtures/random-color-gemma-session.json",
+        "packages/examples/code/tests/e2e/llm-record-replay-proxy.mjs"
+      ]
+    },
+    {
+      "title": "fix: prevent provider errors leaking into replies",
+      "prNumber": 11096,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Convert Claude CLI/SDK `API Error: <status>` envelopes into typed `ProviderApiError`s instead of returning them as model text.\n- Add a configurable Claude SDK per-turn timeout (`ELIZA_CLI_SDK_TURN_TIMEOUT_MS`, default 90s) so ",
+      "files": [
+        "packages/core/src/runtime/__tests__/use-model-provider-fallback.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/services/message/fallback-reply.ts",
+        "packages/core/src/services/message/provider-error-hygiene.test.ts",
+        "packages/core/src/utils/model-errors.ts",
+        "plugins/plugin-cli-inference/__tests__/claude-sdk-session.test.ts",
+        "plugins/plugin-cli-inference/index.ts",
+        "plugins/plugin-cli-inference/package.json",
+        "plugins/plugin-cli-inference/src/claude-cli.ts",
+        "plugins/plugin-cli-inference/src/claude-sdk-session.ts",
+        "plugins/plugin-cli-inference/src/provider-errors.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): cap per-org coding containers to close the fleet-DoS #11042 left open (#11023)",
+      "prNumber": 11095,
+      "type": "bugfix",
+      "body": "## Summary\n\nPR #11042 closed the **primary** #11023 fleet-DoS on `POST /api/v1/eliza/agents` (`forceCreate`) by capping `createAgent`'s plain-insert branch — but it did **not** touch the sibling path behind **`POST /api/v1/coding-containers",
+      "files": [
+        "packages/cloud/api/v1/coding-containers/route.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/shared/src/lib/constants/agent-sandbox-quota.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/eliza-sandbox-coding-container-quota.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox-create-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts"
+      ]
+    },
+    {
+      "title": "test(elizacloud): fix gating test broken by #11063 (embeddings moved out of the static map) — fails on clean develop",
+      "prNumber": 11094,
+      "type": "bugfix",
+      "body": "#11063 moved `TEXT_EMBEDDING` out of `elizaOSCloudPlugin.models` into init-time `registerCloudEmbeddingModels` (gated on `ELIZAOS_CLOUD_USE_EMBEDDINGS`) but didn't update the #10819 arbitration test that asserts static membership — `text-in",
+      "files": [
+        "plugins/plugin-elizacloud/__tests__/unit/text-inference-gating.test.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): cancel pending legacy-task eviction when a session resumes (post-#11086)",
+      "prNumber": 11093,
+      "type": "bugfix",
+      "body": "## Cancel pending legacy-task eviction on session resume (follow-up to #11086)\n\nAn adversarial post-merge review of #11086 found a real correctness regression in its new eviction feature.\n\n### The bug\n\n#11086 added a 60s post-terminal evict",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/swarm-coordinator-service.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/swarm-coordinator-service.ts"
+      ]
+    },
+    {
+      "title": "fix(trajectories): expose conversation metadata in fallback API",
+      "prNumber": 11091,
+      "type": "bugfix",
+      "body": "## Summary\n- include persisted trajectory `metadata` plus top-level `roomId` / `entityId` on trajectory list rows\n- preserve the recorded trajectory source in fallback detail responses instead of hard-coding `chat`\n- add opt-in `?resolve=1`",
+      "files": [
+        "packages/agent/src/api/trajectory-fallback-routes.test.ts",
+        "packages/agent/src/api/trajectory-fallback-routes.ts",
+        "packages/core/src/features/trajectories/TrajectoriesService.test.ts",
+        "packages/core/src/features/trajectories/TrajectoriesService.ts"
+      ]
+    },
+    {
+      "title": "fix(lifeops): harden scheduler tick liveness + owner-send double-send race (post-#10993)",
+      "prNumber": 11090,
+      "type": "bugfix",
+      "body": "## Post-merge hardening of the LifeOps scheduler spine (follow-up to #10993)\n\nAn adversarial post-merge review of #10993 (the LifeOps/PA de-larp campaign) surfaced **three latent bugs in the merged spine**. All three are proven fail-without",
+      "files": [
+        "packages/core/src/services/task-scheduler.test.ts",
+        "packages/core/src/services/task-scheduler.ts",
+        "packages/core/src/services/task.test.ts",
+        "packages/core/src/services/task.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/messaging/owner-send-policy.ts",
+        "plugins/plugin-personal-assistant/test/owner-send-approval-worker.test.ts"
+      ]
+    },
+    {
+      "title": "test(scenarios): echo debt 215→0, dead fields 31→0, harness fail-loud, honest judges, deterministic lane green",
+      "prNumber": 11089,
+      "type": "tests",
+      "body": "## Scenario corpus: echo debt to ZERO + harness fail-loud + judge governance\n\nFollow-on to the merged #10993 campaign (refs #9310 #10721 #10723 #8795 #10757). 28 commits.\n\n### Echo ratchet: 215 → 0\n\nEvery remaining echo-satisfiable scenario",
+      "files": [
+        ".github/workflows/live-scenarios.yml",
+        "packages/scenario-runner/schema/index.d.ts",
+        "packages/scenario-runner/schema/index.js",
+        "packages/scenario-runner/src/corpus-assertion-guard.test.ts",
+        "packages/scenario-runner/src/echo-assertion-ratchet.test.ts",
+        "packages/scenario-runner/src/executor.ts",
+        "packages/scenario-runner/src/final-checks/index.ts",
+        "packages/scenario-runner/src/judge-independence.test.ts",
+        "packages/scenario-runner/src/judge-independence.ts",
+        "packages/scenario-runner/src/loader.ts",
+        "packages/scenario-runner/src/reporter.test.ts",
+        "packages/scenario-runner/src/reporter.ts",
+        "packages/scenario-runner/src/schema-strict.test.ts",
+        "packages/scenario-runner/src/types.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-app-control-actions.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-app-control-nl-routing.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-generated-app-routes.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-xr-view-actions.scenario.ts",
+        "packages/scripts/run-live-scenarios.mjs",
+        "packages/test/scenarios/calendar/calendar.create.with-prep-buffer.scenario.ts",
+        "packages/test/scenarios/calendar/calendar.scheduling-with-others.propose-times.scenario.ts",
+        "packages/test/scenarios/connector-certification/_factory.ts",
+        "packages/test/scenarios/connector-certification/connector.browser-portal.certify-blocked-resume.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.browser-portal.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.calendly.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.calendly.certify-disconnected.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.discord.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.discord.certify-disconnected.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.gmail.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.gmail.certify-missing-scope.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.google-calendar.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.google-calendar.certify-rate-limited.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.google-drive-docs-sheets.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.google-drive-docs-sheets.certify-missing-scope.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.imessage.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.imessage.certify-helper-disconnected.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.notifications.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.notifications.certify-transport-offline.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.signal.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.signal.certify-session-revoked.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.slack.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.slack.certify-disconnected.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.telegram.certify-auth-expired.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.telegram.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.travel-booking.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.travel-booking.certify-hold-expired.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.twilio-sms.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.twilio-sms.certify-retry-idempotent.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.twilio-voice.certify-core.scenario.ts",
+        "packages/test/scenarios/connector-certification/connector.twilio-voice.certify-retry-idempotent.scenario.ts"
+      ]
+    },
+    {
+      "title": "perf(orchestrator): cache session metadata + evict terminal legacy task state in SwarmCoordinatorService",
+      "prNumber": 11086,
+      "type": "other",
+      "body": "## What\n\nFollow-up hardening on the SWARM_COORDINATOR adapter restored in #10981 (kanban #10561). One concern: per-event enrichment cost + unbounded legacy state growth in `SwarmCoordinatorService`.\n\n## Why\n\n- `enrichEventData` called `acp.",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/swarm-coordinator-service.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/swarm-coordinator-service.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): self-heal orphaned rate-limit counters — dropped pexpire bricks an IP/key with permanent 429s (live prod incident)",
+      "prNumber": 11085,
+      "type": "bugfix",
+      "body": "## Production incident (live, 2026-07-02 ~00:45 UTC): one IP permanently 429'd on every endpoint\n\nAn IP making **~26 requests/hour** got hard-locked out of the entire API — authed inference, `credits/summary`, apps, and the **public `/model",
+      "files": [
+        "packages/cloud/shared/src/lib/middleware/rate-limit-hono-cloudflare.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-orphaned-counter.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): floating-chat onboarding lock + programmable GLSL shader background + interaction/QA de-larp (#9952, #10694, #10722, #10434)",
+      "prNumber": 11083,
+      "type": "feature",
+      "body": "## Summary\n\nFloating-chat onboarding + interaction/background QA epic. This branch makes the\nin-chat first-run onboarding a true **modal lock**, ships the missing headline\nfeature of the app background (**arbitrary programmable GLSL shader*",
+      "files": [
+        ".github/issue-evidence/10712-live-streaming-thinking/README.md",
+        ".github/issue-evidence/10712-live-streaming-thinking/live-run-green-1.log",
+        ".github/issue-evidence/10712-live-streaming-thinking/live-run-green-2.log",
+        ".github/issue-evidence/10712-live-streaming-thinking/live-run-green-final.log",
+        ".github/issue-evidence/10712-live-streaming-thinking/live-run-red-provider-race.log",
+        ".github/issue-evidence/10712-live-streaming-thinking/sse-frames-run-1.json",
+        ".github/issue-evidence/10712-live-streaming-thinking/sse-frames-run-2.json",
+        ".github/workflows/ui-e2e-gate.yml",
+        "packages/agent/src/api/__tests__/conversation-stream-sse-contract.test.ts",
+        "packages/agent/src/api/avatar-routes.ts",
+        "packages/app-core/test/app/streaming-visible-text.live.e2e.test.ts",
+        "packages/app/package.json",
+        "packages/app/scripts/update-minimalism-baseline.mjs",
+        "packages/app/test/audit/aesthetic-audit-rules.test.ts",
+        "packages/app/test/ui-smoke/aesthetic-audit-rules.ts",
+        "packages/app/test/ui-smoke/aesthetic-minimalism-baseline.json",
+        "packages/app/test/ui-smoke/all-views-aesthetic-audit.spec.ts",
+        "packages/app/test/ui-smoke/cloud-live.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home-mobile.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.spec.ts",
+        "packages/ui/src/App.screen-background-fuzz.test.tsx",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/backgrounds/AppBackground.test.tsx",
+        "packages/ui/src/backgrounds/AppBackground.tsx",
+        "packages/ui/src/backgrounds/ProgrammableShaderBackground.stories.tsx",
+        "packages/ui/src/backgrounds/ProgrammableShaderBackground.test.tsx",
+        "packages/ui/src/backgrounds/ProgrammableShaderBackground.tsx",
+        "packages/ui/src/backgrounds/index.ts",
+        "packages/ui/src/backgrounds/shader-presets.test.ts",
+        "packages/ui/src/backgrounds/shader-presets.ts",
+        "packages/ui/src/backgrounds/shader-schema.test.ts",
+        "packages/ui/src/backgrounds/shader-schema.ts",
+        "packages/ui/src/backgrounds/useBackgroundApplyChannel.ts",
+        "packages/ui/src/components/pages/BackgroundView.test.tsx",
+        "packages/ui/src/components/pages/__e2e__/background-fixture.tsx",
+        "packages/ui/src/components/pages/__e2e__/output-background/background.html",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-01-default-orange.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-02-swatch-green.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-04-chat-apply-teal.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-05-chat-undo-to-image.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-06-ui-undo-to-green.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-07-chat-redo-to-image.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/bg-08-ui-redo-to-teal.png",
+        "packages/ui/src/components/pages/__e2e__/output-background/walkthrough.webm",
+        "packages/ui/src/components/pages/__e2e__/run-background-e2e.mjs",
+        "packages/ui/src/components/settings/BackgroundSettingsControls.test.tsx",
+        "packages/ui/src/components/settings/BackgroundSettingsControls.tsx",
+        "packages/ui/src/components/settings/BackgroundSettingsSection.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.firstrun.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(core): wait for embeddings before character docs",
+      "prNumber": 11082,
+      "type": "bugfix",
+      "body": "## Summary\n- wait for `ModelType.TEXT_EMBEDDING` before processing character `documents` / `knowledge` entries on startup\n- bound the wait at 120s with clear logs, and skip character ingestion rather than creating empty-fragment stubs if th",
+      "files": [
+        "packages/core/src/features/documents/service-character-ingest.test.ts",
+        "packages/core/src/features/documents/service.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): pass sandbox character settings and knowledge",
+      "prNumber": 11081,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Pass `settings` and `knowledge` from `ELIZA_AGENT_CHARACTER_JSON` through the sandbox character config entry.\n- Merge per-agent character settings into the final `Character.settings` without overriding runtime/env-derived sett",
+      "files": [
+        "packages/agent/src/runtime/__tests__/sandbox-character.test.ts",
+        "packages/agent/src/runtime/build-character-config.test.ts",
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/sandbox-character.ts",
+        "packages/shared/src/config/types.agents.ts"
+      ]
+    },
+    {
+      "title": "fix(cli-inference): never relay the SDK's \"API Error: NNN\" envelope as a user reply (leaked 18x live)",
+      "prNumber": 11080,
+      "type": "bugfix",
+      "body": "## Problem — raw `API Error: 400 …` relayed to Discord users 18×\n\nLive incident (cozy dev server, 2026-07-01 ~23:00 UTC): empty Minecraft-relay lines (`2fingersBTW | ZenithProxy: ` with no content) reached the RESPONSE_HANDLER; the flattene",
+      "files": [
+        "plugins/plugin-cli-inference/__tests__/subscription-limit.test.ts",
+        "plugins/plugin-cli-inference/src/claude-sdk-session.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): stop steward sign-in 500ing on profile-refresh conflicts + make sync failures observable",
+      "prNumber": 11079,
+      "type": "bugfix",
+      "body": "## What\n\nProd `POST /api/auth/steward-nonce-exchange` has been returning 500 on ~half its requests for over a week — a successful Steward OAuth that never becomes a cloud session, so the user lands back on /login and loops. This PR makes th",
+      "files": [
+        "packages/cloud/api/auth/steward-nonce-exchange/route.ts",
+        "packages/cloud/api/auth/steward-session/route.ts",
+        "packages/cloud/shared/src/lib/steward-sync-grant.test.ts",
+        "packages/cloud/shared/src/lib/steward-sync-profile-refresh.test.ts",
+        "packages/cloud/shared/src/lib/steward-sync.ts"
+      ]
+    },
+    {
+      "title": "test(cloud): run the money-path PGlite proof suites for real in CI (kill self-skip-to-green + latent red)",
+      "prNumber": 11078,
+      "type": "tests",
+      "body": "## Problem\n\nThe cloud money-path PGlite proof suites in `packages/cloud/shared/src/lib/services/__tests__/` never actually execute in a completed CI lane — they self-skip to a vacuous green (or a latent red), so the concurrency / idempotenc",
+      "files": [
+        ".github/workflows/cloud-tests.yml",
+        "packages/cloud/shared/package.json",
+        "packages/cloud/shared/src/lib/services/__tests__/ad-inventory.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-backup.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-charge-callback-cross-tenant.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-credit-hold-concurrency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-credits-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-earnings-withdrawal-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/container-billing-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/containers-slot-release-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/creator-earnings-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/credits-deduct-guard.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/credits-reconcile.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/crypto-payments-topup-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/direct-wallet-payments.integration.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/domain-maintenance.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/inference-billing-ledger.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/influencer-marketplace.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/managed-domains-squat.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/payout-stale-lock-recovery.test.ts",
+        "packages/cloud/shared/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "test(scenario-runner): skippable-check ratchet + factory-scenario hardening (#9310)",
+      "prNumber": 11077,
+      "type": "tests",
+      "body": "Advances #9310 with theme 7 (skipped-dependency-missing silent pass) and hardens the theme-3 ratchet from #11057.\n\n## Theme 7 — skippable-check ratchet (new)\n\n`approvalRequestExists` and `pushSent` return a **passing** `skipped-dependency-m",
+      "files": [
+        "packages/scenario-runner/src/action-effect-ratchet.test.ts",
+        "packages/scenario-runner/src/skippable-check-ratchet.test.ts"
+      ]
+    },
+    {
+      "title": "test(lifeops): pin #11041 dispatch-failure semantics in the simulation harness",
+      "prNumber": 11076,
+      "type": "tests",
+      "body": "Follow-up to #10835 (LifeOps scheduled-task simulation harness) and #11070 (stale `fired`→`failed` assertion fix). Refs #10721, #10718.\n\n## What\n\nExtends `plugins/plugin-personal-assistant/test/lifeops-scheduled-task-simulation.test.ts` to ",
+      "files": [
+        "plugins/plugin-personal-assistant/test/lifeops-scheduled-task-simulation.test.ts"
+      ]
+    },
+    {
+      "title": "fix(accounts): probe direct-API keys before keeping them in rotation (#11033 regression)",
+      "prNumber": 11075,
+      "type": "bugfix",
+      "body": "Fixes the MAJOR regression the post-merge review of #11033 flagged. #11033's verify-before-evict keeps a pooled coding account in rotation if `getAccessToken` returns a token — but a **direct-API** key (anthropic-api/openai-api/cerebras-api",
+      "files": [
+        "packages/agent/src/api/accounts-routes.ts",
+        "packages/agent/src/auth/direct-api-probe.ts",
+        "packages/agent/src/auth/types.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app-core/src/services/multi-account-refresh-failover.test.ts"
+      ]
+    },
+    {
+      "title": "fix(elizacloud): auto-send X-App-Id from ELIZA_APP_ID for per-app attribution (#10423)",
+      "prNumber": 11074,
+      "type": "bugfix",
+      "body": "Closes the code half of #10423. Product decision confirmed by @shaw: **inject `ELIZA_APP_ID` + auto-send `X-App-Id`**.\n\n## The gap\n\nThe managed deploy path already injects the platform-authoritative `ELIZA_APP_ID` into a deployed app contai",
+      "files": [
+        "plugins/plugin-elizacloud/__tests__/app-attribution-header.test.ts",
+        "plugins/plugin-elizacloud/src/utils/config.ts",
+        "plugins/plugin-elizacloud/src/utils/sdk-client.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): policy-merge security + app-build misclassify + usage-state default (audit-3)",
+      "prNumber": 11073,
+      "type": "bugfix",
+      "body": "Three confirmed findings from a fresh full-codebase audit of the orchestrator (post the 10 merged round-1/2 fixes):\n\n### 1. Security — policy override dropped the Discord ADMIN gate\n`parseTaskAgentPolicy` **replaced** the built-in `connecto",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acceptance-criteria.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/task-policy.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acceptance-criteria.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/task-policy.ts"
+      ]
+    },
+    {
+      "title": "test(cockpit): regression tests for the #11040 terminal-crash fixes",
+      "prNumber": 11072,
+      "type": "bugfix",
+      "body": "Follow-up to **#11043** (merged as `0777843a13`, by @NubsCarson), which fixed three hard-crash root causes behind #11040 / #10830 but merged with **no regression tests for two of the three crashes**. This PR is test-only — it adds/extends c",
+      "files": [
+        "packages/examples/code/src/components/narrow-terminal.test.ts",
+        "packages/scripts/__tests__/view-bundle-single-chunk.test.ts",
+        "plugins/plugin-pty/test/pty-routes.test.ts"
+      ]
+    },
+    {
+      "title": "test(orchestrator): keyless e2e of app-creation via a deterministic fake ACP agent",
+      "prNumber": 11071,
+      "type": "tests",
+      "body": "## Summary\n\nCaptures the \"ideal\" Claude-Code/Codex ACP session as a **deterministic fake agent**, enabling a **keyless, no-LLM end-to-end test of the whole app-creation-through-orchestration pipeline**.\n\n`__tests__/fixtures/fake-acp-agent.m",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/fixtures/fake-acp-agent.mjs",
+        "plugins/plugin-agent-orchestrator/src/__tests__/keyless-app-creation.e2e.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): steward session follow-ups — one host map, retryable cookie sync, exp-less tokens clearable, 401-guard tests",
+      "prNumber": 11067,
+      "type": "bugfix",
+      "body": "## What\n\nFollow-up to #11016 (merged), addressing the review findings on it:\n\n1. **One host→API map instead of three.** `ELIZA_CLOUD_DIRECT_API_BY_HOST` is now exported from `steward-url.ts` and imported by `StewardProviderShared` and publi",
+      "files": [
+        "packages/ui/src/cloud/public-pages/lib/steward-session.ts",
+        "packages/ui/src/cloud/shell/StewardProviderRuntime.test.tsx",
+        "packages/ui/src/cloud/shell/StewardProviderRuntime.tsx",
+        "packages/ui/src/cloud/shell/StewardProviderShared.test.ts",
+        "packages/ui/src/cloud/shell/StewardProviderShared.ts",
+        "packages/ui/src/cloud/shell/steward-url.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): commit real-touch horizontal flicks that a janked WebView coalesces or cancels (#9943)",
+      "prNumber": 11065,
+      "type": "bugfix",
+      "body": "## Summary\n\nRoot cause + fix for the long-standing **'flick does not commit' gap under real touch** — the on-device chat-grabber swipe spec (`touch-gesture.android.spec.ts`) red, and the redness the #10766 audit documented as deferred on th",
+      "files": [
+        "packages/app/scripts/lib/android-device.mjs",
+        "packages/app/test/android/touch-gesture.android.spec.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-e2e.mjs",
+        "packages/ui/src/components/shell/use-pull-gesture.test.ts",
+        "packages/ui/src/components/shell/use-pull-gesture.ts"
+      ]
+    },
+    {
+      "title": "fix(cockpit): make the tap-in interactive terminal work end-to-end",
+      "prNumber": 11043,
+      "type": "bugfix",
+      "body": "Fixes #11040.\n\nThe cockpit's flagship \"tap ⌨ Terminal → real interactive eliza-code CLI\" flow (merged in #10544 / #10668, enablement #10830) was broken end-to-end on develop. Three independent root causes, each reproduced pre-fix and A/B-ve",
+      "files": [
+        ".github/issue-evidence/11040-cockpit-terminal-e2e.md",
+        ".github/issue-evidence/11040-cockpit-view-phone.png",
+        ".github/issue-evidence/11040-proof-result.json",
+        ".github/issue-evidence/11040-real-model-reply-pong.png",
+        ".github/issue-evidence/11040-terminal-tui-phone-width.png",
+        "packages/benchmarks/view-bundle-size/budgets.json",
+        "packages/examples/code/package.json",
+        "packages/examples/code/scripts/write-dist-tsconfig.mjs",
+        "packages/examples/code/src/components/ChatPane.ts",
+        "packages/examples/code/src/components/MainScreen.ts",
+        "packages/scripts/view-bundle-vite.config.ts",
+        "plugins/plugin-pty/AGENTS.md",
+        "plugins/plugin-pty/CLAUDE.md",
+        "plugins/plugin-pty/routes/pty-routes.ts",
+        "plugins/plugin-pty/test/pty-routes.test.ts"
+      ]
+    },
+    {
+      "title": "test/ci: de-larp the interaction test surface — WS wire round-trip, real-touch CI matrix, TUI paste, XR hand/gaze, immersive framebuffer readback (#10722, #10104)",
+      "prNumber": 11003,
+      "type": "tests",
+      "body": "## Summary\n\nTwelve verified slices against the testing/QA umbrella (#10722, #10104 — descends from #9943; part of the broader QA grind spanning #9950/#8798/#10696/#10721/#10726/#10691/#11032):\n\n1. **Real WS wire round-trip harness for the v",
+      "files": [
+        ".github/CODEOWNERS",
+        ".github/issue-evidence/10104-touch-matrix-ci/README.md",
+        ".github/issue-evidence/10104-webkit-input-modality/README.md",
+        ".github/issue-evidence/10104-webkit-input-modality/apps-launcher-chromium.png",
+        ".github/issue-evidence/10104-webkit-input-modality/apps-launcher-webkit.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-home-chromium.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-home-webkit.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-open-chromium.png",
+        ".github/issue-evidence/10104-webkit-input-modality/chat-open-webkit.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/01-empty-state.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/02-add-invalid-key-error.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/03-add-dialog.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/04-account-added.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/05-two-accounts.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/06-reordered.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/07-strategy-round-robin.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/08-health-states.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/09-mobile-health-states.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/10-disabled-account.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/11-delete-confirm.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/12-after-delete.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/13-empty-after-delete.png",
+        ".github/issue-evidence/10722-accounts-ui-e2e/README.md",
+        ".github/issue-evidence/10722-dnd-harness/README.md",
+        ".github/issue-evidence/10722-dnd-harness/chat-01-dropped-pending-thumbnail.png",
+        ".github/issue-evidence/10722-dnd-harness/chat-02-sent-after-drop.png",
+        ".github/issue-evidence/10722-dnd-harness/documents-01-before-drop.png",
+        ".github/issue-evidence/10722-dnd-harness/documents-02-ingested-in-list.png",
+        ".github/issue-evidence/10722-dnd-harness/documents-03-second-drop-ingested.png",
+        ".github/issue-evidence/10722-dnd-harness/launcher-01-longpress-no-edit-mode.png",
+        ".github/issue-evidence/10722-dnd-harness/launcher-02-drag-noop-curated.png",
+        ".github/issue-evidence/10722-dnd-harness/plugins-01-before-drag.png",
+        ".github/issue-evidence/10722-dnd-harness/plugins-02-after-drag.png",
+        ".github/issue-evidence/10722-dnd-harness/plugins-03-after-reload.png",
+        ".github/issue-evidence/10722-dnd-harness/plugins-04-invalid-drop-noop.png",
+        ".github/issue-evidence/10722-dnd-harness/plugins-05-rapid-drags-converged.png",
+        ".github/issue-evidence/10722-dnd-harness/video-chat-file-drop-send.webm",
+        ".github/issue-evidence/10722-dnd-harness/video-knowledge-file-drop-ingest.webm",
+        ".github/issue-evidence/10722-dnd-harness/video-launcher-curated-contract.webm",
+        ".github/issue-evidence/10722-dnd-harness/video-plugins-rapid-drags.webm",
+        ".github/issue-evidence/10722-dnd-harness/video-plugins-reorder-persist-reload.webm",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/README.md",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/app-control-live-fixed.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/app-control-live.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/app-control-oss120b-differential-fixed.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/app-control-oss120b-differential.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/brush-teeth-basic-after-routing-fix.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/brush-teeth-basic.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/health-status-and-trend.report.json",
+        ".github/issue-evidence/9950-gemma4-31b-live-trajectories/live-inbound-attachment.report.json"
+      ]
+    },
+    {
+      "title": "fix(lifeops): de-larp + battle-test the scheduling/PA spine — recurrence, dispatch policy, approvals, honest tests",
+      "prNumber": 10993,
+      "type": "bugfix",
+      "body": "## LifeOps / personal-assistant de-larp + battle-test campaign\n\nFull audit and hardening of the LifeOps/PA stack (scheduling, calendar, email, reminders, todos, goals, check-ins, follow-ups, approvals) per #10721 #10723 #8795 #9310 #10757. ",
+      "files": [
+        ".github/issue-evidence/10721-10723-lifeops-qa-checklist/README.md",
+        ".github/issue-evidence/10721-trigger-boundary-before-after/README.md",
+        ".github/issue-evidence/10721-trigger-boundary-before-after/after-report.json",
+        ".github/issue-evidence/10757-cli-live-lane/README.md",
+        ".github/issue-evidence/10757-cli-live-lane/console-excerpt.log",
+        ".github/issue-evidence/10757-cli-live-lane/report.json",
+        ".github/issue-evidence/10757-cli-live-lane/run-dir-listing.txt",
+        "bun.lock",
+        "packages/agent/src/services/approval/service.test.ts",
+        "packages/agent/src/services/approval/store.ts",
+        "packages/core/src/generated/action-docs.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/services/task-scheduler.test.ts",
+        "packages/core/src/services/task-scheduler.ts",
+        "packages/core/src/services/task.test.ts",
+        "packages/core/src/services/task.ts",
+        "packages/core/src/testing/index.ts",
+        "packages/core/src/testing/live-provider.test.ts",
+        "packages/core/src/testing/live-provider.ts",
+        "packages/core/src/types/task.ts",
+        "packages/prompts/specs/actions/plugins.generated.json",
+        "packages/scenario-runner/src/__tests__/deterministic-action-coverage.test.ts",
+        "packages/scenario-runner/src/cli.ts",
+        "packages/scenario-runner/src/corpus-assertion-guard.test.ts",
+        "packages/scenario-runner/src/echo-assertion-ratchet.test.ts",
+        "packages/scenario-runner/src/executor-judge-score.test.ts",
+        "packages/scenario-runner/src/executor.ts",
+        "packages/scenario-runner/src/native-export.test.ts",
+        "packages/scenario-runner/src/native-export.ts",
+        "packages/scenario-runner/src/runtime-factory.ts",
+        "packages/scenario-runner/src/types.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-lifeops-concurrent-day.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-lifeops-dispatch-retry.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-lifeops-multiday-journey.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-lifeops-recurrence.scenario.ts",
+        "packages/test/scenarios/executive-assistant/ea.docs.collect-id-copy-for-workflow.scenario.ts",
+        "packages/test/scenarios/executive-assistant/ea.docs.signature-before-appointment.scenario.ts",
+        "packages/test/scenarios/executive-assistant/ea.followup.repair-missed-call-and-reschedule.scenario.ts",
+        "packages/test/scenarios/executive-assistant/ea.inbox.daily-brief-cross-channel.scenario.ts",
+        "packages/test/scenarios/executive-assistant/ea.schedule.travel-blackout-reschedule.scenario.ts",
+        "packages/test/scenarios/lifeops.hygiene/hygiene.brush-teeth-bedtime-wakeup.scenario.ts",
+        "packages/test/scenarios/lifeops.hygiene/hygiene.floss-daily-before-brush.scenario.ts",
+        "packages/test/scenarios/lifeops.hygiene/hygiene.medication-am-pm-with-meals.scenario.ts",
+        "packages/test/scenarios/lifeops.hygiene/hygiene.stretch-breaks-every-90min.scenario.ts",
+        "packages/test/scenarios/lifeops.hygiene/hygiene.water-custom-cadence-with-meals.scenario.ts",
+        "packages/test/scenarios/reminders/reminder.cross-platform.acknowledged-syncs.scenario.ts",
+        "packages/test/scenarios/reminders/reminder.cross-platform.fires-on-mac-and-phone.scenario.ts",
+        "packages/test/scenarios/reminders/reminder.escalation.intensity-up.scenario.ts",
+        "packages/test/scenarios/reminders/reminder.escalation.silent-dismiss.scenario.ts",
+        "plugins/plugin-inbox/test/inbox-service.test.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "greptile-apps",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/867647?v=4",
+      "totalScore": 630.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 630,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 398.987916146709,
+      "prScore": 303.549916146709,
+      "issueScore": 0,
+      "reviewScore": 95,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 328.72287069799296,
+      "prScore": 328.72287069799296,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 225.0219838328753,
+      "prScore": 224.5839838328753,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 49.67324228283444,
+      "prScore": 49.67324228283444,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 119,
+  "mergedPRs": 111,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 8
+}
