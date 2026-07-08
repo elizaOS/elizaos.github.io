@@ -1,0 +1,1899 @@
+{
+  "interval": {
+    "intervalStart": "2026-07-08T00:00:00.000Z",
+    "intervalEnd": "2026-07-09T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-07-08 to 2026-07-09, elizaos/eliza had 117 new PRs (124 merged), 0 new issues, and 6 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7ve9AE",
+      "title": "promote: verified develop snapshot 4d13d75e17d to main (inference-latency stack: mid-reads ∥ + embeddings pass-through + reply-first streaming)",
+      "author": "NubsCarson",
+      "number": 15529,
+      "body": "Promotes verified develop snapshot `4d13d75e17d` to main (prod). Cleanest snapshot of the day: **31 checks, 0 failures** on the tip.\n\n**Demo-critical content — the full inference-latency stack:**\n- **#15508** parallelize chat-completions mid reads (Shaw) — kills the 230–500ms serial Redis/DB gate tax on cache-miss turns\n- **#15520** embeddings pass-through (#15512) — verbatim upstream pipe; staging-verified engaging (`X-Eliza-Inference-Path: passthrough` on `/v1/embeddings`, warm 1.3–1.5s vs 3.8s worst-case; residual is the Worker→origin hop #15521 addresses). Prod flag `INFERENCE_PASSTHROUGH_EMBEDDINGS` already `true` — activates on this deploy.\n- **#15524** stream tool-input deltas on structured Stage-1 — first visible reply token ~1.1s → ~0.3s (cloud \"streaming\" was previously a post-hoc chunker)\n- **#15521** Smart Placement is **staging-only** in this snapshot (soak by design; prod follows once staging ttfb comparison holds)\n\nAlso carries 99 commits of develop accumulation incl. the onboarding/auth fixes and the passthrough byte-assertion test hardening.\n\n**Verify after merge:** CF Deploy (main→production) green → probe `/v1/embeddings` for the passthrough header + `/v1/chat/completions` warm ttfb; SSE first-token capture for #15524 evidence.\n\nRollback: `INFERENCE_PASSTHROUGH_EMBEDDINGS=false` (embeddings), revert #15524 (plugin-scoped), both independent.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-08T22:02:06Z",
+      "mergedAt": "2026-07-08T22:02:22Z",
+      "additions": 12736,
+      "deletions": 835
+    },
+    {
+      "id": "PR_kwDOMT5cIs7vZ4xl",
+      "title": "promote: verified develop snapshot 04f552e95b6 to main (cloud pass-through streaming — 4x faster inference)",
+      "author": "NubsCarson",
+      "number": 15478,
+      "body": "Promotes verified develop snapshot `04f552e95b6` to main (prod).\n\n**Demo-critical content: cloud inference pass-through streaming (#15437 + prod flag #15463).** Turns the gateway's AI-SDK re-encode path into a byte-for-byte upstream pipe for qualifying plain streamed Cerebras chat. Proven on staging (identical snapshot) in a warm A/B on the same request:\n\n| path | ttfb | total |\n|---|---|---|\n| staging (pass-through) | **0.87s** | **1.31s** |\n| prod (old re-encode path) | 2.35s | 5.30s |\n\n~4x faster total, quality intact (correct answers), gateway pre-forward tax collapses ~940ms→~2ms warm. `INFERENCE_PASSTHROUGH_STREAMING` is already `true` in `[env.production.vars]`, so it activates the moment prod deploys this bundle. Rollback = flip the flag `false` + redeploy (instant, byte-identical to today when off).\n\nAlso carries (94 commits since `552387401`): #15441 voice-gate provenance fix, Tier-3 inference hot-path (deferred admission + cached gates, #154xx), INFERENCE_HOT_PATH_CACHES on prod (#15421), cloud-voice v1 fallback (#15395/#15400), stream billing parity (waitUntil), agent reply/ack polish, and the usual develop accumulation.\n\n**Verify after merge:** CF Deploy (main→production) all-green; then probe `POST https://elizacloud.ai/api/v1/chat/completions` (stream + include_usage, model `zai-glm-4.7`) → response header `X-Eliza-Inference-Path: passthrough` + warm total ~1.3s.\n\nCI: cloud/core/build/unit lanes green on this snapshot; the red lanes are the known repo-wide-flaky Zero-Key browser/scenario E2E infra (same set carried on prior promotions).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-08T17:54:46Z",
+      "mergedAt": "2026-07-08T17:55:14Z",
+      "additions": 9430,
+      "deletions": 1419
+    },
+    {
+      "id": "PR_kwDOMT5cIs7vGD-u",
+      "title": "feat(ui-voice): streaming ASR live transcript + hands-free auto-send + VAD tunability (V2a complete, supersedes #15417) [sol-cloud]",
+      "author": "0xSolace",
+      "number": 15426,
+      "body": "## Voice UX — the complete V2a voice stack in one PR (supersedes #15417) [sol-cloud]\n\n**This PR is now THE single voice-UX PR.** It contains the full **V2a chunked-segment streaming ASR core** (live incremental transcript) **plus** the hands-free auto-send + in-flow toggle + VAD-tunability layer, as one coherent change on `develop`. It **supersedes and closes #15417** — that branch's V2a streaming core is included here in its entirety (byte-identical segmenter/stitcher/segment core), so there is no longer a separate streaming PR to land first.\n\nDesign docs: `VOICE-STREAMING-DESIGN.md`, `VOICE-LOOP-DOSSIER.md`. Extends the #15267 VAD/silence-guard base; does **not** regress barge-in (#15353/#15327), mic-permission recheck (#15329), shared-tier voice (#15400). **No V2b websocket.**\n\n---\n\n### 0. V2a streaming ASR core (was #15417 — now included here)\n\n- **Chunked-segment streaming transcription:** `cloud-stt-segmenter.ts` + `cloud-stt-stitcher.ts` cut speech into mid-utterance segments on length/pause boundaries and stitch them into a live incremental transcript, with seam-overlap dedup, silent-segment drop, and a graceful batch fallback when streaming isn't available. `local-asr-capture.ts` / `local-asr-transcribe.ts` drive the capture + per-segment transcribe legs; `voice-capture-factory.ts` wires backend selection.\n- **Opt-out:** `client-types-config.ts` `asr.streaming` opt-out + the `server-cloud-tts.ts` change are identical to what #15417 shipped (confirmed byte-for-byte).\n- Teardown/suspend/barge-in abort the in-flight segment POSTs (single `AbortController` per turn); a mid-utterance segment never submits — the turn's real final is committed at stop (stitched or batch fallback).\n\n### 1. Hands-free auto-send (full path, DEFAULT OFF)\n\nThe complete end-of-speech → finalize → send path, hands-free. Ships **default OFF** — composer review is the launch default — gated behind a user preference (`autoSend`, defaults `false`).\n\n- `applyTranscriptUpdate` (useVoiceChat) auto-sends a finalized **compose / push-to-talk** transcript when `autoSend` is on **AND** it clears the min-transcript reliability guard. Off ⇒ the transcript fills the composer draft for review. `passive` (ambient) auto-sends as before.\n- **No double-send:** the auto-send path clears the transcript buffer, so an explicit `stopListening({submit:true})` cannot re-emit. Test-covered.\n\n### 2. In-flow toggle on the mic surface\n\nA compact lucide icon-button rendered **inside the composer, adjacent to the mic** — `AutoSendToggle`. Not a settings page.\n- OFF (review): `PenLine`, `text-muted`. ON (auto-send): `Send`, `text-accent`. `aria-pressed`, disabled support, `data-*` hooks, richer Tooltip.\n- Persisted via `saveVoiceAutoSend`/`loadVoiceAutoSend` (key `eliza:voice:auto-send`, default `false`), owned in `ChatView`.\n\n### 3. VAD tunability\n\n- **`vad-params.ts` — single source.** The end-of-speech tunables re-export the runtime `DEFAULT_LOCAL_ASR_AUTO_STOP` so there is exactly ONE runtime source (a test asserts they never drift). Auto-send guard params (`minChars`/`minWords`/`minSpeechMs`) owned here too.\n- **`vad-debug.ts` — dev/QA affordance, OFF by default** behind `ELIZA_VOICE_VAD_DEBUG` (mirrors `tts-debug.ts`): logs each VAD decision + which threshold triggered the cutoff + the guard result.\n- **`auto-send-guard.ts` — the reliability gate.** Pure `passesAutoSendGuard`: never auto-send empty / single-token / sub-threshold-duration noise.\n\n---\n\n### Dedupe note (supersedes #15417)\n\nThis PR was reconciled against #15417 during a dedupe pass. Result: **#15426 survives, #15417 closes.** The two branches had shared a byte-identical V2a core; the auto-send layers differed (#15417 used a duplicate `voice-autosend-config.ts` + an inline composer toggle; this PR uses a pure `auto-send-guard.ts` + single-source `vad-params.ts` + a dedicated `AutoSendToggle.tsx` component + a simpler `useVoiceChat.ts`). Gap-ports pulled from #15417 into this branch:\n\n- **`vad-debug.test.ts`** — the only genuine test gap; ported and adapted to this branch's single-object `vadDebug(detail)` API (`ELIZA_VOICE_VAD_DEBUG`, `console.info`, no cached flag). 6 tests.\n- Verified this branch preserves #15417's behaviors: toggle visibility gated on the voice-send loop, no-double-send guarantee, silent-segment drop, seam-overlap dedup, graceful batch fallback, teardown→suspend + barge-in abort, PTT + compose modes both handled.\n- Did **not** port #15417's duplicate `voice-autosend-config.ts` (superseded by `auto-send-guard.ts` + `vad-params.ts`). Kept this branch's richer toggle UX copy (structured Tooltip + `aria-pressed` + disabled).\n\n---\n\n### Tests (per-file, vitest, `packages/ui`)\n\n```\n✓ src/voice/cloud-stt-segment.test.ts            (6)\n✓ src/voice/cloud-stt-segmenter.test.ts          (7)\n✓ src/voice/cloud-stt-stitcher.test.ts           (17)\n✓ src/voice/local-asr-capture.test.ts            (23)\n✓ src/voice/local-asr-transcribe.test.ts         (14)\n✓ src/voice/voice-capture-factory.test.ts        (14)\n✓ src/voice/auto-send-guard.test.ts              (13)\n✓ src/voice/vad-params.test.ts                   (5)\n✓ src/voice/vad-debug.test.ts                    (6)   <- ported gap\n✓ src/state/persistence-voice-auto-send.test.ts  (4)\n✓ src/components/composites/chat/AutoSendToggle.test.tsx (5)\n✓ src/hooks/useVoiceChat.auto-send.test.tsx      (6)\n✓ src/hooks/useVoiceChat.cloud-asr.test.tsx      (3)\n✓ src/hooks/useVoiceChat.local-asr.test.tsx      (2)\nTest Files 14 passed | Tests 125 passed\n```\n\nTypecheck: clean on all touched files (`tsgo --noEmit`; remaining errors are pre-existing esbuild/pg/postcss module-resolution noise in unrelated e2e-runner + plugin-sql files).\n\n### UI evidence (toggle states)\n\nThe `audit:app` OCR harness needs a full app build + packaged OCR engine (heavy/flaky on CI), so the surface-artifact rows below use the deterministic **rendered-DOM receipt** of both states (same approach #15400 used) — real media generated from the component's rendered semantics, verified by `AutoSendToggle.test.tsx`:\n\n- **OFF (review):** `data-auto-send=\"off\"`, `aria-pressed=\"false\"`, `text-muted`, `lucide-pen-line`, label \"Auto-send off — voice fills the draft to review\".\n- **ON (auto-send):** `data-auto-send=\"on\"`, `aria-pressed=\"true\"`, `text-accent`, `lucide-send`, label \"Auto-send on — voice sends automatically\".\n\nDevice PWA screenshots pending Shadow's staging test.\n\n---\n\nConstraints honored: no touch to vite.config/index.html/client-base.ts/bun.lock/binaries; explicit-pathspec commits; **no self-merge**.\n\n[sol-cloud]\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>\n\n\n<!-- evidence-row:before-screenshots -->\n- [x] ![before-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15426-before-auto-send-toggle-review.png)\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15426-after-auto-send-toggle-on.png)\n\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/elizaOS/eliza/releases/download/pr-evidence/15426-auto-send-walkthrough.webm\n\n<!-- evidence-row:ocr-review -->\n- [x] [15426-ocr-readout.txt](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15426-ocr-readout.txt)\n\n<!-- evidence-row:frontend-logs -->\n- [x] [15426-frontend-console.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15426-frontend-console.log)\n\n<!-- evidence-row:backend-logs -->\n- [ ] N/A - client-only UI change (AutoSendToggle + composer wiring + client-side guard/params); no server code path touched. server-cloud-tts.ts change is identical to #15417's and covered there.\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no model/LLM code path; gates a composer mic-surface affordance + client-side send decision, no prompt/generation change.\n\n<!-- evidence-row:domain-artifacts -->\n- [ ] N/A - UI voice-affordance change, no domain artifacts.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-08T02:50:55Z",
+      "mergedAt": "2026-07-08T04:16:32Z",
+      "additions": 2944,
+      "deletions": 20
+    },
+    {
+      "id": "PR_kwDOMT5cIs7vFp-F",
+      "title": "feat(ui-voice): chunked-segment streaming ASR — live incremental transcript (V2a) [sol-cloud]",
+      "author": "0xSolace",
+      "number": 15417,
+      "body": "## V2a — chunked-segment streaming ASR (live incremental transcript)\n\n**V2a of `VOICE-STREAMING-DESIGN.md`** (Phase 1). Companion to the voice quick-wins umbrella (#15267 lineage: capture lifecycle / STT timeout+retry / silence guard / VAD; #15327 barge-in; #15329 mic-permission recheck) and the shared-tier voice route (#15400).\n\n### Why\nOwner feedback (staging PWA): *\"mic/transcription works but ux is horrible and we can improve real time stt -> chat etc and make it more intuitive.\"* Today's loop is **batch**: record → stop → upload → wait → text (the STT stage dominates felt latency, and the composer feels dead while you talk). V2a makes the transcript appear **incrementally while you speak**, then finalize on stop.\n\n### How (zero cloud-infra change)\nThe cloud `/voice/stt` upstream stays the existing **batch** endpoint. V2a's \"streaming\" is **N independent per-segment transcriptions**, POSTed as the user speaks and stitched client-side:\n\n1. **Segmenter** (`cloud-stt-segmenter.ts`) — pure per-frame state machine running alongside the existing auto-stop VAD. Cuts a boundary after ~1s of buffered speech OR on a short intra-utterance pause (softer than the 650ms end-of-turn window), with a min-speech floor and the same echo-gate as auto-stop. Retains a ~200ms audio seam overlap for continuity.\n2. **Recorder** (`local-asr-capture.ts`) — optional `segmenter`+`onSegment` wiring. Encodes each boundary's buffered audio (with overlap) to a WAV and fires `onSegment` **while** buffering the full utterance for the untouched `stop()` batch WAV. Silent mid-segments drop (no seq consumed); a silent final tail emits a header-only marker so a clean utterance still finalizes without a doomed empty POST.\n3. **Segment transcribe** (`local-asr-transcribe.ts` `transcribeCloudSegment`) — same both-tier route selection (dedicated `/api/asr/cloud` + shared-tier `/api/v1/voice/stt`, #15400), same V4 timeout + single retry, adds the `X-Asr-Segment` header, and (unlike batch) treats an empty segment transcript as `\"\"`, not an error.\n4. **Stitcher** (`cloud-stt-stitcher.ts`) — ordered, seam-deduped incremental assembly. Handles **out-of-order / duplicate / retried** segment delivery (buffer-until-contiguous; idempotent on re-delivered `seq`) and dedups the overlapped seam words.\n5. **Composer** (`useVoiceChat.ts`) — emits a live **non-final** preview per stitched segment (drives the existing interim surface). On stop, **prefers the streamed stitch** when it finalized cleanly with no hard-failed segment; **else falls back** to the authoritative batch WAV transcription.\n6. **Proxy** (`server-cloud-tts.ts`) — `X-Asr-Segment` **passthrough only**. Phase 1 keeps the proxy **stateless**: each segment is a standalone WAV forwarded to the batch upstream; no session state, **no new endpoint**.\n\n`voice-capture-factory.ts` (ambient/desktop surface) gets the same behavior behind an opt-in `cloudStreaming` flag (default off; the composer drives its own streaming). `asr.streaming` config flag added (default **on** for cloud; `false` is a hard opt-out, e.g. to avoid per-segment credit-reservation churn on the ElevenLabs upstream — see design §2.4).\n\n### UX intuitiveness (owner's actual ask, first-class)\nThe composer state machine is now legible: **listening** (partial text appears live as you speak) → brief **processing** → **sent** (transcript becomes the message). No dead spinner during the STT wait.\n\n### Graceful degrade (mandatory, everywhere)\nStreaming off / never-finalized / any segment hard-fail / empty stitch → **batch full-WAV path** (already V4/V5-hardened). Batch-vs-stream is a *latency* difference, not a *correctness* one, so degrading down-to-working is the right call. Stream teardown is wired into `resetListeningState` (covers the V1 `APP_PAUSE` suspend-discard via `discardCaptureForSuspend`) and barge-in abort — no regression to #15267/#15327/#15329/#15400.\n\n### Tests (all green)\n`bun test --conditions=eliza-source` / vitest. **106 voice tests pass**, including the required `voice-provider-defaults`, `voice-chat-types.asr-default`, `local-asr-transcribe`, `shared-runtime-voice`.\n\nNew:\n- **cloud-stt-stitcher.test.ts** — in-order assembly + seam dedup, out-of-order/duplicate/retried delivery, negative/stale seqs, finalize + reset, empty-final finalize.\n- **cloud-stt-segmenter.test.ts** — length + pause boundaries, min-speech floor, speech-clock reset, echo gate, sane defaults.\n- **cloud-stt-segment.test.ts** — `X-Asr-Segment` wire shape, both-tier route selection, empty-segment-is-OK, retry classification.\n- **local-asr-capture.test.ts** (extended) — segmenter integration: boundaries emit ordered segments + terminal final, silent mid-segment drop (no seq consumed), header-only final marker on silent tail.\n\n<details><summary>Test output</summary>\n\n```\n Test Files  8 passed (8)\n      Tests  106 passed (106)\n```\n</details>\n\n### Scope\n**V2a ONLY.** No V2b (websocket / request-body streaming — later phase, needs streaming-Whisper upstream). No new server endpoints (chunked reuse of the batch route per design §2.2 option A).\n\n### Follow-ups (not V2a — noted per lane instructions)\n- Auto-send on end-of-speech (design-doc optional; deliberately not wired here).\n- Wire per-segment timings into the existing `ChatVoiceStatusBar` latency badge (real numbers vs estimates).\n- Mic-button state-machine polish (explicit listening/processing/sent affordance).\n- Adopt the streaming segmenter in the ambient factory path by default once the composer flow is device-verified.\n\n### Notes / caveats\n- **File constraints honored:** did not touch vite.config/index.html/client-base.ts/bun.lock/binaries. Codegen (`generate-keywords.mjs`) run but its generated file is unmodified.\n- **codex review:** timed out on the VPS on this ~1.4k-line diff (known VPS OOM/slowness on large diffs). Please run `codex review` in CI. Full-project `tsc --noEmit` passed clean before the final two type-trivial guard edits; the vitest suite compiles + exercises every new path.\n- **UI evidence:** the `check-pr-evidence` gate will want composer screenshots. The `audit:app` harness (`file-type` resolution) doesn't resolve from this symlinked worktree (pre-existing env quirk, reproduces on a pristine checkout of the affected test files — unrelated to this PR). **Requesting device-verify on the installed iOS PWA** for the live-partial-transcript UX + the streamed-vs-batch finalize path.\n\n**Sign:** [sol-cloud]\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-08T02:21:16Z",
+      "mergedAt": null,
+      "additions": 2212,
+      "deletions": 21
+    },
+    {
+      "id": "PR_kwDOMT5cIs7vHPuL",
+      "title": "feat(ui-voice): live mic-level waveform on the composer mic surface [sol-cloud]",
+      "author": "0xSolace",
+      "number": 15430,
+      "body": "## Live mic-level waveform on the composer mic surface\n\nFast-follow on the streaming-ASR + auto-send + VAD voice UX. This is the **instant-feedback layer under the streaming transcript**: a wispr/openai-style rolling waveform on the mic surface that reacts to live mic amplitude while listening, so the user *sees* the mic is hot before any transcript text lands.\n\n### ⚠️ Stacks on #15426\nBranched off `origin/sol/voice-autosend-vad` (PR #15426 — the deduped single voice-UX PR: streaming ASR + auto-send + VAD tunables). **Rebase to `develop` when #15426 merges.** This PR does **not** alter #15426's semantics — it is small and additive.\n\n### What it does\n1. **Expose live mic level from the capture loop** — `local-asr-capture.ts` gains an optional `onAudioLevel(PcmAudioStats)` sink invoked per PCM chunk, re-using the RMS/peak *already computed for the VAD gate* (zero extra audio processing). rAF-coalesced to ≤1 call per animation frame, cancelled on teardown. Fully opt-in: no sink attached ⇒ no level work runs.\n2. **Pipe through `useVoiceChat`** — a **ref-based `subscribeMicLevel` fan-out** (NOT per-chunk React state) so a ~30-60fps signal never re-renders the composer. Wired at **both PCM capture paths** (local-inference **and** eliza-cloud/openai). Browser SpeechRecognition + native TalkMode own no PCM stream, so they emit no level (documented).\n3. **`MicWaveform` component** — compact token-palette bar strip (accent while speech detected, muted below the VAD floor), rolling-history bars mutated via **direct DOM writes** off the subscription. **Presence-gated**: renders nothing until a real level arrives, so non-PCM \"listening\" backends never show a misleading idle meter. `prefers-reduced-motion` ⇒ static level bar. Design tokens only, no hardcoded colors, sized to the composer line (no layout shift). Renders on the mic surface in chat-composer while listening (compose + PTT), threaded through `ChatView`'s real call sites.\n\n### Perf (the whole point)\nLevel updates **never hit React state** — only a throttled speech-vs-silence flag flips (on threshold crossings). Bars/fill are mutated imperatively via refs + a single rAF loop. The 30-60fps amplitude stream causes **zero** composer re-renders.\n\n### Capture paths covered\n- ✅ `local-inference` (WAV capture) — waveform live\n- ✅ `eliza-cloud` / `openai` (same `startLocalAsrRecorder` WAV capture, streaming + batch) — waveform live\n- ⛔ browser `SpeechRecognition`, native TalkMode — no PCM stream, presence gate keeps the meter unmounted\n\n### Tests (vitest jsdom — full voice surface green: 18 files / 139 tests)\n- `local-asr-capture.test.ts` — `onAudioLevel`: sync delivery (no rAF host), rAF-coalescing (N chunks → 1 call/frame, latest wins), teardown cancels the pending frame, throwing-sink isolation, zero work when no sink.\n- `useVoiceChat.mic-level.test.tsx` — stable `subscribeMicLevel`, `onAudioLevel` wired at both local + cloud recorders, fan-out + unsubscribe, throwing-subscriber isolation.\n- `MicWaveform.test.tsx` — gate-closed until first level, idle/speech accent crossing, direct-DOM-mutation vs re-render count, reduced-motion static fallback, null-render for non-emitting backend.\n- The 14 files / 125 tests from #15426 stay green.\n\n### Evidence\nDeterministic rendered-DOM receipts via `packages/ui/scripts/capture-mic-waveform-evidence.mjs` — mounts the **real** `MicWaveform` via react-dom/client in jsdom, drives synthetic mic levels, flushes the rAF loop, and derives every attribute + bar scale **off the live DOM** (idle=muted, speech=accent, reduced=static). Rows attached below.\n\n**Rendered states (real component, attributes derived off the live DOM):**\n\n| speech (accent) | idle (muted) | reduced-motion (static) |\n|---|---|---|\n| ![speech](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15430-waveform-speech.png) | ![idle](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15430-waveform-idle.png) | ![reduced](https://github.com/elizaOS/eliza/releases/download/pr-evidence/15430-waveform-reduced.png) |\n- OCR/accessible-text readout: <https://github.com/elizaOS/eliza/releases/download/pr-evidence/15430-waveform-ocr-readout.txt>\n- Frontend console log: <https://github.com/elizaOS/eliza/releases/download/pr-evidence/15430-waveform-frontend-console.log>\n\nDevice screenshots pending owner staging test (deterministic CI-box receipts here, same approach as #15426).\n\n---\n🔊 Sol [sol-cloud] · Co-authored-by: wakesync\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-08T04:06:22Z",
+      "mergedAt": "2026-07-08T04:17:56Z",
+      "additions": 1450,
+      "deletions": 7
+    }
+  ],
+  "codeChanges": {
+    "additions": 31254,
+    "deletions": 7767,
+    "files": 445,
+    "commitCount": 232
+  },
+  "completedItems": [
+    {
+      "title": "promote: verified develop snapshot 1bc8eae0dfb to main (Smart Placement prod leg #15513)",
+      "prNumber": 15552,
+      "type": "other",
+      "body": "Promotes develop tip `1bc8eae0dfb` (checks green) to main. Carries **#15551 Smart Placement on production** (fail-safe: CF only moves execution when its analyzer concludes it helps; rollback = delete line + redeploy) + the develop accumulat",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/hetzner-e2e.yml",
+        "packages/app-core/scripts/build-helpers/verify-fused-symbols.mjs",
+        "packages/app-core/scripts/build-helpers/verify-fused-symbols.test.mjs",
+        "packages/cloud/api/__tests__/eliza-agents-create-idempotency.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-orphan-cleanup.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-warm-pool-empty-on-claim.test.ts",
+        "packages/cloud/api/__tests__/stripe-connect-webhook-route.test.ts",
+        "packages/cloud/api/fal/proxy/route.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/db/crypto/kms-client.test.ts",
+        "packages/cloud/shared/src/db/crypto/kms-client.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts",
+        "packages/scripts/cloud/admin/hetzner-e2e/hetzner-e2e-teardown.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud): Smart Placement on production (#15513 prod leg)",
+      "prNumber": 15551,
+      "type": "other",
+      "body": "Prod leg of #15513 (nubs green-lit full-send; staging leg #15521 merged earlier tonight).\n\n## Soak findings (staging, ~1.5h)\n- `placement: {\"mode\":\"smart\"}` confirmed applied on `eliza-cloud-api-staging` via the Workers settings API\n- No me",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(cloud): refuse memory KMS on staging and bare launches, not just production (#15310)",
+      "prNumber": 15550,
+      "type": "bugfix",
+      "body": "## Problem\n\n#15310 failure mode 1: the staging worker ran `ELIZA_KMS_BACKEND=memory`, so every restart rotated the root key and permanently orphaned every org DEK — pre-upgrade snapshots failed (`key not found: org:<org>/dek/v1`) and older ",
+      "files": [
+        "packages/cloud/shared/src/db/crypto/kms-client.test.ts",
+        "packages/cloud/shared/src/db/crypto/kms-client.ts"
+      ]
+    },
+    {
+      "title": "fix(android): align fused symbol verifier with pinned FFI ABI",
+      "prNumber": 15549,
+      "type": "bugfix",
+      "body": "## Problem\n\n#15540 reports the Android native-lib CI lane is red, leaving `build:android` with stale/incomplete `libelizainference.so` artifacts. The latest completed `build-llama-ffi-android.yml` run failed both ABIs after successfully bui",
+      "files": [
+        "packages/app-core/scripts/build-helpers/verify-fused-symbols.mjs",
+        "packages/app-core/scripts/build-helpers/verify-fused-symbols.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): scrub deprecated bridge fallback on provisioning deploy",
+      "prNumber": 15548,
+      "type": "bugfix",
+      "body": "## Problem\n\n#15347 pinned the staging headscale outage to a hand-set `AGENT_ROUTER_ALLOW_BRIDGE_HOST_FALLBACK=1` on the control-plane host. Removing it manually let fresh provisions use Headscale again, but the provisioning-worker deploy re",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): skip hetzner e2e teardown sweep on rejected token when nothing was provisioned",
+      "prNumber": 15547,
+      "type": "bugfix",
+      "body": "## Problem\n\n`Hetzner Agent E2E` has failed on every develop push/schedule today. The deploy job soft-skips when Hetzner rejects `HCLOUD_TOKEN_CI` (HTTP 401 — the secret is currently expired/revoked), so nothing is provisioned — but the tear",
+      "files": [
+        ".github/workflows/hetzner-e2e.yml",
+        "packages/scripts/cloud/admin/hetzner-e2e/hetzner-e2e-teardown.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): restore api typecheck",
+      "prNumber": 15546,
+      "type": "bugfix",
+      "body": "## Summary\n- updates the Stripe Connect signature-only test to use the Stripe SDK's installed, type-valid Dahlia API version literal\n- types the FAL proxy route against this package's Hono context and isolates the duplicate-Hono-package com",
+      "files": [
+        "packages/cloud/api/__tests__/stripe-connect-webhook-route.test.ts",
+        "packages/cloud/api/fal/proxy/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): gate provisioning health at enqueue",
+      "prNumber": 15544,
+      "type": "bugfix",
+      "body": "## Summary\n- moves the provisioning-worker health check to the cold provision-job enqueue boundary, after idempotent reuse, shared-tier, non-eager, and warm-pool paths have had a chance to succeed\n- rolls back the just-created pending sandb",
+      "files": [
+        "packages/cloud/api/__tests__/eliza-agents-create-idempotency.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-orphan-cleanup.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-warm-pool-empty-on-claim.test.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts"
+      ]
+    },
+    {
+      "title": "promote: verified develop snapshot 89f673c618f to main (cold-start TTL + onboarding Bug B — final sync)",
+      "prNumber": 15543,
+      "type": "bugfix",
+      "body": "Promotes verified develop snapshot `89f673c618f` to main — **55 checks, 0 failures** on the tip (cleanest snapshot today). Final sync of tonight's launch-hardening arc; brings main even with develop.\n\nCarries (29 commits):\n- **#15538** infe",
+      "files": [
+        ".github/workflows/app-aesthetic-audit.yml",
+        ".github/workflows/hetzner-e2e-reaper.yml",
+        ".github/workflows/hetzner-e2e.yml",
+        ".github/workflows/hetzner-provision-smoke.yml",
+        ".github/workflows/hetzner-sleep-wake-smoke.yml",
+        ".github/workflows/scenario-pr.yml",
+        "package.json",
+        "packages/agent/src/runtime/optional-plugin-imports.generated.ts",
+        "packages/agent/src/runtime/optional-plugins.ts",
+        "packages/app-core/src/api/credential-tunnel-routes.test.ts",
+        "packages/app/e2e/accounts-ui/tsconfig.e2e-paths.json",
+        "packages/app/scripts/ios-device-e2e.mjs",
+        "packages/app/scripts/lib/ios-device-e2e-lib.mjs",
+        "packages/app/scripts/lib/ios-device-e2e-lib.test.mjs",
+        "packages/app/test/ui-smoke/ocr-view-expectations.ts",
+        "packages/cloud/api/__tests__/eliza-agents-create-idempotency.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-orphan-cleanup.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-warm-pool-empty-on-claim.test.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/cache/keys.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/scripts/cloud/admin/hetzner-e2e/hetzner-e2e-reaper.ts",
+        "packages/ui/src/api/client-cloud-connect-mock-cloud.test.ts",
+        "packages/ui/src/api/client-cloud-select-or-provision.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/components/chat/widgets/ChoiceWidget.tsx",
+        "packages/ui/src/components/chat/widgets/interaction-widgets.behavior.test.tsx",
+        "packages/ui/src/first-run/first-run-finish.force-fresh.test.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/first-run/first-run-runtime-flag.test.ts",
+        "packages/ui/src/first-run/first-run-runtime-flag.ts",
+        "plugins/plugin-elizacloud/__tests__/text-streaming.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts",
+        "plugins/plugin-openai/__tests__/streamstructured-tool-input-delta.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): reuse the existing agent in first-run onboarding instead of 503 dead-end during worker outage",
+      "prNumber": 15541,
+      "type": "bugfix",
+      "body": "## What & why (#15516 Bug B)\n\nOn a real LP3 device, native cloud onboarding **provisioned + 503'd and dead-ended** for a user whose one healthy agent (running/ready/pairable) needed no provisioning at all. Two stacked defects, both fixed he",
+      "files": [
+        "packages/cloud/api/__tests__/eliza-agents-create-idempotency.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-orphan-cleanup.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-warm-pool-empty-on-claim.test.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/ui/src/api/client-cloud-connect-mock-cloud.test.ts",
+        "packages/ui/src/api/client-cloud.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud): raise inference auth-context TTL 60s → 300s — kills the 3-5.5s first-message-after-idle spike",
+      "prNumber": 15538,
+      "type": "other",
+      "body": "## Summary\n- `CacheTTL.inference.authContext` 60s → 300s\n\n## Why (measured on prod `f6f91af` tonight, post latency-stack deploy)\nFirst chat message after >60s idle: `X-Eliza-Preforward-Ms: total=2959 (auth=1684, mid=482, reserve=705)` → 5.5",
+      "files": [
+        "packages/cloud/shared/src/lib/cache/keys.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): repair scenario-pr e2e harness resolution",
+      "prNumber": 15537,
+      "type": "bugfix",
+      "body": "## Summary\n- add `@elizaos/core` to the accounts UI e2e `bun --tsconfig-override` path map so its real AccountPool API server resolves workspace source under Bun canary\n- expose existing support scripts through root package scripts so the s",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        "package.json",
+        "packages/app/e2e/accounts-ui/tsconfig.e2e-paths.json"
+      ]
+    },
+    {
+      "title": "fix(ci): skip hetzner reaper on rejected token",
+      "prNumber": 15536,
+      "type": "bugfix",
+      "body": "## Summary\n- treat Hetzner `missing_token` responses from the scheduled reaper list call as a configured-unavailable state\n- generate shared i18n data in both Hetzner Agent E2E jobs after `bun install --ignore-scripts`, including teardown\n-",
+      "files": [
+        ".github/workflows/hetzner-e2e.yml",
+        "packages/scripts/cloud/admin/hetzner-e2e/hetzner-e2e-reaper.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): make credential tunnel route test auth explicit",
+      "prNumber": 15535,
+      "type": "bugfix",
+      "body": "## Summary\n- make the credential tunnel route test authenticate with an explicit owner bearer token instead of relying on ambient local-request trust\n- reset the route auth limiter around the suite so Windows shard retries do not inherit au",
+      "files": [
+        "packages/app-core/src/api/credential-tunnel-routes.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): generate i18n data before hetzner reaper",
+      "prNumber": 15534,
+      "type": "bugfix",
+      "body": "## Summary\n\n- add the shared i18n/codegen step to the Hetzner E2E Reaper workflow before it imports `@elizaos/core` through the cloud shared client\n- fixes the active scheduled reaper failure where `bun install --ignore-scripts` leaves `pac",
+      "files": [
+        ".github/workflows/hetzner-e2e-reaper.yml"
+      ]
+    },
+    {
+      "title": "fix(plugins): hide prose before structured stream envelopes",
+      "prNumber": 15533,
+      "type": "bugfix",
+      "body": "## Summary\n- stop forwarding ordinary `text-delta` frames from OpenAI `streamStructured` fullStream into the visible structured stream\n- suppress Eliza Cloud SSE `delta.content` prose while the structured Stage-1 reply envelope is streamed ",
+      "files": [
+        "plugins/plugin-elizacloud/__tests__/text-streaming.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts",
+        "plugins/plugin-openai/__tests__/streamstructured-tool-input-delta.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): keep default cloud onboarding steward-only",
+      "prNumber": 15532,
+      "type": "bugfix",
+      "body": "## Summary\n- keep the runtime chooser disabled by default for Android local sideload/system builds unless a developer/test lane explicitly opts in\n- make first-run cloud binding request the Steward-token Cloud REST adapter so default onboar",
+      "files": [
+        "packages/ui/src/api/client-cloud-select-or-provision.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/first-run/first-run-finish.force-fresh.test.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/first-run/first-run-runtime-flag.test.ts",
+        "packages/ui/src/first-run/first-run-runtime-flag.ts"
+      ]
+    },
+    {
+      "title": "fix(app): capture iOS device failure forensics",
+      "prNumber": 15530,
+      "type": "bugfix",
+      "body": "## Summary\n- add physical iOS device failure forensics to the one-command device e2e lane\n- capture best-effort `idevicescreenshot` output plus boot-trace pull diagnostics into each failing step's failure directory\n- cover the new physical-",
+      "files": [
+        "packages/app/scripts/ios-device-e2e.mjs",
+        "packages/app/scripts/lib/ios-device-e2e-lib.mjs",
+        "packages/app/scripts/lib/ios-device-e2e-lib.test.mjs"
+      ]
+    },
+    {
+      "title": "promote: verified develop snapshot 4d13d75e17d to main (inference-latency stack: mid-reads ∥ + embeddings pass-through + reply-first streaming)",
+      "prNumber": 15529,
+      "type": "other",
+      "body": "Promotes verified develop snapshot `4d13d75e17d` to main (prod). Cleanest snapshot of the day: **31 checks, 0 failures** on the tip.\n\n**Demo-critical content — the full inference-latency stack:**\n- **#15508** parallelize chat-completions mi",
+      "files": [
+        ".github/workflows/actions-zombie-janitor.yml",
+        ".github/workflows/android-device-e2e.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/claude-security-review.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/release.yaml",
+        ".github/workflows/scenario-pr.yml",
+        "packages/agent/src/__tests__/plugin-view-inventory-ratchet.test.ts",
+        "packages/agent/src/api/__fixtures__/stream-cors-preflight-harness.ts",
+        "packages/agent/src/api/__tests__/chat-idempotency.test.ts",
+        "packages/agent/src/api/__tests__/conversation-idempotency.test.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/server-cors-preflight.test.ts",
+        "packages/app-core/platforms/android/app/capacitor.build.gradle",
+        "packages/app-core/platforms/android/app/src/main/AndroidManifest.xml",
+        "packages/app-core/src/api/__tests__/ensure-min-role.test.ts",
+        "packages/app-core/src/api/credential-tunnel-routes.test.ts",
+        "packages/app-core/src/api/deferred-runtime-boot.test.ts",
+        "packages/app-core/src/api/dev-route-catalog.test.ts",
+        "packages/app-core/src/api/first-run-persistence.restart.test.ts",
+        "packages/app-core/src/api/ios-local-agent-transport.test.ts",
+        "packages/app-core/src/services/__tests__/deploy-provisioning-worker-reconcile.test.ts",
+        "packages/app/test/core-view-interaction-coverage.test.ts",
+        "packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer/requirements_old.txt",
+        "packages/benchmarks/webshop/pyproject.toml",
+        "packages/benchmarks/webshop/upstream/requirements.txt",
+        "packages/cloud/api/__tests__/chat-completions-mid-read-parallel.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-optimistic-billing.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-warm-pool-empty-on-claim.test.ts",
+        "packages/cloud/api/__tests__/embeddings-affiliate-clamp.integration.test.ts",
+        "packages/cloud/api/__tests__/embeddings-affiliate-reserve.test.ts",
+        "packages/cloud/api/__tests__/embeddings-credit-leak.test.ts",
+        "packages/cloud/api/__tests__/embeddings-passthrough.test.ts",
+        "packages/cloud/api/__tests__/embeddings-route-billing.test.ts",
+        "packages/cloud/api/__tests__/messages-billing-offpath.test.ts",
+        "packages/cloud/api/__tests__/messages-iac-fast-path.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts",
+        "packages/cloud/api/v1/cron/pool-replenish/route.ts",
+        "packages/cloud/api/v1/eliza/agents/[agentId]/provision/route.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/api/v1/embeddings/route.ts",
+        "packages/cloud/api/v1/messages/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/db/repositories/__tests__/jobs-recovery.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/payment-requests-numeric.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/db/repositories/jobs.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): make app aesthetic audit advisory",
+      "prNumber": 15528,
+      "type": "bugfix",
+      "body": "## Summary\n- make the App Aesthetic Audit visual and OCR verdict steps advisory with `continue-on-error: true`\n- keep the strict audit commands and artifact uploads intact so reviewers still get visual evidence\n- document that `ci-ok` remai",
+      "files": [
+        ".github/workflows/app-aesthetic-audit.yml"
+      ]
+    },
+    {
+      "title": "fix(ui): restore first-run choice contrast",
+      "prNumber": 15526,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes the UI half of #15516, Bug A only.\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n      with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [ ] `bun install` and `bu",
+      "files": [
+        "packages/ui/src/components/chat/widgets/ChoiceWidget.tsx",
+        "packages/ui/src/components/chat/widgets/interaction-widgets.behavior.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(ui): bind first-run cloud agent from listed agents",
+      "prNumber": 15525,
+      "type": "bugfix",
+      "body": "## Summary\n- pass first-run's successful cloud-agent list into `selectOrProvisionCloudAgent`\n- avoid a second list/read race between `Finding your agents...` and the bind decision\n- keep the create path only for an authoritative no-running-",
+      "files": [
+        "packages/ui/src/api/client-cloud-select-or-provision.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/first-run/use-first-run-conductor.test.ts"
+      ]
+    },
+    {
+      "title": "perf(plugin-openai): stream tool-input deltas for structured Stage-1 calls — first visible token ~1.1s → ~0.3s",
+      "prNumber": 15524,
+      "type": "other",
+      "body": "Closes #15523.\n\n## Summary\n- with `streamStructured === true` (set only by the core message service's Stage-1 call), plugin-openai's live-streaming branch consumes `fullStream` and forwards **both** `text-delta` and `tool-input-delta` parts",
+      "files": [
+        "plugins/plugin-openai/__tests__/streamstructured-tool-input-delta.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): reuse selected cloud agent in first run",
+      "prNumber": 15522,
+      "type": "bugfix",
+      "body": "## Summary\n- keep cloud-only first-run silent when multiple running cloud agents exist instead of surfacing the old picker\n- prefer the active Settings cloud agent when it is still running\n- fall back to the newest running agent, then norma",
+      "files": [
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/first-run/use-first-run-conductor.test.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud): Smart Placement soak on staging (#15513)",
+      "prNumber": 15521,
+      "type": "other",
+      "body": "Part of #15513 (Fix B from the #15502 decomposition) — staging soak leg.\n\n## Summary\n- `placement = { mode = \"smart\" }` on `[env.staging]` only\n- With pass-through (#15437) live, the gateway's own gates cost ~91ms warm — but client ttfb is ",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "perf(cloud): pass-through fast path for /v1/embeddings (#15512)",
+      "prNumber": 15520,
+      "type": "other",
+      "body": "Closes #15512.\n\n## Summary\n- pass-through fast path for `/api/v1/embeddings`: when `INFERENCE_PASSTHROUGH_EMBEDDINGS` is on and the direct-OpenAI source serves the model, forward the validated request verbatim and return the upstream JSON u",
+      "files": [
+        "packages/cloud/api/__tests__/embeddings-affiliate-clamp.integration.test.ts",
+        "packages/cloud/api/__tests__/embeddings-affiliate-reserve.test.ts",
+        "packages/cloud/api/__tests__/embeddings-credit-leak.test.ts",
+        "packages/cloud/api/__tests__/embeddings-passthrough.test.ts",
+        "packages/cloud/api/__tests__/embeddings-route-billing.test.ts",
+        "packages/cloud/api/v1/embeddings/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/providers/language-model.ts",
+        "packages/cloud/shared/src/lib/services/inference-passthrough.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): passthrough OpenAI embeddings",
+      "prNumber": 15519,
+      "type": "bugfix",
+      "body": "## Summary\n- add an `INFERENCE_PASSTHROUGH_EMBEDDINGS` fast path for OpenAI-native `/v1/embeddings` requests\n- forward qualifying embedding requests directly to the OpenAI-compatible upstream after auth/rate-limit/credit admission, then bil",
+      "files": [
+        "packages/cloud/api/__tests__/embeddings-affiliate-clamp.integration.test.ts",
+        "packages/cloud/api/__tests__/embeddings-passthrough.test.ts",
+        "packages/cloud/api/__tests__/embeddings-route-billing.test.ts",
+        "packages/cloud/api/v1/embeddings/passthrough.ts",
+        "packages/cloud/api/v1/embeddings/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/providers/language-model.ts",
+        "packages/cloud/shared/src/lib/services/inference-passthrough.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): green ui format:check + chat-sheet restore-after-committed-over-pull",
+      "prNumber": 15515,
+      "type": "bugfix",
+      "body": "Two fresh current-tip CI failures, both introduced by **#15497 (39c72afff51)**.\n\n## 1. Quality (Extended) → `@elizaos/ui format:check` (biome format drift)\n\n#15497 merged two files that were not biome-formatted:\n`packages/ui/src/components/",
+      "files": [
+        "packages/ui/src/components/shell/use-pull-gesture.test.ts",
+        "packages/ui/src/components/shell/use-pull-gesture.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump nltk from 3.9.4 to 3.10.0 in /packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer in the uv group across 1 directory",
+      "prNumber": 15514,
+      "type": "other",
+      "body": "Bumps the uv group with 1 update in the /packages/training directory: [nltk](https://github.com/nltk/nltk).\n\nUpdates `nltk` from 3.9.4 to 3.10.0\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/nltk",
+      "files": [
+        "packages/benchmarks/terminal-bench/tasks/modernize-scientific-stack/climate_analyzer/requirements_old.txt",
+        "packages/benchmarks/webshop/pyproject.toml",
+        "packages/benchmarks/webshop/upstream/requirements.txt",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(ui): avoid www redirect for cloud pair exchange",
+      "prNumber": 15511,
+      "type": "bugfix",
+      "body": "## Summary\n- canonicalize `https://www.elizacloud.ai` to `https://elizacloud.ai` for the Cloud pair token exchange endpoint\n- add a regression assertion so the browser pair relay cannot POST to the redirecting `www` host\n\nFixes the remainin",
+      "files": [
+        "packages/ui/src/components/auth/CloudPairRelay.tsx",
+        "packages/ui/src/components/auth/__tests__/CloudPairRelay.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(ci): verify Pages frontend freshness",
+      "prNumber": 15510,
+      "type": "bugfix",
+      "body": "## Summary\n- add a Cloudflare Pages frontend freshness verifier that compares the live custom-domain Vite entry asset to the freshly built `packages/app/dist/index.html`\n- require the onboarding relay strings from #15507 in the served entry",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/scripts/__tests__/verify-pages-frontend.test.ts",
+        "packages/scripts/cloud/verify-pages-frontend-cli.mjs",
+        "packages/scripts/cloud/verify-pages-frontend.mjs",
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix(ci): repair Client Tests + Plugin Tests residuals (feed mock, cloud bind assertions, battery blur)",
+      "prNumber": 15509,
+      "type": "bugfix",
+      "body": "CI remediation for two red Tests jobs on develop. All fixes are at the correct layer; no production behavior weakened. Locally verified: plugin-feed 40/40, ui conductor 56/56, ui backdrop-gate 2/2, ui + plugin-feed typecheck, biome, error-p",
+      "files": [
+        "packages/ui/src/components/shell/VoiceCaptureHud.tsx",
+        "packages/ui/src/first-run/use-first-run-conductor.test.ts",
+        "plugins/plugin-feed/src/components/FeedView.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): parallelize chat completion mid reads",
+      "prNumber": 15508,
+      "type": "bugfix",
+      "body": "## Summary\n- parallelize independent chat-completions mid-path reads after request validation: monetized app lookup, pooled credential selection, reasoning catalog lookup, and suspension check\n- preserve explicit fail-before-forward behavio",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-mid-read-parallel.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-optimistic-billing.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts"
+      ]
+    },
+    {
+      "title": "test(pa): de-larp learning-goal preview assertion (echo-ratchet regression)",
+      "prNumber": 15506,
+      "type": "tests",
+      "body": "## What / why\n\nThe Windows CI `framework-packages` shard (which runs `packages/scenario-runner test`) went red on the echo-assertion ratchet (`src/echo-assertion-ratchet.test.ts`), and the same test fails deterministically on Linux (platfor",
+      "files": [
+        "plugins/plugin-personal-assistant/test/scenarios/goal-learning-spanish-basic.scenario.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): recover wedged cloud deploys",
+      "prNumber": 15505,
+      "type": "bugfix",
+      "body": "## Summary\n- add production Cloud CF Deploy pending/zero-job detection to the freeze-proof Actions janitor\n- force-cancel wedged production deploy runs and redispatch exactly once unless the retry was already bot-created\n- assert the deploy",
+      "files": [
+        ".github/workflows/actions-zombie-janitor.yml",
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "fix(ops): prune stale runner workspaces",
+      "prNumber": 15504,
+      "type": "bugfix",
+      "body": "## Summary\n- add a host-local admin tool for pruning stale GitHub self-hosted runner `_work` children under `/opt/actions-runners`\n- refuse to prune while `Runner.Worker` is active unless the operator passes `--allow-active`\n- support dry-r",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.test.ts",
+        "packages/scripts/cloud/admin/prune-runner-workspaces.test.ts",
+        "packages/scripts/cloud/admin/prune-runner-workspaces.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): repair shared CI test setup",
+      "prNumber": 15501,
+      "type": "bugfix",
+      "body": "## Summary\n- Cast shared Drizzle DB test proxies through `unknown` before `Record<PropertyKey, unknown>` to satisfy repo-wide typecheck.\n- Include the apps enum objects when the payment requests numeric wiring test pushes the PGlite schema.",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/__tests__/payment-requests-numeric.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-credits-ledger.test.ts"
+      ]
+    },
+    {
+      "title": "fix(scripts): clean stale artifact sync archives",
+      "prNumber": 15498,
+      "type": "bugfix",
+      "body": "## Summary\n- remove stale `eliza-artifacts-<pid>.tar.gz` files from the OS temp directory before artifact sync no-ops or downloads\n- preserve fresh archives under six hours old so concurrent installs are not disturbed\n- keep the existing cu",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/__tests__/payment-requests-numeric.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-credits-ledger.test.ts",
+        "packages/scripts/sync-artifacts.mjs"
+      ]
+    },
+    {
+      "title": "fix(ui): stabilize chat sheet gesture settling",
+      "prNumber": 15497,
+      "type": "bugfix",
+      "body": "## Summary\n- stabilize chat sheet pull/settle behavior so restore and free-rest paths do not leak full-bleed state\n- harden touch release velocity handling so stale touchend coordinates and single slow moves do not misclassify gestures\n- up",
+      "files": [
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-e2e.mjs",
+        "packages/ui/src/components/shell/use-pull-gesture.test.ts",
+        "packages/ui/src/components/shell/use-pull-gesture.ts",
+        "packages/ui/src/testing/real-touch-gestures.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): prune stale agent images during disk cleanup",
+      "prNumber": 15496,
+      "type": "bugfix",
+      "body": "## Summary\n- add a separate managed-agent image GC cadence to the node disk manager so large nodes shed superseded `ghcr.io/elizaos/eliza` refs before crossing the emergency disk threshold\n- preserve active container image IDs, keep the new",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.test.ts",
+        "packages/cloud/shared/src/lib/config/containers-env-disk.test.ts",
+        "packages/cloud/shared/src/lib/config/containers-env.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/app-credits-ledger.test.ts",
+        "packages/cloud/shared/src/lib/services/node-disk-manager.test.ts",
+        "packages/cloud/shared/src/lib/services/node-disk-manager.ts"
+      ]
+    },
+    {
+      "title": "test(cloud): isolate shared DB module mocks",
+      "prNumber": 15495,
+      "type": "tests",
+      "body": "## Summary\n- keep repository DB mocks proxy-backed so unrelated cloud-shared tests still see the real DB client surface\n- make the server-wallets DB mock override only the wallet lookup query while preserving real DB exports\n- avoid a Strip",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/server-wallets.test.ts",
+        "packages/cloud/shared/src/lib/stripe.guard.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): clear stale provision handles on retry",
+      "prNumber": 15494,
+      "type": "bugfix",
+      "body": "## Summary\n- clear persisted runtime handle columns when retrying rows whose provisioning job permanently failed\n- keep transport-unresolved provisioning retries and other wake/restart locks unchanged\n- add repository SQL regression coverag",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): reprovision managed agents on current fleet image",
+      "prNumber": 15493,
+      "type": "bugfix",
+      "body": "## Summary\n- resolve managed-agent provision image from the current configured `ELIZA_AGENT_IMAGE` when the stored row pin is absent or points at the same fleet-managed repo\n- preserve custom-repo docker_image pins so bespoke agents are not",
+      "files": [
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): cover long chat retry dedupe window",
+      "prNumber": 15492,
+      "type": "bugfix",
+      "body": "## Summary\n- extend HTTP chat idempotency retention to cover configured generation timeout plus reconnect retry wait\n- add pure-cache regression for the old 30s arrival-window failure\n- add route-level SSE regression proving a slow reconnec",
+      "files": [
+        "packages/agent/src/api/__tests__/chat-idempotency.test.ts",
+        "packages/agent/src/api/__tests__/conversation-idempotency.test.ts",
+        "packages/agent/src/api/chat-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): reconcile cloud agent bindings against running set",
+      "prNumber": 15491,
+      "type": "bugfix",
+      "body": "## Summary\n- route cloud first-run through the live running-agent set: zero running agents provisions, one running agent binds directly, multiple running agents return the existing picker outcome\n- stop reusing non-running cloud agents in s",
+      "files": [
+        "packages/ui/src/api/client-cloud-select-or-provision.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/state/startup-phase-poll.test.ts",
+        "packages/ui/src/state/startup-phase-poll.ts"
+      ]
+    },
+    {
+      "title": "fix(core): hold long streaming secret openers",
+      "prNumber": 15490,
+      "type": "bugfix",
+      "body": "## Summary\n- hold opener detection against the candidate emit prefix so long anchor-separated secrets cannot release their anchor before the value\n- keep the bounded 512-character fast path and add a bounded long-token fallback around the v",
+      "files": [
+        "packages/core/src/security/guarded-stream.test.ts",
+        "packages/core/src/security/guarded-stream.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): pin android-device-e2e setup-bun to 1.3.14 (#15071)",
+      "prNumber": 15489,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes #15071. The Android device-e2e lane has **never reached device test code** — it dies at `setup-bun`.\n\nRoot cause: the three `oven-sh/setup-bun@v2` steps in `android-device-e2e.yml` had **no `bun-version`**, so setup-bun fe",
+      "files": [
+        ".github/workflows/android-device-e2e.yml"
+      ]
+    },
+    {
+      "title": "fix(ui): target live chat sheet handle in e2e",
+      "prNumber": 15488,
+      "type": "bugfix",
+      "body": "Fixes the chat-sheet gesture CI failure seen on develop run 28966470660 / 28966470231.\n\n## What changed\n- The shared chat-sheet e2e `gesture()` helper now resolves the live drag handle when no explicit target is provided.\n- If the current d",
+      "files": [
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-e2e.mjs"
+      ]
+    },
+    {
+      "title": "test(agent): cover stream cors preflight",
+      "prNumber": 15487,
+      "type": "tests",
+      "body": "Addresses the remaining stream-CORS regression check from #15483.\n\n## What changed\n- Adds a Bun subprocess harness that boots the real `startApiServer` path.\n- Sends an actual `OPTIONS /api/conversations/:id/messages/stream` preflight from ",
+      "files": [
+        "packages/agent/src/api/__fixtures__/stream-cors-preflight-harness.ts",
+        "packages/agent/src/api/server-cors-preflight.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): pair native cloud agents in process",
+      "prNumber": 15486,
+      "type": "bugfix",
+      "body": "## Summary\n- add an in-process mode to the cloud agent session recovery runner so Capacitor native shells exchange the returned /pair token without navigating the main WebView to the remote agent origin\n- wire native-safe pairing through fi",
+      "files": [
+        "packages/ui/src/cloud/handoff/resume-pending-handoff.test.ts",
+        "packages/ui/src/cloud/handoff/resume-pending-handoff.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/hooks/useAgentSessionRecovery.test.tsx",
+        "packages/ui/src/hooks/useAgentSessionRecovery.ts",
+        "packages/ui/src/state/agent-session-recovery-runner.test.ts",
+        "packages/ui/src/state/agent-session-recovery-runner.ts",
+        "packages/ui/src/state/startup-phase-poll.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): reconcile provisioning worker secrets master key",
+      "prNumber": 15485,
+      "type": "bugfix",
+      "body": "## Summary\n- forward SECRETS_MASTER_KEY into the provisioning worker deploy ssh-action env allowlist\n- reconcile SECRETS_MASTER_KEY into /opt/eliza/cloud/.env.local with the same skip-empty-before-delete semantics as existing control-plane ",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/app-core/src/services/__tests__/deploy-provisioning-worker-reconcile.test.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): recover interrupted provisioning jobs on worker boot",
+      "prNumber": 15484,
+      "type": "bugfix",
+      "body": "## Summary\n- add a startup-only recovery path for jobs claimed before the provisioning worker process started\n- keep normal stale recovery thresholds unchanged so slow cold boots are not double-run\n- scope startup recovery to the daemon's c",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/__tests__/jobs-recovery.test.ts",
+        "packages/cloud/shared/src/db/repositories/jobs.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs-lanes.test.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): allow claude security workflow to validate",
+      "prNumber": 15482,
+      "type": "bugfix",
+      "body": "## Summary\n- move ANTHROPIC_API_KEY into step env for the Claude security review action\n- gate the step on env.ANTHROPIC_API_KEY instead of the forbidden secrets context\n- fixes the zero-job workflow validation failure on develop pushes\n\n##",
+      "files": [
+        ".github/workflows/claude-security-review.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud): serialize org rate-limit lease flushes",
+      "prNumber": 15481,
+      "type": "bugfix",
+      "body": "## Summary\n- claim org rate-limit lease flushes synchronously before any await\n- prevent active flushes from serving more local lease hits or publishing stale replacement leases\n- add a forced interleaving test for the #15415 double-carry/s",
+      "files": [
+        "packages/cloud/shared/src/lib/middleware/rate-limit-org-lease.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): mark app chat credit holds sweepable",
+      "prNumber": 15480,
+      "type": "bugfix",
+      "body": "## Summary\n- stamp monetized app-chat inference holds with the existing app_chat_reservation_v1 settlement marker\n- persist reserved base cost and raw estimate facts that the stale reservation sweeper consumes\n- add a real-PGlite reservatio",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/app-credit-hold-concurrency.test.ts",
+        "packages/cloud/shared/src/lib/services/app-credits.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): harden sandbox retry and UI gates",
+      "prNumber": 15479,
+      "type": "bugfix",
+      "body": "## Summary\n- Preserve docker provider attribution when adopting persisted provisioning retry handles so docker-backed rows without `node_id` fail closed instead of flipping to running.\n- Add a regression test for the persisted retry adoptio",
+      "files": [
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/ui/src/cloud-ui/components/dashboard/cloud-dashboard-components.tsx",
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-e2e.mjs"
+      ]
+    },
+    {
+      "title": "promote: verified develop snapshot 04f552e95b6 to main (cloud pass-through streaming — 4x faster inference)",
+      "prNumber": 15478,
+      "type": "other",
+      "body": "Promotes verified develop snapshot `04f552e95b6` to main (prod).\n\n**Demo-critical content: cloud inference pass-through streaming (#15437 + prod flag #15463).** Turns the gateway's AI-SDK re-encode path into a byte-for-byte upstream pipe fo",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/certification-image.yml",
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/tee-build-deploy.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/training-stack.yml",
+        ".github/workflows/weekly-maintenance.yml",
+        "bun.lock",
+        "package.json",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/api/__tests__/conversation-idempotency.test.ts",
+        "packages/agent/src/api/chat-augmentation.test.ts",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/agent/src/runtime/view-capability-audit.test.ts",
+        "packages/agent/src/services/remote-plugin-adapter.test.ts",
+        "packages/app-core/deploy/Dockerfile.ci",
+        "packages/app-core/platforms/android/capacitor.settings.gradle",
+        "packages/app-core/platforms/electrobun/package.json",
+        "packages/app-core/src/api/auth.ts",
+        "packages/app-core/src/api/auth/auth-context.ts",
+        "packages/app-core/src/api/auth/tokens.ts",
+        "packages/app-core/src/runtime/dev-server.ts",
+        "packages/app-core/test/live-agent/automations-compat-routes.test.ts",
+        "packages/app/scripts/lib/device-e2e-bundle.mjs",
+        "packages/app/scripts/ocr-triage.ts",
+        "packages/app/src/sw-registration.ts",
+        "packages/app/test/audit/ocr-content-rules.test.ts",
+        "packages/app/test/core-view-interaction-coverage.test.ts",
+        "packages/app/test/ui-smoke/chat-overlay-controls-interactions.spec.ts",
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/ocr-view-expectations.ts",
+        "packages/app/test/ui-smoke/onboarding-confused-user.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home-mobile.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.spec.ts",
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-interaction.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): scroll cloud pairing + CLI sign-in screens on short viewports",
+      "prNumber": 15476,
+      "type": "bugfix",
+      "body": "## What & why\n\nSibling follow-up to #15470 (login page). The **CLI / device sign-in** panel and\nthe **cloud pairing** screens share the login page's short-viewport clip bug:\nthey center a card with a flex `justify-center` and no scroll cont",
+      "files": [
+        "packages/ui/src/cloud/public-pages/pages/auth/cli-login-page.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/auth/cli-login-page.tsx",
+        "packages/ui/src/components/auth/CloudPairRelay.tsx",
+        "packages/ui/src/components/auth/__tests__/CloudPairRelay.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(ci): CRLF-safe OC migrate reader + Windows-tolerant app-worker readyMs",
+      "prNumber": 15475,
+      "type": "bugfix",
+      "body": "Fixes the two genuine current-tip **Windows CI** failures on `develop` (run 28958914187: `app-and-cli` + `plugins` shards). Both are Windows-specific; Linux was always green.\n\n## 1. app-and-cli — `packages/elizaos/src/migrate/migrate.test.t",
+      "files": [
+        "packages/elizaos/src/migrate/migrate.test.ts",
+        "packages/elizaos/src/migrate/openclaw-reader.ts",
+        "plugins/plugin-app-control/src/services/__tests__/app-worker-host.test.ts"
+      ]
+    },
+    {
+      "title": "fix(discord): abort generation on timeout — no orphaned runs, no double-dispatch",
+      "prNumber": 15474,
+      "type": "bugfix",
+      "body": "## Diagnosis narrative\n\n**Symptom (screenshot-verified, soliza Discord DM):** real questions hit a\n~2min \"I timed out while generating that reply. Please retry.\" while trivial\nfollow-ups reply instantly — an alternating pattern.\n\n**Root cau",
+      "files": [
+        "plugins/plugin-discord/README.md",
+        "plugins/plugin-discord/__tests__/generation-abort.test.ts",
+        "plugins/plugin-discord/__tests__/generation-timeout-dispatch.test.ts",
+        "plugins/plugin-discord/messages.ts"
+      ]
+    },
+    {
+      "title": "chore(cloud): enable pass-through streaming on production",
+      "prNumber": 15473,
+      "type": "other",
+      "body": "Activates INFERENCE_PASSTHROUGH_STREAMING on prod (#15437, deepscanned MERGE-FLAGS-OFF). Staging idle+keyless so verification is live-on-prod with the proven pattern (baseline captured: streaming ttfb 3.75s/total 7.27s median; direct 0.6s).",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(#14355): stabilize MVP goal grounding and confirmations",
+      "prNumber": 15471,
+      "type": "bugfix",
+      "body": "Closes #14355.\n\n## Summary\n- Add a first-party `goals` context and stronger OWNER_GOALS routing aliases so savings/travel/fitness/learning/sleep goal requests stay on the goal surface instead of reminders/routines.\n- Preserve concrete goal ",
+      "files": [
+        "packages/core/src/runtime/__tests__/action-retrieval.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-terminal-continuation-noop-relay.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-user-facing-text.test.ts",
+        "packages/core/src/runtime/action-retrieval.ts",
+        "packages/core/src/runtime/context-normalization.ts",
+        "packages/core/src/runtime/default-contexts.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "packages/core/src/services/message/direct-action-heuristics.test.ts",
+        "packages/core/src/services/message/direct-action-heuristics.ts",
+        "packages/core/src/types/components.ts",
+        "packages/core/src/types/contexts.ts",
+        "plugins/plugin-personal-assistant/src/actions/life-reminder-datetime.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/life.ts",
+        "plugins/plugin-personal-assistant/src/actions/owner-surfaces.ts",
+        "plugins/plugin-personal-assistant/src/actions/scheduled-task.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/scheduled-task.ts",
+        "plugins/plugin-personal-assistant/test/scenarios/goal-fitness-5k-basic.scenario.ts",
+        "plugins/plugin-personal-assistant/test/scenarios/goal-learning-spanish-basic.scenario.ts",
+        "plugins/plugin-personal-assistant/test/scenarios/goal-lowact-walk-around-block.scenario.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): scroll the sign-in card on short viewports instead of clipping",
+      "prNumber": 15470,
+      "type": "bugfix",
+      "body": "## What & why\n\nThe Eliza Cloud sign-in page (`/login`) clips its card — instead of scrolling — on **short viewports**, making the lower sign-in options (the `or continue with` OAuth row, and the wallet row when enabled) **unreachable**.\n\nFo",
+      "files": [
+        "packages/ui/src/cloud/public-pages/pages/login/login-page.safe-area.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/login-page.tsx"
+      ]
+    },
+    {
+      "title": "chore(cloud): enable pass-through streaming on staging for the soak",
+      "prNumber": 15469,
+      "type": "other",
+      "body": "Staging-only flip of INFERENCE_PASSTHROUGH_STREAMING (from #15437; prod stays false). Deepscanned MERGE-FLAGS-OFF. Post-deploy: latency probe (expect ~5s→~1s), billing-row comparison, isolate-memory watch (the tee ceiling), then prod flip.\n",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(registry): regenerate stale first-party generated.json (facewear drift)",
+      "prNumber": 15468,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe `packages/registry generate:first-party:check` CI gate is red on `develop`.\nThe checked-in `packages/registry/src/first-party/generated.json` is **stale**\nagainst the current source `registry-entry.json` files, so the `--che",
+      "files": [
+        "packages/registry/src/first-party/generated.json"
+      ]
+    },
+    {
+      "title": "fix(ci): green residual Server + Client Tests at develop tip",
+      "prNumber": 15467,
+      "type": "bugfix",
+      "body": "Repairs the two non-live Tests failures at develop tip (Server Tests + Client Tests). Live E2E jobs are workflow_dispatch-only and out of scope.\n\n## Server Tests — `view-capability-audit` facewear (`expected 0 to be greater than 0`)\n\nRoot c",
+      "files": [
+        "packages/agent/src/runtime/view-capability-audit.test.ts",
+        "packages/app/scripts/lib/device-e2e-bundle.mjs",
+        "packages/ui/src/components/settings/CapabilitiesSection.tsx",
+        "packages/ui/src/hooks/useWeather.ts"
+      ]
+    },
+    {
+      "title": "test(app): realign onboarding e2e suite to the #15339 sign-in-first cloud flow",
+      "prNumber": 15466,
+      "type": "tests",
+      "body": "## Windows CI — current shard failures (post-#15338/#15436)\n\nEnumerated every failing test across all 5 `windows (...)` shard jobs of the newest **Windows CI** run on `develop` (`a9c056f46d`, run 28928390547) and fixed each at the correct l",
+      "files": [
+        "packages/app/test/ui-smoke/onboarding-confused-user.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home-mobile.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.spec.ts"
+      ]
+    },
+    {
+      "title": "test(app): realign onboarding composer-lock e2e to #15339 sign-in-first",
+      "prNumber": 15465,
+      "type": "tests",
+      "body": "## Root cause\n\nThe Scenario-PR app-browser matrix fails at `onboarding-to-home.shared.ts:762` with:\n\n```\nexpect(locator).toBeEnabled() failed\nExpected: enabled\nReceived: disabled\n  at expectChatFirstOnboarding (onboarding-to-home.shared.ts:",
+      "files": [
+        "packages/app/test/ui-smoke/onboarding-confused-user.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.spec.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @hono/node-server from 2.0.6 to 2.0.8",
+      "prNumber": 15464,
+      "type": "other",
+      "body": "Bumps [@hono/node-server](https://github.com/honojs/node-server) from 2.0.6 to 2.0.8.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/honojs/node-server/releases\">@​hono/node-server's releases</a>.",
+      "files": [
+        "packages/cloud/services/gateway-discord/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @xyflow/system from 0.0.76 to 0.0.79",
+      "prNumber": 15463,
+      "type": "other",
+      "body": "Bumps [@xyflow/system](https://github.com/xyflow/xyflow/tree/HEAD/packages/system) from 0.0.76 to 0.0.79.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/xyflow/xyflow/releases\">@​xyflow/system's r",
+      "files": [
+        "packages/ui/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @ai-sdk/provider-utils from 4.0.36 to 5.0.5",
+      "prNumber": 15462,
+      "type": "other",
+      "body": "Bumps [@ai-sdk/provider-utils](https://github.com/vercel/ai/tree/HEAD/packages/provider-utils) from 4.0.36 to 5.0.5.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/vercel/ai/releases\">@​ai-sdk/pro",
+      "files": [
+        "packages/core/package.json",
+        "plugins/plugin-elizacloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump c12 from 2.0.4 to 3.3.4",
+      "prNumber": 15461,
+      "type": "other",
+      "body": "Bumps [c12](https://github.com/unjs/c12) from 2.0.4 to 3.3.4.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/unjs/c12/releases\">c12's releases</a>.</em></p>\n<blockquote>\n<h2>v3.3.4</h2>\n<p><a href",
+      "files": [
+        "packages/feed/packages/sim/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group with 6 updates",
+      "prNumber": 15460,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 6 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [@biomejs/biome](https://github.com/biomejs/biome/tree/HEAD/packages/@biomejs/biome) | `2.5.2` | `2.5.3` |\n| [turbo](https://github.com/vercel/t",
+      "files": [
+        "package.json",
+        "packages/app-core/platforms/electrobun/package.json",
+        "packages/benchmarks/eliza-1/package.json",
+        "packages/benchmarks/eliza-1/vision-cua-e2e/package.json",
+        "packages/benchmarks/interrupt-bench/package.json",
+        "packages/benchmarks/lib/package.json",
+        "packages/benchmarks/three-agent-dialogue/package.json",
+        "packages/cloud/api/package.json",
+        "packages/cloud/routing/package.json",
+        "packages/cloud/services/agent-server/package.json",
+        "packages/cloud/services/gateway-discord/package.json",
+        "packages/cloud/services/gateway-webhook/package.json",
+        "packages/cloud/services/operator/package.json",
+        "packages/cloud/shared/package.json",
+        "packages/contracts/package.json",
+        "packages/examples/bluesky/package.json",
+        "packages/examples/cloud/clone-ur-crush/package.json",
+        "packages/examples/discord/package.json",
+        "packages/examples/farcaster/package.json",
+        "packages/examples/twitter-xai/package.json",
+        "packages/feed/apps/web/package.json",
+        "packages/feed/package.json",
+        "packages/feed/packages/examples/local-a2a-server/package.json",
+        "packages/homepage/package.json",
+        "packages/os/homepage/package.json",
+        "plugins/plugin-agent-orchestrator/package.json",
+        "plugins/plugin-agent-skills/package.json",
+        "plugins/plugin-anthropic/package.json",
+        "plugins/plugin-app-control/package.json",
+        "plugins/plugin-background-runner/package.json",
+        "plugins/plugin-benchmarks/package.json",
+        "plugins/plugin-birdclaw/package.json",
+        "plugins/plugin-blocker/package.json",
+        "plugins/plugin-bluebubbles/package.json",
+        "plugins/plugin-bluesky/package.json",
+        "plugins/plugin-calendly/package.json",
+        "plugins/plugin-capacitor-bridge/package.json",
+        "plugins/plugin-cli-inference/package.json",
+        "plugins/plugin-cli/package.json",
+        "plugins/plugin-codex-cli/package.json",
+        "plugins/plugin-commands/package.json",
+        "plugins/plugin-computeruse/package.json",
+        "plugins/plugin-contacts/package.json",
+        "plugins/plugin-discord-local/package.json",
+        "plugins/plugin-discord/package.json",
+        "plugins/plugin-e2b-sandbox/package.json",
+        "plugins/plugin-edge-tts/package.json",
+        "plugins/plugin-elevenlabs/package.json",
+        "plugins/plugin-elizacloud/package.json",
+        "plugins/plugin-embeddings/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump docker/login-action from 4.2.0 to 4.4.0",
+      "prNumber": 15459,
+      "type": "other",
+      "body": "Bumps [docker/login-action](https://github.com/docker/login-action) from 4.2.0 to 4.4.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/docker/login-action/releases\">docker/login-action's releases",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/certification-image.yml",
+        ".github/workflows/tee-build-deploy.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump github/codeql-action/init from 4.36.2 to 4.37.0",
+      "prNumber": 15458,
+      "type": "other",
+      "body": "Bumps [github/codeql-action/init](https://github.com/github/codeql-action) from 4.36.2 to 4.37.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/github/codeql-action/releases\">github/codeql-action",
+      "files": [
+        ".github/workflows/codeql.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump anthropics/claude-code-action from 1.0.161 to 1.0.168",
+      "prNumber": 15457,
+      "type": "other",
+      "body": "Bumps [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) from 1.0.161 to 1.0.168.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-code-action/releas",
+      "files": [
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/weekly-maintenance.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump docker/setup-buildx-action from 4.1.0 to 4.2.0",
+      "prNumber": 15456,
+      "type": "other",
+      "body": "Bumps [docker/setup-buildx-action](https://github.com/docker/setup-buildx-action) from 4.1.0 to 4.2.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/docker/setup-buildx-action/releases\">docker/se",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/certification-image.yml",
+        ".github/workflows/training-stack.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump ruby/setup-ruby from 1.314.0 to 1.316.0",
+      "prNumber": 15455,
+      "type": "other",
+      "body": "Bumps [ruby/setup-ruby](https://github.com/ruby/setup-ruby) from 1.314.0 to 1.316.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ruby/setup-ruby/releases\">ruby/setup-ruby's releases</a>.</em></",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update transformers requirement from ~=5.12.1 to ~=5.13.0 in /packages/benchmarks/OSWorld",
+      "prNumber": 15454,
+      "type": "other",
+      "body": "Updates the requirements on [transformers](https://github.com/huggingface/transformers) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/huggingface/transformers/releas",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/setup.py"
+      ]
+    },
+    {
+      "title": "chore(deps): update numpy requirement from ~=2.5.0 to ~=2.5.1 in /packages/benchmarks/OSWorld",
+      "prNumber": 15453,
+      "type": "other",
+      "body": "Updates the requirements on [numpy](https://github.com/numpy/numpy) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/numpy/numpy/releases\">numpy's releases</a>.</em></p",
+      "files": [
+        "packages/benchmarks/OSWorld/requirements.txt"
+      ]
+    },
+    {
+      "title": "fix(ci): green the 5 non-live Tests fan-out failures at develop tip",
+      "prNumber": 15452,
+      "type": "bugfix",
+      "body": "Repairs the five current-tip **non-live** jobs from the develop-HEAD `Tests` run (28937426001 / push 28937218658, both at develop HEAD 9c99e6556c5). Each fixed at the correct layer per fail-fast doctrine; **no coverage weakened**. Verified ",
+      "files": [
+        "packages/agent/src/services/remote-plugin-adapter.test.ts",
+        "packages/app/scripts/lib/device-e2e-bundle.mjs",
+        "packages/app/src/sw-registration.ts",
+        "packages/app/test/ui-smoke/chat-overlay-controls-interactions.spec.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-browser-actions.scenario.ts",
+        "packages/ui/src/cloud/shell/ConsoleShell.test.tsx",
+        "packages/ui/src/components/chat/message-parser-incremental.test.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/test/story-gate/log-capture-wiring.test.mjs",
+        "plugins/plugin-workflow/__tests__/integration/embedded-harness.ts",
+        "plugins/plugin-workflow/__tests__/integration/trigger-dispatch-e2e.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): de-flake perf-gate-e2e's maximize-restore frame budget",
+      "prNumber": 15451,
+      "type": "bugfix",
+      "body": "## Failure\n\n`test:perf-gate-e2e` (Chat shell gestures + UI fixture E2E) fails on:\n\n```\n✗ [maximize-restore] within frame budget (p95 33.4ms ≤ 33.3ms, dropped 23% < 20%)\n1 FAILED\n```\n\nSibling of the chat-perf-gate fixed in #15449 — the SAME ",
+      "files": [
+        "packages/ui/src/components/shell/__e2e__/run-perf-gate-e2e.mjs"
+      ]
+    },
+    {
+      "title": "fix(elizaos): resolve curated root-memory by case (Windows CI portability)",
+      "prNumber": 15450,
+      "type": "bugfix",
+      "body": "## Problem — last current-tip Windows CI failure\n\nWindows CI (`app-and-cli` shard, `bun run --cwd packages/elizaos test`) fails the sole remaining case in `packages/elizaos/src/migrate/migrate.test.ts`:\n\n```\nFAIL src/migrate/migrate.test.ts",
+      "files": [
+        "packages/elizaos/src/migrate/migrate.test.ts",
+        "packages/elizaos/src/migrate/openclaw-reader.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): de-flake chat perf gate's streaming frame-budget check",
+      "prNumber": 15449,
+      "type": "bugfix",
+      "body": "## Failure\n\n`test:chat-perf-gate` (Chat shell gestures + UI fixture E2E) fails on:\n\n```\n✗ frame-budget detector does not flag the streaming window\nGATE CHECK(S) FAILED\n```\n\n## Root cause — vsync-quantization knife-edge, not a real regressio",
+      "files": [
+        "packages/ui/src/components/shell/__e2e__/run-chat-perf-gate.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): green residual Windows CI shards (elizaos + task-coordinator)",
+      "prNumber": 15448,
+      "type": "bugfix",
+      "body": "## What\n\nGreens the two Windows CI lanes still red on `develop` after #15445 — `windows (app-and-cli, …)` and `windows (plugins, …)`. #15446/#15447 landed after #15445 but touched only scenario + ui-smoke suites, not these shards, so these ",
+      "files": [
+        "packages/elizaos/src/commands/deploy.test.ts",
+        "packages/elizaos/vitest.config.ts",
+        "plugins/plugin-task-coordinator/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): stop shell overlays from eating clicks in zero-key browser suite",
+      "prNumber": 15447,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **Zero-Key app browser** CI step (`.github/workflows/test.yml` → \"Actual app\nplugin view browser coverage\") runs five ui-smoke specs. The\n`plugin-views-interaction` \"exercise every control\" pass was red across the\nshell-rend",
+      "files": [
+        "packages/app/test/ui-smoke/helpers.ts",
+        "packages/app/test/ui-smoke/orchestrator-gui-workbench.spec.ts",
+        "packages/app/test/ui-smoke/plugin-views-interaction.spec.ts",
+        "packages/ui/src/components/shell/ShellOverlays.tsx"
+      ]
+    },
+    {
+      "title": "fix(scheduling): de-flake f1-timezone zero-key scenario (catch-up window, not a tz-offset bug)",
+      "prNumber": 15446,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe `f1-timezone-boundary-edge-generic` zero-key scenario intermittently failed its naive-tick assertion (`reminder must NOT fire at the naive 07:30-UTC instant`). This has been deferred by multiple prior lanes. This PR fixes it",
+      "files": [
+        "plugins/plugin-personal-assistant/test/scenarios/f1-timezone-boundary-edge-generic.scenario.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): green current Windows CI shards — CRLF/PATHEXT/ui-dist portability + develop-red drift",
+      "prNumber": 15445,
+      "type": "bugfix",
+      "body": "## Windows CI — current shard failures (post-#15338/#15436)\n\nEnumerated every failing test across all 5 `windows (...)` shard jobs of the newest **Windows CI** run on `develop` (`a9c056f46d`, run 28928390547) and fixed each at the correct l",
+      "files": [
+        "packages/app-core/platforms/android/capacitor.settings.gradle",
+        "packages/app-core/test/live-agent/automations-compat-routes.test.ts",
+        "packages/core/src/services/message/pre-llm-direct-hook-removed.test.ts",
+        "packages/scenario-runner/src/scenario-pr-workflow.test.ts",
+        "plugins/plugin-app-control/src/actions/scaffold-env.test.ts",
+        "plugins/plugin-app-control/src/actions/settings.test.ts",
+        "plugins/plugin-app-control/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): green Tests fan-out — live-ci audit drift, health ENOTDIR, dead spec, VAD drift, handoff mock",
+      "prNumber": 15444,
+      "type": "bugfix",
+      "body": "Repairs still-red **Tests** fan-out jobs on `develop` (verified against tip `a9c056f`, run 28928390551). Every item is a stale-config / stale-assertion / stale-mock / dangling-ref class fix aligned to the current *intentional* tree — **none",
+      "files": [
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/test.yml",
+        "packages/app/test/core-view-interaction-coverage.test.ts",
+        "packages/scripts/audit-capability-router-live-ci.self-test.ts",
+        "packages/scripts/audit-capability-router-live-ci.ts",
+        "packages/ui/src/cloud/handoff/resume-pending-handoff.test.ts",
+        "plugins/plugin-app-control/src/actions/settings.ts",
+        "plugins/plugin-health/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): chat sheet drag tracks the finger 1:1 through the inset ceiling into maximize",
+      "prNumber": 15443,
+      "type": "bugfix",
+      "body": "## What / Why\n\nThe chat-sheet drag-follow e2e lane (`test:chat-sheet-e2e`) went red on four drag-tracking assertions:\n\n```\n✗ [mouse]  BEYOND full keeps tracking the finger 1:1 into the morph (got 742, full 682)\n✗ [finger] UP open→top: panel",
+      "files": [
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-e2e.mjs"
+      ]
+    },
+    {
+      "title": "fix(i18n): add 76 missing Korean UI translations",
+      "prNumber": 15442,
+      "type": "bugfix",
+      "body": "## Summary\r\n- Add 76 missing keys to `packages/ui/src/i18n/locales/ko.json` that were present in `en.json` but absent from Korean locale\r\n- Covers new UI surfaces: files view, chat attachment limits/suggestions, cloud deploy + CLI login, pr",
+      "files": [
+        "packages/ui/src/i18n/locales/ko.json"
+      ]
+    },
+    {
+      "title": "fix(core): skip the humanness voice gate for genuine model replies (~771ms/turn)",
+      "prNumber": 15441,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe humanness voice gate (#14873, `ensureAgentVoice` in `packages/core/src/services/message/voice-gate.ts`) runs at `AgentRuntime.sendMessageToTarget` on every connector-delivered agent message and short-circuits only when `cont",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/features/basic-capabilities/actions/reply.test.ts",
+        "packages/core/src/features/basic-capabilities/actions/reply.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/services/message.voice-gate-provenance.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): green cloud unit-tests — bound per-process memory (exit 143 hang) + exposed drift",
+      "prNumber": 15438,
+      "type": "bugfix",
+      "body": "## Root cause — the exit-143 \"hang\"\n\n`Cloud Tests → unit-tests` has been red for every run in the last ~60 (no green since before Jul 6), always dying with **exit 143 (SIGTERM)** at a drizzle-kit `pushSchema` step (\"Pulling schema from data",
+      "files": [
+        "packages/cloud/api/__tests__/stripe-event-clawback.test.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts",
+        "packages/scripts/test-cloud-run.mjs"
+      ]
+    },
+    {
+      "title": "perf(cloud): opt-in pass-through streaming for openai-compatible providers (8x gateway overhead)",
+      "prNumber": 15437,
+      "type": "other",
+      "body": "Closes nothing; implements the cloud-side fix for #15428 (gateway adds ~1.5-2.7s/call floor; the model is 0.4s).\n\n## The measured problem\n\nIdentical 5K-token `zai-glm-4.7` **streaming** call, measured twice, self-verified:\n\n| path | TTFB | ",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-passthrough-streaming.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/providers/language-model.ts",
+        "packages/cloud/shared/src/lib/services/inference-passthrough.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): green Format+Type-Safety ratchet and Server Tests (tui-smoke removal)",
+      "prNumber": 15436,
+      "type": "bugfix",
+      "body": "## Two fresh develop CI failures, both fallout from recent merges\n\n### 1. Quality (Extended) → Format + Type Safety Ratchet\n\n**Root cause:** `audit:type-safety-ratchet` overflowed two empty-fallback counters vs the `6194c24` baseline — `?? ",
+      "files": [
+        ".github/workflows/test.yml",
+        "packages/agent/src/__tests__/plugin-tui-view-coverage.test.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/runtime/plugin-resolver.ts",
+        "packages/core/src/services/message.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.firstrun.test.tsx",
+        "packages/ui/src/hooks/useLayoutShiftMonitor.ts"
+      ]
+    },
+    {
+      "title": "ci: drop dangling packages/tui build + retired XR harness job from Tests",
+      "prNumber": 15435,
+      "type": "tests",
+      "body": "## Problem\n\nThree straggler classes in the `Tests` workflow have failed on every `develop`\nrun since the TUI feature and the facewear XR harness were removed. All fail at\n**setup, before any test executes**, with `ENOENT` on a now-missing d",
+      "files": [
+        ".github/workflows/test.yml",
+        "packages/ui/.storybook/main.ts"
+      ]
+    },
+    {
+      "title": "revert(ui-voice): back out streaming ASR + waveform merges (device voice regression)",
+      "prNumber": 15434,
+      "type": "other",
+      "body": "**Immediate revert of tonight's two voice-UX merges — mic/transcription broke on device after they deployed.**\n\nReverts:\n- e02afb5442e (#15430 live mic waveform)\n- e8d780cd31d (#15426 streaming ASR + auto-send + VAD)\n\nShadow device-tested a",
+      "files": [
+        "packages/ui/scripts/capture-auto-send-toggle-evidence.mjs",
+        "packages/ui/scripts/capture-mic-waveform-evidence.mjs",
+        "packages/ui/src/api/client-types-config.ts",
+        "packages/ui/src/components/composites/chat/AutoSendToggle.test.tsx",
+        "packages/ui/src/components/composites/chat/AutoSendToggle.tsx",
+        "packages/ui/src/components/composites/chat/MicWaveform.test.tsx",
+        "packages/ui/src/components/composites/chat/MicWaveform.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx",
+        "packages/ui/src/components/pages/chat-view-hooks.tsx",
+        "packages/ui/src/hooks/useVoiceChat.auto-send.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.cloud-asr.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.local-asr.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.mic-level.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/state/persistence-voice-auto-send.test.ts",
+        "packages/ui/src/state/persistence.ts",
+        "packages/ui/src/voice/auto-send-guard.test.ts",
+        "packages/ui/src/voice/auto-send-guard.ts",
+        "packages/ui/src/voice/cloud-stt-segment.test.ts",
+        "packages/ui/src/voice/cloud-stt-segmenter.test.ts",
+        "packages/ui/src/voice/cloud-stt-segmenter.ts",
+        "packages/ui/src/voice/cloud-stt-stitcher.test.ts",
+        "packages/ui/src/voice/cloud-stt-stitcher.ts",
+        "packages/ui/src/voice/index.ts",
+        "packages/ui/src/voice/local-asr-capture.test.ts",
+        "packages/ui/src/voice/local-asr-capture.ts",
+        "packages/ui/src/voice/local-asr-transcribe.ts",
+        "packages/ui/src/voice/vad-debug.test.ts",
+        "packages/ui/src/voice/vad-debug.ts",
+        "packages/ui/src/voice/vad-params.test.ts",
+        "packages/ui/src/voice/vad-params.ts",
+        "packages/ui/src/voice/voice-capture-factory.test.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts",
+        "packages/ui/src/voice/voice-chat-types.ts",
+        "plugins/plugin-elizacloud/src/lib/server-cloud-tts.ts"
+      ]
+    },
+    {
+      "title": "fix(build): break cloud-shared/plugin/ui workspace cycle",
+      "prNumber": 15433,
+      "type": "bugfix",
+      "body": "## Summary\n- Break the `cloud-shared -> plugin-elizacloud -> ui -> cloud-shared` build-order cycle by making plugin UI usage an optional host-external peer instead of a regular workspace dependency.\n- Upgrade `audit:turbo-build-deps` from d",
+      "files": [
+        "bun.lock",
+        "packages/scripts/audit-turbo-build-deps.mjs",
+        "packages/scripts/audit-turbo-build-deps.self-test.mjs",
+        "packages/scripts/test-cloud-run-helpers.mjs",
+        "packages/scripts/test-cloud-run-helpers.self-test.mjs",
+        "packages/scripts/test-cloud-run.mjs",
+        "plugins/plugin-elizacloud/package.json"
+      ]
+    },
+    {
+      "title": "fix(ci): align slop-removal-e2e to the dual-mount console routing contract",
+      "prNumber": 15432,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe **UI Fixture E2E** workflow's 3rd cloud-stack runner (`test:slop-removal-e2e`, added by #14459) was red on two layers. #15389 fixed the sibling runners (`frontend-hosting`, `credentials`) and explicitly flagged this one as o",
+      "files": [
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/01-console-dashboard-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/01-redirect-dashboard-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/02-console-dashboard-billing-canceled-true.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/02-redirect-dashboard-billing-canceled-true.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/03-console-dashboard-api-keys.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/03-redirect-dashboard-earnings.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/04-console-dashboard-account.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/04-redirect-dashboard-monetization.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/05-console-dashboard-security.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/05-redirect-dashboard-affiliates.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/06-console-dashboard-security-permissions.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/06-redirect-dashboard-account.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/07-console-dashboard-monetization.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/07-redirect-dashboard-security.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/08-console-dashboard-connectors.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/08-redirect-dashboard-security-permissions.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/09-console-dashboard-organization.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/09-redirect-dashboard-api-keys.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/10-console-dashboard-earnings.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/10-redirect-dashboard-settings-tab-connections.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/11-console-dashboard-affiliates.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/11-redirect-dashboard-settings-tab-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/12-console-dashboard-settings-tab-connections.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/12-redirect-settings-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/13-console-dashboard-settings-tab-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/13-redirect-settings-api-keys.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/14-settings-hash-settings-cloud-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/14-surface-billing-canceled-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/15-settings-hash-settings-billing.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/15-surface-billing-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/16-settings-hash-settings-cloud-api-keys.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/16-surface-monetization-earnings-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/17-settings-hash-settings-api-keys.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/17-surface-monetization-affiliates-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/18-settings-hash-settings-cloud-monetization.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/18-surface-security-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/19-settings-hash-settings-cloud-account.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/19-surface-api-keys-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/20-settings-hash-settings-cloud-security.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/20-surface-account-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/21-settings-hash-settings-cloud-plugin-grants.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/21-surface-billing-canceled-mobile.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/22-settings-hash-settings-cloud-organization.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/22-surface-monetization-mobile.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/23-surface-billing-canceled-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/24-surface-billing-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/25-surface-monetization-earnings-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/26-surface-monetization-affiliates-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/27-surface-security-desktop.png",
+        "packages/ui/src/cloud/__e2e__/output-slop-removal/28-surface-api-keys-desktop.png"
+      ]
+    },
+    {
+      "title": "perf(agent): parallelize + defer per-turn embedding calls off the reply critical path",
+      "prNumber": 15431,
+      "type": "other",
+      "body": "Cuts the serial gateway embedding round-trips a dedicated-agent chat turn pays before its reply model call. Refs #15428 (gateway adds a ~1.5-2.7s floor per call; a turn was making 1 RESPONSE_HANDLER + 2-3 embedding calls, serially). Complem",
+      "files": [
+        "packages/agent/src/api/chat-augmentation.test.ts",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/core/src/features/documents/index.ts",
+        "packages/core/src/features/documents/recall-embed.test.ts",
+        "packages/core/src/features/documents/recall-embed.ts"
+      ]
+    },
+    {
+      "title": "feat(ui-voice): live mic-level waveform on the composer mic surface [sol-cloud]",
+      "prNumber": 15430,
+      "type": "feature",
+      "body": "## Live mic-level waveform on the composer mic surface\n\nFast-follow on the streaming-ASR + auto-send + VAD voice UX. This is the **instant-feedback layer under the streaming transcript**: a wispr/openai-style rolling waveform on the mic sur",
+      "files": [
+        "packages/ui/scripts/capture-mic-waveform-evidence.mjs",
+        "packages/ui/src/components/composites/chat/MicWaveform.test.tsx",
+        "packages/ui/src/components/composites/chat/MicWaveform.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx",
+        "packages/ui/src/hooks/useVoiceChat.mic-level.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/local-asr-capture.test.ts",
+        "packages/ui/src/voice/local-asr-capture.ts",
+        "packages/ui/src/voice/voice-chat-types.ts"
+      ]
+    },
+    {
+      "title": "chore(cloud): enable INFERENCE_DEFERRED_ADMISSION on production",
+      "prNumber": 15427,
+      "type": "other",
+      "body": "Second/final half of the prod inference hot-path flip (caches landed in #15421). Activates deferred billing admission on prod — the billing write moves off the response critical path via waitUntil. Prod already runs optimistic billing + $5 ",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "feat(ui-voice): streaming ASR live transcript + hands-free auto-send + VAD tunability (V2a complete, supersedes #15417) [sol-cloud]",
+      "prNumber": 15426,
+      "type": "feature",
+      "body": "## Voice UX — the complete V2a voice stack in one PR (supersedes #15417) [sol-cloud]\n\n**This PR is now THE single voice-UX PR.** It contains the full **V2a chunked-segment streaming ASR core** (live incremental transcript) **plus** the hand",
+      "files": [
+        "packages/ui/scripts/capture-auto-send-toggle-evidence.mjs",
+        "packages/ui/src/api/client-types-config.ts",
+        "packages/ui/src/components/composites/chat/AutoSendToggle.test.tsx",
+        "packages/ui/src/components/composites/chat/AutoSendToggle.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx",
+        "packages/ui/src/components/pages/chat-view-hooks.tsx",
+        "packages/ui/src/hooks/useVoiceChat.auto-send.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.cloud-asr.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.local-asr.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/state/persistence-voice-auto-send.test.ts",
+        "packages/ui/src/state/persistence.ts",
+        "packages/ui/src/voice/auto-send-guard.test.ts",
+        "packages/ui/src/voice/auto-send-guard.ts",
+        "packages/ui/src/voice/cloud-stt-segment.test.ts",
+        "packages/ui/src/voice/cloud-stt-segmenter.test.ts",
+        "packages/ui/src/voice/cloud-stt-segmenter.ts",
+        "packages/ui/src/voice/cloud-stt-stitcher.test.ts",
+        "packages/ui/src/voice/cloud-stt-stitcher.ts",
+        "packages/ui/src/voice/index.ts",
+        "packages/ui/src/voice/local-asr-capture.test.ts",
+        "packages/ui/src/voice/local-asr-capture.ts",
+        "packages/ui/src/voice/local-asr-transcribe.ts",
+        "packages/ui/src/voice/vad-debug.test.ts",
+        "packages/ui/src/voice/vad-debug.ts",
+        "packages/ui/src/voice/vad-params.test.ts",
+        "packages/ui/src/voice/vad-params.ts",
+        "packages/ui/src/voice/voice-capture-factory.test.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts",
+        "packages/ui/src/voice/voice-chat-types.ts",
+        "plugins/plugin-elizacloud/src/lib/server-cloud-tts.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud): move /v1/messages billing tail off the response path (stream + non-stream)",
+      "prNumber": 15425,
+      "type": "other",
+      "body": "## What\n\nCloses #15414 (the `/v1/messages` streaming billing tail) and its non-stream sibling, per lanes B1+B2 of the gateway latency plan scoped on #15404. Template: #15412 (the identical fix for `/v1/chat/completions`, merged).\n\n## Why\n\nT",
+      "files": [
+        "packages/cloud/api/__tests__/messages-billing-offpath.test.ts",
+        "packages/cloud/api/v1/messages/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): never flip running without durable node attribution (dockerMeta guard miss + warm-pool claim of null-node pool row)",
+      "prNumber": 15424,
+      "type": "bugfix",
+      "body": "## What\n\n`provision()` could flip an agent row to `status=running` with `node_id` **NULL** on docker-backed (dedicated/pool) tiers, minting an unattributable orphan. This PR closes both paths and hardens the warm-pool \"ready\" count so the f",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts"
+      ]
+    },
+    {
+      "title": "chore(cloud): enable INFERENCE_HOT_PATH_CACHES on production",
+      "prNumber": 15421,
+      "type": "other",
+      "body": "First half of the prod inference hot-path flip. Enables the in-isolate decision caches (rate-limit convergent lease, moderation memo, catalog memo) from #15409 on prod; `INFERENCE_DEFERRED_ADMISSION` stays false (separate deliberate step). ",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(cloud): wire warm-pool replenish into the daemon — pool no longer starves after claims/drains",
+      "prNumber": 15420,
+      "type": "bugfix",
+      "body": "## What & why\n\n`WarmPoolManager.replenish()` had **no live caller**. The warm pool got *claimed* and *idle-drained* but was **never refilled** — so once it depleted, every dedicated create silently degraded to the 30-120s+ cold path. This i",
+      "files": [
+        "packages/cloud/api/__tests__/eliza-agents-warm-pool-empty-on-claim.test.ts",
+        "packages/cloud/api/v1/cron/pool-replenish/route.ts",
+        "packages/cloud/api/v1/eliza/agents/[agentId]/provision/route.ts",
+        "packages/cloud/api/v1/eliza/agents/route.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/services/containers/agent-warm-pool.replenish.test.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.replenish.test.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): keep cloud pair links out of the owner-password wall (split from #15366)",
+      "prNumber": 15418,
+      "type": "bugfix",
+      "body": "## Summary\n\nSplits out and lands **only** the sound, secure, tested pair-link half of #15366.\n\nHosted Cloud agent `/pair?token=X` handoffs are intercepted **before** the auth gate so a stale/edge-hosted SPA fallback can never fall through t",
+      "files": [
+        "packages/cloud/shared/src/lib/cors/cloud-api-hono-cors.test.ts",
+        "packages/cloud/shared/src/lib/cors/cloud-api-hono-cors.ts",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/auth/CloudPairRelay.tsx",
+        "packages/ui/src/components/auth/__tests__/CloudPairRelay.test.tsx"
+      ]
+    },
+    {
+      "title": "chore(cloud): enable the inference hot-path stack on staging for the soak",
+      "prNumber": 15416,
+      "type": "other",
+      "body": "Staging-only flag flip per the #15409 review's flip-order (prod untouched). Enables the full hot-path stack on staging: optimistic billing + $5 threshold (matching prod's proven Tier-2 config — without it deferred admission is inert), defer",
+      "files": [
+        "packages/cloud/api/wrangler.toml"
+      ]
+    },
+    {
+      "title": "fix(agent): polish batch - dupe returns persisted reply, single-source ack vocabulary, view-overlap miss budget cap",
+      "prNumber": 15413,
+      "type": "bugfix",
+      "body": "Polish batch from the 2026-07-07 adversarial reviews + latency investigation. Three code fixes plus one item verified already landed upstream. Each item is independent; zero intended behavior change outside the described shapes.\n\n## 1. Doc-",
+      "files": [
+        "packages/agent/src/api/__tests__/conversation-idempotency.test.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/core/src/__tests__/message-routing-live-regression.test.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/types/components.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): stream billing parity with non-stream (waitUntil) + stream-aware dedicated-agent proxy timeout",
+      "prNumber": 15412,
+      "type": "bugfix",
+      "body": "Two small, high-impact cloud-api latency/reliability fixes, measured tonight from inside a prod agent container. Refs #15404 and the HQ root-cause decomposition: https://github.com/elizaOS/eliza/discussions/14308#discussioncomment-17565768.",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-streaming-credit-leak.test.ts",
+        "packages/cloud/api/__tests__/dedicated-agent-proxy.test.ts",
+        "packages/cloud/api/docs/inference-hot-path.md",
+        "packages/cloud/api/src/dedicated-agent-proxy.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts"
+      ]
+    },
+    {
+      "title": "chore(deslop): break two real circular dependencies",
+      "prNumber": 15411,
+      "type": "other",
+      "body": "## Summary\n\n`madge --circular` on `packages/{core,ui,agent,app-core,shared,elizaos}/src` surfaced 6 cycles. Four are deliberate / madge false-positives (type-only imports or intentional dynamic-import seams); **two were real barrel / wrong-",
+      "files": [
+        "packages/app-core/src/api/auth.ts",
+        "packages/app-core/src/api/auth/auth-context.ts",
+        "packages/app-core/src/api/auth/tokens.ts",
+        "packages/ui/src/cloud/handoff/resume-pending-handoff.ts"
+      ]
+    },
+    {
+      "title": "chore(app-core): route dev-server diagnostics through structured logger",
+      "prNumber": 15410,
+      "type": "other",
+      "body": "## What\n\nPer the repo's logger-only server commandment, convert the non-fatal diagnostic `console.*` calls in the app-core dev-server process entry to the structured `logger` (already imported and used in this file).\n\nConverted (3):\n- `cons",
+      "files": [
+        "packages/app-core/src/runtime/dev-server.ts"
+      ]
+    },
+    {
+      "title": "perf(cloud): Tier-3 inference hot path — deferred billing admission + cached gates",
+      "prNumber": 15409,
+      "type": "other",
+      "body": "## What\n\nTier-3 latency work on the inference hot path: extends @lalalune's a07084e9cbc Tier-1 (single-cache auth) / Tier-2 (optimistic billing) — **needs your eyes on the reconciliation semantics before merge.** Money path; do not merge wi",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-optimistic-billing.test.ts",
+        "packages/cloud/api/docs/inference-hot-path.md",
+        "packages/cloud/api/v1/chat/completions/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-org-lease.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-redis.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit.ts",
+        "packages/cloud/shared/src/lib/services/content-moderation-block-cache.test.ts",
+        "packages/cloud/shared/src/lib/services/content-moderation.ts",
+        "packages/cloud/shared/src/lib/services/inference-billing-deferred.test.ts",
+        "packages/cloud/shared/src/lib/services/inference-billing-deferred.ts",
+        "packages/cloud/shared/src/lib/services/inference-billing-fast-path.ts",
+        "packages/cloud/shared/src/lib/services/inference-hot-path-caches.ts",
+        "packages/cloud/shared/src/lib/services/model-catalog.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): post-permission capture death on iOS PWA — pause-cancel race + suspended AudioContext + silent-drop feedback",
+      "prNumber": 15408,
+      "type": "bugfix",
+      "body": "## Symptom\nOn the installed iOS PWA, tapping the mic (mic surface **and** \"transcribe\") prompts for permission, the user grants, then **crickets**: no listening indicator, no transcript, no error toast, nothing. Backend proven healthy (stag",
+      "files": [
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/VoiceCaptureHud.test.tsx",
+        "packages/ui/src/components/shell/VoiceCaptureHud.tsx",
+        "packages/ui/src/components/shell/__tests__/useShellController.test.tsx",
+        "packages/ui/src/components/shell/useShellController.ts",
+        "packages/ui/src/hooks/useVoiceChat.app-suspend.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.suspend.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/utils/voice-capture-debug.test.ts",
+        "packages/ui/src/utils/voice-capture-debug.ts",
+        "packages/ui/src/voice/local-asr-capture.test.ts",
+        "packages/ui/src/voice/local-asr-capture.ts",
+        "packages/ui/src/voice/voice-capture-factory.test.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): node re-registration preserves operator-set capacity",
+      "prNumber": 15407,
+      "type": "bugfix",
+      "body": "## Problem\n\nOur bare-metal prod robots (12 cores / 252 GB RAM) were registered into `docker_nodes` with `capacity=8` — a value inherited from the cpx32 CLOUD autoscale default (~8 GB box, ~4 GB/agent). On a 252 GB robot measuring ~2.5 GB/ag",
+      "files": [
+        "packages/cloud/api/__tests__/bootstrap-callback-node-identity.test.ts",
+        "packages/cloud/api/v1/admin/docker-nodes/bootstrap-callback/route.ts",
+        "packages/scripts/cloud/admin/onboard-docker-node.test.ts",
+        "packages/scripts/cloud/admin/onboard-docker-node.ts"
+      ]
+    },
+    {
+      "title": "perf(docker): layer-split deps + registry build cache for the agent image",
+      "prNumber": 15403,
+      "type": "other",
+      "body": "Cuts the agent-image pipeline (`Build Agent Image`, ghcr.io/elizaos/eliza) from ~24.5 min to an expected ~14–16 min for a typical source-only develop push. Layer restructure + cache config only — **the runtime image content and boot behavio",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "packages/app-core/deploy/Dockerfile.ci"
+      ]
+    },
+    {
+      "title": "ci(worker-deploy): reconcile DATABASE_URL into the CP env like the other control-plane secrets",
+      "prNumber": 15402,
+      "type": "other",
+      "body": "## What\n\nAdds `DATABASE_URL` to the set of control-plane secrets the provisioning-worker deploy reconciles into `/opt/eliza/cloud/.env.local`, exactly in the established `HEADSCALE_*` / `SANDBOX_REGISTRY_REDIS_URL` pattern. Item 1 of #15401",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml"
+      ]
+    },
+    {
+      "title": "fix(cloud-voice): route shared-tier voice to v1 STT/TTS fallback (#15395)",
+      "prNumber": 15400,
+      "type": "bugfix",
+      "body": "## What\n\nFixes **#15395** (voice STT+TTS structurally 404 for shared-tier cloud agents). Umbrella **#15310** failure mode **#11** (shared-tier voice parity).\n\nShared-tier cloud agents (`node_id: null`, no container, no routable subdomain) 4",
+      "files": [
+        "packages/ui/src/components/composites/chat/chat-composer.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/local-asr-transcribe.test.ts",
+        "packages/ui/src/voice/local-asr-transcribe.ts",
+        "packages/ui/src/voice/shared-runtime-voice.test.ts",
+        "packages/ui/src/voice/shared-runtime-voice.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): remove the cloud-agent provisioning tile from the home grid",
+      "prNumber": 15397,
+      "type": "bugfix",
+      "body": "## Problem\nFor **shared-tier** cloud users the home-grid 'Cloud Agent / Setting up…' tile renders **permanently** against a healthy, running, chattable agent (owner screenshot, staging PWA, 2026-07-07). The tile's self-hide contract is 'hid",
+      "files": [
+        "packages/ui/src/widgets/registry.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): drop reconciled temp chat turns",
+      "prNumber": 15396,
+      "type": "bugfix",
+      "body": "## Summary\n- Stop `mergeLocalPendingConversationMessages` from re-appending optimistic `temp-*` chat rows after server history already carries the same turn.\n- Keep genuinely in-flight temp assistant rows when only the user message has land",
+      "files": [
+        "packages/app/scripts/ocr-triage.ts",
+        "packages/app/test/audit/ocr-content-rules.test.ts",
+        "packages/app/test/ui-smoke/ocr-view-expectations.ts",
+        "packages/ui/src/state/useDataLoaders.conversation-cache.test.tsx",
+        "packages/ui/src/state/useDataLoaders.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): count only live slots for node allocated_count — stop phantom slots forcing billable cloud-node spawn",
+      "prNumber": 15380,
+      "type": "bugfix",
+      "body": "## Problem (#15378) — live on prod\nThe autoscaler keeps spinning up **billable Hetzner-cloud** nodes even though the 5 **bare-metal robots** (already paid for) have real spare capacity. Live prod: `docker_nodes` shows `eliza-core-prod-6` = ",
+      "files": [
+        "packages/cloud/shared/src/lib/services/docker-node-workloads.count.test.ts",
+        "packages/cloud/shared/src/lib/services/docker-node-workloads.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): self-heal readiness-probe false-negative wedged provisions (#15310 #6)",
+      "prNumber": 15377,
+      "type": "bugfix",
+      "body": "## Failure mode #6 from the self-healing umbrella (#15310)\n\nLive on staging (2026-07-07): a dedicated agent container was **HEALTHY inside** (runtime `ready:true`, 17 plugins loaded, answering on its bridge) but the provisioning-worker read",
+      "files": [
+        "packages/cloud/api/__tests__/compat-agent-credit-gate.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-create-idempotency.test.ts",
+        "packages/cloud/api/__tests__/eliza-agents-orphan-cleanup.test.ts",
+        "packages/cloud/api/__tests__/messages-iac-fast-path.test.ts",
+        "packages/cloud/api/__tests__/stripe-event-clawback.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-sandboxes.ts",
+        "packages/cloud/shared/src/lib/eliza/shared/utils/helpers.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/docker-sandbox-health-fallback.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/docker-sandbox-health-stale-node.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/docker-sandbox-probe-transport.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/docker-ssh-probe-classify.test.ts",
+        "packages/cloud/shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/cloud/shared/src/lib/services/docker-ssh.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs-stuck-reconcile.test.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud/shared/src/lib/services/sandbox-provider-types.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): keep cloud pair links out of password wall",
+      "prNumber": 15366,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Adds a first-class SPA fallback for hosted Cloud agent `/pair?token=...` links so stale/static hosting cannot fall through to the self-hosted password `LoginView`.\n- Exchanges the Cloud pairing token in the browser when needed",
+      "files": [
+        "packages/app/scripts/ocr-triage.ts",
+        "packages/app/test/audit/ocr-content-rules.test.ts",
+        "packages/app/test/ui-smoke/ocr-view-expectations.ts",
+        "packages/cloud/shared/src/lib/cors/cloud-api-hono-cors.test.ts",
+        "packages/cloud/shared/src/lib/cors/cloud-api-hono-cors.ts",
+        "packages/ui/src/App.navigate-view-wiring.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/components/auth/CloudPairRelay.tsx",
+        "packages/ui/src/components/auth/__tests__/CloudPairRelay.test.tsx",
+        "packages/ui/src/components/chat/widgets/ChoiceWidget.tsx",
+        "packages/ui/src/components/chat/widgets/interaction-widgets.behavior.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.firstrun.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/ShellOverlays.tsx",
+        "packages/ui/src/first-run/use-first-run-conductor.test.ts",
+        "packages/ui/src/first-run/use-first-run-conductor.ts",
+        "packages/ui/src/hooks/useLayoutShiftMonitor.ts",
+        "packages/ui/src/state/ConversationMessagesContext.hooks.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 404.7429610221341,
+      "prScore": 395.30496102213414,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 394.3295454878506,
+      "prScore": 393.89154548785064,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 319.43409945912884,
+      "prScore": 318.99609945912886,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "atukunare",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23396169?u=2c566f8c7bed62b8326f2b2ea3c1cb2f92beec93&v=4",
+      "totalScore": 24.73172392623351,
+      "prScore": 24.73172392623351,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 117,
+  "mergedPRs": 124,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 6
+}
