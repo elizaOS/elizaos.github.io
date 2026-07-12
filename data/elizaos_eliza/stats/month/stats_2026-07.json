@@ -5,8 +5,69 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-01 to 2026-08-01, elizaos/eliza had 3830 new PRs (3436 merged), 0 new issues, and 25 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-07-01 to 2026-08-01, elizaos/eliza had 3873 new PRs (3473 merged), 27 new issues, and 26 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABHr262Q",
+      "title": "Green CI does not mean tested — advisory coverage + vacuous-green runner holes swallow failures",
+      "author": "lalalune",
+      "number": 13620,
+      "repository": "elizaos/eliza",
+      "body": "## Context\n\nGreen CI does not mean the change is tested. Two layers fail open.\n\n### Coverage enforcement is advisory (re-opens the core of closed #9943/#8801)\n\n- `lint-lane-coverage.mjs` runs `--dry-run` warn-only (`.github/workflows/ci.yaml:150-154`) and `ci.yaml` triggers on `[main]` only (`:9-12`), so it doesn't even run on develop PRs. Live state: **160 blocking issues, 104/146 plugins missing deterministic E2E/scenario coverage**, all suppressed by `--dry-run`; `lint-lane-coverage.allowlist.json` doesn't exist.\n- `coverage-gate.yml` is the only per-change coverage gate and is structurally narrow: it runs only when a **changed test file** exists (`:6-8`,`:88-91`) — a PR adding new source with no test never appears in lcov, so nothing fails; it **skips any test importing vitest** (`:61-64`), and ~4,401 test files import vitest vs ~1,291 `bun:test`, so it covers a minority; threshold is a 50% ratchet.\n\nNet: **nothing requires new code to ship real tests.**\n\n### Vacuous-green holes on the PR hot path\n\n- The runner's `--min-tasks`/`MIN_TEST_TASKS` floors (`packages/scripts/run-all-tests.mjs:256-266,1138,1190`) default to `0` and are set by **no** PR lane (`test`, `test:server`, `test:client`, `test:plugins`, `test:e2e`). So a lane whose tasks all self-skip (\"No test files found\") exits **green**. The only floor enforcement, `ci-full-matrix-proof.mjs`, uses `--plan=json` (static discovery, never executes tests) and runs twice-daily/narrow-path (`ci-full-matrix-proof.yml:17-32`), off the PR path.\n- **`outputIndicatesNoTests` swallows real failures.** `run-all-tests.mjs:359-366` + `:969-972`: any **non-zero** child exit is reclassified as `skipped:true` (→ green) if the last 16 KB of merged stdout+stderr matches `/No test files found/i` / `/did not match any test files/i`. A multi-project vitest / `bun test` run where one project legitimately has no files while another **fails** produces both strings in one buffer → the whole task is marked SKIP=green, hiding the failure. Same pattern in the cloud step (`:1030-1035`).\n\n> The iOS/Android-sim manifestations of this are tracked device-specifically in sibling umbrella #13562 (#13571 \"boot-to-error-card passes, whole runs go green with 0 passed\", #13572 \"test:sim:local-chat passes vacuously when no simulator\"). This issue fixes the **general runner mechanism** those lanes rely on.\n\n## Tasks\n\n- [ ] Seed `lint-lane-coverage.allowlist.json` from today's 160 issues (loader already supports it); flip the gate off `--dry-run`; add it to a develop-triggered workflow (`quality.yml`).\n- [ ] Extend `coverage-gate.yml` to require a covering test for changed source, and to include vitest tests (or add a vitest coverage lane).\n- [ ] Set `MIN_TEST_TASKS`/`--min-tasks` on the real PR lanes (`test`, `test:server`, `test:client`, `test:plugins`, `test:e2e`) with realistic floors.\n- [ ] Narrow the \"no tests\" classification to the runner's own empty-file determination (or an exact-banner match on the whole output), not a substring scan over merged child output.\n\n## Acceptance criteria\n\n- A new surface-bearing plugin with no scenario **reds** on a develop PR; a PR adding untested source **reds**.\n- A lane filtered to zero tasks exits **3**, not 0 (extend `run-all-tests-vacuous-green-guard.test.ts`).\n- A suite with an empty sub-project **and** a failing test **FAILS** (does not SKIP=green).\n\n## Files\n\n`.github/workflows/ci.yaml`, `quality.yml`, `coverage-gate.yml`, `packages/scripts/run-all-tests.mjs`, `packages/scripts/lint-lane-coverage.mjs` (+ new allowlist), `packages/scripts/__tests__/run-all-tests-vacuous-green-guard.test.ts`.\n\n## Related\n\nClosed #9943 (green-CI≠tested — describes this verbatim), #8801, #12342 (built the min-tasks guard but never armed it on PR lanes). Sibling device lanes: #13571, #13572, #13573.\n\n## Evidence to close ([PR_EVIDENCE.md](https://github.com/elizaOS/eliza/blob/develop/PR_EVIDENCE.md))\n\nNew unit tests + CI logs for each case: the exit-3 demonstration, the empty-project-plus-failure FAIL, a red PR adding untested source, the shrinking coverage allowlist diff.\n",
+      "createdAt": "2026-07-04T22:11:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 21
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABHsCbbQ",
+      "title": "Nightly App Live E2E — the only scheduled desktop-packaged lane — is red every night; desktop job fails on screenshot 503 + settings-shell timeout, so the desktop loop has no green unattended cadence",
+      "author": "lalalune",
+      "number": 13681,
+      "repository": "elizaos/eliza",
+      "body": "Part of the desktop stream of the unattended-testing umbrella #13562. The screenshot-backend half is filed separately (packaged screenshot seam issue); this issue owns making the scheduled lane green.\n\n## Problem\n\n`app-live-e2e.yml` is the only scheduled CI home for the packaged Electrobun desktop suite (`xvfb-run … bun run --cwd packages/app test:desktop:packaged`, line 380) — and it has failed every night for at least three consecutive nights (Jul 1, Jul 2, Jul 3 2026). In the latest completed run **all four jobs failed** (desktop packaged, app live chat, full walkthrough, cloud login+provision+chat). A nightly that is always red is indistinguishable from no lane: nobody is alerted, regressions accumulate silently, and the desktop loop has no unattended green cadence at all.\n\nDesktop-job specifics from run 28647271527 (2026-07-03):\n\n1. `desktop-launch-render.e2e.spec.ts:110` — bridge screenshot 503; the ubuntu runner has none of `scrot`/`import`/`ffmpeg`/`xwd` installed (workflow installs protobuf but no screenshot tool).\n2. `electrobun-packaged-regressions.e2e.spec.ts:1030` \"packaged desktop persists media, provider, and plugin state across relaunch\" — `Timed out waiting for [data-testid=\"settings-shell\"] at /settings/voice` (needs root-cause: renderer routing under WebKitGTK, or live-api server shape drift).\n3. Lane summary: 2 failed / 2 skipped / 1 passed — most of the suite is macOS-gated, so the Linux leg exercises very little even when green.\n\n## Evidence\n\n- `gh run list --workflow app-live-e2e.yml`: failure 2026-07-01T08:29Z, cancelled+failure 2026-07-02, failure 2026-07-03T20:48Z (run 28647271527).\n- Job log excerpts: `GET http://127.0.0.1:31558/main-window/screenshot failed (503)`, `[ScreenCapture] Executable not found in $PATH: \"scrot\"|\"import\"|\"ffmpeg\"|\"xwd\"`, `Timed out waiting for [data-testid=\"settings-shell\"] at /settings/voice`, `error: script \"test:desktop:packaged\" exited with code 1`.\n- Artifact `app-live-e2e-desktop` (id 8074563215) uploaded with the failure traces.\n\n## Done when\n\n- The runner provisions at least one Linux screenshot backend (apt `scrot` and/or `ffmpeg`) before the desktop step, or the bridge screenshot no longer needs host CLIs (sibling issue).\n- The `/settings/voice` settings-shell timeout is root-caused and fixed (not skipped).\n- Three consecutive scheduled runs of the \"desktop packaged\" job are green, and a red nightly notifies someone (issue comment, Slack, or failing badge referenced from the repo docs).\n- The Linux leg's skip list is reviewed: macOS-gated specs that could run under WebKitGTK are un-gated or their skip reason is documented in the workflow.\n\n## Verification\n\n```\ngh run list --workflow app-live-e2e.yml --limit 3   # 3 green scheduled runs\ngh run view <latest> --json jobs -q '.jobs[] | \"\\(.conclusion) \\(.name)\"'\n# locally reproduce the Linux leg: xvfb-run -a bun run --cwd packages/app test:desktop:packaged (on a Linux host with scrot installed)\n```\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n---\nPart of the flawless-testing-loop initiative #13562 — project [elizaOS/12](https://github.com/orgs/elizaOS/projects/12).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-07-04T23:36:02Z",
+      "closedAt": "2026-07-05T16:38:39Z",
+      "state": "CLOSED",
+      "commentCount": 14
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABH_ZHiQ",
+      "title": "[staging][ops] Staging agents never join headscale — all 48 running agents have empty headscale_ip, so the CP nginx router 404s the worker→CP→agent hop (chat dead-ends after #15205)",
+      "author": "standujar",
+      "number": 15347,
+      "repository": "elizaos/eliza",
+      "body": "## The layer under #15205\nWith the CF wildcard + TLS fixed (#15205), the app's per-agent calls now correctly reach `https://<id>.staging.elizacloud.ai` on the STAGING worker (verified: valid `*.staging.elizacloud.ai` cert, request lands on the staging cloud-api worker, no longer the prod one). But the chat still dead-ends: every `/api/*` call returns **HTTP 404 from Cloudflare with no CORS header** → browser reports `No 'Access-Control-Allow-Origin'`.\n\n## Root cause (systemic, not per-agent)\nThe worker's `handleDedicatedAgentProxy` → `proxyToOrigin` forwards to `AGENT_ROUTER_ORIGIN_HOST = eliza-staging-1.elizacloud.ai` (the staging CP). The CP runs **nginx** (:80/:443) which routes `<id>.staging.elizacloud.ai` to the agent over the **headscale tailnet** via the agent's `headscale_ip`. But:\n- **All 48 running staging agents have `headscale_ip` NULL/empty** (`SELECT (headscale_ip IS NULL OR headscale_ip='') , count(*) FROM agent_sandboxes WHERE status='running'` → `t | 48`).\n- **`headscale nodes list` on the CP shows NO online agent-tagged node** — only `cp-staging-router` (tag:eliza-proxy, online) and two `robot-tstest`/`robot-tstest2` (tag:agent) **offline since 2026-06-16**.\n\nSo staging agent containers are provisioned + running + serving on their node bridge (`bridge_url` is set, e.g. `http://91.98.38.74:19006`), but they **never join the headscale mesh**, so the CP router has no tailnet address to reach them → 404. The agent's own CORS (`resolveCorsOrigin`, which allows any origin when `ELIZA_CLOUD_PROVISIONED=1`) is never reached because the request dies at the CP hop.\n\n## Why it surfaced only now\nNobody ever got a staging agent reachable end-to-end before tonight (DB split #15160 → image boot #15196 → wildcard/TLS #15205 all had to land first). This is the next distinct gap in the same 'staging never fully mirrored prod' class, adjacent to the known prod-parity headscale gap.\n\n## What to investigate\nWhy staging agent containers don't join headscale: is the tailscale-up / headscale pre-auth-key step injected at provision time (the staging worker HAS `HEADSCALE_PUBLIC_URL`/`HEADSCALE_API_URL`/`HEADSCALE_USER=tunnel`) actually running in the container, and is the provisioning worker recording `headscale_ip` back to `agent_sandboxes`? Either the join is failing/skipped or the IP is never persisted. Fixing it should light up all 48 agents at once.\n\n## Scope\nSystemic (48/48 agents), needs the headscale/tailnet provisioning path debugged — an infra workstream, not a config toggle. #15205's edge routing is done and verified; this is the CP→agent hop. [stan-cloud]",
+      "createdAt": "2026-07-07T18:29:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 11
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABHve0Jw",
+      "title": "[onboarding] P0 — Resurrect App Live E2E: real cloud login + real-LLM chat must produce a green nightly run",
+      "author": "lalalune",
+      "number": 14357,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\nThe only tests proving that a REAL Eliza Cloud account works and a REAL LLM answers after onboarding live in the nightly `App Live E2E` workflow — and that workflow has produced no green scheduled run since at least 2026-06-25 (every run 06-25→07-05 is `failure` or `cancelled`). The production-default onboarding is therefore unverified end to end.\n\n## Current state (file refs)\n- Workflow: `.github/workflows/app-live-e2e.yml` (nightly 07:00 UTC + dispatch; `ELIZA_UI_SMOKE_LIVE_STACK=1` un-forces the CI stub).\n- Live specs it runs: `packages/app/test/ui-smoke/cloud-live.spec.ts` (real login via `ELIZAOS_CLOUD_API_KEY`, real provisioning, real cloud chat turn asserting the reply does NOT contain `STUB_FIXTURE_MARKER`) and `packages/app/test/ui-smoke/live-agent-chat.spec.ts` (real local runtime + live provider).\n- Known long-standing failure modes (pre-existing): (1) `desktop packaged` job dies in `packages/app-core/scripts/copy-runtime-node-modules.ts` (`71 required runtime package check(s) failed after copy + prune` — every `@elizaos/plugin-*` missing `dist/node_modules/.../dist/index.js`); (2) `app live chat` job times out at `live-agent-chat.spec.ts` \"sends a message to the live agent and renders the response\" (`toBeVisible()` not found after ~2.1m).\n\n## Proposed change\n1. Triage each red job independently — they are unrelated failures. Fix the runtime-copy prune/filter bug (or build plugin dists before the copy) for the desktop-packaged job; debug the live chat turn (provider selection, model boot, stream render) for the live-chat job.\n2. Do NOT weaken assertions or add mocks to go green — the lane exists to be real.\n3. If a sub-job is genuinely out of MVP scope (e.g. desktop packaged build), split it into its own job so cloud-live can pass independently; keep it visible, never delete coverage silently.\n4. Trigger a `workflow_dispatch` run after the fix and confirm green.\n\n## Acceptance criteria\n- [ ] One fully green scheduled or dispatched `App Live E2E` run on `develop`, linked in the PR.\n- [ ] `cloud-live.spec.ts` passes against real Eliza Cloud: real session, real provisioning, real chat turn, non-stub reply asserted.\n- [ ] `live-agent-chat.spec.ts` passes with a real provider model turn rendered in the UI.\n- [ ] No assertion was weakened and no network mock was added to any live spec (diff review).\n- [ ] Root cause of each failure documented in the PR body (not just \"fixed\").\n\n## Evidence required (posted INLINE in the PR)\n- Link to the green workflow run.\n- MP4 of the Playwright trace/video for the cloud-live spec (real login → onboarded → real reply visible).\n- JPG screenshots: the WRONG behavior first (red run log excerpt), then the passing chat turn with the real model reply.\n- Server + client log excerpts showing the real cloud request/response (redact tokens) in a collapsed details block.\n\n---\n_Workstream: **Onboarding, tutorial & help** · [design doc](https://github.com/elizaOS/eliza/blob/develop/packages/docs/ongoing-development/research/04-onboarding-tutorial-help.md) · [MVP board](https://github.com/orgs/elizaOS/projects/15)_",
+      "createdAt": "2026-07-05T21:32:54Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 7
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABIbjaQA",
+      "title": "fix(observability): make chat latency telemetry truthful and correlate every hop end to end",
+      "author": "NubsCarson",
+      "number": 16079,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nWe cannot currently explain a slow chat turn from one correlated production trace.\n\nThe live `X-Eliza-Preforward-Ms` header is also semantically incorrect. The structured log freezes `totalMs` before provider dispatch, but the response header recomputes it after awaiting the streaming handler, which already waited for the provider response. It therefore includes provider-to-headers time while claiming to represent only pre-forward work. Outer Hono/global rate-limit work is not included at all.\n\nThis produced incorrect conclusions such as attributing a 6.8s Gemma first-token result entirely to gateway pre-forward work.\n\n## Required trace\n\nMint one bounded, validated trace ID and propagate it through:\n\nbrowser → dedicated proxy → agent route → plugin runtime → Cloud API Worker → Cerebras request → first reasoning/content frame → stream completion\n\nRecord monotonic boundaries for:\n\n- browser dispatch, response headers, first SSE event, first reasoning delta, first visible content, `[DONE]`\n- global limiter and route/API-key limiter\n- auth KV/cache and authoritative auth\n- organization lookup and organization limiter\n- app authorization, credential pool, catalog/pricing, moderation, balance/admission\n- provider fetch start, response headers, first upstream frame, first reasoning delta, first content delta, stream completion\n- background billing settlement separately from user-visible response time\n- Cloudflare colo and `cf-placement`\n\nDo not log prompts, API keys, authorization headers, or unbounded attacker-controlled identifiers.\n\n## Persistence\n\n- Enable sampled Workers traces with custom spans.\n- Write aggregate latency events to Workers Analytics Engine.\n- Preserve app trace IDs because Cloudflare native trace context is not propagated to external providers.\n- Store provider completion/request IDs where Cerebras exposes them.\n- Poll Cerebras organization metrics for queue time, TTFT, TPOT, cache rate, and end-to-end latency.\n\n## Benchmark harness\n\nThe harness must:\n\n- randomize model and direct/gateway ordering\n- use the same prompt, effective token budget, reasoning controls, credential/service tier, and client region\n- distinguish cold, warm, and post-idle requests\n- collect at least 30 samples per model/path\n- report p50/p90/p95 for headers, first event, first visible token, and completion\n- retain redacted JSON evidence tied to deployed Worker version\n\n## Acceptance\n\n- The pre-forward header is frozen before provider dispatch and agrees with the corresponding structured event.\n- Outer middleware timings are visible instead of disappearing before the route timer starts.\n- A single trace can be followed across browser, dedicated agent, plugin, gateway, and provider-facing boundaries.\n- First SSE, first reasoning, and first visible content remain separate metrics.\n- Staging proof includes Gemma and GLM-4.7, direct and gateway, cold and warm.\n- Existing streaming, CORS, billing, abort, and no-prompt-logging tests remain green.\n\n## References\n\n- Cloudflare Workers traces and custom spans:\n  https://developers.cloudflare.com/workers/observability/traces/\n- Cloudflare tracing limitation for external services:\n  https://developers.cloudflare.com/workers/observability/traces/known-limitations/\n- Analytics Engine writes are nonblocking:\n  https://developers.cloudflare.com/workers/observability/metrics-and-analytics/\n- Cerebras organization latency metrics:\n  https://inference-docs.cerebras.ai/api-reference/metrics/retrieve-metrics\n- Historical pre-forward instrumentation: #9909\n- Gateway latency tracker: #15428\n",
+      "createdAt": "2026-07-11T05:27:53Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOMT5cIs7t5Wyd",
@@ -70,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 2730869,
-    "deletions": 604216,
-    "files": 15753,
-    "commitCount": 7480
+    "additions": 2769771,
+    "deletions": 606281,
+    "files": 15910,
+    "commitCount": 7754
   },
   "completedItems": [
     {
@@ -56167,6 +56228,114 @@
       ]
     },
     {
+      "title": "feat(discord): /ask command + opt-in group-DM / user-install commands",
+      "prNumber": 16067,
+      "type": "feature",
+      "body": "## What\nTwo additions that let a user talk to the agent from a Discord **group DM** — a context where a bot can never read the message stream, only receive interactions:\n\n1. **`/ask <message>`** — routes free text through the real message s",
+      "files": [
+        "plugins/plugin-discord/AGENTS.md",
+        "plugins/plugin-discord/CLAUDE.md",
+        "plugins/plugin-discord/__tests__/ask-command-and-groupdm.test.ts",
+        "plugins/plugin-discord/__tests__/slash-command-registration-scope.test.ts",
+        "plugins/plugin-discord/discord-commands.ts",
+        "plugins/plugin-discord/service.ts",
+        "plugins/plugin-discord/slash-commands.ts",
+        "plugins/plugin-discord/__tests__/channel-allowlist.test.ts",
+        "plugins/plugin-discord/__tests__/connector-rooms.test.ts",
+        "plugins/plugin-discord/__tests__/dm-access.test.ts",
+        "plugins/plugin-discord/__tests__/dm-gate-handle-message.test.ts",
+        "plugins/plugin-discord/__tests__/generation-timeout-dispatch.test.ts",
+        "plugins/plugin-discord/__tests__/help-status-commands.test.ts",
+        "plugins/plugin-discord/__tests__/login-retry.test.ts",
+        "plugins/plugin-discord/__tests__/messages-component-delivery.test.ts",
+        "plugins/plugin-discord/__tests__/messages-url.test.ts",
+        "plugins/plugin-discord/__tests__/register-slash-commands-guards.test.ts",
+        "plugins/plugin-discord/__tests__/service-account-config-resolution.test.ts",
+        "plugins/plugin-discord/__tests__/service-account-pool.test.ts",
+        "plugins/plugin-discord/__tests__/slash-command-dispatch-cooldown-and-errors.test.ts",
+        "plugins/plugin-discord/__tests__/slash-command-registry.test.ts",
+        "plugins/plugin-discord/dm-access.ts",
+        "plugins/plugin-discord/messages.ts",
+        "plugins/plugin-discord/slash-command-registration.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): realtime voice session — integrated Phase-1 slice (server + client + live-provider evidence)",
+      "prNumber": 16062,
+      "type": "feature",
+      "body": "## Realtime voice: integrated Phase-1 slice (server + client + live-provider evidence)\n\nOne vertical slice, per Definition of Done: server, browser client, and the evidence rig that proved them against **live Deepgram Flux + Cartesia Sonic*",
+      "files": [
+        "bun.lock",
+        "packages/cloud/api/package.json",
+        "packages/cloud/api/src/_router.generated.ts",
+        "packages/cloud/api/src/middleware/auth.ts",
+        "packages/cloud/api/v1/voice/session/[id]/revoke/route.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/mint-consent-route.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/revoke-and-metering.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/uplink-reframer.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/ws-lifecycle.test.ts",
+        "packages/cloud/api/v1/voice/session/consent/route.ts",
+        "packages/cloud/api/v1/voice/session/lib/harness-real-server.ts",
+        "packages/cloud/api/v1/voice/session/lib/provider-socket-factory.ts",
+        "packages/cloud/api/v1/voice/session/lib/session.ts",
+        "packages/cloud/api/v1/voice/session/lib/uplink-reframer.ts",
+        "packages/cloud/api/v1/voice/session/route.ts",
+        "packages/cloud/api/v1/voice/session/voice-session-routes-and-auth.test.ts",
+        "packages/cloud/api/v1/voice/session/ws/route.ts",
+        "packages/cloud/shared/src/lib/services/voice-usage-meter.test.ts",
+        "packages/cloud/shared/src/lib/services/voice-usage-meter.ts",
+        "packages/cloud/shared/src/lib/voice-session/__tests__/eliza-sse-bridge.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/__tests__/jwt.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/__tests__/protocol-and-aggregation.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/config-consent-opus.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/config.ts",
+        "packages/cloud/shared/src/lib/voice-session/consent-nonce.ts",
+        "packages/cloud/shared/src/lib/voice-session/eliza-sse-bridge.ts",
+        "packages/cloud/shared/src/lib/voice-session/jwt.ts",
+        "packages/cloud/shared/src/lib/voice-session/opus-transcode.ts",
+        "packages/cloud/shared/src/lib/voice-session/phrase-aggregator.ts",
+        "packages/cloud/shared/src/lib/voice-session/protocol.ts",
+        "packages/cloud/shared/src/lib/voice-session/session-registry.ts",
+        "packages/cloud/shared/src/lib/voice-session/test-signing.ts",
+        "packages/cloud/shared/src/lib/voice-session/ws-handler.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts",
+        "packages/tools/voice-evidence-harness/.gitignore",
+        "packages/tools/voice-evidence-harness/README.md",
+        "packages/tools/voice-evidence-harness/bun.lock",
+        "packages/tools/voice-evidence-harness/fixtures/PROVENANCE.md",
+        "packages/tools/voice-evidence-harness/fixtures/turn_bargein.wav",
+        "packages/tools/voice-evidence-harness/fixtures/turn_error.wav",
+        "packages/tools/voice-evidence-harness/fixtures/turn_weather.wav",
+        "packages/tools/voice-evidence-harness/package.json",
+        "packages/tools/voice-evidence-harness/src/cli.ts",
+        "packages/tools/voice-evidence-harness/src/client.ts",
+        "packages/tools/voice-evidence-harness/src/evidence.ts",
+        "packages/tools/voice-evidence-harness/src/mp4.ts",
+        "packages/tools/voice-evidence-harness/src/real/real-target.ts",
+        "packages/tools/voice-evidence-harness/src/reference/llm-bridge.ts",
+        "packages/tools/voice-evidence-harness/src/reference/voice-session-server.ts",
+        "packages/tools/voice-evidence-harness/src/voice-evidence-harness.test.ts",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/coverage-gate.yml",
+        "package.json",
+        "packages/cloud/api/v1/voice/session/__tests__/harness-real-server.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/provider-socket-factory.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/ws-route-upgrade.test.ts",
+        "packages/cloud/shared/src/lib/services/oauth/connection-adapters/secrets-adapter-utils.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/oauth/oauth-service.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/oauth/providers/oauth2.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/phone-gateway-devices.test.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs-delete-enqueue.test.ts",
+        "packages/cloud/shared/src/lib/services/proxy/services/market-data.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/secrets/secrets.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/signup-grant-guard.test.ts",
+        "packages/cloud/shared/src/lib/services/social-media/providers/reddit.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/social-media/providers/slack.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/social-media/providers/tiktok.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/social-media/providers/twitter.error-policy.test.ts"
+      ]
+    },
+    {
       "title": "fix(voice): remove transcripts and provider payloads from STT/TTS logs",
       "prNumber": 16060,
       "type": "bugfix",
@@ -56258,6 +56427,38 @@
       ]
     },
     {
+      "title": "fix(cloud-ui): onboarding handoff survives proxy-readiness window, stale markers, and returning-account landing (#15901 #15902 #15903)",
+      "prNumber": 16048,
+      "type": "bugfix",
+      "body": "Fixes #15901, #15902, #15903 — the three onboarding defects isolated on a physical Pixel 6a during the #14358 Android close-out (evidence + logcat timelines: https://github.com/elizaOS/eliza/issues/14358#issuecomment-4930960082). They share",
+      "files": [
+        "packages/app/test/android/cloud-onboarding.android.spec.ts",
+        "packages/ui/src/api/client-cloud-connect-mock-cloud.test.ts",
+        "packages/ui/src/api/client-cloud-handoff-target.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/cloud/handoff/cloud-handoff-supervisor.test.ts",
+        "packages/ui/src/cloud/handoff/cloud-handoff-supervisor.ts",
+        "packages/ui/src/cloud/handoff/conversation-handoff.test.ts",
+        "packages/ui/src/cloud/handoff/conversation-handoff.ts",
+        "packages/ui/src/cloud/handoff/pending-handoff-store.test.ts",
+        "packages/ui/src/components/chat/widgets/agent-provisioning.test.tsx",
+        "packages/ui/src/components/chat/widgets/agent-provisioning.tsx",
+        "packages/ui/src/events/index.ts",
+        "packages/ui/src/first-run/first-run-finish.force-fresh.test.ts",
+        "packages/ui/src/first-run/first-run-finish.reused-shared-handoff.test.ts",
+        "packages/ui/src/first-run/first-run-finish.ts",
+        "packages/ui/src/hooks/useCloudHandoffPhase.ts",
+        "packages/ui/src/state/startup-phase-poll.ts",
+        "packages/ui/src/api/client-cloud-direct-methods.test.ts",
+        "packages/ui/src/api/client-cloud-provision-sandbox.test.ts",
+        "packages/ui/src/api/client-cloud-steward-token.test.ts",
+        "packages/ui/src/events/cloud-handoff-phase.test.ts",
+        "packages/ui/src/first-run/first-run-finish.local-and-router.test.ts",
+        "packages/ui/src/hooks/useCloudHandoffPhase.test.tsx",
+        "packages/ui/src/state/startup-phase-poll.test.ts"
+      ]
+    },
+    {
       "title": "fix(agent): harden IPC response byte classification and surface partial-write failures",
       "prNumber": 16046,
       "type": "bugfix",
@@ -56286,6 +56487,32 @@
       ]
     },
     {
+      "title": "fix(scenarios): complete credentialed live lanes",
+      "prNumber": 16044,
+      "type": "bugfix",
+      "body": "Fixes #16009.\nFixes #16032.\nFixes #16033.\n\nSupersedes the closed #16010 without its rejected timeout increase.\n\n## Root causes\n\n- Clean runners installed with `--ignore-scripts` but built a hand-maintained subset of the scenario runner's tr",
+      "files": [
+        ".github/workflows/live-scenarios.yml",
+        "bun.lock",
+        "packages/agent/package.json",
+        "packages/scripts/__tests__/live-scenarios-workflow.test.ts",
+        "plugins/plugin-app-control/test/scenarios/app-list.scenario.ts",
+        "plugins/plugin-health/AGENTS.md",
+        "plugins/plugin-health/CLAUDE.md",
+        "plugins/plugin-health/src/__tests__/smoke.test.ts",
+        "plugins/plugin-health/src/actions/index.ts",
+        "plugins/plugin-health/src/actions/owner-health-routing.test.ts",
+        "plugins/plugin-health/src/actions/owner-health-routing.ts",
+        "plugins/plugin-health/src/index.ts",
+        "plugins/plugin-health/test/scenarios/wake-up-routine.scenario.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/health-service.status.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/health-service.ts",
+        "plugins/plugin-health/src/__tests__/plugin-init.test.ts",
+        "plugins/plugin-health/vitest.config.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/health-connector-status.ts"
+      ]
+    },
+    {
       "title": "test(harness): run scenario assertion units in recurring lane",
       "prNumber": 16040,
       "type": "tests",
@@ -56311,6 +56538,21 @@
         "scripts/security/coverage-gate.self-test.mjs",
         "scripts/security/coverage-node-self-tests.txt",
         "scripts/security/coverage-source-classifier.mjs"
+      ]
+    },
+    {
+      "title": "feat(cloud): Cartesia Sonic engine for WAV voice TTS (codec-less clients) — ~5× faster",
+      "prNumber": 16030,
+      "type": "feature",
+      "body": "## Summary\n\nWires the merged Cartesia Sonic 3.5 adapter (#15949) into `/api/v1/voice/tts` as the synthesis engine for **WAV-format requests** (codec-less clients — e.g. the Light Phone III's LightOS WebView, which has no MP3 decoder). Buffe",
+      "files": [
+        "packages/cloud/api/v1/voice/tts/__tests__/cartesia-synthesis.test.ts",
+        "packages/cloud/api/v1/voice/tts/cartesia-synthesis.ts",
+        "packages/cloud/api/v1/voice/tts/provider-selection.ts",
+        "packages/cloud/api/v1/voice/tts/route.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts",
+        "packages/cloud/api/v1/voice/tts/__tests__/provider-selection.test.ts",
+        "packages/cloud/api/v1/voice/tts/__tests__/route-provider-selection.test.ts"
       ]
     },
     {
@@ -57595,6 +57837,554 @@
         "packages/ui/src/first-run/use-first-run-conductor.test.ts",
         "packages/ui/src/first-run/use-first-run-conductor.ts"
       ]
+    },
+    {
+      "title": "fix(discord,commands): clamp slash descriptions so one long one can't drop all commands",
+      "prNumber": 16199,
+      "type": "bugfix",
+      "body": "`/accounts` and `/backend` (#16198) registered in-process but never appeared on Discord. Root cause: the `/accounts` `value`-option description was **103 chars** and Discord's limit is **100** — and `commands.set()` is **atomic**, so one ov",
+      "files": [
+        "plugins/plugin-commands/src/registry.ts",
+        "plugins/plugin-discord/__tests__/slash-commands.test.ts",
+        "plugins/plugin-discord/discord-commands.ts"
+      ]
+    },
+    {
+      "title": "feat(commands,agent): /accounts + /backend operator slash commands",
+      "prNumber": 16198,
+      "type": "feature",
+      "body": "The multi-account operator surface, requested for Discord/GUI/Telegram parity with the Settings account UI. Built in the plugin-commands catalog (reaches every connector through the existing bridges) following the `/model` loopback-route pr",
+      "files": [
+        "packages/agent/src/api/model-config-routes.test.ts",
+        "packages/agent/src/api/model-config-routes.ts",
+        "plugins/plugin-commands/AGENTS.md",
+        "plugins/plugin-commands/CLAUDE.md",
+        "plugins/plugin-commands/__tests__/accounts-backend-command.test.ts",
+        "plugins/plugin-commands/__tests__/command-actions.test.ts",
+        "plugins/plugin-commands/src/actions/accounts.ts",
+        "plugins/plugin-commands/src/actions/backend.ts",
+        "plugins/plugin-commands/src/actions/handlers.ts",
+        "plugins/plugin-commands/src/actions/model-config.ts",
+        "plugins/plugin-commands/src/registry.ts"
+      ]
+    },
+    {
+      "title": "fix(commands,discord): declutter the native slash picker + close the auth-flag gap",
+      "prNumber": 16197,
+      "type": "bugfix",
+      "body": "The Discord slash picker showed 30 commands with only 4 gated — including operator-only tools (model config, queue mode, session reset) any server member could see and fire. Cleanup:\n\n- **Removed `/clear`** — its whole handler just replied ",
+      "files": [
+        "plugins/plugin-commands/__tests__/command-actions.test.ts",
+        "plugins/plugin-commands/__tests__/model-config-command.test.ts",
+        "plugins/plugin-commands/__tests__/model-switch-command.test.ts",
+        "plugins/plugin-commands/src/actions/handlers.ts",
+        "plugins/plugin-commands/src/connector-catalog.ts",
+        "plugins/plugin-commands/src/registry.ts",
+        "plugins/plugin-discord/__tests__/catalog-commands.test.ts",
+        "plugins/plugin-discord/__tests__/slash-commands.test.ts",
+        "plugins/plugin-discord/catalog-commands.ts",
+        "plugins/plugin-discord/slash-commands.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): fail closed when app live cloud key is missing",
+      "prNumber": 16195,
+      "type": "bugfix",
+      "body": "# Relates to\n\n- Addresses #14357's green-by-skip credential bug.\n- Implements the App Live credential/fail-closed acceptance item in #16194.\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` at push time (`6c4",
+      "files": [
+        ".github/workflows/app-live-e2e.yml",
+        "packages/app-core/test/helpers/live-child-env.test.ts",
+        "packages/app-core/test/helpers/live-child-env.ts",
+        "packages/scripts/__tests__/app-live-e2e-workflow.test.ts"
+      ]
+    },
+    {
+      "title": "test: tolerate cloud audit auth navigation",
+      "prNumber": 16193,
+      "type": "tests",
+      "body": "## Summary\n\n- treat only Playwright execution-context destruction during Steward auth navigation as transient\n- retain all other cloud route-registry evaluation failures\n- preserve the successfully read registry paths instead of evaluating ",
+      "files": [
+        "packages/app/test/ui-smoke/cloud-surfaces-aesthetic-audit.spec.ts"
+      ]
+    },
+    {
+      "title": "ci: stabilize promotion startup and cloud audit gates",
+      "prNumber": 16191,
+      "type": "other",
+      "body": "## Summary\n\n- remove source-adjacent JavaScript emitted by the workspace build before source-mode dev startup\n- read the cloud route registry from an authenticated route instead of racing the seeded-session redirect away from `/login`\n\n## V",
+      "files": [
+        ".github/workflows/ci.yaml",
+        "packages/app/test/ui-smoke/cloud-surfaces-aesthetic-audit.spec.ts"
+      ]
+    },
+    {
+      "title": "test(commands): align Discord scenario with GUI-only navigation",
+      "prNumber": 16188,
+      "type": "tests",
+      "body": "## Summary\n\n- align the deterministic Discord slash-command scenario with the command catalog's GUI-only navigation contract\n- reject any non-agent command on the Discord surface\n- keep a representative assertion that the agent command `/th",
+      "files": [
+        "packages/scenario-runner/test/scenarios/deterministic-slash-commands.scenario.ts"
+      ]
+    },
+    {
+      "title": "fix(loadperf): measure network bytes without service worker cache",
+      "prNumber": 16186,
+      "type": "bugfix",
+      "body": "## Summary\n\n- block service workers in the frontend KPI browser context\n- keep Resource Timing measurements scoped to CDN-like HTTP responses\n- assert the browser context option in the benchmark unit test\n\n## Why\n\nOnce the app service worke",
+      "files": [
+        "packages/benchmarks/loadperf/frontend-kpi.mjs",
+        "packages/benchmarks/loadperf/frontend-kpi.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(homepage): ship leaderboard model asset",
+      "prNumber": 16184,
+      "type": "bugfix",
+      "body": "## Summary\n\n- restore the existing 3.09 MB iPhone GLB as a first-class homepage asset\n- remove its artifact-only ignore rule so light installs and production builds include it\n- add a smoke assertion for the binary glTF header\n\n## Root caus",
+      "files": [
+        ".gitignore",
+        "packages/homepage/public/models/iphone.glb",
+        "packages/homepage/tests/smoke.node.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(discord): break the slash-command sync deadlock + carry the admin gate",
+      "prNumber": 16183,
+      "type": "bugfix",
+      "body": "Reading the live registered command set back from Discord's API (with command-id snowflakes decoded to timestamps) showed the last successful push was **two days old across ~15 bot restarts** — every cleanup since (#16154's nav declutter + ",
+      "files": [
+        "plugins/plugin-discord/__tests__/slash-command-registration-scope.test.ts",
+        "plugins/plugin-discord/slash-command-registration.ts",
+        "plugins/plugin-discord/slash-commands.ts"
+      ]
+    },
+    {
+      "title": "release: promote verified develop snapshot 239275b8fa1 to main",
+      "prNumber": 16182,
+      "type": "other",
+      "body": "## Release candidate\n\nPromotes frozen `develop` cutoff `239275b8fa1bc46c5c40565c70983e4c67c2b89c` into `main` through promotion head `62fbd0a56e33b01d30add7b295ad8f8bc85e526f`.\n\nThe promotion tree and cutoff tree are identical (`8fbb42bcd25",
+      "files": [
+        ".github/ci-windows-command-inventory.json",
+        ".github/workflows/chat-latency-live.yml",
+        ".github/workflows/ci.yaml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/live-scenarios.yml",
+        ".github/workflows/loadperf.yml",
+        ".github/workflows/pr.yaml",
+        ".github/workflows/quality.yml",
+        ".github/workflows/views-soak.yml",
+        ".github/workflows/windows-ci.yml",
+        ".gitignore",
+        "bun.lock",
+        "package.json",
+        "packages/agent/package.json",
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/agent/src/api/accounts-routes.ts",
+        "packages/agent/src/api/chat-augmentation.test.ts",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/commands-routes.real-server.test.ts",
+        "packages/agent/src/api/commands-routes.test.ts",
+        "packages/agent/src/api/index.ts",
+        "packages/agent/src/api/model-catalog.test.ts",
+        "packages/agent/src/api/model-catalog.ts",
+        "packages/agent/src/api/model-config-routes.test.ts",
+        "packages/agent/src/api/model-config-routes.ts",
+        "packages/agent/src/api/model-config-slash-command.test.ts",
+        "packages/agent/src/api/models-routes.test.ts",
+        "packages/agent/src/api/models-routes.ts",
+        "packages/agent/src/api/server-lazy-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/api/subscription-routes.test.ts",
+        "packages/agent/src/api/subscription-routes.ts",
+        "packages/agent/src/runtime/host-bridge.ts",
+        "packages/agent/src/runtime/operations/repository.ts",
+        "packages/app-core/src/api/auth.ts",
+        "packages/app-core/src/api/route-auth-policy.ts",
+        "packages/app-core/src/runtime/install-agent-host-bridge.ts",
+        "packages/app-core/src/services/account-pool-availability.test.ts",
+        "packages/app-core/src/services/account-pool.test.ts",
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/account-usage.test.ts",
+        "packages/app-core/src/services/account-usage.ts",
+        "packages/app-core/src/services/claude-token-refresh.test.ts",
+        "packages/app-core/src/services/claude-token-refresh.ts",
+        "packages/app-core/src/services/coding-account-bridge.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): preserve committed homepage baselines",
+      "prNumber": 16181,
+      "type": "bugfix",
+      "body": "## Summary\n\n- skip the legacy large-fixture artifact sync only in the homepage Quality job\n- preserve the visual baselines from the checked-out commit during CI setup\n- keep the rest of repository postinstall enabled\n\n## Root cause\n\nThe leg",
+      "files": [
+        ".github/workflows/quality.yml"
+      ]
+    },
+    {
+      "title": "fix(ci): prove runtime-equivalent coverage changes",
+      "prNumber": 16179,
+      "type": "bugfix",
+      "body": "## Summary\n\n- compare changed TypeScript source at the merge base and PR head, excluding it from LCOV only when emitted runtime code is independently proven equivalent\n- retain semantic comments, coverage directives, decorator metadata chan",
+      "files": [
+        "packages/app-core/src/services/account-pool-availability.test.ts",
+        "packages/app-core/src/services/account-pool.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.test.ts",
+        "packages/scripts/__tests__/coverage-source-classifier.test.ts",
+        "packages/ui/src/components/chat/ChatWidgetHarness.test.tsx",
+        "packages/ui/test/audio-worklets-runtime.test.mjs",
+        "scripts/security/coverage-changed-files.self-test.mjs",
+        "scripts/security/coverage-changed-files.sh",
+        "scripts/security/coverage-source-classifier.mjs"
+      ]
+    },
+    {
+      "title": "fix(agent,ui): catalog-only fast path + pin chat models to the active provider",
+      "prNumber": 16178,
+      "type": "bugfix",
+      "body": "Two live-reported defects in the #16171 model-configuration panel:\n\n**1. \"Loading options failed\" on the model dropdown.** `GET /api/models` fans out to every provider's live model-list API — measured **22.7s on a cold cache** against the r",
+      "files": [
+        "packages/agent/src/api/models-routes.test.ts",
+        "packages/agent/src/api/models-routes.ts",
+        "packages/ui/src/api/client-agent-models-config.test.ts",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.test.tsx",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.tsx",
+        "packages/ui/src/components/settings/ProviderSwitcher.tsx",
+        "packages/ui/src/components/settings/useModelConfiguration.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): restore post-merge develop gates",
+      "prNumber": 16177,
+      "type": "bugfix",
+      "body": "## Summary\n\n- update the Windows command inventory to match the package-owned PGlite retry introduced in #16173\n- apply Biome formatting to the model-catalog assertion that broke the full develop format gate\n- restore the push-only Tests an",
+      "files": [
+        ".github/ci-windows-command-inventory.json",
+        "packages/agent/src/api/model-catalog.test.ts"
+      ]
+    },
+    {
+      "title": "feat(anthropic): effort-driven adaptive thinking + live-probed model gates (stage 3)",
+      "prNumber": 16175,
+      "type": "feature",
+      "body": "# Anthropic effort-driven adaptive thinking + live-probed model gates (stage 3)\n\nCompletes the model-configuration arc (#16164 → #16171): the `ANTHROPIC_EFFORT(_SMALL/_LARGE)` keys that `POST /api/models/config` persists for claude chat tar",
+      "files": [
+        "packages/agent/src/api/model-catalog.test.ts",
+        "packages/agent/src/api/model-catalog.ts",
+        "packages/agent/src/api/model-config-routes.test.ts",
+        "plugins/plugin-anthropic/AGENTS.md",
+        "plugins/plugin-anthropic/CLAUDE.md",
+        "plugins/plugin-anthropic/__tests__/effort-thinking.shape.test.ts",
+        "plugins/plugin-anthropic/models/text.ts",
+        "plugins/plugin-anthropic/utils/config.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): add execution_tier to CloudCompatAgent",
+      "prNumber": 16174,
+      "type": "bugfix",
+      "body": "TS2339 `Property 'execution_tier' does not exist on type 'CloudCompatAgent'` at `packages/ui/src/api/client-cloud.ts:3435/3438` on current develop — #16163's dedicated-mode agent filter reads the field and the compat mapper already populate",
+      "files": [
+        "packages/ui/src/api/client-types-cloud.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): restore develop after voice and deterministic lane regressions",
+      "prNumber": 16173,
+      "type": "bugfix",
+      "body": "## Summary\n\nRestores the current `develop` branch after deterministic regressions in realtime voice, UI fixtures, type-safety, Windows CI, and repository hygiene blocked unrelated work.\n\nThe repair keeps the existing security and quality bo",
+      "files": [
+        ".github/workflows/windows-ci.yml",
+        "packages/agent/src/api/accounts-routes.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/commands-routes.real-server.test.ts",
+        "packages/agent/src/api/commands-routes.test.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/operations/repository.ts",
+        "packages/app-core/src/api/auth.ts",
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/claude-token-refresh.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app/test/core-view-interaction-coverage.test.ts",
+        "packages/app/test/service-worker-cache-strategies.test.ts",
+        "packages/cloud/shared/src/lib/cache/redis-factory.ts",
+        "packages/cloud/shared/src/lib/voice-session/config-consent-opus.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/consent-nonce.ts",
+        "packages/cloud/shared/src/lib/voice-session/jwt.ts",
+        "packages/core/src/services/message.ts",
+        "packages/homepage/tests/smoke.node.test.mjs",
+        "packages/homepage/tsconfig.app.json",
+        "packages/homepage/vite.config.ts",
+        "packages/scripts/__tests__/ci-path-gate.test.mjs",
+        "packages/scripts/__tests__/test-cloud-run.test.mjs",
+        "packages/scripts/__tests__/windows-ci-workflow.test.ts",
+        "packages/tools/voice-evidence-harness/src/cli.ts",
+        "packages/tools/voice-evidence-harness/src/client.ts",
+        "packages/tools/voice-evidence-harness/src/evidence.ts",
+        "packages/tools/voice-evidence-harness/src/reference/voice-session-server.integration.test.ts",
+        "packages/tools/voice-evidence-harness/src/reference/voice-session-server.ts",
+        "packages/tools/voice-evidence-harness/src/voice-evidence-harness.test.ts",
+        "packages/tools/voice-evidence-harness/src/ws-factories.ts",
+        "packages/tools/voice-evidence-harness/tsconfig.json",
+        "packages/ui/package.json",
+        "packages/ui/src/api/client-cloud-steward-token.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/components/chat/ChatWidgetHarness.tsx",
+        "packages/ui/src/components/cockpit/CockpitNewSessionForm.test.tsx",
+        "packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx",
+        "packages/ui/src/hooks/useVoiceChat.playback-grace.test.tsx",
+        "packages/ui/src/state/persistence-cloud-active-server.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-client.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-fakes.ts",
+        "packages/ui/src/voice/__tests__/voice-session-mic-capture.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-pcm.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-playback.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-state.test.ts",
+        "packages/ui/src/voice/audio-worklet-module-urls.test.ts",
+        "packages/ui/src/voice/audio-worklet-module-urls.ts",
+        "packages/ui/src/voice/browser-audio-runtime.test.ts",
+        "packages/ui/src/voice/browser-audio-runtime.ts"
+      ]
+    },
+    {
+      "title": "feat: model configuration surfaces — settings panel + /model subcommands (stage 2)",
+      "prNumber": 16171,
+      "type": "feature",
+      "body": "# Model configuration surfaces — Settings panel + /model subcommands (stage 2)\n\nBuilds the user surfaces on the stage-1 model-config API (#16164): a **Settings → Models & Providers panel** for the small / large / coding models with per-mode",
+      "files": [
+        "packages/agent/src/api/chat-augmentation.test.ts",
+        "packages/agent/src/api/chat-augmentation.ts",
+        "packages/agent/src/api/model-config-slash-command.test.ts",
+        "packages/core/src/generated/action-docs.ts",
+        "packages/docs/action-catalog.md",
+        "packages/prompts/specs/actions/plugins.generated.json",
+        "packages/scripts/view-action-ratchet.registry.json",
+        "packages/ui/src/api/client-agent-models-config.test.ts",
+        "packages/ui/src/api/client-agent.ts",
+        "packages/ui/src/api/client-types-core.ts",
+        "packages/ui/src/chat/model-choices.test.ts",
+        "packages/ui/src/chat/model-choices.ts",
+        "packages/ui/src/chat/slash-menu.ts",
+        "packages/ui/src/chat/useSlashCommandController.models.test.ts",
+        "packages/ui/src/chat/useSlashCommandController.ts",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.stories.tsx",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.test.tsx",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.tsx",
+        "packages/ui/src/components/settings/ProviderSwitcher.tsx",
+        "packages/ui/src/components/settings/useModelConfiguration.ts",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.slash.test.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.stories.tsx",
+        "packages/ui/src/components/shell/ContinuousChatOverlay.tsx",
+        "packages/ui/src/components/shell/SlashCommandMenu.tsx",
+        "plugins/plugin-commands/__tests__/model-config-command.test.ts",
+        "plugins/plugin-commands/__tests__/model-switch-command.test.ts",
+        "plugins/plugin-commands/src/actions/handlers.ts",
+        "plugins/plugin-commands/src/actions/model-config.ts",
+        "plugins/plugin-commands/src/registry.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): drop duplicated CARTESIA_API_KEY declaration",
+      "prNumber": 16168,
+      "type": "bugfix",
+      "body": "TS2300 `Duplicate identifier 'CARTESIA_API_KEY'` in `packages/cloud/shared/src/types/cloud-worker-env.ts` since #16030 declared the key twice (voice section + AI-providers section). Breaks `bun run --cwd packages/ui typecheck` (and any pack",
+      "files": [
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(core): honor Provider.cacheStable when rendering provider events",
+      "prNumber": 16166,
+      "type": "bugfix",
+      "body": "Fixes #16165.\n\n## What\n\n`Provider.cacheStable` is part of the `Provider` contract and is set by in-tree providers, but its value was never read when a provider's output was rendered into a prompt segment — so it had no effect on caching.\n\n#",
+      "files": [
+        "packages/core/src/runtime/__tests__/context-renderer.test.ts",
+        "packages/core/src/runtime/context-renderer.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/types/context-object.ts"
+      ]
+    },
+    {
+      "title": "feat: model configuration API — catalog, validated config routes, spawn wiring (stage 1)",
+      "prNumber": 16164,
+      "type": "feature",
+      "body": "# Model configuration API — catalog + validated config routes + spawn wiring (stage 1)\n\nLets an operator set the **small / large / coding sub-agent** models (and per-model reasoning effort) through one validated API, with the config actuall",
+      "files": [
+        "packages/agent/src/api/index.ts",
+        "packages/agent/src/api/model-catalog.test.ts",
+        "packages/agent/src/api/model-catalog.ts",
+        "packages/agent/src/api/model-config-routes.test.ts",
+        "packages/agent/src/api/model-config-routes.ts",
+        "packages/agent/src/api/models-routes.test.ts",
+        "packages/agent/src/api/models-routes.ts",
+        "packages/agent/src/api/server-lazy-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/app-core/src/services/coding-account-bridge.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app-core/test/helpers/live-provider.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/multi-account-spawn.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/should-forward-env.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/task-agent-frameworks.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/opencode-config.ts",
+        "plugins/plugin-agent-orchestrator/src/services/task-agent-frameworks.ts",
+        "plugins/plugin-anthropic/__tests__/native-plumbing.shape.test.ts",
+        "plugins/plugin-anthropic/package.json",
+        "plugins/plugin-anthropic/registry-entry.json",
+        "plugins/plugin-anthropic/utils/config.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): keep staging dedicated ingress environment-scoped",
+      "prNumber": 16163,
+      "type": "bugfix",
+      "body": "## Summary\n- derive dedicated-agent ingress from the active Cloud environment instead of hardcoding production\n- preserve the control plane's authoritative execution tier so dedicated onboarding never binds a shared-runtime bridge as a dedi",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/scripts/cloud/admin/daemons/agent-router.test.ts",
+        "packages/scripts/cloud/admin/daemons/provisioning-worker-env-reconcile.test.ts",
+        "packages/ui/src/api/client-cloud-agent-base.test.ts",
+        "packages/ui/src/api/client-cloud-connect-mock-cloud.test.ts",
+        "packages/ui/src/api/client-cloud-direct-auth.test.ts",
+        "packages/ui/src/api/client-cloud-select-or-provision.test.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "packages/ui/src/state/startup-phase-restore.concurrency.test.ts",
+        "packages/ui/src/state/startup-phase-restore.ts",
+        "packages/ui/src/utils/cloud-agent-base.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): protect canonical cloud deploy sources",
+      "prNumber": 16161,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFollow-up to the staging deployment collision observed in runs [29170937601](https://github.com/elizaOS/eliza/actions/runs/29170937601) and [29171470925](https://github.com/elizaOS/eliza/actions/runs/29171470925).\n\n- [x] This ",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "fix(ui): preserve cloud app onboarding auth surface",
+      "prNumber": 16157,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRegression introduced by #16090; launch QA context: #13406.\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` and scoped verification were run after sync.",
+      "files": [
+        "packages/ui/src/App.navigate-view-wiring.test.tsx",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/api/client-cloud-agent-base.test.ts",
+        "packages/ui/src/state/top-level-auth-gate.test.ts",
+        "packages/ui/src/state/top-level-auth-gate.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): remove Railway Redis from chat ingress",
+      "prNumber": 16156,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16153. Cold Worker bootstrap is tracked in #16155, cold auth reconnects in #16159, cold pricing single-flight in #16162, and correlated hop telemetry in #16079/#16098.\n\nDefinition of Done: full standard in [`CONTRIBUTIN",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-optimistic-billing.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-passthrough-streaming.test.ts",
+        "packages/cloud/api/auth/create-anonymous-session/route.test.ts",
+        "packages/cloud/api/auth/siwe/nonce/siwe-nonce-redis-outage.test.ts",
+        "packages/cloud/api/auth/siws/nonce/siws-nonce-redis-outage.test.ts",
+        "packages/cloud/api/src/bootstrap-app.test.ts",
+        "packages/cloud/api/src/bootstrap-app.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/cache/__tests__/redis-factory-mock.test.ts",
+        "packages/cloud/shared/src/lib/cache/invalidation-credit-hint.test.ts",
+        "packages/cloud/shared/src/lib/cache/invalidation.ts",
+        "packages/cloud/shared/src/lib/cache/mock-redis-rate-limit-contract.test.ts",
+        "packages/cloud/shared/src/lib/cache/mock-redis.ts",
+        "packages/cloud/shared/src/lib/cache/redis-factory.ts",
+        "packages/cloud/shared/src/lib/cache/socket-redis-resilience.test.ts",
+        "packages/cloud/shared/src/lib/cache/socket-redis-timeout-races.test.ts",
+        "packages/cloud/shared/src/lib/cache/socket-redis.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-cloudflare-binding.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-default-key.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-fail-closed.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-hono-cloudflare.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-hono-lease.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-org-lease.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit-orphaned-counter.test.ts",
+        "packages/cloud/shared/src/lib/middleware/rate-limit.ts",
+        "packages/cloud/shared/src/lib/services/ai-pricing/lookup.error-policy.test.ts",
+        "packages/cloud/shared/src/lib/services/ai-pricing/lookup.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): unhandled-error worker logs carry message+code+cause, not name-only",
+      "prNumber": 16150,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe `[CloudApi] Unhandled error` boundary (`bootstrap-app.ts`) passed the raw `Error` to the logger. The core log-sink redactor (`redactLogArgs`) rebuilds Error instances via `new Error(...)` — `message`/`stack` become **non-enu",
+      "files": [
+        "packages/cloud/api/__tests__/bootstrap-app-unhandled-error.test.ts",
+        "packages/cloud/api/src/bootstrap-app.ts",
+        "packages/cloud/shared/src/lib/utils/unhandled-error-detail.test.ts",
+        "packages/cloud/shared/src/lib/utils/unhandled-error-detail.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-openrouter): read cache-write tokens from inputTokenDetails",
+      "prNumber": 16136,
+      "type": "bugfix",
+      "body": "## Summary\n\n`emitModelUsageEvent` and `buildNativeTextResult` both read cache-write token counts off `usage.cacheCreationInputTokens` — a field `ai@^6` never populates. Every Anthropic-family cache write routed through OpenRouter has been s",
+      "files": [
+        "plugins/plugin-openrouter/__tests__/cache-write-usage.shape.test.ts",
+        "plugins/plugin-openrouter/models/text.ts",
+        "plugins/plugin-openrouter/utils/events.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): preserve context in mobile direct replies",
+      "prNumber": 16115,
+      "type": "bugfix",
+      "body": "## Summary\n- add the six most recent messages to Android local direct-reply prompts, bounded to 700 characters each\n- raise the direct-reply default budget from 20 to 128 tokens and request 1-3 concise spoken sentences\n- disable provider an",
+      "files": [
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/agent/src/api/chat-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): do not gate playback on visualizer worklet loading",
+      "prNumber": 16105,
+      "type": "bugfix",
+      "body": "## Summary\n- prewarm the optional playback-reference AudioWorklet whenever the shared playback context is created\n- cap visualizer-tap setup at a 150 ms grace period so slow WebView worklet loading cannot hold audible TTS\n- late-attach only",
+      "files": [
+        "packages/ui/src/hooks/useVoiceChat.playback-grace.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/playback-frame-pump.test.ts",
+        "packages/ui/src/voice/playback-frame-pump.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): preserve explicit reasoning token caps",
+      "prNumber": 16099,
+      "type": "bugfix",
+      "body": "## Summary\n\n- preserve every explicit `max_tokens` value as the provider-facing output/spend ceiling, including reasoning and Anthropic extended-thinking models\n- retain the 4096 reasoning safety default only when callers omit `max_tokens`\n",
+      "files": [
+        "packages/cloud/api/__tests__/chat-completions-explicit-max-tokens-route.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-tool-choice.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): preserve Cerebras prompt cache key",
+      "prNumber": 16093,
+      "type": "bugfix",
+      "body": "## Summary\n\n- accept canonical `prompt_cache_key` plus the legacy `promptCacheKey` alias\n- validate cache keys as nonempty strings capped at 1024 characters\n- forward one canonical snake-case key on Cerebras pass-through requests\n- merge ca",
+      "files": [
+        "packages/cloud/api/__tests__/cerebras-prompt-cache-sdk-boundary.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-optimistic-billing.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-passthrough-streaming.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-tool-choice.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts"
+      ]
     }
   ],
   "topContributors": [
@@ -57611,41 +58401,41 @@
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 5475.607968002932,
-      "prScore": 3775.727968002932,
+      "totalScore": 5563.267334064519,
+      "prScore": 3862.511334064519,
       "issueScore": 0,
       "reviewScore": 1695.5,
-      "commentScore": 4.379999999999999,
+      "commentScore": 5.255999999999999,
       "summary": "lalalune: Drove extensive architectural hardening and feature expansion across the elizaos/eliza ecosystem, merging 1191 PRs that significantly improved system stability, cloud monetization, and mobile-native performance. Their work included critical infrastructure refactors such as the massive UI/launcher redesign (#11731) and the implementation of robust PII pseudonymization (#10777), alongside rigorous testing efforts that established new quality gates for agent stability and voice-processing pipelines. By maintaining a high velocity of 148 code reviews and executing complex refactors like the normalization of workspace scripts (#13064), they demonstrated a primary focus on bug remediation, test coverage, and core system architecture."
     },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 3898.220793110449,
-      "prScore": 3557.840793110449,
-      "issueScore": 0,
+      "totalScore": 4472.8939331796755,
+      "prScore": 4099.037933179675,
+      "issueScore": 32.6,
       "reviewScore": 336,
-      "commentScore": 4.379999999999999,
+      "commentScore": 5.255999999999999,
       "summary": "NubsCarson: Drove extensive stability and security improvements across the elizaos/eliza ecosystem, merging 308 pull requests that focused heavily on cloud infrastructure, monetization integrity, and core agent logic. Their work included critical refactors and security hardening, such as the major orchestrator generalization in PR #11571 and the implementation of robust money-gating and affiliate-tracking systems across multiple releases. By managing 441 commits and providing 242 total review comments, they ensured high-quality delivery of complex features like the PTY service (#10668) and custom domain support (#11000). Their contributions were primarily dedicated to bug fixing (79%) and testing (27%), significantly enhancing the reliability of the cloud platform and core inference engines."
     },
     {
       "username": "0xSolace",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
-      "totalScore": 3775.567809894153,
-      "prScore": 3497.739809894153,
-      "issueScore": 0,
+      "totalScore": 4235.511347969358,
+      "prScore": 3948.507347969358,
+      "issueScore": 8.3,
       "reviewScore": 275,
-      "commentScore": 2.828,
+      "commentScore": 3.7039999999999997,
       "summary": "0xSolace: Focused heavily on stabilizing the orchestrator and core runtime, delivering 84 merged PRs that significantly improved system reliability through a comprehensive \"fail-closed\" security and error-handling sweep. Their work included major architectural refactors to centralize plugin registration and route management, such as in PR #13207, alongside the implementation of key features like the Hermes parser (#11889) and vendor-neutral model-gateway configurations (#11660). By prioritizing robust error observability and system-wide consistency, they successfully addressed critical bottlenecks in session handling and agent-server communication, with a primary focus on bugfix work and structural code improvements."
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 1000.045445653383,
+      "totalScore": 1000.385445653383,
       "prScore": 998.969445653383,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.0759999999999998,
+      "commentScore": 1.416,
       "summary": "standujar: Focused heavily on stabilizing the elizaos/eliza cloud infrastructure and chat experience, successfully merging 16 pull requests that addressed critical session management, authentication flows, and system latency. They delivered significant improvements to the platform's reliability, including resolving persistent 500 errors and session looping issues in PRs #11079 and #11016, while also enhancing user feedback mechanisms in PR #11739. Their work was characterized by a high-impact approach to bug resolution and testing, with 83% of their 24 commits dedicated to fixing cloud-related defects and 17% focused on strengthening UI and test coverage."
     },
     {
@@ -57671,9 +58461,9 @@
     {
       "username": "noobshow",
       "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
-      "totalScore": 131.58224028435737,
-      "prScore": 131.14424028435738,
-      "issueScore": 0,
+      "totalScore": 179.37561445727457,
+      "prScore": 174.93761445727455,
+      "issueScore": 4,
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
       "summary": null
@@ -57726,6 +58516,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lubluniky",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102585380?u=f9688164896ceedc3a49aa211b9ef6e102bf4c11&v=4",
+      "totalScore": 26.452654885736052,
+      "prScore": 23.912654885736053,
+      "issueScore": 2.2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -57799,9 +58599,9 @@
       "summary": "github-code-quality: No activity this month."
     }
   ],
-  "newPRs": 3830,
-  "mergedPRs": 3436,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 25
+  "newPRs": 3873,
+  "mergedPRs": 3473,
+  "newIssues": 27,
+  "closedIssues": 11,
+  "activeContributors": 26
 }

@@ -5,8 +5,69 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-05 to 2026-07-12, elizaos/eliza had 1755 new PRs (1543 merged), 0 new issues, and 14 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-07-05 to 2026-07-12, elizaos/eliza had 1765 new PRs (1544 merged), 14 new issues, and 14 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABHsCbbQ",
+      "title": "Nightly App Live E2E — the only scheduled desktop-packaged lane — is red every night; desktop job fails on screenshot 503 + settings-shell timeout, so the desktop loop has no green unattended cadence",
+      "author": "lalalune",
+      "number": 13681,
+      "repository": "elizaos/eliza",
+      "body": "Part of the desktop stream of the unattended-testing umbrella #13562. The screenshot-backend half is filed separately (packaged screenshot seam issue); this issue owns making the scheduled lane green.\n\n## Problem\n\n`app-live-e2e.yml` is the only scheduled CI home for the packaged Electrobun desktop suite (`xvfb-run … bun run --cwd packages/app test:desktop:packaged`, line 380) — and it has failed every night for at least three consecutive nights (Jul 1, Jul 2, Jul 3 2026). In the latest completed run **all four jobs failed** (desktop packaged, app live chat, full walkthrough, cloud login+provision+chat). A nightly that is always red is indistinguishable from no lane: nobody is alerted, regressions accumulate silently, and the desktop loop has no unattended green cadence at all.\n\nDesktop-job specifics from run 28647271527 (2026-07-03):\n\n1. `desktop-launch-render.e2e.spec.ts:110` — bridge screenshot 503; the ubuntu runner has none of `scrot`/`import`/`ffmpeg`/`xwd` installed (workflow installs protobuf but no screenshot tool).\n2. `electrobun-packaged-regressions.e2e.spec.ts:1030` \"packaged desktop persists media, provider, and plugin state across relaunch\" — `Timed out waiting for [data-testid=\"settings-shell\"] at /settings/voice` (needs root-cause: renderer routing under WebKitGTK, or live-api server shape drift).\n3. Lane summary: 2 failed / 2 skipped / 1 passed — most of the suite is macOS-gated, so the Linux leg exercises very little even when green.\n\n## Evidence\n\n- `gh run list --workflow app-live-e2e.yml`: failure 2026-07-01T08:29Z, cancelled+failure 2026-07-02, failure 2026-07-03T20:48Z (run 28647271527).\n- Job log excerpts: `GET http://127.0.0.1:31558/main-window/screenshot failed (503)`, `[ScreenCapture] Executable not found in $PATH: \"scrot\"|\"import\"|\"ffmpeg\"|\"xwd\"`, `Timed out waiting for [data-testid=\"settings-shell\"] at /settings/voice`, `error: script \"test:desktop:packaged\" exited with code 1`.\n- Artifact `app-live-e2e-desktop` (id 8074563215) uploaded with the failure traces.\n\n## Done when\n\n- The runner provisions at least one Linux screenshot backend (apt `scrot` and/or `ffmpeg`) before the desktop step, or the bridge screenshot no longer needs host CLIs (sibling issue).\n- The `/settings/voice` settings-shell timeout is root-caused and fixed (not skipped).\n- Three consecutive scheduled runs of the \"desktop packaged\" job are green, and a red nightly notifies someone (issue comment, Slack, or failing badge referenced from the repo docs).\n- The Linux leg's skip list is reviewed: macOS-gated specs that could run under WebKitGTK are un-gated or their skip reason is documented in the workflow.\n\n## Verification\n\n```\ngh run list --workflow app-live-e2e.yml --limit 3   # 3 green scheduled runs\ngh run view <latest> --json jobs -q '.jobs[] | \"\\(.conclusion) \\(.name)\"'\n# locally reproduce the Linux leg: xvfb-run -a bun run --cwd packages/app test:desktop:packaged (on a Linux host with scrot installed)\n```\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n---\nPart of the flawless-testing-loop initiative #13562 — project [elizaOS/12](https://github.com/orgs/elizaOS/projects/12).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-07-04T23:36:02Z",
+      "closedAt": "2026-07-05T16:38:39Z",
+      "state": "CLOSED",
+      "commentCount": 13
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABH_ZHiQ",
+      "title": "[staging][ops] Staging agents never join headscale — all 48 running agents have empty headscale_ip, so the CP nginx router 404s the worker→CP→agent hop (chat dead-ends after #15205)",
+      "author": "standujar",
+      "number": 15347,
+      "repository": "elizaos/eliza",
+      "body": "## The layer under #15205\nWith the CF wildcard + TLS fixed (#15205), the app's per-agent calls now correctly reach `https://<id>.staging.elizacloud.ai` on the STAGING worker (verified: valid `*.staging.elizacloud.ai` cert, request lands on the staging cloud-api worker, no longer the prod one). But the chat still dead-ends: every `/api/*` call returns **HTTP 404 from Cloudflare with no CORS header** → browser reports `No 'Access-Control-Allow-Origin'`.\n\n## Root cause (systemic, not per-agent)\nThe worker's `handleDedicatedAgentProxy` → `proxyToOrigin` forwards to `AGENT_ROUTER_ORIGIN_HOST = eliza-staging-1.elizacloud.ai` (the staging CP). The CP runs **nginx** (:80/:443) which routes `<id>.staging.elizacloud.ai` to the agent over the **headscale tailnet** via the agent's `headscale_ip`. But:\n- **All 48 running staging agents have `headscale_ip` NULL/empty** (`SELECT (headscale_ip IS NULL OR headscale_ip='') , count(*) FROM agent_sandboxes WHERE status='running'` → `t | 48`).\n- **`headscale nodes list` on the CP shows NO online agent-tagged node** — only `cp-staging-router` (tag:eliza-proxy, online) and two `robot-tstest`/`robot-tstest2` (tag:agent) **offline since 2026-06-16**.\n\nSo staging agent containers are provisioned + running + serving on their node bridge (`bridge_url` is set, e.g. `http://91.98.38.74:19006`), but they **never join the headscale mesh**, so the CP router has no tailnet address to reach them → 404. The agent's own CORS (`resolveCorsOrigin`, which allows any origin when `ELIZA_CLOUD_PROVISIONED=1`) is never reached because the request dies at the CP hop.\n\n## Why it surfaced only now\nNobody ever got a staging agent reachable end-to-end before tonight (DB split #15160 → image boot #15196 → wildcard/TLS #15205 all had to land first). This is the next distinct gap in the same 'staging never fully mirrored prod' class, adjacent to the known prod-parity headscale gap.\n\n## What to investigate\nWhy staging agent containers don't join headscale: is the tailscale-up / headscale pre-auth-key step injected at provision time (the staging worker HAS `HEADSCALE_PUBLIC_URL`/`HEADSCALE_API_URL`/`HEADSCALE_USER=tunnel`) actually running in the container, and is the provisioning worker recording `headscale_ip` back to `agent_sandboxes`? Either the join is failing/skipped or the IP is never persisted. Fixing it should light up all 48 agents at once.\n\n## Scope\nSystemic (48/48 agents), needs the headscale/tailnet provisioning path debugged — an infra workstream, not a config toggle. #15205's edge routing is done and verified; this is the CP→agent hop. [stan-cloud]",
+      "createdAt": "2026-07-07T18:29:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 10
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABHve0Jw",
+      "title": "[onboarding] P0 — Resurrect App Live E2E: real cloud login + real-LLM chat must produce a green nightly run",
+      "author": "lalalune",
+      "number": 14357,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\nThe only tests proving that a REAL Eliza Cloud account works and a REAL LLM answers after onboarding live in the nightly `App Live E2E` workflow — and that workflow has produced no green scheduled run since at least 2026-06-25 (every run 06-25→07-05 is `failure` or `cancelled`). The production-default onboarding is therefore unverified end to end.\n\n## Current state (file refs)\n- Workflow: `.github/workflows/app-live-e2e.yml` (nightly 07:00 UTC + dispatch; `ELIZA_UI_SMOKE_LIVE_STACK=1` un-forces the CI stub).\n- Live specs it runs: `packages/app/test/ui-smoke/cloud-live.spec.ts` (real login via `ELIZAOS_CLOUD_API_KEY`, real provisioning, real cloud chat turn asserting the reply does NOT contain `STUB_FIXTURE_MARKER`) and `packages/app/test/ui-smoke/live-agent-chat.spec.ts` (real local runtime + live provider).\n- Known long-standing failure modes (pre-existing): (1) `desktop packaged` job dies in `packages/app-core/scripts/copy-runtime-node-modules.ts` (`71 required runtime package check(s) failed after copy + prune` — every `@elizaos/plugin-*` missing `dist/node_modules/.../dist/index.js`); (2) `app live chat` job times out at `live-agent-chat.spec.ts` \"sends a message to the live agent and renders the response\" (`toBeVisible()` not found after ~2.1m).\n\n## Proposed change\n1. Triage each red job independently — they are unrelated failures. Fix the runtime-copy prune/filter bug (or build plugin dists before the copy) for the desktop-packaged job; debug the live chat turn (provider selection, model boot, stream render) for the live-chat job.\n2. Do NOT weaken assertions or add mocks to go green — the lane exists to be real.\n3. If a sub-job is genuinely out of MVP scope (e.g. desktop packaged build), split it into its own job so cloud-live can pass independently; keep it visible, never delete coverage silently.\n4. Trigger a `workflow_dispatch` run after the fix and confirm green.\n\n## Acceptance criteria\n- [ ] One fully green scheduled or dispatched `App Live E2E` run on `develop`, linked in the PR.\n- [ ] `cloud-live.spec.ts` passes against real Eliza Cloud: real session, real provisioning, real chat turn, non-stub reply asserted.\n- [ ] `live-agent-chat.spec.ts` passes with a real provider model turn rendered in the UI.\n- [ ] No assertion was weakened and no network mock was added to any live spec (diff review).\n- [ ] Root cause of each failure documented in the PR body (not just \"fixed\").\n\n## Evidence required (posted INLINE in the PR)\n- Link to the green workflow run.\n- MP4 of the Playwright trace/video for the cloud-live spec (real login → onboarded → real reply visible).\n- JPG screenshots: the WRONG behavior first (red run log excerpt), then the passing chat turn with the real model reply.\n- Server + client log excerpts showing the real cloud request/response (redact tokens) in a collapsed details block.\n\n---\n_Workstream: **Onboarding, tutorial & help** · [design doc](https://github.com/elizaOS/eliza/blob/develop/packages/docs/ongoing-development/research/04-onboarding-tutorial-help.md) · [MVP board](https://github.com/orgs/elizaOS/projects/15)_",
+      "createdAt": "2026-07-05T21:32:54Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 5
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABIfA0jQ",
+      "title": "perf(cloud): chat gateway pays three failing Railway TCP rate-limit hops before Cerebras",
+      "author": "NubsCarson",
+      "number": 16153,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe Cloud chat gateway still adds seconds before a Cerebras request despite the provider itself being fast. A paired staging benchmark now isolates the dominant regression: chat crosses **three Railway-TCP Redis rate-limit gates** before provider forwarding. After 30 seconds idle, the two Hono middleware gates alone add **2.45–3.11s** outside the route timer, and the handler's org gate contributes to another **0.51–0.97s** phase. Direct Cerebras remains **0.09–0.37s**.\n\nThis is not reasoning-effort overhead and it is not slow Cerebras generation. The actual gateway-to-Cerebras response-header phase was **0.09–0.33s** in every post-idle case.\n\n## Live evidence\n\nAccepted paired run (staging gateway and direct provider, same prompts/models, paced below limits):\n\n- Run: https://github.com/elizaOS/eliza/actions/runs/29167994915\n- Job: https://github.com/elizaOS/eliza/actions/runs/29167994915/job/86584408510\n- Artifact: https://github.com/elizaOS/eliza/actions/runs/29167994915/artifacts/8252811951\n- 320/320 HTTP 200; 0 transport failures; 0 SSE terminal failures\n- 160 gateway + 160 direct samples; 30 warm pairs per case plus cold/post-idle\n- Both paths entered Cloudflare at IAD; every gateway inference used the direct pass-through path\n\nPost-idle gateway decomposition (`response headers - route total` exposes middleware before the route timer):\n\n| Model/case | Outside route | Auth | Mid reads | Reserve | Provider-to-headers | Gateway headers |\n|---|---:|---:|---:|---:|---:|---:|\n| Gemma / none | 2,993ms | 151ms | 664ms | 812ms | 333ms | 4,953ms |\n| GLM / omit | 2,540ms | 158ms | 659ms | 844ms | 89ms | 4,290ms |\n| GLM / none 4096 | 3,100ms | 44ms | 965ms | 755ms | 161ms | 5,025ms |\n| Gemma / omit | 2,450ms | 1,827ms | 514ms | 614ms | 89ms | 5,494ms |\n| GLM / none 512 | 3,107ms | 34ms | 862ms | 789ms | 156ms | 4,948ms |\n\nThe matched direct samples returned headers/TTFT in 86–365ms.\n\nWarm gateway p50 was still 485ms vs direct headers around 81–88ms, with gateway outliers up to 5.84s. The hidden outside-route interval reached 4.66s.\n\n### Independent live-tail confirmation on current staging\n\nOn commit `b2e36d3`, privacy-safe unauthenticated chat probes reproduced both modes without ever calling a model provider:\n\n- successful Railway Redis check: 556–589ms wall\n- SocketRedis timeout: 2.378s, 3.250s, and 3.459s wall\n- exact log: `SocketRedis operation timed out after 1000ms`\n- degraded response policy: `redis-unavailable` (the limiter fell open)\n\nAcross 679 successful Worker requests in the prior 30 minutes, p95 wall time was 3.40s and p99 was 8.49s. `/api/health`, which bypasses the lazy full-app import, stayed at 0–1ms; cold chat also pays initialization for the monolithic 580-route app.\n\n## Code-level cause\n\nEvery chat call currently stacks:\n\n1. `bootstrap-app.ts`: global Hono IP limiter (600/min), before the chat route timer.\n2. `v1/chat/completions/route.ts`: Hono API-key limiter (200/min), also before the timer.\n3. `handleChatCompletionsPOST`: per-org tier limiter (60/120/300 per minute).\n\nAll three use `REDIS_URL` in staging/production. `redis-factory.ts` resolves that to `SocketRedis` over `cloudflare:sockets`, opening request-scoped TCP/TLS connections to Railway. The committed Wrangler comments simultaneously state that raw external Redis from Workers is unreliable and can hang under load. `SocketRedis` has a 1,000ms operation timeout, so the measured two outer stalls plus one inner stall match the three connection/operation failure windows. Its error cleanup awaits an unbounded `close()` sequence, so the documented 1s ceiling is not actually a wall-clock ceiling; that is consistent with 3–4.66s outside-route outliers.\n\nThe existing `X-Eliza-Preforward-Ms` header starts inside `handleChatCompletionsPOST`, so it cannot see the largest two gates and currently labels provider-header wait as `total`. This is tracked more broadly in #16079.\n\n## Required fix\n\n- Replace the protective global and chat route Redis gates with Cloudflare's native Rate Limiting binding. It is machine-local/non-network-blocking and designed for protective limits.\n- Keep the organization-tier limit on a globally strong backend. Cloudflare's native binding is location-local and eventually consistent, so silently substituting it would weaken the purchased org quota. Batch its lease reconciliation and use one request-scoped connection or a strong Cloudflare primitive such as a Durable Object.\n- Preserve explicit 429 behavior and observable policy headers/logs. Missing/misconfigured production bindings must fail visibly, not silently disable protection.\n- Bound SocketRedis teardown so an operation timeout remains a real wall-clock ceiling for non-chat consumers.\n- Extend correlated telemetry across global limiter, route limiter, auth, org tier lookup/limit, pool selection, balance gate/reservation, provider fetch-to-headers, first byte/token, stream completion, and deferred settlement.\n- Keep production untouched until staging proves the change.\n\n## Acceptance criteria\n\n- Unit/integration tests cover allow, deny, binding failure/missing binding, batched lease reconciliation, and no duplicate counter increments.\n- Wrangler dry-run and generated binding types pass for staging and production config.\n- A real staging paired run repeats the same five Cerebras cases with at least 30 warm pairs/case plus 30-second post-idle probes, paced below limits.\n- Post-idle paired excess outside the route timer (`gateway headers - route total - matched direct headers`) has p90 below 100ms, and no Redis TCP timeout appears in the two protective chat ingress limiters.\n- Gateway provider-to-headers remains within 2x direct after subtracting deliberate auth/billing work; all remaining deltas are named by truthful telemetry.\n- Billing reservations/deferred settlement, auth failures, 402s, and 429s retain their existing correctness semantics.\n\nRelated: #9899 (original pre-forward work, now shown incomplete for middleware), #15513 (Smart Placement), #16079 (truthful E2E telemetry), #16137 (paired live harness).\n",
+      "createdAt": "2026-07-11T22:10:05Z",
+      "closedAt": "2026-07-12T07:28:44Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABIb7Azw",
+      "title": "fix(mobile): preserve recent context in direct-chat fast path",
+      "author": "0xSolace",
+      "number": 16109,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe Android local direct-chat fast path in `packages/agent/src/api/chat-routes.ts` currently sends no recent conversation history, caps generation at `maxTokens: 20`, and instructs the model to answer in one sentence under 10 words. It then truncates output to the first sentence.\n\nThis makes mobile voice replies effectively memoryless and often produces terse dodges instead of context-aware spoken answers.\n\n## Acceptance criteria\n\n- Include a bounded recent-turn window in the fast-path prompt.\n- Allow a practical spoken-answer token budget and 1-3 concise sentences.\n- Preserve bounded latency/context growth.\n- Add focused regression coverage for prompt history and response handling.\n\nParent: #16064, checkbox 5.\n\n[sol-cloud]",
+      "createdAt": "2026-07-11T07:14:12Z",
+      "closedAt": "2026-07-12T00:43:36Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOMT5cIs7ucfBO",
@@ -70,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 770117,
-    "deletions": 235072,
-    "files": 5135,
-    "commitCount": 3462
+    "additions": 770349,
+    "deletions": 235082,
+    "files": 5136,
+    "commitCount": 3579
   },
   "completedItems": [
     {
@@ -22618,47 +22679,58 @@
         "packages/ui/src/first-run/use-first-run-conductor.test.ts",
         "packages/ui/src/first-run/use-first-run-conductor.ts"
       ]
+    },
+    {
+      "title": "fix(plugin-openrouter): read cache-write tokens from inputTokenDetails",
+      "prNumber": 16136,
+      "type": "bugfix",
+      "body": "## Summary\n\n`emitModelUsageEvent` and `buildNativeTextResult` both read cache-write token counts off `usage.cacheCreationInputTokens` — a field `ai@^6` never populates. Every Anthropic-family cache write routed through OpenRouter has been s",
+      "files": [
+        "plugins/plugin-openrouter/__tests__/cache-write-usage.shape.test.ts",
+        "plugins/plugin-openrouter/models/text.ts",
+        "plugins/plugin-openrouter/utils/events.ts"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 3679.095454514051,
-      "prScore": 2214.967454514051,
+      "totalScore": 3722.7730466790617,
+      "prScore": 2258.207046679062,
       "issueScore": 0,
       "reviewScore": 1461.5,
-      "commentScore": 2.6279999999999997,
+      "commentScore": 3.066,
       "summary": null
     },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 2554.874510306424,
-      "prScore": 2253.2465103064237,
-      "issueScore": 0,
+      "totalScore": 2754.603401037082,
+      "prScore": 2436.2374010370822,
+      "issueScore": 16.3,
       "reviewScore": 299,
-      "commentScore": 2.6279999999999997,
+      "commentScore": 3.066,
       "summary": null
     },
     {
       "username": "0xSolace",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
-      "totalScore": 2386.5798162892474,
-      "prScore": 2109.3898162892474,
-      "issueScore": 0,
+      "totalScore": 2607.5354093107244,
+      "prScore": 2321.6074093107245,
+      "issueScore": 8.3,
       "reviewScore": 275,
-      "commentScore": 2.1899999999999995,
+      "commentScore": 2.6279999999999997,
       "summary": null
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 760.9829906944668,
+      "totalScore": 761.3229906944669,
       "prScore": 759.9069906944668,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.0759999999999998,
+      "commentScore": 1.416,
       "summary": null
     },
     {
@@ -22732,9 +22804,9 @@
       "summary": null
     }
   ],
-  "newPRs": 1755,
-  "mergedPRs": 1543,
-  "newIssues": 0,
-  "closedIssues": 0,
+  "newPRs": 1765,
+  "mergedPRs": 1544,
+  "newIssues": 14,
+  "closedIssues": 1,
   "activeContributors": 14
 }
