@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-05 to 2026-07-12, elizaos/eliza had 1765 new PRs (1544 merged), 14 new issues, and 14 active contributors.",
+  "overview": "From 2026-07-05 to 2026-07-12, elizaos/eliza had 1765 new PRs (1544 merged), 30 new issues, and 14 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABHsCbbQ",
@@ -44,6 +44,18 @@
       "commentCount": 5
     },
     {
+      "id": "I_kwDOMT5cIs8AAAABIS5Wmg",
+      "title": "fix(app): stop unauthorized CharacterEditor early-persist loop and gate console errors",
+      "author": "lalalune",
+      "number": 15922,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nA real local app/API soak repeatedly emits an unauthorized early-persist failure from CharacterEditor while merely navigating views:\n\n```\n[console.error] Error [CharacterEditor] voice config early persist failed (err=Unauthorized)\n```\n\nIt repeated throughout a 114-activation, 19-view soak. The soak's `pageErrors` assertion does not include console errors, so it still reported PASS. A healthy unattended audit can therefore conceal a persistent authenticated-write failure.\n\nObserved while validating #15915 on current `develop` after #15896.\n\n## Acceptance criteria\n\n- CharacterEditor does not attempt the voice-config write before the session/auth boundary is ready.\n- A required persist failure surfaces as an explicit UI/error state; it is not reduced to console noise.\n- The real app soak records/gates unexpected console errors in addition to uncaught page errors.\n- Add a real browser regression covering fresh local startup and Character navigation.\n- Attach frontend console/network logs and rendered proof.",
+      "createdAt": "2026-07-10T03:07:53Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
+    },
+    {
       "id": "I_kwDOMT5cIs8AAAABIfA0jQ",
       "title": "perf(cloud): chat gateway pays three failing Railway TCP rate-limit hops before Cerebras",
       "author": "NubsCarson",
@@ -52,18 +64,6 @@
       "body": "## Summary\n\nThe Cloud chat gateway still adds seconds before a Cerebras request despite the provider itself being fast. A paired staging benchmark now isolates the dominant regression: chat crosses **three Railway-TCP Redis rate-limit gates** before provider forwarding. After 30 seconds idle, the two Hono middleware gates alone add **2.45–3.11s** outside the route timer, and the handler's org gate contributes to another **0.51–0.97s** phase. Direct Cerebras remains **0.09–0.37s**.\n\nThis is not reasoning-effort overhead and it is not slow Cerebras generation. The actual gateway-to-Cerebras response-header phase was **0.09–0.33s** in every post-idle case.\n\n## Live evidence\n\nAccepted paired run (staging gateway and direct provider, same prompts/models, paced below limits):\n\n- Run: https://github.com/elizaOS/eliza/actions/runs/29167994915\n- Job: https://github.com/elizaOS/eliza/actions/runs/29167994915/job/86584408510\n- Artifact: https://github.com/elizaOS/eliza/actions/runs/29167994915/artifacts/8252811951\n- 320/320 HTTP 200; 0 transport failures; 0 SSE terminal failures\n- 160 gateway + 160 direct samples; 30 warm pairs per case plus cold/post-idle\n- Both paths entered Cloudflare at IAD; every gateway inference used the direct pass-through path\n\nPost-idle gateway decomposition (`response headers - route total` exposes middleware before the route timer):\n\n| Model/case | Outside route | Auth | Mid reads | Reserve | Provider-to-headers | Gateway headers |\n|---|---:|---:|---:|---:|---:|---:|\n| Gemma / none | 2,993ms | 151ms | 664ms | 812ms | 333ms | 4,953ms |\n| GLM / omit | 2,540ms | 158ms | 659ms | 844ms | 89ms | 4,290ms |\n| GLM / none 4096 | 3,100ms | 44ms | 965ms | 755ms | 161ms | 5,025ms |\n| Gemma / omit | 2,450ms | 1,827ms | 514ms | 614ms | 89ms | 5,494ms |\n| GLM / none 512 | 3,107ms | 34ms | 862ms | 789ms | 156ms | 4,948ms |\n\nThe matched direct samples returned headers/TTFT in 86–365ms.\n\nWarm gateway p50 was still 485ms vs direct headers around 81–88ms, with gateway outliers up to 5.84s. The hidden outside-route interval reached 4.66s.\n\n### Independent live-tail confirmation on current staging\n\nOn commit `b2e36d3`, privacy-safe unauthenticated chat probes reproduced both modes without ever calling a model provider:\n\n- successful Railway Redis check: 556–589ms wall\n- SocketRedis timeout: 2.378s, 3.250s, and 3.459s wall\n- exact log: `SocketRedis operation timed out after 1000ms`\n- degraded response policy: `redis-unavailable` (the limiter fell open)\n\nAcross 679 successful Worker requests in the prior 30 minutes, p95 wall time was 3.40s and p99 was 8.49s. `/api/health`, which bypasses the lazy full-app import, stayed at 0–1ms; cold chat also pays initialization for the monolithic 580-route app.\n\n## Code-level cause\n\nEvery chat call currently stacks:\n\n1. `bootstrap-app.ts`: global Hono IP limiter (600/min), before the chat route timer.\n2. `v1/chat/completions/route.ts`: Hono API-key limiter (200/min), also before the timer.\n3. `handleChatCompletionsPOST`: per-org tier limiter (60/120/300 per minute).\n\nAll three use `REDIS_URL` in staging/production. `redis-factory.ts` resolves that to `SocketRedis` over `cloudflare:sockets`, opening request-scoped TCP/TLS connections to Railway. The committed Wrangler comments simultaneously state that raw external Redis from Workers is unreliable and can hang under load. `SocketRedis` has a 1,000ms operation timeout, so the measured two outer stalls plus one inner stall match the three connection/operation failure windows. Its error cleanup awaits an unbounded `close()` sequence, so the documented 1s ceiling is not actually a wall-clock ceiling; that is consistent with 3–4.66s outside-route outliers.\n\nThe existing `X-Eliza-Preforward-Ms` header starts inside `handleChatCompletionsPOST`, so it cannot see the largest two gates and currently labels provider-header wait as `total`. This is tracked more broadly in #16079.\n\n## Required fix\n\n- Replace the protective global and chat route Redis gates with Cloudflare's native Rate Limiting binding. It is machine-local/non-network-blocking and designed for protective limits.\n- Keep the organization-tier limit on a globally strong backend. Cloudflare's native binding is location-local and eventually consistent, so silently substituting it would weaken the purchased org quota. Batch its lease reconciliation and use one request-scoped connection or a strong Cloudflare primitive such as a Durable Object.\n- Preserve explicit 429 behavior and observable policy headers/logs. Missing/misconfigured production bindings must fail visibly, not silently disable protection.\n- Bound SocketRedis teardown so an operation timeout remains a real wall-clock ceiling for non-chat consumers.\n- Extend correlated telemetry across global limiter, route limiter, auth, org tier lookup/limit, pool selection, balance gate/reservation, provider fetch-to-headers, first byte/token, stream completion, and deferred settlement.\n- Keep production untouched until staging proves the change.\n\n## Acceptance criteria\n\n- Unit/integration tests cover allow, deny, binding failure/missing binding, batched lease reconciliation, and no duplicate counter increments.\n- Wrangler dry-run and generated binding types pass for staging and production config.\n- A real staging paired run repeats the same five Cerebras cases with at least 30 warm pairs/case plus 30-second post-idle probes, paced below limits.\n- Post-idle paired excess outside the route timer (`gateway headers - route total - matched direct headers`) has p90 below 100ms, and no Redis TCP timeout appears in the two protective chat ingress limiters.\n- Gateway provider-to-headers remains within 2x direct after subtracting deliberate auth/billing work; all remaining deltas are named by truthful telemetry.\n- Billing reservations/deferred settlement, auth failures, 402s, and 429s retain their existing correctness semantics.\n\nRelated: #9899 (original pre-forward work, now shown incomplete for middleware), #15513 (Smart Placement), #16079 (truthful E2E telemetry), #16137 (paired live harness).\n",
       "createdAt": "2026-07-11T22:10:05Z",
       "closedAt": "2026-07-12T07:28:44Z",
-      "state": "CLOSED",
-      "commentCount": 3
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABIb7Azw",
-      "title": "fix(mobile): preserve recent context in direct-chat fast path",
-      "author": "0xSolace",
-      "number": 16109,
-      "repository": "elizaos/eliza",
-      "body": "## Problem\n\nThe Android local direct-chat fast path in `packages/agent/src/api/chat-routes.ts` currently sends no recent conversation history, caps generation at `maxTokens: 20`, and instructs the model to answer in one sentence under 10 words. It then truncates output to the first sentence.\n\nThis makes mobile voice replies effectively memoryless and often produces terse dodges instead of context-aware spoken answers.\n\n## Acceptance criteria\n\n- Include a bounded recent-turn window in the fast-path prompt.\n- Allow a practical spoken-answer token budget and 1-3 concise sentences.\n- Preserve bounded latency/context growth.\n- Add focused regression coverage for prompt history and response handling.\n\nParent: #16064, checkbox 5.\n\n[sol-cloud]",
-      "createdAt": "2026-07-11T07:14:12Z",
-      "closedAt": "2026-07-12T00:43:36Z",
       "state": "CLOSED",
       "commentCount": 3
     }
@@ -22806,7 +22806,7 @@
   ],
   "newPRs": 1765,
   "mergedPRs": 1544,
-  "newIssues": 14,
+  "newIssues": 30,
   "closedIssues": 1,
   "activeContributors": 14
 }
