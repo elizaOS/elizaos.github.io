@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-12 to 2026-07-19, elizaos/eliza had 128 new PRs (106 merged), 64 new issues, and 10 active contributors.",
+  "overview": "From 2026-07-12 to 2026-07-19, elizaos/eliza had 184 new PRs (150 merged), 73 new issues, and 14 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABIgmN8w",
@@ -18,6 +18,18 @@
       "closedAt": "2026-07-14T04:55:02Z",
       "state": "CLOSED",
       "commentCount": 6
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABI7h9pQ",
+      "title": "perf(core): composeState serializes embedding-gated providers — 0.7-3.4s floor before Stage-1 on every turn",
+      "author": "NubsCarson",
+      "number": 16393,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\n`composeState` serializes embedding-gated providers ahead of every Stage-1 call. On a direct-Cerebras deployment (fast models, telemetry below), the context-assembly floor is **0.7–3.4s per turn before the routing model even starts**:\n\n```\n total  ttreply  stage1  embed  compose  relconv  chatctx\n  3351     3156    1176   1984     1600     1598      794\n  6042     5853    1650   1012     2329     1963     1442\n  7375     7212    1666   1447     2445     2131     1345\n  4478     4232    1804   2559     1834     1833      538\n  6322     6047    2010   1579     2248     1789     2243\n```\n(`InferenceTiming` spans; median composeState 1.2s across 20 live turns; the two ~15ms rows are reused-state turns, showing the ceiling when assembly is skipped.)\n\n`model:TEXT_EMBEDDING` runs ×2 (query embedding for `relevant-conversations` + one more) and `PLATFORM_CHAT_CONTEXT` adds 0.3–3.4s. On a 1.2s-stage-1 backend this floor is 40–60% of time-to-reply.\n\n## Ask\n\nMake the embedding-gated providers non-blocking or degrading: kick off `relevant-conversations` (and its embeddings) in parallel with the fast providers and give it a soft deadline — when it misses, compose without it rather than serializing every turn behind it. `PLATFORM_CHAT_CONTEXT` deserves the same soft-deadline treatment.\n\nTelemetry: captured on a live Discord agent, Cerebras direct (gemma-4-31b small / zai-glm-4.7 large), develop @ 3e47d12ba03.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-07-15T16:07:20Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 5
     },
     {
       "id": "I_kwDOMT5cIs8AAAABH_ZHiQ",
@@ -51,20 +63,8 @@
       "repository": "elizaos/eliza",
       "body": "## Problem\n\n`zai-glm-4.7` — the default `TEXT_LARGE` model on Cerebras since #16261 — is a hybrid reasoning model (streams a separate `reasoning` delta channel), but `isReasoningModel()` in `plugins/plugin-openai/models/text.ts` does not match it. Two consequences on a local Cerebras runtime (`ELIZA_PROVIDER=cerebras`, `OPENAI_LARGE_MODEL=zai-glm-4.7`):\n\n1. The Cerebras-mode `reasoning_effort: \"low\"` default (added for exactly this failure on `gpt-oss-120b`) never applies to GLM, so its reasoning runs unbounded.\n2. `providerOptions.eliza.thinking = \"off\"` — set by core's planner loop (`packages/core/src/runtime/planner-loop.ts:1549`), Stage-1 formatting calls (`packages/core/src/services/message.ts:8770`), and the app-model-tester — is silently ignored by plugin-openai, while plugin-elizacloud maps it to each Cerebras model's suppression value (`resolveCerebrasThinkingOffReasoningEffort`, `plugins/plugin-elizacloud/src/models/text.ts:366`).\n\nWith a capped `max_tokens` the model spends the entire budget on hidden reasoning and returns **empty visible content** with `finish_reason: \"length\"`.\n\n## Reproduction (live Cerebras, wire-captured via a logging proxy)\n\n`POST /api/model-tester/run {\"test\":\"text-large\"}` on a default local Cerebras setup, 8 runs. Every request went out as `{\"model\":\"zai-glm-4.7\",\"max_tokens\":160}` with **no** `reasoning_effort`:\n\n```\n4x  finish_reason:\"length\"  reasoning_tokens:160/160  → \"TEXT_LARGE returned empty text\"\n4x  finish_reason:\"stop\"    reasoning_tokens:62–157   → \"pong\"\n```\n\n~50% failure, purely dependent on how long GLM happens to reason. Direct curl confirms the mechanism: `reasoning_effort:\"low\"` bounds reasoning (~20–30 tokens), and `reasoning_effort:\"none\"` (accepted by gemma/GLM, rejected by gpt-oss) eliminates it entirely (`reasoning_tokens: 0`).\n\n## Fix\n\nPR incoming, mirroring plugin-elizacloud's settled semantics:\n\n- add the GLM family to `isReasoningModel()` so the Cerebras `\"low\"` default applies;\n- honor `eliza.thinking === \"off\"` in Cerebras mode by mapping it per model: `\"none\"` for gemma/GLM, `\"low\"` for gpt-oss; explicit caller `providerOptions.openai.reasoningEffort` still wins.\n\nAfter the fix (same wire capture): 10/10 probes return content, `finish_reason:\"stop\"`, `reasoning_tokens: 0`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "createdAt": "2026-07-13T20:49:30Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 4
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABIqj_6g",
-      "title": "[agent] Make npm release transactional and retry-safe",
-      "author": "lalalune",
-      "number": 16277,
-      "repository": "elizaos/eliza",
-      "body": "## Project / Coordination\n\n- Project board: N/A - release integrity work is not assigned to a current product board.\n- Parent dependency: #16276 supplies the immutable release plan and fail-closed primitives.\n- Coordination Discussion: N/A - scope and acceptance live in this issue.\n- Suggested lane tag: codex-transactional-npm\n\n## Scope\n\nReplace the current single-job npm release script with a retry-safe, least-privilege workflow that stages and verifies the complete immutable package cohort before any public channel or GitHub release advances.\n\n## Acceptance Criteria\n\n- [ ] The npm workflow requires explicit `source_sha`, exact semver `version`, and `channel`; tag-push and `release:created` publication paths are removed.\n- [ ] One global release concurrency group serializes every version/channel mutation.\n- [ ] Candidate jobs have read-only contents access, disable persisted Git credentials, and build/test/pack/checksum once without npm credentials.\n- [ ] Publish jobs download the verified tarball cohort and never rebuild or mutate source/manifests.\n- [ ] Missing exact versions publish under a unique internal candidate dist-tag; matching existing versions resume only after integrity comparison.\n- [ ] Every package/version/integrity is verified before every package's public `beta`/`latest` tag is promoted and re-verified.\n- [ ] Finalization pushes only the exact planned `refs/tags/vX`; matching tags are idempotent and conflicting tags fail. `--follow-tags`, `-X theirs`, `git add -A`, and direct branch pushes are absent.\n- [ ] The GitHub release is published only after full registry verification; all direct `develop`/`main` version-sync logic is removed from this workflow.\n- [ ] Structural YAML tests, retry/failure matrices, focused integrations, actionlint, and repository verification pass.\n\n## Evidence Plan\n\n- [ ] Screenshots or recording: N/A - release orchestration only.\n- [ ] Logs: local registry cohort staging/promotion/retry and local Git exact-tag/idempotency transcripts.\n- [ ] Real-LLM trajectories: N/A - no agent/model behavior changes.\n- [ ] Domain artifacts: release plan, immutable tarballs, integrity map, candidate/public dist-tags, and exact Git refs.\n- [ ] CI or local commands: workflow contract tests, local integrations, actionlint, error-policy ratchet, and `bun run verify`.\n\n## Claim / Status Notes\n\nDo not publish to public npm or mutate public Git refs while implementing. Public tags `v2.0.3-beta.8` through `.10` are reserved failed-release residue. The next real canary must use a new version and happen only after the orchestrator layer is merged and reviewed.\n",
-      "createdAt": "2026-07-13T18:25:15Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-07-15T00:39:39Z",
+      "state": "CLOSED",
       "commentCount": 4
     }
   ],
@@ -94,18 +94,6 @@
       "deletions": 2500
     },
     {
-      "id": "PR_kwDOMT5cIs7xgi5e",
-      "title": "Add @ophis/plugin-elizaos to the third-party registry",
-      "author": "san-npm",
-      "number": 16352,
-      "body": "Adds **`@ophis/plugin-elizaos`** to the community (third-party) registry.\n\n[Ophis](https://ophis.fi) is CoW-Protocol MEV-protected swap infrastructure. The plugin lets an elizaOS agent perform same-chain ERC-20 swaps: it signs a GPv2 order with the agent's own EVM key and the order settles gaslessly in a batch auction — uniform clearing price, surplus returned to the trader, no sandwiching.\n\n- **Package**: `@ophis/plugin-elizaos@0.3.0` (published on npm, provenance-attested; `@ophis` scope, not the reserved `@elizaos`).\n- **Repo**: https://github.com/ophis-fi/ophis (`packages/plugin-elizaos`), public.\n- Provides a `swap` action (natural-language → MEV-protected swap) reusing the audited `@ophis/agent-swap` core.\n\nPer the registry guide: added `entries/third-party/ophis-plugin-elizaos.json` and regenerated `generated-registry.json` (`bun run validate` → 24 entries validated; `bun run generate`). The diff to `generated-registry.json` is a pure addition (+45/-0).\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-14T10:59:16Z",
-      "mergedAt": null,
-      "additions": 45543,
-      "deletions": 450074
-    },
-    {
       "id": "PR_kwDOMT5cIs7wuCf-",
       "title": "feat(chat): liquid-glass ChatOverlay + native transcript renderer (iOS/Android/desktop)",
       "author": "lalalune",
@@ -114,7 +102,7 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-12T10:07:32Z",
       "mergedAt": null,
-      "additions": 23210,
+      "additions": 23211,
       "deletions": 4767
     },
     {
@@ -128,13 +116,25 @@
       "mergedAt": null,
       "additions": 17248,
       "deletions": 10547
+    },
+    {
+      "id": "PR_kwDOMT5cIs7wQG3J",
+      "title": "feat(voice): realtime voice session — integrated Phase-1 slice (server + client + live-provider evidence)",
+      "author": "0xSolace",
+      "number": 16062,
+      "body": "## Realtime voice: integrated Phase-1 slice (server + client + live-provider evidence)\n\nOne vertical slice, per Definition of Done: server, browser client, and the evidence rig that proved them against **live Deepgram Flux + Cartesia Sonic**, in a single reviewable unit. Nothing here is a seam, a stub, or UI ahead of capability.\n\n### What this is\n- **Server** (`packages/cloud/api/v1/voice/session/**`, `packages/cloud/shared/src/lib/voice-session/**`): mint route (short-lived scoped JWT, jti, aud-bound), consent-nonce precondition (server-enforced, SEC-21), WS handler with hello-first headerless auth (WebView 113 cannot set WS headers), revoke-to-silence (SEC-6: revocation severs live provider sockets), server-derived usage metering (SEC-15: client never trusted for cost), interruption pipeline under a single voiceTurnId (cancel TTS -> abort SSE -> flush downlink -> `interrupted`), uplink re-framing to Flux's 2560B/80ms frames.\n- **Client** (`packages/ui/src/voice/voice-session-*.ts`): mint -> hello-first WSS -> full event handling; mic capture with runtime-verified AudioWorklet + ScriptProcessor fallback (WebView 113); streaming PCM playback (no decodeAudioData full-clip barrier); barge-in flushes local playback before server ack; re-mint on revoked/expired token (no reconnect with a dead token); maps onto the existing unified voice status from #15924 (no second state system).\n- **Evidence harness** (`packages/tools/voice-evidence-harness`): one command drives baseline / barge-in / error-auth scenarios and fails loudly if any stage or artifact is missing. `--target=real` boots the REAL server code (real jwt/consent/session/registry/metering/reframer/adapters; only the socket transport is a documented node shim in place of Workers `WebSocketPair`).\n\n### Flag\n`VOICE_REALTIME_WS_ENABLED` (default off) is consumed at the WS route: mint returns 503 `voice_realtime_disabled` when off; the evidence run exercises it ON. Real runtime consumer, not a dead flag.\n\n### Live-provider evidence (run against the REAL server, this branch)\nEvidence pack (WS transcript with tokens redacted, input/output WAVs, both-side logs, stage timings, domain rows, SHA-256 index, MP4): `evidence/voice-e2e/2026-07-10T15-37-44-748Z-real-server/` (artifacts attached below; full pack retained outside repo, hashes in the index).\n\n| scenario | result |\n| --- | --- |\n| baseline (real speech in -> transcript -> LLM -> real audio out) | PASS |\n| barge-in (interrupt mid-speech) | PASS, **0 post-interrupt downlink frames** |\n| error-auth (bad provider key) | PASS, typed `stt_transport_error`, no ready, no audio |\n\nMeasured stage deltas (baseline, live providers, monotonic clock; missing stages report `not_reached`, never zero):\n- mint -> ready: **10.5ms**\n- stt_final -> llm_first_text: 834ms\n- llm_first_text -> tts_first_frame: 1273ms\n- **stt_final -> tts_first_frame: 2107ms** (see \"Latency\" below)\n- transcript verbatim: \"What is the weather like in Denver today?\"; 1.8MB real Cartesia audio captured.\n\n### Real bugs found ONLY by the live boot (fixed in this branch, with regression tests)\n1. `end_audio` advisory frame was treated as fatal `control_unknown_type` and killed the turn.\n2. Empty-transcript finalization sent Cartesia a live 400 (\"No valid transcripts passed\") -> tts_error, zero audio. Finalization now holds one phrase back so the terminal phrase closes the context with `continue:false`.\n3. Harness `stop()` hung on half-open sockets under bun canary drain-exit.\n4. Harness error-auth gate accepted only one error shape; the real adapter emits `transport_error`.\n\n### Latency (honest)\n2107ms stt_final -> first audio frame is above our 1.2s target. The measured split shows two roughly equal legs (LLM first-token 834ms, TTS first-byte 1273ms). Optimization is scoped as immediate follow-up on this same evidence rig (candidates: eager-EOT speculative LLM start, TTS warm-context reuse, first-phrase fast-path). The rig measures every run, so improvements land with numbers, not adjectives.\n\n### Tests\n124 green under bun canary (CI's bun): 31 cloud-api session, 33 cloud-shared voice-session, 60 ui client. Full WS lifecycle, barge-in zero-post-cancel, revoke <=500ms, JWT expiry/revocation/claim-mismatch, metering enforcement, hello-first, malformed/oversized frames, PCM golden vectors, playback ordering, visibility-suspend.\n\n### Known pre-existing failure (not this branch)\n`bun run verify` fails on `audit:type-safety-ratchet` on **clean develop** (dd2aac161d4) with identical feed-package violations; receipt below. This branch's surfaces typecheck clean.\n\n### Security acceptance (from the voice threat model)\nConsent nonce server-enforced before mint; revoke-to-silence severs provider sockets; metering server-derived; `mip_opt_out` note: NOT yet on develop's flux adapter (verified absent) — separate single-boundary PR follows; token never in URL or logs (redacted in evidence transcript, hand-reviewed).\n\n[sol-cloud]\n\n\n## Evidence rows\n\n<!-- evidence-row:before-screenshots -->\n- N/A - This slice adds protocol/client TypeScript only and does not change an existing rendered UI surface.\n\n<!-- evidence-row:after-screenshots -->\n- N/A - No rendered UI component is added or changed; the browser client is a transport library.\n\n<!-- evidence-row:walkthrough-video -->\n- N/A - There is no rendered UI flow to walk through; the live voice flow is represented by its audio, transcript, timings, and server logs.\n\n<!-- evidence-row:backend-logs -->\n- [Live real-server/provider run log and timing receipt](https://github.com/elizaOS/eliza/pull/16062#issuecomment-4937244765), manually reviewed, tokens redacted.\n\n<!-- evidence-row:frontend-logs -->\n- N/A - No browser page is integrated in this slice, so there is no frontend console/network capture; client protocol behavior is covered by the 60-test client suite.\n\n<!-- evidence-row:llm-trajectory -->\n- [Real streaming LLM trajectory receipt, including verbatim input, stage output, and timings](https://github.com/elizaOS/eliza/pull/16062#issuecomment-4937244765).\n\n<!-- evidence-row:domain-artifacts -->\n- [Live voice domain artifact receipt, including real Deepgram transcript, Cartesia audio size, SHA-256 index excerpt, and latency deltas](https://github.com/elizaOS/eliza/pull/16062#issuecomment-4937244765).\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-10T16:10:02Z",
+      "mergedAt": "2026-07-12T02:07:35Z",
+      "additions": 15530,
+      "deletions": 243
     }
   ],
   "codeChanges": {
-    "additions": 85676,
-    "deletions": 10429,
-    "files": 837,
-    "commitCount": 558
+    "additions": 105686,
+    "deletions": 13353,
+    "files": 1062,
+    "commitCount": 718
   },
   "completedItems": [
     {
@@ -1051,6 +1051,39 @@
       "files": [
         "plugins/plugin-cli-inference/__tests__/cli-inference.test.ts",
         "plugins/plugin-cli-inference/index.ts"
+      ]
+    },
+    {
+      "title": "fix(auth): reconcile Codex token rotations atomically",
+      "prNumber": 16308,
+      "type": "bugfix",
+      "body": "## What\n\nCorrective follow-up to the prematurely merged #16293. This closes #16300 by making the Codex one-time refresh-token path fail closed from selection through the periodic account sweep.\n\n- Codex selection reconciles every materializ",
+      "files": [
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/coding-account-bridge.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app-core/src/services/multi-account-refresh-failover.test.ts",
+        "packages/benchmarks/codex-adapter/AGENTS.md",
+        "packages/benchmarks/codex-adapter/CLAUDE.md",
+        "packages/benchmarks/codex-adapter/README.md",
+        "packages/benchmarks/codex-adapter/codex_adapter/accounts.py",
+        "packages/benchmarks/codex-adapter/tests/test_accounts.py",
+        "packages/benchmarks/docs/HITL_MULTI_CODEX_RUNBOOK.md"
+      ]
+    },
+    {
+      "title": "fix: format pre-existing Biome defects",
+      "prNumber": 16306,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16303. Corrective follow-up to #16297.\n\n- [x] This PR targets `develop` and is based on the latest `origin/develop`.\n- [x] `bun install` and `bun run verify` were run after sync.\n- [x] A reviewer can confirm the change ",
+      "files": [
+        "packages/core/src/runtime/shortcut-registry.test.ts",
+        "plugins/plugin-commands/__tests__/model-config-command.test.ts",
+        "plugins/plugin-commands/src/actions/model-config.ts",
+        "plugins/plugin-elizacloud/__tests__/unit/text-user-reasoning-effort.test.ts",
+        "plugins/plugin-cli-inference/__tests__/cli-inference.test.ts",
+        "plugins/plugin-cli-inference/index.ts",
+        "plugins/plugin-discord/__tests__/catalog-commands.test.ts"
       ]
     },
     {
@@ -1999,6 +2032,239 @@
       ]
     },
     {
+      "title": "fix(ci): trust mounted checkout in training containers",
+      "prNumber": 16353,
+      "type": "bugfix",
+      "body": "Closes #16351\n\n## Summary\n\n- pass a process-scoped Git configuration to the training CPU test container\n- trust only the mounted `/workspace/repo` checkout\n- keep Git ownership protection enabled for every other path\n\n## Root cause\n\n`action",
+      "files": [
+        ".github/workflows/training-stack.yml"
+      ]
+    },
+    {
+      "title": "Add @ophis/plugin-elizaos to the third-party registry",
+      "prNumber": 16352,
+      "type": "other",
+      "body": "Adds **`@ophis/plugin-elizaos`** to the community (third-party) registry.\n\n[Ophis](https://ophis.fi) is CoW-Protocol MEV-protected swap infrastructure. The plugin lets an elizaOS agent perform same-chain ERC-20 swaps: it signs a GPv2 order ",
+      "files": [
+        ".github/workflows/README.md",
+        ".github/workflows/build-ios.yml",
+        ".github/workflows/build-llama-ffi-android.yml",
+        ".github/workflows/build-llama-ffi-ios.yml",
+        ".github/workflows/build-llama-ffi-linux.yml",
+        ".github/workflows/build-llama-ffi-macos.yml",
+        ".github/workflows/chat-latency-live.yml",
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/develop-live.yml",
+        ".github/workflows/managed-dedicated-canary.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/release.yaml",
+        ".github/workflows/training-stack.yml",
+        ".gitignore",
+        "bun.lock",
+        "bunfig.live.toml",
+        "package.json",
+        "packages/agent/src/api/__tests__/conversation-stream-sse-contract.test.ts",
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/agent/src/api/accounts-routes.test.ts",
+        "packages/agent/src/api/accounts-routes.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/model-catalog.test.ts",
+        "packages/agent/src/api/model-catalog.ts",
+        "packages/agent/src/api/model-config-routes.test.ts",
+        "packages/agent/src/api/model-config-routes.ts",
+        "packages/agent/src/api/model-config-slash-command.test.ts",
+        "packages/agent/src/api/notification-routes.test.ts",
+        "packages/agent/src/api/notification-routes.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/views-registry.package-resolution.test.ts",
+        "packages/agent/src/api/views-registry.ts",
+        "packages/agent/src/capacitor-bridge-shim-parity.test.ts",
+        "packages/agent/src/providers/media-provider.ts",
+        "packages/agent/src/runtime/load-plugin-from-directory.test.ts",
+        "packages/agent/src/runtime/load-plugin-from-directory.ts",
+        "packages/agent/test/api/accounts-routes.test.ts",
+        "packages/app-core/scripts/ffi-stub/Makefile",
+        "packages/app-core/scripts/ffi-stub/README.md",
+        "packages/app-core/scripts/ffi-stub/libelizainference_stub.so",
+        "packages/app-core/scripts/lib/workspace-discovery.mjs",
+        "packages/app-core/scripts/playwright-ui-live-stack.ts",
+        "packages/app-core/scripts/playwright-ui-smoke-api-stub.mjs",
+        "packages/app-core/scripts/smoke-view-bundle-provenance.test.ts",
+        "packages/app-core/src/services/account-pool-availability.test.ts",
+        "packages/app-core/src/services/account-pool.test.ts",
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/coding-account-bridge.test.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/registry/entries/third-party/ophis-plugin-elizaos.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "fix(ci): isolate exhaustive concurrency and preserve quiescent signal",
+      "prNumber": 16350,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRelates to #16336\nSupports #13401\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`0f8045c674",
+      "files": [
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/develop-exhaustive.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/keyless-harness-e2e.yml",
+        ".github/workflows/mobile-build-smoke.yml",
+        ".github/workflows/scenario-pr.yml",
+        ".github/workflows/test-electrobun-release.yml",
+        ".github/workflows/test.yml",
+        ".github/workflows/ui-e2e-gate.yml",
+        ".github/workflows/ui-fixture-e2e.yml",
+        ".github/workflows/ui-story-gate.yml",
+        ".github/workflows/windows-ci.yml",
+        "packages/scripts/__tests__/ci-full-matrix-proof.test.ts",
+        "packages/scripts/ci-full-matrix-proof.mjs",
+        "packages/scripts/ci-lane-manifest.json"
+      ]
+    },
+    {
+      "title": "fix(build): harden package dist inputs",
+      "prNumber": 16346,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16343.\n\nFollow-up to #12333 / #12631, which explicitly deferred this publishing edge case. Relates to #16268 / #16269; launcher smoke verification remains a separate scope.\n\nDefinition of Done: full standard in [`CONTRI",
+      "files": [
+        "packages/scripts/__tests__/copy-package-assets.test.ts",
+        "packages/scripts/__tests__/prepare-package-dist.test.ts",
+        "packages/scripts/copy-package-assets.mjs",
+        "packages/scripts/prepare-package-dist.mjs"
+      ]
+    },
+    {
+      "title": "perf(cloud): remove KV write from cold inference auth path",
+      "prNumber": 16338,
+      "type": "other",
+      "body": "# Relates to\n\nFixes #16159.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebase",
+      "files": [
+        ".github/workflows/chat-latency-live.yml",
+        ".github/workflows/coverage-gate.yml",
+        ".gitleaks.toml",
+        "package.json",
+        "packages/cloud/api/__tests__/chat-completions-optimistic-billing.test.ts",
+        "packages/cloud/api/__tests__/chat-completions-passthrough-streaming.test.ts",
+        "packages/cloud/api/__tests__/malformed-json-body-routes.test.ts",
+        "packages/cloud/api/v1/chat/completions/route.ts",
+        "packages/cloud/shared/src/lib/auth-inference-api-key.test.ts",
+        "packages/cloud/shared/src/lib/cache/__tests__/client-mock.test.ts",
+        "packages/cloud/shared/src/lib/cache/__tests__/client-worker-rest.test.ts",
+        "packages/cloud/shared/src/lib/cache/cache-scan-pagination.test.ts",
+        "packages/cloud/shared/src/lib/cache/client.ts",
+        "packages/cloud/shared/src/lib/cache/del-confirmed.test.ts",
+        "packages/cloud/shared/src/lib/cors-constants.ts",
+        "packages/cloud/shared/src/lib/cors/cloud-api-hono-cors.test.ts",
+        "packages/cloud/shared/src/lib/observability/http-telemetry.test.ts",
+        "packages/cloud/shared/src/lib/observability/http-telemetry.ts",
+        "packages/cloud/shared/src/lib/services/inference-api-key-auth.ts",
+        "packages/cloud/shared/src/lib/services/inference-auth-cache.ts",
+        "packages/cloud/shared/src/lib/services/inference-auth-context.test.ts",
+        "packages/cloud/shared/src/lib/services/inference-auth-context.ts",
+        "packages/cloud/shared/src/lib/services/inference-hot-path-benchmark.test.ts",
+        "packages/scripts/__tests__/chat-latency-workflow.test.ts",
+        "packages/scripts/__tests__/coverage-workflow-source-condition.test.ts",
+        "packages/scripts/cloud/inference-auth-latency.mjs",
+        "packages/scripts/cloud/inference-auth-latency.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud): make Railway voice services reproducible",
+      "prNumber": 16337,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #14374.\n\n- [x] Both pinned Railway services reproduce from committed definitions.\n- [x] The production request shapes pass against fresh exact-head deployments.\n- [x] The scheduled monitor fails on a deliberately broken ",
+      "files": [
+        "packages/cloud/services/voice-kokoro-tts/Dockerfile",
+        "packages/cloud/services/voice-kokoro-tts/README.md",
+        "packages/cloud/services/voice-kokoro-tts/eliza_kokoro_compat.py",
+        "packages/cloud/services/voice-whisper-stt/Dockerfile",
+        "packages/cloud/services/voice-whisper-stt/README.md",
+        "packages/cloud/services/voice-whisper-stt/railway.toml",
+        "packages/scripts/__tests__/voice-railway-service-defs.test.ts"
+      ]
+    },
+    {
+      "title": "fix(lifeops): fail prompt benchmark on runtime aborts",
+      "prNumber": 16335,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16331.\n\n- [x] Targets `develop` and is synced to `origin/develop` with zero conflicts.\n- [x] Installs dependencies and passes the full repository verification gate at\n      the exact PR head.\n- [x] Provides a credential",
+      "files": [
+        ".github/workflows/lifeops-prompt-benchmark.yml",
+        "plugins/plugin-personal-assistant/test/helpers/lifeops-prompt-benchmark-artifacts.ts",
+        "plugins/plugin-personal-assistant/test/helpers/lifeops-prompt-benchmark-cases.ts",
+        "plugins/plugin-personal-assistant/test/helpers/lifeops-prompt-benchmark-runner.ts",
+        "plugins/plugin-personal-assistant/test/helpers/runtime.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-prompt-benchmark-runtime.test.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-prompt-benchmark.activation.test.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-prompt-benchmark.test.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-openai): add auditable Cerebras provider evidence",
+      "prNumber": 16334,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #16298.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebas",
+      "files": [
+        ".github/workflows/develop-live.yml",
+        "packages/scripts/__tests__/real-live-suites.test.ts",
+        "packages/scripts/lib/real-live-suites.mjs",
+        "plugins/plugin-openai/__tests__/cerebras-evidence.live.test.ts",
+        "plugins/plugin-openai/__tests__/cerebras-wire-capture.test.ts",
+        "plugins/plugin-openai/__tests__/helpers/cerebras-wire-capture.ts",
+        "plugins/plugin-openai/__tests__/native-plumbing.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): make LifeOps live validation evidence fail closed",
+      "prNumber": 16333,
+      "type": "bugfix",
+      "body": "## Summary\n\nRepairs the agent-resolvable validation-harness residual in #11632 without claiming that credentialed connector or physical-device rows are complete.\n\n- resolves monorepo sources in the integration Vitest config so the OWNER/AGE",
+      "files": [
+        ".github/workflows/lifeops-live-validation-11632.yml",
+        "packages/scripts/__tests__/lifeops-live-validation-workflow.test.ts",
+        "packages/test/vitest/integration.config.ts",
+        "scripts/lifeops/collect-11632-live-validation-status.mjs",
+        "scripts/lifeops/collect-11632-live-validation-status.test.mjs",
+        "scripts/lifeops/validate-11632-evidence.mjs"
+      ]
+    },
+    {
+      "title": "fix(audit): distinguish unreadable OCR from blank pixels",
+      "prNumber": 16332,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16327. Residual split from #15912.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](https://github.com/elizaOS/eliza/blob/develop/CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the lates",
+      "files": [
+        "packages/app/scripts/OCR_TRIAGE.md",
+        "packages/app/scripts/lib/visual-qa.test.ts",
+        "packages/app/scripts/mvp-visual-verify/ocr.mjs",
+        "packages/app/scripts/ocr-real-engine.test.ts",
+        "packages/app/scripts/ocr-triage.ts",
+        "packages/app/test/audit/ocr-content-rules.test.ts",
+        "packages/app/test/audit/ocr-triage-provenance.test.ts",
+        "packages/app/test/ui-smoke/ocr-content-rules.ts",
+        "packages/evidence/src/visual-primitives.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): add fail-closed develop PR aggregate",
+      "prNumber": 16329,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #16217.\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n      with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [x] `bun install` and `bun run verify` were run aft",
+      "files": [
+        ".github/workflows/README.md",
+        ".github/workflows/develop-pr-gate.yml",
+        ".github/workflows/develop-pr.yml",
+        "packages/scripts/develop-pr-aggregate-workflow-contract.mjs",
+        "packages/scripts/develop-pr-aggregate.mjs",
+        "packages/scripts/develop-pr-aggregate.self-test.mjs",
+        "packages/scripts/develop-pr-aggregate.test.mjs",
+        "scripts/security/coverage-node-self-tests.txt"
+      ]
+    },
+    {
       "title": "fix(app): avoid protected API probes during fresh onboarding",
       "prNumber": 16328,
       "type": "bugfix",
@@ -2030,6 +2296,20 @@
       "files": [
         "plugins/plugin-inbox/src/components/inbox/InboxView.test.tsx",
         "plugins/plugin-inbox/src/components/inbox/InboxView.tsx"
+      ]
+    },
+    {
+      "title": "fix(voice): route forced-cloud TTS directly to the configured cloud worker",
+      "prNumber": 16324,
+      "type": "bugfix",
+      "body": "## Root cause\n\nWhen mobile voice explicitly forces Eliza Cloud TTS (`provider === \"eliza-cloud\"`), the renderer still POSTed to the on-device agent's `/api/tts/cloud` proxy. On a dedicated/on-device (hybrid) runtime that proxy runs on the c",
+      "files": [
+        "packages/ui/src/hooks/useVoiceChat.forced-cloud-tts.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/hooks/useVoiceChat.tts-playback.test.tsx",
+        "packages/ui/src/voice/shared-runtime-voice.test.ts",
+        "packages/ui/src/voice/shared-runtime-voice.ts",
+        "packages/ui/src/voice/voice-chat-types.ts"
       ]
     },
     {
@@ -2066,6 +2346,53 @@
       ]
     },
     {
+      "title": "test(cloud): make test:cloud self-contained after a clean install",
+      "prNumber": 16317,
+      "type": "refactor",
+      "body": "Closes #16187\n\n## Problem\n\nRoot `test:cloud` invoked `packages/scripts/test-cloud-run.mjs` with no build prerequisite, so after a deterministic clean install (`ELIZA_SKIP_ARTIFACT_SYNC=1 bun install --frozen-lockfile`) the batches started a",
+      "files": [
+        ".github/workflows/cloud-tests.yml",
+        "package.json",
+        "packages/scripts/__tests__/test-cloud-run.test.mjs",
+        "packages/scripts/test-cloud-run-preflight.self-test.mjs",
+        "packages/scripts/test-cloud-run.mjs",
+        "scripts/security/coverage-node-self-tests.txt"
+      ]
+    },
+    {
+      "title": "test(voice): keep CLI evidence runs out of the real user home",
+      "prNumber": 16316,
+      "type": "tests",
+      "body": "Closes #16180\n\n## Problem\n\n`packages/tools/voice-evidence-harness/src/cli.ts` derived both the evidence root and the Deepgram/Cartesia secret paths from `node:os.homedir()` inline, and `cli-run.test.ts` only reassigned `process.env.HOME` — ",
+      "files": [
+        "packages/tools/voice-evidence-harness/README.md",
+        "packages/tools/voice-evidence-harness/src/cli-run.test.ts",
+        "packages/tools/voice-evidence-harness/src/cli.ts",
+        "packages/tools/voice-evidence-harness/src/paths.test.ts",
+        "packages/tools/voice-evidence-harness/src/paths.ts"
+      ]
+    },
+    {
+      "title": "docs(cloud): refresh canonical hosting topology after Railway/Pages/Hetzner cutovers",
+      "prNumber": 16315,
+      "type": "docs",
+      "body": "Closes #16085\n\nDocs-only refresh of the canonical Eliza Cloud hosting-topology documentation after the Railway/Pages/Hetzner cutovers. `packages/cloud/infra/cloud/RAILWAY.md` is rewritten as the canonical service/runtime/request-path map; t",
+      "files": [
+        ".github/workflows/terraform-control-plane.yml",
+        "packages/cloud/infra/AGENTS.md",
+        "packages/cloud/infra/CLAUDE.md",
+        "packages/cloud/infra/README.md",
+        "packages/cloud/infra/cloud/AWS_RETIREMENT.md",
+        "packages/cloud/infra/cloud/RAILWAY.md",
+        "packages/cloud/infra/cloud/charts/README.md",
+        "packages/cloud/infra/cloud/docker-compose.yml",
+        "packages/cloud/infra/cloud/terraform/README.md",
+        "packages/cloud/infra/cloud/terraform/hetzner/ARCHITECTURE.md",
+        "packages/cloud/infra/cloud/terraform/hetzner/control-plane/README.md",
+        "packages/cloud/infra/cloud/terraform/hetzner/control-plane/main.tf"
+      ]
+    },
+    {
       "title": "feat(ui): multi-account manager with reauthenticate flow [draft]",
       "prNumber": 16314,
       "type": "feature",
@@ -2099,55 +2426,456 @@
         "plugins/plugin-cli-inference/index.ts",
         "plugins/plugin-cli-inference/src/claude-sdk-session.ts"
       ]
+    },
+    {
+      "title": "fix(ui): stop intermittent unhandled errors on the Client Tests ui shard",
+      "prNumber": 16413,
+      "type": "bugfix",
+      "body": "## What this fixes\n\nThe **Client Tests** lane's `@elizaos/ui#test` shard failed intermittently with\n`Vitest caught N unhandled errors during the test run` (exit 1) **even though\nevery ui test file passed** (825 files, 0 assertion failures).",
+      "files": [
+        "packages/ui/src/App.screen-background-fuzz.test.tsx",
+        "packages/ui/src/App.surface-manifest-wallpaper.test.tsx",
+        "packages/ui/src/App.surface-mutation-fuzz.test.tsx",
+        "packages/ui/src/chat/useSlashCommandController.catalog.test.ts",
+        "packages/ui/src/hooks/useProtectedAgentProbesEnabled.test.tsx",
+        "packages/ui/test/offline-app-fetch.ts",
+        "packages/ui/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @openai/codex-sdk from 0.80.0 to 0.144.4",
+      "prNumber": 16392,
+      "type": "other",
+      "body": "\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=@openai/codex-sdk&package-manager=npm_and_yarn&previous-version=0.80.0&new-version=0.144.4)](https://docs.github.com/en/",
+      "files": [
+        "plugins/plugin-cli-inference/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump abitype from 1.2.3 to 1.2.4",
+      "prNumber": 16391,
+      "type": "other",
+      "body": "Bumps [abitype](https://github.com/wevm/abitype) from 1.2.3 to 1.2.4.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/wevm/abitype/releases\">abitype's releases</a>.</em></p>\n<blockquote>\n<h2>abityp",
+      "files": [
+        "package.json",
+        "packages/feed/package.json",
+        "plugins/plugin-elizacloud/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump react-resizable-panels from 4.11.2 to 4.12.2",
+      "prNumber": 16390,
+      "type": "other",
+      "body": "Bumps [react-resizable-panels](https://github.com/bvaughn/react-resizable-panels) from 4.11.2 to 4.12.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/bvaughn/react-resizable-panels/releases\">rea",
+      "files": [
+        "packages/feed/apps/mobile/package.json",
+        "packages/feed/apps/web/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump react-dom from 19.2.3 to 19.2.7",
+      "prNumber": 16389,
+      "type": "other",
+      "body": "Bumps [react-dom](https://github.com/facebook/react/tree/HEAD/packages/react-dom) from 19.2.3 to 19.2.7.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/facebook/react/releases\">react-dom's release",
+      "files": [
+        "packages/examples/app/capacitor/frontend/package.json",
+        "packages/examples/app/electron/frontend/package.json",
+        "packages/examples/elizagotchi/package.json",
+        "packages/examples/next/package.json",
+        "packages/examples/react/package.json",
+        "packages/homepage/package.json",
+        "packages/os/homepage/package.json",
+        "packages/ui/package.json",
+        "plugins/plugin-phone/package.json",
+        "plugins/plugin-training/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group with 8 updates",
+      "prNumber": 16388,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 8 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [@biomejs/biome](https://github.com/biomejs/biome/tree/HEAD/packages/@biomejs/biome) | `2.5.3` | `2.5.4` |\n| [semver](https://github.com/npm/nod",
+      "files": [
+        "package.json",
+        "packages/app-core/platforms/electrobun/package.json",
+        "packages/app/package.json",
+        "packages/cloud/api/package.json",
+        "packages/cloud/routing/package.json",
+        "packages/cloud/services/agent-server/package.json",
+        "packages/cloud/services/gateway-discord/package.json",
+        "packages/cloud/services/gateway-webhook/package.json",
+        "packages/cloud/services/operator/package.json",
+        "packages/cloud/shared/package.json",
+        "packages/contracts/package.json",
+        "packages/examples/bluesky/package.json",
+        "packages/examples/cloud/clone-ur-crush/package.json",
+        "packages/examples/discord/package.json",
+        "packages/examples/farcaster/package.json",
+        "packages/examples/twitter-xai/package.json",
+        "packages/examples/vercel/package.json",
+        "packages/feed/package.json",
+        "packages/homepage/package.json",
+        "packages/os/homepage/package.json",
+        "plugins/plugin-agent-orchestrator/package.json",
+        "plugins/plugin-agent-skills/package.json",
+        "plugins/plugin-anthropic/package.json",
+        "plugins/plugin-app-control/package.json",
+        "plugins/plugin-background-runner/package.json",
+        "plugins/plugin-benchmarks/package.json",
+        "plugins/plugin-birdclaw/package.json",
+        "plugins/plugin-blocker/package.json",
+        "plugins/plugin-bluebubbles/package.json",
+        "plugins/plugin-bluesky/package.json",
+        "plugins/plugin-capacitor-bridge/package.json",
+        "plugins/plugin-cli-inference/package.json",
+        "plugins/plugin-cli/package.json",
+        "plugins/plugin-codex-cli/package.json",
+        "plugins/plugin-commands/package.json",
+        "plugins/plugin-contacts/package.json",
+        "plugins/plugin-discord-local/package.json",
+        "plugins/plugin-discord/package.json",
+        "plugins/plugin-e2b-sandbox/package.json",
+        "plugins/plugin-edge-tts/package.json",
+        "plugins/plugin-elevenlabs/package.json",
+        "plugins/plugin-elizacloud/package.json",
+        "plugins/plugin-embeddings/package.json",
+        "plugins/plugin-facewear/package.json",
+        "plugins/plugin-farcaster/package.json",
+        "plugins/plugin-feishu/package.json",
+        "plugins/plugin-finances/package.json",
+        "plugins/plugin-gitpathologist/package.json",
+        "plugins/plugin-goals/package.json",
+        "plugins/plugin-google-chat/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump actions/checkout from 4 to 7",
+      "prNumber": 16387,
+      "type": "other",
+      "body": "Bumps [actions/checkout](https://github.com/actions/checkout) from 4 to 7.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/actions/checkout/releases\">actions/checkout's releases</a>.</em></p>\n<bloc",
+      "files": [
+        ".github/workflows/android-device-e2e.yml",
+        ".github/workflows/android-release.yml",
+        ".github/workflows/app-aesthetic-audit.yml",
+        ".github/workflows/app-live-e2e.yml",
+        ".github/workflows/app-real-e2e.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/apps-deploy-e2e.yml",
+        ".github/workflows/arm-apps-daemon.yml",
+        ".github/workflows/arm-headscale-control-plane.yml",
+        ".github/workflows/attachment-journey-videos.yml",
+        ".github/workflows/benchmark-orchestrator-scheduled.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/browser-real-bench.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-android.yml",
+        ".github/workflows/build-debian-package.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/build-llama-ffi-android.yml",
+        ".github/workflows/build-vm-image.yml",
+        ".github/workflows/cache-key-stability.yml",
+        ".github/workflows/cerebras-nightly.yml",
+        ".github/workflows/certification-image.yml",
+        ".github/workflows/certification-vast.yml",
+        ".github/workflows/certification-verify.yml",
+        ".github/workflows/chat-latency-live.yml",
+        ".github/workflows/chat-shell-gestures.yml",
+        ".github/workflows/ci-full-matrix-proof.yml",
+        ".github/workflows/ci.yaml",
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude-security-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/cloud-aesthetic-audit.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-e2e.yml",
+        ".github/workflows/cloud-gateway-discord.yml",
+        ".github/workflows/cloud-gateway-webhook.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/coverage-gate.yml",
+        ".github/workflows/deploy-homepage.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/develop-exhaustive.yml",
+        ".github/workflows/develop-live.yml",
+        ".github/workflows/develop-pr-gate.yml",
+        ".github/workflows/develop-pr.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/docs-ci.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump docker/metadata-action from 6.1.0 to 6.2.0",
+      "prNumber": 16386,
+      "type": "other",
+      "body": "Bumps [docker/metadata-action](https://github.com/docker/metadata-action) from 6.1.0 to 6.2.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/docker/metadata-action/releases\">docker/metadata-actio",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/certification-image.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump actions/labeler from 6.1.0 to 6.2.0",
+      "prNumber": 16385,
+      "type": "other",
+      "body": "Bumps [actions/labeler](https://github.com/actions/labeler) from 6.1.0 to 6.2.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/actions/labeler/releases\">actions/labeler's releases</a>.</em></p>\n<",
+      "files": [
+        ".github/workflows/auto-label.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump ruby/setup-ruby from 1.316.0 to 1.318.0",
+      "prNumber": 16384,
+      "type": "other",
+      "body": "Bumps [ruby/setup-ruby](https://github.com/ruby/setup-ruby) from 1.316.0 to 1.318.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ruby/setup-ruby/releases\">ruby/setup-ruby's releases</a>.</em></",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump anthropics/claude-code-action from 1.0.168 to 1.0.174",
+      "prNumber": 16383,
+      "type": "other",
+      "body": "Bumps [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) from 1.0.168 to 1.0.174.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-code-action/releas",
+      "files": [
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/weekly-maintenance.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): update opencv-python requirement from ~=4.13.0.92 to ~=5.0.0.93 in /packages/benchmarks/OSWorld",
+      "prNumber": 16382,
+      "type": "other",
+      "body": "Updates the requirements on [opencv-python](https://github.com/opencv/opencv-python) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/opencv/opencv-python/releases\">ope",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml"
+      ]
+    },
+    {
+      "title": "chore(deps): update tqdm requirement from ~=4.68.3 to ~=4.68.4 in /packages/benchmarks/OSWorld",
+      "prNumber": 16381,
+      "type": "other",
+      "body": "Updates the requirements on [tqdm](https://github.com/tqdm/tqdm) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/tqdm/tqdm/releases\">tqdm's releases</a>.</em></p>\n<blo",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt"
+      ]
+    },
+    {
+      "title": "fix(ui): unify speaking status shimmer",
+      "prNumber": 16377,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #16375\n\n# What changed\n\n- Use the established neutral shimmer and spinner for the speaking turn phase.\n- Document the phase-neutral chat status convention.\n\n# Why\n\nSpeaking was the only active turn phase using a one-off",
+      "files": [
+        "packages/ui/AGENTS.md",
+        "packages/ui/CLAUDE.md",
+        "packages/ui/src/components/composites/chat/chat-typing-indicator.test.tsx",
+        "packages/ui/src/components/composites/chat/chat-typing-indicator.tsx"
+      ]
+    },
+    {
+      "title": "fix(app): unblock zero-key plugin-view e2e for model-tester and orchestrator",
+      "prNumber": 16376,
+      "type": "bugfix",
+      "body": "## What & why\n\nThe **Zero-Key app browser** lane (`.github/workflows/test.yml` → `zero-key-browser` → \"Actual app plugin view browser coverage\") is red on `develop`. Its `plugin-views-interaction.spec.ts` runs an \"exercise every control, no",
+      "files": [
+        "packages/app/test/ui-smoke/helpers.ts",
+        "plugins/app-model-tester/src/model-tester-app.test.ts",
+        "plugins/app-model-tester/src/model-tester-app.ts"
+      ]
+    },
+    {
+      "title": "feat(registry): add @wealthville/plugin-wealthville",
+      "prNumber": 16374,
+      "type": "feature",
+      "body": "Adds **@wealthville/plugin-wealthville** (v0.2.0) to the third-party registry.\n\n**What it does:** gives Eliza agents live liquidity-pool intelligence — Enter/Hold/Exit verdicts and a composite 0–100 Wealthville Score for Solana (Raydium/Orc",
+      "files": [
+        "packages/registry/entries/third-party/wealthville__plugin-wealthville.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "fix(plugin-computeruse): validate action input before the approval gate (headless-safe)",
+      "prNumber": 16372,
+      "type": "bugfix",
+      "body": "# Summary\n\nFixes a consistent CI failure on `develop`: the Plugin **Tests** lane (shard\n2/4) times out (~90s) on\n`plugins/plugin-computeruse/src/__tests__/service.integration.test.ts`.\n\n## Root cause (corrected diagnosis)\n\nThe hang is **not",
+      "files": [
+        "plugins/plugin-computeruse/src/__tests__/service-browser-routing.test.ts",
+        "plugins/plugin-computeruse/src/__tests__/service.integration.test.ts",
+        "plugins/plugin-computeruse/src/services/computer-use-service.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): restore App auth-mock exports in surface fuzz tests",
+      "prNumber": 16370,
+      "type": "bugfix",
+      "body": "## What & why\n\nPart of the fix for the red **Client Tests** lane on `develop`, split out of #16367 so the test-only portion can merge immediately (it is exempt from the surface-artifact evidence gate).\n\n`notification-store` (#16242) reads `",
+      "files": [
+        "packages/ui/src/App.screen-background-fuzz.test.tsx",
+        "packages/ui/src/App.surface-manifest-wallpaper.test.tsx",
+        "packages/ui/src/App.surface-mutation-fuzz.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(ui): remove reintroduced design-gate violations on account/settings/notification/widget surfaces",
+      "prNumber": 16367,
+      "type": "bugfix",
+      "body": "## What & why\n\nRestores two source-scanning **design-gates** that concurrent UI merges re-triggered on the red **Client Tests** lane, at the source (the gates scan `src/`), **preserving** the features that introduced them (multi-account man",
+      "files": [
+        "packages/ui/src/components/accounts/AccountManagementPanel.test.tsx",
+        "packages/ui/src/components/accounts/AccountManagementPanel.tsx",
+        "packages/ui/src/components/accounts/ProviderAccountRow.tsx",
+        "packages/ui/src/components/accounts/ProviderPicker.test.tsx",
+        "packages/ui/src/components/accounts/ProviderPicker.tsx",
+        "packages/ui/src/components/chat/widgets/orchestrator-task-widget.test.tsx",
+        "packages/ui/src/components/chat/widgets/orchestrator-task-widget.tsx",
+        "packages/ui/src/components/settings/DesktopSettingsNavigation.test.tsx",
+        "packages/ui/src/components/settings/DesktopSettingsNavigation.tsx",
+        "packages/ui/src/components/shell/NotificationsHomeCenter.test.tsx",
+        "packages/ui/src/components/shell/NotificationsHomeCenter.tsx"
+      ]
+    },
+    {
+      "title": "fix(tests): realign Server-lane test expectations with merged behavior",
+      "prNumber": 16366,
+      "type": "bugfix",
+      "body": "## What & why\n\nFour Server-lane test files on `develop` carried expectations that concurrent merges invalidated, turning the **Tests** lane red (Server shard). Each fix realigns the test with the already-merged production behavior; **no pro",
+      "files": [
+        "packages/agent/src/api/notification-lazy-route.test.ts",
+        "packages/scenario-runner/src/__tests__/deterministic-action-coverage.test.ts",
+        "packages/scenario-runner/src/corpus-assertion-guard.test.ts",
+        "packages/test/harness/integration-config-core-subpath-alias.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): remove chat sheet crossfade single-frame flash flake",
+      "prNumber": 16364,
+      "type": "bugfix",
+      "body": "## What\n\nRemoves the false **single-frame flash** that the \"Chat shell gestures\" lane's\n`Frame-glitch (transient) e2e` step flagged intermittently. The fix is in the\n**detector**, not the animation — the chat sheet renders identically befor",
+      "files": [
+        "packages/ui/src/components/shell/__e2e__/run-chat-sheet-frame-glitch-e2e.mjs",
+        "packages/ui/src/testing/frame-glitch-detect.test.ts",
+        "packages/ui/src/testing/frame-glitch-detect.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): pin desktop settings rail outside the content scroll container",
+      "prNumber": 16363,
+      "type": "bugfix",
+      "body": "## Summary\n\n- route the desktop settings navigation through `ContentLayout` / `WorkspaceLayout`'s sidebar slot, placing it beside rather than inside the scrollable `<main>`\n- give the fixed-width rail its own vertical overflow while preserv",
+      "files": [
+        "packages/ui/src/components/pages/SettingsView.test.tsx",
+        "packages/ui/src/components/pages/SettingsView.tsx",
+        "packages/ui/src/components/settings/DesktopSettingsNavigation.tsx",
+        "packages/ui/src/layouts/content-layout/content-layout.tsx"
+      ]
+    },
+    {
+      "title": "fix(ui): repair App navigate-view wiring useAuthStatus mock drift",
+      "prNumber": 16360,
+      "type": "bugfix",
+      "body": "# Relates to\n\nPre-existing `develop`-tip test failure in `packages/ui/src/App.navigate-view-wiring.test.tsx` (Tests workflow reported `13 tests | 1 failed`). No linked issue; the failure was surfaced by the CI Tests lane on `develop`.\n\nDefi",
+      "files": [
+        "packages/ui/src/App.navigate-view-wiring.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(ui): apply biome formatting to account panel test",
+      "prNumber": 16359,
+      "type": "bugfix",
+      "body": "# Summary\n\nThe `develop` **Quality (Extended)** CI lane's *Format + Type Safety Ratchet → Run biome format check* step fails on `@elizaos/ui#format:check`. One file drifted out of biome format:\n\n- `packages/ui/src/components/accounts/Accoun",
+      "files": [
+        "packages/ui/src/components/accounts/AccountManagementPanel.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(plugin-cli-inference): apply biome formatting",
+      "prNumber": 16358,
+      "type": "bugfix",
+      "body": "# Summary\n\nThe `develop` **Quality (Extended)** CI lane's *Format + Type Safety Ratchet → Run biome format check* step fails on exactly one package:\n\n```\n@elizaos/plugin-cli-inference#format:check  ->  exited (1)\n```\n\nTwo files in `plugins/",
+      "files": [
+        "plugins/plugin-cli-inference/__tests__/cli-inference.test.ts",
+        "plugins/plugin-cli-inference/index.ts",
+        "plugins/plugin-cli-inference/src/claude-sdk-session.ts"
+      ]
+    },
+    {
+      "title": "fix(lifeops): surface active delegation contracts to the planner provider",
+      "prNumber": 16357,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes a deterministic, pre-existing failure on `develop` in\n`plugins/plugin-personal-assistant/test/delegation-contracts.test.ts`\n(`> surfaces active contracts to the planner provider`). Not caused by a merge —\na time-bomb fix",
+      "files": [
+        "plugins/plugin-personal-assistant/test/delegation-contracts.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): persistent desktop settings navigation rail",
+      "prNumber": 16354,
+      "type": "feature",
+      "body": "## Motivation\n\nThe desktop UI dossier identified three linked causes behind Settings feeling like a stretched phone UI:\n\n1. Desktop mode changed mechanics, not composition. Settings remained one wide vertical column.\n2. Opening a section re",
+      "files": [
+        "packages/ui/src/components/pages/SettingsView.test.tsx",
+        "packages/ui/src/components/pages/SettingsView.tsx",
+        "packages/ui/src/components/pages/__e2e__/run-settings-e2e.mjs",
+        "packages/ui/src/components/settings/DesktopSettingsNavigation.test.tsx",
+        "packages/ui/src/components/settings/DesktopSettingsNavigation.tsx"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 975.5931535110875,
-      "prScore": 816.1791535110875,
+      "totalScore": 1350.9330400178658,
+      "prScore": 1191.081040017866,
       "issueScore": 118.6,
       "reviewScore": 39.5,
-      "commentScore": 1.3139999999999998,
+      "commentScore": 1.7519999999999998,
       "summary": null
     },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 897.7626151881286,
-      "prScore": 849.2866151881286,
-      "issueScore": 42.6,
+      "totalScore": 1231.6047253937934,
+      "prScore": 1162.3907253937934,
+      "issueScore": 62.900000000000006,
       "reviewScore": 5,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
       "username": "0xSolace",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
-      "totalScore": 299.30971895030365,
-      "prScore": 298.0937189503037,
-      "issueScore": 0,
+      "totalScore": 649.7460535981581,
+      "prScore": 646.0920535981581,
+      "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
+      "commentScore": 1.654,
       "summary": null
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 247.48691740531683,
-      "prScore": 247.04891740531684,
+      "totalScore": 455.87593269141746,
+      "prScore": 450.4999326914175,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "reviewScore": 4.5,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
       "username": "noobshow",
       "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
-      "totalScore": 47.79337417291718,
+      "totalScore": 49.79337417291718,
       "prScore": 43.79337417291718,
-      "issueScore": 4,
+      "issueScore": 6,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -2155,11 +2883,11 @@
     {
       "username": "san-npm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/40546417?u=09999b7d21bb7e74bcb691351abb9487de20685d&v=4",
-      "totalScore": 36.468773896576096,
+      "totalScore": 36.6687738965761,
       "prScore": 36.468773896576096,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -2167,6 +2895,16 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/7603595?u=e5e4f26dd1d559dcfa7b49d85a1ad84471c5d110&v=4",
       "totalScore": 34.23410650459726,
       "prScore": 34.23410650459726,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "amitesh-m",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4655313?v=4",
+      "totalScore": 28.14735169073515,
+      "prScore": 28.14735169073515,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -2183,6 +2921,26 @@
       "summary": null
     },
     {
+      "username": "odilitime",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
+      "totalScore": 18.50406509320417,
+      "prScore": 18.30406509320417,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "johnny-lineen",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220250612?v=4",
+      "totalScore": 10.75653744390572,
+      "prScore": 10.75653744390572,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "seven7763",
       "avatarUrl": "https://avatars.githubusercontent.com/u/246023385?u=02cb8d3ae64ebafec48bd772153de736f18322bb&v=4",
       "totalScore": 8.500912816362163,
@@ -2193,9 +2951,9 @@
       "summary": null
     }
   ],
-  "newPRs": 128,
-  "mergedPRs": 106,
-  "newIssues": 64,
-  "closedIssues": 51,
-  "activeContributors": 10
+  "newPRs": 184,
+  "mergedPRs": 150,
+  "newIssues": 73,
+  "closedIssues": 69,
+  "activeContributors": 14
 }
