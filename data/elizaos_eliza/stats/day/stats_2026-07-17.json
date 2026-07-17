@@ -1,0 +1,988 @@
+{
+  "interval": {
+    "intervalStart": "2026-07-17T00:00:00.000Z",
+    "intervalEnd": "2026-07-18T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-07-17 to 2026-07-18, elizaos/eliza had 37 new PRs (56 merged), 0 new issues, and 8 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7ws4ee",
+      "title": "fix(voice): wire the realtime voice client into the chat UI + staging deploy flag (closes the app-staging bundle gap)",
+      "author": "0xSolace",
+      "number": 16192,
+      "body": "# Relates to\n\nRealtime voice Phase-1 staging rollout. Follow-up to #16062 (server + client library) and #16105. Root cause + evidence: `VOICE-UI-STAGING-GAP-REPORT.md` (fleet workspace).\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` (c93ebbb73c3) with zero conflicts.\n- [x] `bun install` run after sync; targeted typecheck + unit suites pass (see Testing).\n- [x] A reviewer can confirm the change works without reading the code, from the evidence attached below.\n\n# Sync with develop\n\n- [x] Built directly on `origin/develop` @ c93ebbb73c3; all six cherry-picks applied clean.\n- [x] Targeted verify (ui typecheck, cloud/api voice tests, biome) passes post-sync.\n\n# Risks\n\n**Low-medium.**\n- UI: the realtime path is dead code unless `VITE_VOICE_REALTIME_WS=1` is baked at build time AND the server mint succeeds. Production builds keep the flag at `0`, so prod behavior is byte-identical on the voice path.\n- Workflow: `.github/workflows/cloud-cf-deploy.yml` changes (staging-only voice env plumbing + `VITE_VOICE_REALTIME_WS` gated to `0` on production/main). **Workflow-file change: flagged for orchestrator review per fleet law.**\n- Worker: `wrangler.toml` staging vars for the voice session service (staging section only) + a `binaryType` fix in the WS route that only executes when the voice WS feature flag is on.\n\n# Background\n\n## What does this PR do?\n\nCloses the staging gap where api-staging has the realtime voice server live (mint/consent/WS routes answering 200) but the app-staging bundle contains **no client path to reach it**. #16062 merged the voice-session client *library* (`packages/ui/src/voice/voice-session-*`) but not the chat-UI wiring, so nothing in the develop-built bundle imports `createVoiceSessionClient`, and the deploy workflow never set the build-time flag.\n\nSix commits cherry-picked from `feat/voice-standalone-backend` (the branch behind the working 2026-07-10 staging build), plus one rebase-hygiene commit:\n\n1. `50d27a94acf` feat(ui): wire realtime voice-session client into the existing chat mic UI — `useRealtimeVoiceSession` / `useRealtimeVoiceMint` / `useContinuousVoiceSession` hooks + ChatView/chat-view-hooks integration. Realtime is an ADDITIVE enhancement of the existing continuous-mic toggle; batch path unchanged when unavailable.\n2. `fbc40396a27` fix(ui): route forced realtime voice through mic controls.\n3. `1065f619b3e` feat(voice): force-arm override (`VITE_VOICE_REALTIME_FORCE`, default OFF everywhere; set to \"0\" explicitly in the workflow).\n4. `f0b9708743b` chore(cloud): enable realtime voice on staging deploy — workflow secrets plumbing + staging wrangler vars + `VITE_VOICE_REALTIME_WS` = 1 on staging, 0 on production/main.\n5. `549b8c8890d` fix(cloud): staging voice auth fallback (dedicated secrets preferred, ElizaCloud API key fallback so the Worker is not deployed half-configured).\n6. `c4aa4eeffa8` fix(cloud): set voice WS server `binaryType` to arraybuffer so audio uplink works.\n7. `731ab66cda0` fix(ui): biome format + drop an unused `continuous` destructure that the develop rebase made dead.\n\n## What kind of change is this?\n\nFeatures (staging-gated) + fixes.\n\n# Documentation changes needed?\n\n`packages/ui/src/voice/REALTIME_VOICE_UI_WIRING.md` ships in this PR (wiring contract + manual test script).\n\n# Testing\n\n**Build-time flag proof (the actual bug):** staging-config app build from this branch (`VITE_VOICE_REALTIME_WS=1 VITE_ENVIRONMENT=staging bun run build` in `packages/app`) produces a bundle where:\n- `createVoiceSessionClient` is present in the chat chunk (`src-*.js`, `voice-*.js`)\n- the main chunk carries `VITE_VOICE_REALTIME_WS:\"1\"` and the consent-route reference `voice/session/consent`\n\nCurrent staging bundle (built from develop without this PR) has ZERO of these; verified by downloading all 177 chunks of `app-staging.elizacloud.ai` and grepping.\n\n**Unit:** `packages/ui` — useRealtimeVoiceSession (18), useRealtimeVoiceMint (12), useContinuousVoiceSession (7), chat-view-hooks (5), ChatVoiceStatusBar (8), BackgroundView (6): **56/56 pass**.\n`packages/cloud/api` — ws-route-upgrade + ws-lifecycle + mint-consent-route: **27/27 pass** (bun test).\n\n**Types:** `packages/ui` tsgo --noEmit clean. `packages/cloud/api` typecheck clean (wrangler dry-run completes).\n\n**Lint:** biome clean on all touched files.\n\n**Server side already live on staging:** POST `/api/v1/voice/session/consent` returns 200 + consentNonce with `VOICE_REALTIME_WS_ENABLED=true` (restored as worker secret 2026-07-12).\n\n# Deploy notes\n\n- Staging Pages deploy will bake `VITE_VOICE_REALTIME_WS=1` → realtime arms only after a successful server mint; falls back to batch otherwise.\n- Production/main builds evaluate the same expression to `0` → no behavior change.\n- Rollback = revert this PR or flip the workflow env to `0`.\n\n[sol-cloud]\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-12T08:00:33Z",
+      "mergedAt": "2026-07-17T15:21:28Z",
+      "additions": 6051,
+      "deletions": 264
+    },
+    {
+      "id": "PR_kwDOMT5cIs7x156d",
+      "title": "feat(pendant): add canonical session sync [sol-cloud]",
+      "author": "0xSolace",
+      "number": 16362,
+      "body": "# Relates to\n\nRelates to #15744. Ordered stack: merge #16361 first.\n\n- [x] Replayed onto current `origin/develop` plus the framing base in #16361.\n- [x] Focused route, contract, and browser-client tests provide deterministic evidence.\n\n# Sync with develop\n\n- [x] Fresh worktree from `96b443a614d`; only two mechanical barrel/server-dispatch conflicts, resolved by preserving current develop structure.\n- [ ] Full monorepo typecheck is blocked by current missing workspace declarations (`@elizaos/contracts`, `@elizaos/cloud-routing`) and existing account-rail diagnostics. No account or SettingsView file is changed here.\n\n# Risks\n\nMedium. This introduces server-authoritative session persistence and control routes behind the existing authenticated API gate. It does not alter auth, billing, provider selection, or default-on voice behavior.\n\n# Background\n\nAdds a canonical pendant session document, capture lease, contiguous transcript segments, revisions, polling/export/delete/control endpoints, durable Memory-backed persistence, client offline queueing, and typed shared contracts. Session identities remain owner/agent isolated.\n\nThe branch was rebased as a stack above #16361 because insights and retrieval need one canonical segment identity. No duplicate voice stack is added.\n\n# Testing\n\n- `bunx vitest run packages/agent/src/api/pendant-session-routes.test.ts packages/shared/src/contracts/pendant-session-sync.test.ts packages/ui/src/pendant/session-sync-client.test.ts`\n  - PASS: 3 files, 23 tests.\n- Biome on all eight touched implementation/test/barrel files\n  - PASS.\n- Codex review against #16361 found two P2 issues. Both were fixed: paused sessions accept late revisions for already-durable segments, and offline session switches cannot return another session's cached snapshot.\n- `codex review --commit b094564cadad`\n  - PASS: no actionable correctness issues.\n- Full typecheck\n  - BLOCKED on unrelated develop/workspace declarations and current account-rail diagnostics; this branch does not touch those paths.\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - no visual change.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - no visual change.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - physical multi-client LP3 walkthrough is blocked on the device and is not claimed.\n<!-- evidence-row:backend-logs -->\n- [x] N/A - deterministic authenticated route tests cover persistence/control responses; deployed logs await staging/device validation.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - deterministic browser-client tests cover queue and convergence behavior; live BLE logs await device validation.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no prompt, action, provider, or model behavior changes.\n<!-- evidence-row:domain-artifacts -->\n- [x] N/A - exact physical session export is blocked on the LP3; modeled snapshots and route contracts are covered by 23 tests.\n\n# Known gaps / failures\n\n- Requires #16361 first.\n- Physical-device proof remains blocked on Shadow plugging in the LP3.\n- Verify deployed APK SHA and install the exact CI artifact before requesting device evidence.\n- No auto-merge.\n\n[sol-cloud]\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-15T03:12:06Z",
+      "mergedAt": "2026-07-17T19:42:53Z",
+      "additions": 3924,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDOMT5cIs7yJMpR",
+      "title": "feat(ui): account command-center table",
+      "author": "0xSolace",
+      "number": 16399,
+      "body": "## What & why\n\nNext slice of the account-observability roadmap (after #16355). Users running a large credential pool get a proper **command-center table** instead of a stack of cards, so health, usage, resets, priority, and lease activity are legible at a glance and sortable.\n\nRenders as a **desktop enhancement** (`min-width:1024px`, the same query `SettingsView` uses for the settings rail from #16354) once a provider pool has **>= 4 accounts**. Narrow/mobile widths and small pools keep the existing `AccountCard` stack (which carries the richer per-card affordances). The card view is untouched.\n\n### Columns\naccount (label + email) · **health** badge (ok / needs-reauth / rate-limited / invalid, with `healthDetail` tooltip + rate-limit countdown) · session/weekly **usage** bars · **resets** (relative) · **priority** · **enabled** toggle · **last-used** (relative) · **leases** (feature-gated, see below) · **actions**.\n\n### Row states & actions\n- **Sortable** by health / usage / last-used / priority. Default surfaces worst health first (the reason to open the table). `aria-sort` lives on the header `<th>` cell.\n- **needs-reauth / invalid** → a repair CTA that reuses the **existing #16314 credential-repair flow** (`replaceAccountId` path via `onReauthenticate`).\n- **rate-limited** → a live \"resets in …\" countdown in the health cell.\n- **disabled** rows are dimmed.\n- Full card affordance parity preserved in the actions cell: **test**, **refresh usage**, **reorder** (priority up/down — targets the priority neighbour regardless of the current table sort), reauthenticate, and remove (confirm dialog). Every row action is an optional prop and hides when its handler is absent.\n- Loading is upstream (the table only mounts with data). Empty/degenerate pool → an in-table empty row; the surface's overall empty state remains the existing add-account CTA in `AccountManagementPanel`.\n\n### Feature-detection (does NOT depend on #16355 merging)\n#16355 adds an `observability` field (`activeLeaseCount`, `lastLeaseAt`, `lastSelectedAt`, `servedLastRequest`) to each account. This PR feature-detects it: the **Leases column is hidden entirely** when no row carries observability, so it degrades gracefully on older hosts and pre-#16355 payloads — no column of lying zeros, no crash. The client types are augmented with the **optional** shape only.\n\n### Design gate (#16367)\npackages/ui tokens + lucide-react only, **no new deps**. The new files introduce **zero** `no-focus-ring-gate` / `no-widget-chrome-gate` offenders (verified against the source-scanning suites; the only account-surface offenders on `develop` are the pre-existing ones #16367 already targets, none in the new files).\n\n## Verification\n\n- `vitest run src/components/accounts/account-table-model.test.ts` → **16 passed** (health mapping, usage extraction, sort comparators incl. unknown-usage sink in both directions, `hasLeaseObservability` feature-detection, `rowResetAt`).\n- `vitest run src/components/accounts/AccountCommandTable.test.tsx` → **14 passed** (renders rows, default worst-health sort, header-click sort toggle, health→badge tone mapping, lease-column hide/show, reauth CTA gating + wiring, disabled-row dimming + enabled toggle, test/refresh/reorder wiring + priority-neighbour targeting + disabled edges, `aria-sort` on `<th>`, active-row + empty state).\n- Full `src/components/accounts/` suite → **118 passed / 14 files**, no regressions (stories-smoke 33→36).\n- `tsgo --noEmit -p tsconfig.json` → no errors in changed files (the only two are the pre-existing unbuilt `@elizaos/cloud-routing` dep in `packages/core`).\n\n## Evidence\n\nDesktop screenshots captured at 1440px (matching the rail breakpoint) from the built storybook bundle via headless chromium: the table with #16355 observability (leases column + \"served last\" marker), without observability (leases column absent — feature-detection proven), the empty pool, and a scrolled desktop-slice proving the table body scrolls while the surrounding layout holds.\n\nMedia upload to the shared `pr-evidence` release is blocked repo-wide by GitHub's 1000/1000-asset hard cap (same block #16367 documents). Rows are marked honestly below; the PNGs are staged locally and will be attached once a maintainer prunes that release.\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before screenshots — N/A: new component, no prior table state; the pre-existing card view is unchanged and still covered by its own stories/tests.\n<!-- evidence-row:after-screenshots -->\n- [ ] After screenshots — desktop 1440px renders of with-observability / without-observability / empty-pool captured from the storybook bundle; DOM-verified (5 rows each with Test/Refresh/reorder, `aria-sort=ascending` on the Health `<th>`, Leases column present only with observability). Media upload blocked by the full `pr-evidence` release.\n<!-- evidence-row:walkthrough-video -->\n- [ ] Walkthrough video — N/A: static table surface; sort/action behavior is proven by the vitest suite. Desktop-scroll-slice screenshot staged to prove content scrolls.\n<!-- evidence-row:backend-logs -->\n- [ ] Backend logs — N/A: renderer-only change; consumes existing `/api/accounts/*` payloads, no backend path touched.\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend logs — N/A: no new network behavior; the table is a projection of already-fetched `useAccounts` data.\n<!-- evidence-row:llm-trajectory -->\n- [ ] Real-LLM trajectory — N/A: no agent/action/provider/prompt/model change.\n<!-- evidence-row:domain-artifacts -->\n- [ ] Domain artifacts — N/A: UI-only change, no domain artifacts produced.\n\n---\n\nAuto-merge intentionally NOT armed (auth-adjacent surface).\n\n[sol-orch]\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-15T17:31:40Z",
+      "mergedAt": "2026-07-17T09:39:40Z",
+      "additions": 2226,
+      "deletions": 67
+    },
+    {
+      "id": "PR_kwDOMT5cIs7yTpmT",
+      "title": "feat(orchestrator): add gated lane planner (W1 of #16443)",
+      "author": "0xSolace",
+      "number": 16454,
+      "body": "# Relates to\n\nW1 of #16443.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [ ] `bun install` and `bun run verify` were run after sync. The exact unrelated local dependency/typecheck blockers are recorded below.\n- [x] A reviewer can confirm the change from the focused automated evidence below.\n\n# Sync with develop\n\n- [x] Rebased onto latest `origin/develop`; zero conflicts.\n- [ ] `bun run verify` passes post-sync. Local workspace dependency blockers are documented under **Known gaps / failures**.\n\n# Risks\n\nLow to medium. The integration is default OFF behind `ELIZA_ORCHESTRATOR_LANE_PLANNER`. When disabled, `TASKS create` immediately uses the unchanged legacy path. When enabled, only create requests with explicit, mutually exclusive scoped subtasks become concurrent lane task runs. Planning and collision-discovery failures degrade to the legacy path before execution starts.\n\n# Background\n\n## What does this PR do?\n\nAdds W1's `LanePlannerService` to `plugin-agent-orchestrator`:\n\n- pure deterministic decomposition and overlap rejection\n- structured `LaneSpec` values with scope, forbidden paths, open-PR/sibling collision annotations, routing-compatible difficulty tag, acceptance criteria seed, and initial prompt\n- sibling scope unioning into every lane's forbidden paths\n- optional defensive `TEXT_SMALL` refinement behind a separate setting\n- one minted wave id stamped into ACP session and durable task metadata\n- one existing `runCreateLegacy`/Smithers path per lane, launched concurrently\n- an injected collision-provider adapter that reuses workspace-service plumbing without adding a GitHub client, task store, or runner\n- exact legacy fallback for planner failures and unscoped single-task plans\n\n## What kind of change is this?\n\nFeature, non-breaking and default OFF.\n\n# Documentation changes needed?\n\nNo user-facing documentation change is required for this independently landable W1. The setting is exported in code and defaults OFF while the broader #16443 orchestration stack is assembled.\n\n# Testing\n\n## Where should a reviewer start?\n\n- `plugins/plugin-agent-orchestrator/src/services/lane-planner.ts`\n- `plugins/plugin-agent-orchestrator/src/actions/tasks.ts`\n- `plugins/plugin-agent-orchestrator/src/__tests__/lane-planner.test.ts`\n\n## Detailed testing steps\n\n```bash\ncd /tmp\nbun test /path/to/eliza/plugins/plugin-agent-orchestrator/src/__tests__/lane-planner.test.ts\n```\n\nResult after rebase: **14 pass, 0 fail, 57 expectations**.\n\nCovered behaviors include decomposition, overlap/cap rejection, PR collision annotation, difficulty-tag contract, gate OFF/ON, concurrent lane startup, one durable create path per lane, metadata wave stamping, unscoped legacy behavior, planning fallback, content-agent de-duplication, and no legacy replay after execution begins.\n\n```bash\nbunx biome check \\\n  plugins/plugin-agent-orchestrator/src/services/lane-planner.ts \\\n  plugins/plugin-agent-orchestrator/src/actions/tasks.ts \\\n  plugins/plugin-agent-orchestrator/src/index.ts \\\n  plugins/plugin-agent-orchestrator/src/__tests__/lane-planner.test.ts\n```\n\nResult: **Checked 4 files. No fixes applied.**\n\nCodex reviewed the uncommitted patch repeatedly. All reported findings were fixed, including content-agent duplication, unscoped prompt safety, lane-cap truncation, execution replay, concurrent execution, and settled-result type narrowing.\n\n# Evidence Gate\n\n- [x] Before full-page screenshots: N/A - server-only orchestrator service/action change with no UI surface.\n- [x] After full-page screenshots: N/A - server-only orchestrator service/action change with no UI surface.\n- [x] Walkthrough video: N/A - no frontend or interactive UI flow changed.\n- [x] Backend logs: N/A - no configured live orchestrator service exists in this isolated worktree; focused action integration tests exercise the complete changed path.\n- [x] Frontend logs: N/A - no frontend code, request, or browser state changed.\n- [x] Real-LLM trajectory: N/A - deterministic lane planning is the production default and optional model refinement is separately gated OFF; no live runtime credentials are configured in this isolated worktree.\n- [x] Domain artifacts: N/A - no DB schema, memory, scheduled task, wallet, generated binary, audio, or other persistent domain artifact changed.\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nN/A - optional refinement is defensive and separately disabled by default. Deterministic and malformed/failure behavior is covered by focused tests.\n\n## Backend + frontend logs\n\nN/A - server-only library/action change; no live server or frontend is configured in this worktree.\n\n## Screenshots (before / after) + video walkthrough\n\nN/A - no rendered UI changed.\n\n## Audio / voice walkthrough\n\nN/A - no voice, transcript, TTS, or STT behavior changed.\n\n## Known gaps / failures\n\n- `bun install --frozen-lockfile --offline` could not complete because 29 packages were absent from the local Bun cache. No lockfile was changed.\n- Package typecheck is blocked by pre-existing/current-worktree dependency issues (`reset-soonest` contract mismatch, missing `fast-redact` declarations, missing `drizzle-orm`, `coding-agent-adapters`, and local `git-workspace-service` declaration resolution). The one changed-code TypeScript issue found by Codex was fixed before commit.\n- Root `bun test` can exit with Bun's known `WriteFailed` while emitting forced multi-file coverage. Running the authoritative test file from `/tmp` passes 14/14.\n\nNo self-merge requested.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-16T02:28:21Z",
+      "mergedAt": "2026-07-17T09:51:40Z",
+      "additions": 1952,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDOMT5cIs7yTfPE",
+      "title": "feat(orchestrator): supervise wave lane lifecycle (W3 of #16443)",
+      "author": "0xSolace",
+      "number": 16452,
+      "body": "## Summary\n\nW3 of #16443. Adds a default-off `WaveSupervisor` to `plugin-agent-orchestrator` for wave-scoped lane lifecycle management.\n\n- reads the canonical `metadata.waveId` contract, with defensive aliases for manually stamped tasks\n- refills terminal lanes while the wave goal remains unmet through an injected `WaveRefillPlanner` interface\n- ships a no-op planner fallback so W3 can land before W1; W1 can register `ORCHESTRATOR_LANE_PLANNER` with the same interface without changing W3\n- detects failed-lane uncommitted work via `git status`, preserves lifecycle-registered workspaces, and includes the preserved path/files in replacement metadata and brief\n- re-checks active lane scopes against sibling scopes and matching-repository open PR changed files, warning once per collision pair in the originating room\n- layers a per-wave concurrency reservation/cap over the existing durable admission queue, including head-of-line avoidance across waves\n- persists compact wave status in existing task metadata and surfaces it through `ACTIVE_SUB_AGENTS`\n- gates all behavior behind `ELIZA_ORCHESTRATOR_WAVE_SUPERVISOR` (default OFF)\n\n## Redundancy check and design choice\n\nI read the existing watchdog, reflexion/respawn path, task service/store/types, admission queue, Smithers integration, active-sub-agent provider, workspace lifecycle/registry, and swarm coordinator before implementation.\n\nThis is a **new service rather than an extension of `TaskWatchdogService`**. The watchdog is session-liveness detection and reminder delivery; wave supervision owns a different aggregate lifecycle plus admission control and planner orchestration. Combining them would couple default-on watchdog behavior to a default-off feature and expand the watchdog's responsibilities substantially. W3 does reuse its proven structure: pure detectors, one tick owner, in-memory one-time warning keys, target resolution through the task service, no new store, and timer-free policy tests.\n\nExisting mechanisms reused:\n\n- task durability and metadata: `OrchestratorTaskService` / existing store\n- dispatch backpressure: existing admission queue and its durable admission record\n- salvage ownership: workspace lifecycle plus shared registry, without adopting caller-owned paths\n- status visibility: existing `ACTIVE_SUB_AGENTS` provider\n- retry context remains owned by existing reflexion/respawn logic\n\n## Configuration\n\n- `ELIZA_ORCHESTRATOR_WAVE_SUPERVISOR=true` enables the service\n- `ELIZA_ORCHESTRATOR_WAVE_CONCURRENCY=<n>` sets the default per-wave cap (default 4)\n- `ELIZA_ORCHESTRATOR_WAVE_INTERVAL_MS=<ms>` sets tick cadence (minimum 5000, default 60000)\n- task metadata `waveConcurrencyCap` overrides the default for that wave\n\n## Evidence\n\n| Check | Command | Result |\n|---|---|---|\n| authoritative per-file unit test | `bun test plugins/plugin-agent-orchestrator/src/__tests__/wave-supervisor.test.ts` | PASS, 6 tests / 18 assertions |\n| targeted Vitest suite | `bunx vitest run --config vitest.config.ts src/__tests__/wave-supervisor.test.ts src/__tests__/admission-queue.test.ts src/__tests__/admission-integration.test.ts` | PASS, 3 files / 26 tests |\n| formatting/lint | `bunx @biomejs/biome check <six changed files>` | PASS |\n| patch hygiene | `git diff --check` | PASS |\n| package typecheck | `bun run typecheck` | BLOCKED by existing workspace/dependency failures outside W3 (`reset-soonest` generated contract mismatch plus missing `ai`, `markdown-it`, `file-type`, and `fast-redact` declarations); no W3-file diagnostic emitted |\n| review | `codex review --uncommitted` (two passes) | Findings fixed: queue reservation releases, degraded-recording release, and repository-qualified PR collision matching |\n\n## Scope\n\nNo new store or UI. No W1/W2 planner/create-path/completion-evidence changes. No lockfile, Vite config, or binary changes.\n\n[sol-cloud]\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-16T02:17:18Z",
+      "mergedAt": "2026-07-17T10:03:37Z",
+      "additions": 1874,
+      "deletions": 12
+    }
+  ],
+  "codeChanges": {
+    "additions": 44904,
+    "deletions": 2569,
+    "files": 347,
+    "commitCount": 121
+  },
+  "completedItems": [
+    {
+      "title": "fix(voice): wire the realtime voice client into the chat UI + staging deploy flag (closes the app-staging bundle gap)",
+      "prNumber": 16192,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRealtime voice Phase-1 staging rollout. Follow-up to #16062 (server + client library) and #16105. Root cause + evidence: `VOICE-UI-STAGING-GAP-REPORT.md` (fleet workspace).\n\nDefinition of Done: full standard in [`CONTRIBUTING.",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud/api/v1/voice/session/ws/route.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/ui/src/components/composites/chat/ChatVoiceStatusBar.test.tsx",
+        "packages/ui/src/components/composites/chat/ChatVoiceStatusBar.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx",
+        "packages/ui/src/components/pages/chat-view-hooks.test.tsx",
+        "packages/ui/src/components/pages/chat-view-hooks.tsx",
+        "packages/ui/src/hooks/useContinuousVoiceSession.test.tsx",
+        "packages/ui/src/hooks/useContinuousVoiceSession.ts",
+        "packages/ui/src/hooks/useRealtimeVoiceMint.test.tsx",
+        "packages/ui/src/hooks/useRealtimeVoiceMint.ts",
+        "packages/ui/src/hooks/useRealtimeVoiceSession.test.tsx",
+        "packages/ui/src/hooks/useRealtimeVoiceSession.ts",
+        "packages/ui/src/voice/REALTIME_VOICE_UI_WIRING.md",
+        "packages/cloud/api/v1/voice/session/__tests__/ws-route-upgrade.test.ts",
+        "packages/ui/src/components/pages/ChatView.render-window.test.tsx",
+        "packages/scripts/__tests__/cloud-cf-voice-deploy-workflow.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-client.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-mic-capture.test.ts",
+        "packages/ui/src/voice/__tests__/voice-session-playback.test.ts",
+        "packages/ui/src/voice/voice-session-client.ts",
+        "packages/ui/src/voice/voice-session-mic-capture.ts",
+        "packages/ui/src/voice/voice-session-playback.ts",
+        "packages/cloud/api/__tests__/shared-agent-messages-stream.test.ts",
+        "packages/cloud/api/v1/eliza/agents/[agentId]/api/conversations/[conversationId]/messages/stream/route.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/mint-consent-route.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/ws-lifecycle.test.ts",
+        "packages/cloud/api/v1/voice/session/lib/session.ts",
+        "packages/cloud/api/v1/voice/session/route.ts",
+        "packages/cloud/shared/src/lib/voice-session/__tests__/eliza-sse-bridge.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/eliza-sse-bridge.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts",
+        "packages/tools/voice-evidence-harness/src/real/real-target.ts",
+        "packages/tools/voice-evidence-harness/src/voice-evidence-harness.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): preserve the last-good model catalog on a transient fetch failure",
+      "prNumber": 16408,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFound while auditing cloud hot-path caches for the negative-caching / stale-preservation class (the pricing-catalog analog of #16162). No existing issue.\n\n- [x] Targets `develop`, rebased on latest `origin/develop`, zero confl",
+      "files": [
+        "packages/cloud/shared/src/lib/services/model-catalog.test.ts",
+        "packages/cloud/shared/src/lib/services/model-catalog.ts",
+        "packages/cloud/shared/src/lib/cache/keys.ts",
+        "packages/cloud/shared/src/lib/services/model-catalog-cache.test.ts",
+        "packages/cloud/shared/src/lib/services/model-catalog-cache.ts"
+      ]
+    },
+    {
+      "title": "perf(plugin-sql): HNSW cosine index on the active embedding column + KNN-first vector search",
+      "prNumber": 16405,
+      "type": "other",
+      "body": "## What\n\n`searchMemoriesByEmbedding` was a full sequential scan computing 1536-dim cosine across the whole embeddings table on every turn. On PGlite that scan runs **WASM on the main thread**, freezing the event loop for its duration — it i",
+      "files": [
+        "plugins/plugin-sql/__tests__/base-adapter.harness.test.ts",
+        "plugins/plugin-sql/src/__tests__/integration/base-comprehensive.real.test.ts",
+        "plugins/plugin-sql/src/__tests__/integration/memory.real.test.ts",
+        "plugins/plugin-sql/src/base.ts",
+        "plugins/plugin-sql/vitest.harness.config.ts",
+        "plugins/plugin-sql/src/pg/__tests__/manager.test.ts",
+        "plugins/plugin-sql/src/pg/manager.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): account command-center table",
+      "prNumber": 16399,
+      "type": "feature",
+      "body": "## What & why\n\nNext slice of the account-observability roadmap (after #16355). Users running a large credential pool get a proper **command-center table** instead of a stack of cards, so health, usage, resets, priority, and lease activity a",
+      "files": [
+        "packages/ui/src/api/client-accounts.ts",
+        "packages/ui/src/components/accounts/AccountCommandTable.stories.tsx",
+        "packages/ui/src/components/accounts/AccountCommandTable.test.tsx",
+        "packages/ui/src/components/accounts/AccountCommandTable.tsx",
+        "packages/ui/src/components/accounts/ProviderAccountRow.tsx",
+        "packages/ui/src/components/accounts/account-table-model.test.ts",
+        "packages/ui/src/components/accounts/account-table-model.ts",
+        "packages/ui/src/components/accounts/ProviderAccountRow.test.tsx",
+        "packages/ui/src/components/accounts/reset-time.test.ts",
+        "packages/ui/src/components/accounts/reset-time.ts"
+      ]
+    },
+    {
+      "title": "feat(account-pool): drain weekly usage windows before reset",
+      "prNumber": 16398,
+      "type": "feature",
+      "body": "## Summary\n\nAdds a burn-efficiency account-pool strategy that spends paid Anthropic capacity before each account's weekly allowance rolls over unused.\n\nThe strategy is now `drain-soonest-reset`, and is the default for `anthropic-subscriptio",
+      "files": [
+        "packages/agent/src/api/accounts-routes.test.ts",
+        "packages/agent/src/api/accounts-routes.ts",
+        "packages/agent/src/api/subscription-routes.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/host-bridge.ts",
+        "packages/app-core/src/services/account-pool.test.ts",
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/account-usage.test.ts",
+        "packages/app-core/src/services/account-usage.ts",
+        "packages/app-core/src/services/coding-account-bridge.ts",
+        "packages/app-core/src/services/multi-account-refresh-failover.test.ts",
+        "packages/contracts/src/contracts-drift.test.ts",
+        "packages/contracts/src/service-routing.ts",
+        "packages/core/src/account-pool-bridge.ts",
+        "packages/core/src/contracts/contracts-alignment.test.ts",
+        "packages/core/src/contracts/service-routing.ts",
+        "packages/shared/src/contracts/service-routing.ts",
+        "packages/ui/src/api/client-accounts.ts",
+        "packages/ui/src/components/accounts/AccountCard.test.tsx",
+        "packages/ui/src/components/accounts/AccountCard.tsx",
+        "packages/ui/src/components/accounts/ProviderAccountRow.tsx",
+        "packages/ui/src/components/accounts/RotationStrategyPicker.test.tsx",
+        "packages/ui/src/components/accounts/RotationStrategyPicker.tsx",
+        "packages/ui/src/components/accounts/account-eligibility.test.ts",
+        "packages/ui/src/components/accounts/account-eligibility.ts",
+        "packages/ui/src/i18n/locales/en.json",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/coding-account-selection.ts",
+        "plugins/plugin-commands/__tests__/accounts-backend-command.test.ts",
+        "plugins/plugin-commands/src/actions/accounts.ts",
+        "packages/shared/src/contracts/service-routing.test.ts",
+        "packages/ui/src/components/accounts/ProviderAccountRow.test.tsx",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-service.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/coding-account-selection.test.ts"
+      ]
+    },
+    {
+      "title": "feat(pendant): add canonical session sync [sol-cloud]",
+      "prNumber": 16362,
+      "type": "feature",
+      "body": "# Relates to\n\nRelates to #15744. Ordered stack: merge #16361 first.\n\n- [x] Replayed onto current `origin/develop` plus the framing base in #16361.\n- [x] Focused route, contract, and browser-client tests provide deterministic evidence.\n\n# Sy",
+      "files": [
+        "packages/agent/src/api/index.ts",
+        "packages/agent/src/api/pendant-session-routes.test.ts",
+        "packages/agent/src/api/pendant-session-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/shared/src/contracts/index.ts",
+        "packages/shared/src/contracts/pendant-session-sync.test.ts",
+        "packages/shared/src/contracts/pendant-session-sync.ts",
+        "packages/ui/src/pendant/index.ts",
+        "packages/ui/src/pendant/omi-protocol.test.ts",
+        "packages/ui/src/pendant/omi-protocol.ts",
+        "packages/ui/src/pendant/pendant-connection.test.ts",
+        "packages/ui/src/pendant/pendant-connection.ts",
+        "packages/ui/src/pendant/session-sync-client.test.ts",
+        "packages/ui/src/pendant/session-sync-client.ts",
+        "packages/ui/src/pendant/session-sync-guide.md",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/runtime/settings-action-composition.test.ts",
+        "packages/agent/src/services/pendant-session/index.ts",
+        "packages/agent/src/services/pendant-session/repository.test.ts",
+        "packages/agent/src/services/pendant-session/repository.ts",
+        "packages/agent/src/services/pendant-session/schema.ts",
+        "packages/shared/package.json"
+      ]
+    },
+    {
+      "title": "fix(pendant): reassemble dual BLE framing contracts [sol-cloud]",
+      "prNumber": 16361,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRelates to #15744.\n\n- [x] Targets `develop` at `96b443a614d` and applies cleanly with zero conflicts.\n- [x] `bun install --frozen-lockfile` completed.\n- [x] Focused deterministic tests provide reviewable behavior evidence.\n\n# ",
+      "files": [
+        "packages/ui/src/pendant/index.ts",
+        "packages/ui/src/pendant/omi-protocol.test.ts",
+        "packages/ui/src/pendant/omi-protocol.ts",
+        "packages/ui/src/pendant/pendant-connection.test.ts",
+        "packages/ui/src/pendant/pendant-connection.ts"
+      ]
+    },
+    {
+      "title": "fix(anthropic): budget the strict tool surface against the grammar caps",
+      "prNumber": 16516,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #16499\n\n- [x] Targets `develop`, rebased on latest `origin/develop`, zero conflicts.\n- [x] A reviewer can confirm the change from the evidence below without reading the code.\n\n# Risks\n\nLow. Under-budget surfaces pass th",
+      "files": [
+        "plugins/plugin-anthropic/__tests__/strict-tool-budget.shape.test.ts",
+        "plugins/plugin-anthropic/models/text.ts"
+      ]
+    },
+    {
+      "title": "feat(discord): conversational, eliza-code-first agent defaults",
+      "prNumber": 16515,
+      "type": "feature",
+      "body": "# Default agents to a conversational, eliza-code-first posture\n\n## What & why\n\nThe connector and orchestrator defaults are tuned for a locked-down, quiet-safe\ndemo agent. For a general-purpose Eliza agent that should feel present and\nuseful",
+      "files": [
+        "packages/docs/connectors/discord.md",
+        "packages/docs/user/connect-discord.mdx",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/task-agent-frameworks.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/task-agent-frameworks.ts",
+        "plugins/plugin-discord/AGENTS.md",
+        "plugins/plugin-discord/CLAUDE.md",
+        "plugins/plugin-discord/__tests__/discord-defaults-lane.test.ts",
+        "plugins/plugin-discord/__tests__/environment-defaults.test.ts",
+        "plugins/plugin-discord/banner.ts",
+        "plugins/plugin-discord/environment.ts",
+        "plugins/plugin-discord/messages.ts",
+        "plugins/plugin-discord/slash-command-registration.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump mcp from 1.27.1 to 1.28.1 in /packages/training in the uv group across 1 directory",
+      "prNumber": 16513,
+      "type": "other",
+      "body": "Bumps the uv group with 1 update in the /packages/training directory: [mcp](https://github.com/modelcontextprotocol/python-sdk).\n\nUpdates `mcp` from 1.27.1 to 1.28.1\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"ht",
+      "files": [
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "fix(ios): gate production app association",
+      "prNumber": 16512,
+      "type": "bugfix",
+      "body": "Part of #16420\n\n## What changed\n\n- keeps the develop-published GitHub Pages AASA fallback deliberately inert\n- stores the reviewed production association document outside the Pages public tree\n- serves only the exact `https://eliza.app/.wel",
+      "files": [
+        ".github/workflows/deploy-aasa.yml",
+        "packages/app-core/platforms/ios/App/App/App.entitlements",
+        "packages/homepage/AGENTS.md",
+        "packages/homepage/CLAUDE.md",
+        "packages/homepage/edge/apple-app-site-association.json",
+        "packages/homepage/edge/apple-app-site-association.test.ts",
+        "packages/homepage/edge/apple-app-site-association.ts",
+        "packages/homepage/edge/text-modules.d.ts",
+        "packages/homepage/edge/tsconfig.json",
+        "packages/homepage/package.json",
+        "packages/homepage/public/.well-known/README.md",
+        "packages/homepage/scripts/verify-aasa-response.mjs",
+        "packages/homepage/wrangler-aasa.toml"
+      ]
+    },
+    {
+      "title": "feat(coding-tools): manage background shell sessions",
+      "prNumber": 16495,
+      "type": "feature",
+      "body": "## Summary\n- add per-conversation background shell lifecycle via `SHELL` subactions: `start_background`, `poll_background`, `write_background`, `kill_background`, and `list_background`\n- retain bounded incremental stdout/stderr rings with o",
+      "files": [
+        "plugins/plugin-coding-tools/AGENTS.md",
+        "plugins/plugin-coding-tools/CLAUDE.md",
+        "plugins/plugin-coding-tools/README.md",
+        "plugins/plugin-coding-tools/src/actions/bash.test.ts",
+        "plugins/plugin-coding-tools/src/actions/bash.ts",
+        "plugins/plugin-coding-tools/src/index.ts",
+        "plugins/plugin-coding-tools/src/lib/run-shell.ts",
+        "plugins/plugin-coding-tools/src/providers/available-tools.ts",
+        "plugins/plugin-coding-tools/src/services/background-shell-service.ts",
+        "plugins/plugin-coding-tools/src/services/index.ts",
+        "plugins/plugin-coding-tools/src/types.ts"
+      ]
+    },
+    {
+      "title": "feat(coding-tools): add hardened web research actions",
+      "prNumber": 16493,
+      "type": "feature",
+      "body": "## Summary\n- expose `WEB_FETCH` and `WEB_SEARCH` to the headless `eliza-code` coding-agent runtime\n- reuse core DNS-pinned SSRF guard with HTTPS-only redirects, bounded redirects/time/body, binary rejection, and HTML-to-readable-text extrac",
+      "files": [
+        "plugins/plugin-coding-tools/__tests__/plugin-integration.test.ts",
+        "plugins/plugin-coding-tools/src/actions/index.ts",
+        "plugins/plugin-coding-tools/src/actions/web-fetch.test.ts",
+        "plugins/plugin-coding-tools/src/actions/web-fetch.ts",
+        "plugins/plugin-coding-tools/src/actions/web-search.test.ts",
+        "plugins/plugin-coding-tools/src/actions/web-search.ts",
+        "plugins/plugin-coding-tools/src/index.ts",
+        "plugins/plugin-coding-tools/src/lib/web-http.ts",
+        "plugins/plugin-coding-tools/src/providers/available-tools.ts",
+        "packages/docs/action-catalog.md",
+        "plugins/plugin-coding-tools/src/providers/available-tools.test.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): prefer Cartesia for default TTS",
+      "prNumber": 16491,
+      "type": "feature",
+      "body": "## Summary\n- make Cartesia Sonic 3.5 the first-class default cloud TTS provider whenever `CARTESIA_API_KEY` is explicitly configured\n- stream MP3 bytes from Cartesia's REST `/tts/bytes` endpoint and keep the existing Cartesia WebSocket PCM/",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud/api/v1/voice/tts/__tests__/cartesia-synthesis.test.ts",
+        "packages/cloud/api/v1/voice/tts/__tests__/provider-selection.test.ts",
+        "packages/cloud/api/v1/voice/tts/__tests__/route-provider-selection.test.ts",
+        "packages/cloud/api/v1/voice/tts/cartesia-synthesis.ts",
+        "packages/cloud/api/v1/voice/tts/provider-selection.ts",
+        "packages/cloud/api/v1/voice/tts/route.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): ride the cloud default Cerebras route + qualify voice turns for the byte pass-through",
+      "prNumber": 16490,
+      "type": "bugfix",
+      "body": "## What\n\nShadow directive (2026-07-15): staging should test voice + chat against **Cerebras and the cloud default route**, because sub-1.2s voice latency needs cerebras-class token speed, not the anthropic-pool/dev path.\n\nTwo in-repo gaps k",
+      "files": [
+        "packages/cloud/shared/src/lib/voice-session/__tests__/eliza-sse-bridge.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/config-consent-opus.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/config.ts",
+        "packages/cloud/shared/src/lib/voice-session/eliza-sse-bridge.ts"
+      ]
+    },
+    {
+      "title": "feat(account-pool): auto-prime missing Anthropic usage windows",
+      "prNumber": 16488,
+      "type": "feature",
+      "body": "## Summary\n- default-on auto-priming for enabled Anthropic subscription accounts whose usage window is missing or whose reset boundary has crossed\n- one minimal Haiku message (`max_tokens: 1`) through the account's existing OAuth credential",
+      "files": [
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/multi-account-refresh-failover.test.ts",
+        "packages/contracts/src/service-routing.lastprimed.test.ts",
+        "packages/contracts/src/service-routing.ts",
+        "packages/shared/src/contracts/service-routing.lastprimed.test.ts",
+        "packages/shared/src/contracts/service-routing.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud-deploy): publish WHISPER_STT_URL/MODEL to the Worker so cloud STT stops 503ing (ASR 502)",
+      "prNumber": 16487,
+      "type": "bugfix",
+      "body": "## The bug\n\n`POST /api/v1/voice/stt` on **prod and staging** failed on EVERY request:\n\n```\nHTTP 503 {\"error\":\"Speech-to-text service is temporarily unavailable due to high demand...\",\"type\":\"service_unavailable\"}\n```\n\nThe agent-side proxy `",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "fix(openai): split Cerebras model tiers",
+      "prNumber": 16484,
+      "type": "bugfix",
+      "body": "## Summary\n- add `CEREBRAS_SMALL_MODEL` and `CEREBRAS_LARGE_MODEL` resolution in plugin-openai\n- seed the two Cerebras tiers from matching shared tiers at runtime boot\n- preserve explicit legacy `CEREBRAS_MODEL` as an all-tier override\n- do",
+      "files": [
+        "packages/agent/src/runtime/__tests__/model-env-seed.test.ts",
+        "packages/agent/src/runtime/provider-model-defaults.ts",
+        "plugins/plugin-openai/AGENTS.md",
+        "plugins/plugin-openai/CLAUDE.md",
+        "plugins/plugin-openai/__tests__/cerebras-config.shape.test.ts",
+        "plugins/plugin-openai/utils/config.ts",
+        "packages/agent/src/api/provider-switch-config.test.ts",
+        "packages/agent/src/api/provider-switch-config.ts"
+      ]
+    },
+    {
+      "title": "style(ui): deslop accounts settings surface (chevron glyph, auth copy, provider capability copy)",
+      "prNumber": 16481,
+      "type": "other",
+      "body": "## What\n\nCopy/polish pass on the accounts settings surface. No behavior change.\n\n- **AccountManagementPanel**: the collapsible \"available providers\" header used a raw text glyph (`›`) as its disclosure indicator. Replaced with lucide `Chevr",
+      "files": [
+        "packages/ui/src/components/accounts/AccountManagementPanel.test.tsx",
+        "packages/ui/src/components/accounts/AccountManagementPanel.tsx",
+        "packages/ui/src/components/accounts/AddAccountDialog.component.test.tsx",
+        "packages/ui/src/components/accounts/AddAccountDialog.tsx",
+        "packages/ui/src/components/accounts/ProviderPicker.test.tsx",
+        "packages/ui/src/components/accounts/ProviderPicker.tsx"
+      ]
+    },
+    {
+      "title": "feat(app-core): add public account pool status",
+      "prNumber": 16477,
+      "type": "feature",
+      "body": "## Summary\n\n- add public `GET /api/pool/status` through the app-core compat route chain and explicit public auth policy\n- expose aggregate capacity, anonymized `account-N` rows, model-aware headroom, relative refill windows, burn rate, proj",
+      "files": [
+        "packages/app-core/src/api/account-pool-status-routes.test.ts",
+        "packages/app-core/src/api/account-pool-status-routes.ts",
+        "packages/app-core/src/api/route-auth-policy.test.ts",
+        "packages/app-core/src/api/route-auth-policy.ts",
+        "packages/app-core/src/api/server.ts",
+        "packages/app-core/src/services/account-pool-status.test.ts",
+        "packages/app-core/src/services/account-pool-status.ts",
+        "packages/app-core/src/services/account-pool-consumer-metering.test.ts",
+        "packages/app-core/src/services/account-pool-consumer-metering.ts",
+        "packages/app-core/src/services/account-pool.test.ts",
+        "packages/app-core/src/services/account-pool.ts"
+      ]
+    },
+    {
+      "title": "fix(voice): preserve cloud TTS bytes in native transport",
+      "prNumber": 16463,
+      "type": "bugfix",
+      "body": "## Summary\n- move binary-response handling into the canonical native cloud transport instead of adding a second direct `CapacitorHttp` path\n- request `arraybuffer` from `CapacitorHttp`, reconstruct its base64 bridge payload as exact bytes, ",
+      "files": [
+        "packages/ui/src/api/csrf-client.test.ts",
+        "packages/ui/src/api/csrf-client.ts",
+        "packages/ui/src/api/native-cloud-http-transport.test.ts",
+        "packages/ui/src/api/native-cloud-http-transport.ts",
+        "packages/ui/src/api/transport.ts",
+        "packages/ui/src/hooks/useVoiceChat.fail-closed.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.forced-cloud-tts.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/hooks/useVoiceChat.tts-playback.test.tsx"
+      ]
+    },
+    {
+      "title": "feat(account-pool): add first-class consumer metering",
+      "prNumber": 16461,
+      "type": "feature",
+      "body": "## Summary\n\nMakes consumer metering a first-class part of the account-pool broker introduced by #16355.\n\n- managed consumer API keys: create, label/update, enable/disable, rotate, one-time plaintext return, SHA-256 digest at rest\n- opt-in `",
+      "files": [
+        "packages/app-core/src/account-pool.ts",
+        "packages/app-core/src/api/account-pool-broker-routes.test.ts",
+        "packages/app-core/src/api/account-pool-broker-routes.ts",
+        "packages/app-core/src/index.ts",
+        "packages/app-core/src/services/account-pool-broker.ts",
+        "packages/app-core/src/services/account-pool-consumer-metering.md",
+        "packages/app-core/src/services/account-pool-consumer-metering.test.ts",
+        "packages/app-core/src/services/account-pool-consumer-metering.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): add gated lane planner (W1 of #16443)",
+      "prNumber": 16454,
+      "type": "feature",
+      "body": "# Relates to\n\nW1 of #16443.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [ ] `bun install` and `bun ru",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/__tests__/lane-planner.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-agent-orchestrator/src/index.ts",
+        "plugins/plugin-agent-orchestrator/src/services/lane-planner.ts",
+        "plugins/plugin-agent-orchestrator/src/services/workspace-service.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): verify completion against GitHub ground truth",
+      "prNumber": 16453,
+      "type": "feature",
+      "body": "## Summary\n\nW2 of #16443 adds deterministic remote-reality verification to the existing completion-validation pipeline in `plugin-agent-orchestrator`.\n\n- verifies the claimed pull request exists and records open/closed/merged state\n- fetche",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/completion-evidence.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/ground-truth-verifier.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/repo-parsing.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/completion-evidence.ts",
+        "plugins/plugin-agent-orchestrator/src/services/ground-truth-verifier.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/workspace-github.ts",
+        "plugins/plugin-agent-orchestrator/src/services/workspace-service.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/orchestrator-task-service.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/workspace-github-issues.test.ts"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): supervise wave lane lifecycle (W3 of #16443)",
+      "prNumber": 16452,
+      "type": "feature",
+      "body": "## Summary\n\nW3 of #16443. Adds a default-off `WaveSupervisor` to `plugin-agent-orchestrator` for wave-scoped lane lifecycle management.\n\n- reads the canonical `metadata.waveId` contract, with defensive aliases for manually stamped tasks\n- r",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/__tests__/wave-supervisor.test.ts",
+        "plugins/plugin-agent-orchestrator/src/index.ts",
+        "plugins/plugin-agent-orchestrator/src/providers/active-sub-agents.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/wave-supervisor.ts",
+        "plugins/plugin-agent-orchestrator/src/services/workspace-lifecycle.ts",
+        "plugins/plugin-agent-orchestrator/src/services/workspace-service.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): call canonical voice stream core directly",
+      "prNumber": 16559,
+      "type": "bugfix",
+      "body": "## Summary\n- replace the nested Hono `app.request` adapter, which live staging proved returned an immediate internal 500, with a shared canonical scoped-stream core\n- revalidate the verified agent/org/user scope before direct in-process dis",
+      "files": [
+        "packages/cloud/api/__tests__/shared-agent-messages-stream.test.ts",
+        "packages/cloud/api/v1/eliza/agents/[agentId]/api/conversations/[conversationId]/messages/stream/route.ts",
+        "packages/cloud/api/v1/voice/session/lib/internal-eliza-conversation-fetch.ts",
+        "packages/cloud/api/v1/voice/session/ws/route.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/canonical-scoped-stream.ts",
+        "packages/cloud/shared/src/lib/voice-session/eliza-sse-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): resume persisted native ACP sessions",
+      "prNumber": 16558,
+      "type": "bugfix",
+      "body": "## Summary\n- route session lifecycle operations through each persisted transport instead of the current process default\n- reconnect durable native ACP sessions lazily after runtime restart, and resume orphaned busy/tool-running sessions\n- p",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/acp-service.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/model-gateway-lease.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/acp-orphan-resume.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): dispatch voice SSE bridge in-process",
+      "prNumber": 16557,
+      "type": "bugfix",
+      "body": "## Summary\n- route verified voice turns through the canonical conversation SSE handler in-process instead of self-fetching the Worker public hostname\n- preserve scoped agent/org/user authorization and canonical billing/error/SSE behavior\n- ",
+      "files": [
+        "packages/cloud/api/__tests__/shared-agent-messages-stream.test.ts",
+        "packages/cloud/api/v1/voice/session/__tests__/ws-lifecycle.test.ts",
+        "packages/cloud/api/v1/voice/session/lib/internal-eliza-conversation-fetch.ts",
+        "packages/cloud/api/v1/voice/session/lib/session.ts",
+        "packages/cloud/api/v1/voice/session/ws/route.ts",
+        "packages/cloud/shared/src/lib/voice-session/eliza-sse-bridge.ts",
+        "packages/cloud/shared/src/lib/voice-session/protocol.ts"
+      ]
+    },
+    {
+      "title": "chore(plugin-app-control): apply canonical formatting",
+      "prNumber": 16555,
+      "type": "other",
+      "body": "## Summary\n- apply the repository-pinned Biome formatter output to `src/resolve.test.ts`\n- no logic changes\n\n## Verification\n- `bun run format:check` in `plugins/plugin-app-control`: pass\n- `git diff --check`: pass\n- Codex review: no findin",
+      "files": [
+        "plugins/plugin-app-control/src/resolve.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): reconcile type-safety ratchet drift",
+      "prNumber": 16554,
+      "type": "bugfix",
+      "body": "## Summary\n- replace two newly introduced `as unknown as` assertions with structural runtime capability guards\n- regenerate the stale type-safety baseline to exact current counts for legitimate nullish defaults\n- preserve the pendant legacy",
+      "files": [
+        "packages/scripts/type-safety-ratchet-baseline.json",
+        "plugins/plugin-calendar/src/apple-calendar.ts",
+        "plugins/plugin-finances/src/services/browser-bridge-seam.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): preserve realtime bridge upstream errors",
+      "prNumber": 16550,
+      "type": "bugfix",
+      "body": "## Summary\n- preserve bounded, sanitized canonical route error details across the realtime SSE bridge\n- propagate canonical `code` and `retryable` semantics to the realtime WebSocket client\n- add contract coverage for the live HTTP 402 `ins",
+      "files": [
+        "packages/cloud/api/v1/voice/session/__tests__/ws-lifecycle.test.ts",
+        "packages/cloud/api/v1/voice/session/lib/session.ts",
+        "packages/cloud/shared/src/lib/voice-session/__tests__/eliza-sse-bridge.test.ts",
+        "packages/cloud/shared/src/lib/voice-session/eliza-sse-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(connectors): fail closed on trusted account routing (canonical IDs only)",
+      "prNumber": 16549,
+      "type": "bugfix",
+      "body": "## Summary\n\nRebuilds the recovered aggregate tail `62ba0c2` (\"fix(connectors): fail closed on trusted account routing\") on current develop. Trusted account routing now matches ONLY canonical connector account IDs; display labels, display na",
+      "files": [
+        "packages/core/src/features/advanced-capabilities/actions/connectorActionUtils.ts",
+        "packages/core/src/features/advanced-capabilities/actions/message.test.ts",
+        "packages/core/src/features/advanced-capabilities/actions/message.ts",
+        "packages/core/src/features/advanced-capabilities/actions/post.test.ts",
+        "packages/core/src/features/advanced-capabilities/actions/post.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/__tests__/message-post-connectors.test.ts",
+        "packages/core/src/types/runtime.ts",
+        "plugins/plugin-x/src/services/x.service.test.ts",
+        "plugins/plugin-x/src/services/x.service.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): keep Headscale agent nodes across Docker restarts",
+      "prNumber": 16548,
+      "type": "bugfix",
+      "body": "## Summary\n- provision dedicated-agent Headscale identities as persistent nodes rather than ephemeral nodes\n- remove an existing deterministic hostname registration before full reprovisioning\n- add strict Headscale node lookup so reprovisio",
+      "files": [
+        "packages/cloud/shared/src/lib/services/headscale-client.ts",
+        "packages/cloud/shared/src/lib/services/headscale-integration.test.ts",
+        "packages/cloud/shared/src/lib/services/headscale-integration.ts"
+      ]
+    },
+    {
+      "title": "fix(inbox): authenticate connector account selection before dispatch",
+      "prNumber": 16547,
+      "type": "bugfix",
+      "body": "## Summary\n\nRebuilds the retained `agent/inbox-account-selection-boundary` slice (head c38a610, per the branch-audit disposition on the issue) on current develop. Adds an authenticated account-selection boundary at the inbox request edge so",
+      "files": [
+        "packages/agent/src/api/__tests__/inbox-account-routing.test.ts",
+        "packages/agent/src/api/inbox-request-authorization.test.ts",
+        "packages/agent/src/api/inbox-request-authorization.ts",
+        "packages/agent/src/api/inbox-routes.ts",
+        "packages/agent/src/api/server-route-dispatch.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/host-bridge.ts",
+        "packages/app-core/src/api/__tests__/ensure-route-min-role.test.ts",
+        "packages/app-core/src/api/auth.ts",
+        "packages/app-core/src/runtime/install-agent-host-bridge.test.ts",
+        "packages/app-core/src/runtime/install-agent-host-bridge.ts",
+        "packages/shared/src/contracts/inbox-routes.test.ts",
+        "packages/shared/src/contracts/inbox-routes.ts",
+        "packages/ui/src/api/client-chat.ts",
+        "packages/ui/src/components/pages/ChatView.inbox-send.test.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx"
+      ]
+    },
+    {
+      "title": "feat(coding-tools): carry the FILES_READ/READ_FILE simile family on the FILE action",
+      "prNumber": 16546,
+      "type": "feature",
+      "body": "## What\n\nCarries the `FILES_READ` / `FILES_LIST` / `FILE_READ` / `FILE_LIST` / `READ_FILE` / `LIST_FILES` simile family on the `FILE` action, so the simile-hint resolver (#16522) catches Stage-1's invented file-action names.\n\n## The live fa",
+      "files": [
+        "plugins/plugin-coding-tools/src/actions/file-regression-lane.test.ts",
+        "plugins/plugin-coding-tools/src/actions/file.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): narrow settled wallet results per-branch before reading .reason",
+      "prNumber": 16545,
+      "type": "bugfix",
+      "body": "## What\n\nOne-line narrowing fix: `addrRes.reason ?? balRes.reason` under only the `||` guard fails typecheck (TS2339 — neither `PromiseSettledResult` is proven rejected). Select the reason with a per-branch ternary instead.\n\n## Why now\n\nInt",
+      "files": [
+        "packages/ui/src/cloud/instances/components/eliza-wallet-section.tsx"
+      ]
+    },
+    {
+      "title": "fix(scheduling): accept GH_PAT for PR shepherd",
+      "prNumber": 16544,
+      "type": "bugfix",
+      "body": "## Summary\n- retain explicit `GITHUB_TOKEN` precedence\n- accept the coding stack standard `GH_PAT` as fallback\n- trim settings and keep tokens out of logs/children\n\n## Live failure\nParity round 2 created and fired a real PR-shepherd schedul",
+      "files": [
+        "plugins/plugin-scheduling/src/coding-agent-schedules.test.ts",
+        "plugins/plugin-scheduling/src/coding-agent-schedules.ts"
+      ]
+    },
+    {
+      "title": "fix(coding-tools): fence preformatted tool output for the user-facing callback channel",
+      "prNumber": 16542,
+      "type": "bugfix",
+      "body": "## What\n\nPreformatted tool output relayed to the user-facing callback channel is now wrapped in a markdown code fence at the source: a new `fencePreformatted` helper (fence length grows past the longest embedded backtick run) applied to the",
+      "files": [
+        "plugins/plugin-coding-tools/src/actions/bash-regression-lane.test.ts",
+        "plugins/plugin-coding-tools/src/actions/bash.test.ts",
+        "plugins/plugin-coding-tools/src/actions/bash.ts",
+        "plugins/plugin-coding-tools/src/actions/file-regression-lane.test.ts",
+        "plugins/plugin-coding-tools/src/actions/file.ts",
+        "plugins/plugin-coding-tools/src/actions/grep-regression-lane.test.ts",
+        "plugins/plugin-coding-tools/src/actions/grep.ts",
+        "plugins/plugin-coding-tools/src/actions/ls-regression-lane.test.ts",
+        "plugins/plugin-coding-tools/src/actions/ls.ts",
+        "plugins/plugin-coding-tools/src/lib/format.test.ts",
+        "plugins/plugin-coding-tools/src/lib/format.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): forward Anthropic proxy config to eliza-code",
+      "prNumber": 16541,
+      "type": "bugfix",
+      "body": "## Summary\n- forward Anthropic base URL and tier model overrides into ACP children\n- preserve deny-list precedence and credential hygiene\n- cover endpoint/model forwarding and denied secret behavior\n\n## Live failure\nParity round 2 showed he",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/should-forward-env.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-env-deny.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/acp-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-env-policy.ts"
+      ]
+    },
+    {
+      "title": "style(ui): polish onboarding settings and wallet views",
+      "prNumber": 16540,
+      "type": "other",
+      "body": "## Summary\n\n- polish onboarding and sign-in copy, agent provisioning status semantics, and progress-rail alignment\n- replace the blank settings lazy-load gap with an accessible, reduced-motion-safe skeleton and clean up dense/robotic settin",
+      "files": [
+        "packages/ui/src/cloud/instances/components/create-eliza-agent-dialog.tsx",
+        "packages/ui/src/cloud/instances/components/eliza-wallet-section.test.tsx",
+        "packages/ui/src/cloud/instances/components/eliza-wallet-section.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/login-page.tsx",
+        "packages/ui/src/components/pages/SettingsView.tsx",
+        "packages/ui/src/components/settings/CapabilitiesSection.tsx",
+        "packages/ui/src/components/settings/CloudAgentsSection.tsx",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.test.tsx",
+        "packages/ui/src/components/settings/ModelConfigurationPanel.tsx",
+        "packages/ui/src/components/settings/ProviderPanels.test.tsx",
+        "packages/ui/src/components/settings/ProviderPanels.tsx",
+        "packages/ui/src/components/settings/RemotePluginHostSection.tsx",
+        "packages/ui/src/components/settings/VoiceConfigView.tsx",
+        "packages/ui/src/components/settings/VoiceTierBanner.tsx",
+        "packages/ui/src/i18n/locales/en.json"
+      ]
+    },
+    {
+      "title": "fix(ci): drop duplicate DEEPGRAM/CARTESIA env keys that broke cloud-cf-deploy parsing",
+      "prNumber": 16539,
+      "type": "bugfix",
+      "body": "## What\n#16192's squash (8549adfc252) appended `DEEPGRAM_API_KEY` and `CARTESIA_API_KEY` to the **Publish Worker AI secrets** env block, but both keys were already defined ~30 lines up in the same block (added by #16525 / #16491 with routin",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml"
+      ]
+    },
+    {
+      "title": "test(gpu): prove CUDA coverage continuity before retiring gpu-bench authority",
+      "prNumber": 16537,
+      "type": "tests",
+      "body": "## Summary\n- add a candidate single CUDA continuity authority with exact-head GPU/toolkit probing, native fixture parity, model-backed runtime graph smoke, and fail-closed artifact upload\n- inventory the retired `gpu-bench-nightly` contexts",
+      "files": [
+        ".github/workflows/README.md",
+        ".github/workflows/cuda-continuity.yml",
+        "plugins/plugin-local-inference/native/verify/cuda_runner.sh",
+        "scripts/cuda-continuity-inventory.json",
+        "scripts/cuda-continuity.mjs",
+        "scripts/cuda-continuity.test.mjs"
+      ]
+    },
+    {
+      "title": "feat(orchestrator): add verified curated coding memory",
+      "prNumber": 16536,
+      "type": "feature",
+      "body": "## Summary\n\nImplements W4 of #16443 after merged GitHub ground truth (#16453):\n\n- harvests only bounded durable lessons from GitHub-verified task completion, verified test fixes, orchestrator/user reviewer findings, and explicit user decisi",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/__tests__/curated-coding-memory-integration.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/curated-coding-memory.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/goal-prompt.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/curated-coding-memory.ts",
+        "plugins/plugin-agent-orchestrator/src/services/goal-prompt.ts",
+        "plugins/plugin-agent-orchestrator/src/services/orchestrator-task-service.ts"
+      ]
+    },
+    {
+      "title": "feat(scheduling): add recurring PR shepherd coding tasks",
+      "prNumber": 16533,
+      "type": "feature",
+      "body": "## Summary\n- add durable recurring coding-agent schedule helpers on top of `plugin-scheduling`\n- add a production-safe built-in `pr-shepherd` recipe using read-only GitHub discovery and the existing orchestrator task service\n- suppress dupl",
+      "files": [
+        "plugins/plugin-scheduling/src/coding-agent-schedules.test.ts",
+        "plugins/plugin-scheduling/src/coding-agent-schedules.ts",
+        "plugins/plugin-scheduling/src/dispatch-types.ts",
+        "plugins/plugin-scheduling/src/index.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/runner-service.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/runner-service.ts",
+        "plugins/plugin-scheduling/vitest.config.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump stanza from 1.10.1 to 1.12.2 in /packages/training in the pip group across 1 directory",
+      "prNumber": 16531,
+      "type": "other",
+      "body": "Bumps the pip group with 1 update in the /packages/training directory: [stanza](https://github.com/stanfordnlp/stanza).\n\nUpdates `stanza` from 1.10.1 to 1.12.2\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://",
+      "files": [
+        "packages/training/pyproject.toml"
+      ]
+    },
+    {
+      "title": "test(scenarios): enforce trustworthy live shard evidence",
+      "prNumber": 16530,
+      "type": "tests",
+      "body": "## Summary\n- define a checked-in authoritative catalog for the three credentialed live-scenario shards, including owner, trigger, timeout, cost ceiling, prerequisites, and artifact contract\n- fail before execution with typed `prerequisite_u",
+      "files": [
+        ".github/workflows/live-scenarios.yml",
+        "packages/scripts/__tests__/live-scenarios-workflow.test.ts",
+        "packages/scripts/live-scenario-contract.mjs",
+        "packages/scripts/live-scenario-shards.json"
+      ]
+    },
+    {
+      "title": "fix(agent): deduplicate subscription CLI bootstrap",
+      "prNumber": 16529,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFollow-up to #16518 and #16526.\n\n- [x] Targets `develop` and is based on current `origin/develop` after #16526 merged.\n- [x] Adds the missing concurrent-bootstrap acceptance case from #16518.\n- [x] Codex gpt-5.5 reviewed commi",
+      "files": [
+        "packages/agent/src/api/accounts-routes.subscription-cli.test.ts",
+        "packages/agent/src/api/accounts-routes.test.ts",
+        "packages/agent/src/api/accounts-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(flatpak): pin AppStream screenshots to immutable elizaOS/docs assets",
+      "prNumber": 16528,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16465\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [x] `bun install` and `bun run verify` were run after sync,",
+      "files": [
+        "packages/app-core/packaging/flatpak/ai.elizaos.App.metainfo.xml"
+      ]
+    },
+    {
+      "title": "fix(voice): fall back to cloud ASR when persisted local inference is unavailable",
+      "prNumber": 16527,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16524\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [x] `bun install` and `bun run verify` were run after sync,",
+      "files": [
+        "packages/ui/src/hooks/useVoiceChat.app-suspend.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.bidirectional.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.cloud-asr.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.local-asr.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.suspend.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.talkmode-listeners.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.ts",
+        "packages/ui/src/voice/voice-capture-factory.test.ts",
+        "packages/ui/src/voice/voice-capture-factory.ts",
+        "packages/ui/src/voice/voice-provider-defaults.test.ts",
+        "packages/ui/src/voice/voice-provider-defaults.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): install device-login CLIs into a user-writable prefix, never npm -g",
+      "prNumber": 16526,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #16518\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [x] `bun install` and `bun run verify` were run after sync,",
+      "files": [
+        "packages/agent/src/api/accounts-routes.subscription-cli.test.ts",
+        "packages/agent/src/api/accounts-routes.test.ts",
+        "packages/agent/src/api/accounts-routes.ts"
+      ]
+    },
+    {
+      "title": "feat(voice): add opt-in Deepgram batch STT",
+      "prNumber": 16525,
+      "type": "feature",
+      "body": "## Summary\n\n- adds an explicit `VOICE_BATCH_STT_PROVIDER=deepgram` opt-in for prerecorded STT\n- routes verified audio bytes to Deepgram `nova-3` before the existing Whisper lane\n- normalizes Deepgram transcript, utterance, and word timestam",
+      "files": [
+        ".github/workflows/cloud-cf-deploy.yml",
+        "packages/cloud/api/v1/voice/stt/route.test.ts",
+        "packages/cloud/api/v1/voice/stt/route.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts",
+        "packages/scripts/__tests__/cloud-deploy-workflow-contract.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): resolve simile candidate hints to their catalog parent in action retrieval",
+      "prNumber": 16522,
+      "type": "bugfix",
+      "body": "## What\n\n`retrieveActions` now resolves Stage-1 candidate hints that name an action by one of its **similes** to the owning catalog parent, and exact-scores that parent like any explicit hint. Child similes resolve to their parent; a simile",
+      "files": [
+        "packages/core/src/runtime/__tests__/action-retrieval.test.ts",
+        "packages/core/src/runtime/action-retrieval.ts"
+      ]
+    },
+    {
+      "title": "fix(core): harden task scheduler failure handling",
+      "prNumber": 16521,
+      "type": "bugfix",
+      "body": "## Summary\n- validate scheduled task identifiers, workers, scheduling/failure metadata, and `shouldRun` contracts per row while continuing healthy work\n- reject timer/manual/serverless calls with typed aggregate `ElizaError`s instead of sil",
+      "files": [
+        "packages/core/src/services/task-scheduler.test.ts",
+        "packages/core/src/services/task-scheduler.ts",
+        "packages/core/src/services/task.test.ts",
+        "packages/core/src/services/task.ts"
+      ]
+    },
+    {
+      "title": "fix(cli-inference): resolve model self-report per agent",
+      "prNumber": 16520,
+      "type": "bugfix",
+      "body": "## Summary\n- extend serializable model-registration metadata with an ordered runtime setting chain plus provider default\n- resolve that chain when `RUNTIME_MODEL_CONTEXT` runs, so each agent's character/runtime settings beat process environ",
+      "files": [
+        "packages/core/src/features/basic-capabilities/providers/runtimeModelContext.test.ts",
+        "packages/core/src/features/basic-capabilities/providers/runtimeModelContext.ts",
+        "packages/core/src/types/model.ts",
+        "plugins/plugin-cli-inference/__tests__/cli-inference.test.ts",
+        "plugins/plugin-cli-inference/index.ts"
+      ]
+    },
+    {
+      "title": "fix(core): bound merged evaluator prompts without skipping",
+      "prNumber": 16519,
+      "type": "bugfix",
+      "body": "## Summary\n- replace the evaluator's overflow-and-skip guard with deterministic bounded prompt assembly\n- split the 120K cap between shared context and active evaluator sections, then fairly redistribute unused capacity\n- keep latest shared",
+      "files": [
+        "packages/core/src/services/evaluator.test.ts",
+        "packages/core/src/services/evaluator.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): restore deterministic develop workflows",
+      "prNumber": 16517,
+      "type": "bugfix",
+      "body": "## Summary\n\n- pin coverage and canonical cloud deploy jobs to the repository CI Bun version (`1.3.14`) so required checks do not depend on floating tag discovery\n- extend the Bun-version contract to protect both workflows from drifting back",
+      "files": [
+        ".github/workflows/app-aesthetic-audit.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/coverage-gate.yml",
+        "packages/scripts/__tests__/ci-bun-version-contract.test.ts",
+        "packages/scripts/__tests__/coverage-gate-test-only-pr.test.ts",
+        "packages/scripts/__tests__/e2e-coverage.test.ts",
+        "packages/scripts/aggregate-scenario-reports.mjs",
+        "packages/scripts/ci-bun-version-contract.mjs",
+        "packages/scripts/develop-pr-aggregate.mjs",
+        "packages/scripts/develop-pr-aggregate.self-test.mjs",
+        "packages/scripts/develop-pr-aggregate.test.mjs",
+        "plugins/plugin-discord/__tests__/connector-loop.harness.test.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 491.902655891835,
+      "prScore": 414.46465589183504,
+      "issueScore": 0,
+      "reviewScore": 77,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 247.09460146075344,
+      "prScore": 246.65660146075345,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 156.4453768541282,
+      "prScore": 156.2453768541282,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 38.17538503273084,
+      "prScore": 38.17538503273084,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 37,
+  "mergedPRs": 56,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 8
+}
