@@ -5,8 +5,57 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-18 to 2026-07-19, elizaos/eliza had 62 new PRs (45 merged), 0 new issues, and 7 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-07-18 to 2026-07-19, elizaos/eliza had 62 new PRs (45 merged), 4 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABJUZotg",
+      "title": "fix(cloud): bound snapshot hydration and fail closed the memory-intensive worker lane",
+      "author": "NubsCarson",
+      "number": 16639,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe production provisioning worker is repeatedly exhausting its Node heap while processing `agent_snapshot` work. Disabling backup verification does not disable snapshot hydration, and the current worker has no independent fail-closed switch for that memory-intensive lane. A restart can also recover snapshot jobs before operators can safely re-enable them.\n\nThis is a production-safety blocker for Cloud agent provisioning and backup/restore confidence. It must be fixed and soaked in staging before deferred production snapshot work becomes eligible again.\n\n## Required behavior\n\n- `agent_snapshot` claim and startup-recovery paths are disabled unless one explicit environment gate is exactly enabled.\n- Ordinary provision, start, stop, delete, and lifecycle jobs remain independently operable while snapshots are disabled.\n- Snapshot hydration reads and validates metadata first, enforces bounded compressed and expanded byte/file budgets before retaining payloads, and processes work sequentially.\n- Worker phases remain serialized to settlement; timed-out or slow work must not continue detached while a later phase allocates another snapshot payload.\n- Failure is observable and fail-closed. No fabricated success, partial restore, or healthy-empty result.\n- Unit/integration coverage proves the disabled gate, startup recovery exclusion, byte/file limits, oversized/malformed payload failures, sequential settlement, and unaffected non-snapshot jobs.\n\n## Rollout / proof\n\n1. Merge a clean PR based on current `develop`; do not transplant the old mixed provisioning worktree wholesale.\n2. Deploy to staging with snapshot jobs disabled and prove an exact 503/disabled outcome plus normal non-snapshot provisioning.\n3. Enable a single snapshot job in staging, capture worker RSS/heap and structured phase logs, restore the produced artifact, and verify zero worker restarts.\n4. Run a bounded multi-job soak with the same evidence.\n5. Promote the exact tested SHA to production with the gate disabled first, then enable sequentially only after the staging proof is reviewed.\n\n## Evidence observed\n\nRead-only production inspection on 2026-07-18 found repeated `Reached heap limit` exits in the provisioning worker while the snapshot queue was active. The worker stabilized only after no snapshot rows were eligible; pending rows are deferred, so this is time-sensitive rather than resolved.\n",
+      "createdAt": "2026-07-18T22:41:08Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABJSoqbA",
+      "title": "plugin-wallet: add an additive \"simulate\" execution mode (real quote/build + RPC simulate, never send)",
+      "author": "noobshow",
+      "number": 16613,
+      "repository": "elizaos/eliza",
+      "body": "### Problem\n\n`dryRun`/`mode:\"prepare\"` means two different things depending on which layer of `plugin-wallet` you hit, and **neither actually simulates a transaction**:\n\n1. **`WalletBackendService.routeWalletAction`** (`services/wallet-backend-service.ts:154-205`): when `params.dryRun || params.mode === \"prepare\"`, it returns a **hardcoded object literal** echoing the input params — `handler.execute()` is never called. No network request happens at all. (Only `subaction:\"bridge\"` calls `execute()` in prepare mode — every other subaction, including `swap`, short-circuits.)\n2. **`SolanaService.swap({dryRun:true})`** (`chains/solana/service.ts:644-717`): this one *does* call `buildJupiterSwapTransaction` unconditionally at `:661` — a real `GET quote-api.jup.ag/v6/quote` + `POST /v6/swap`, returning a real serialized `swapTransaction`. But then the `if (dryRun)` branch at `:669` **discards that built transaction** and returns `{txid:null, dryRun:true, ...}` without ever deserializing, signing, or simulating it.\n3. **pump.fun** (`chains/registry.ts:518-616`, `executePumpFunBuy`) has **no dry-run branch at all** — it always POSTs to PumpPortal `trade-local`, deserializes the response into a `VersionedTransaction`, signs, and sends.\n4. There is **no `connection.simulateTransaction` call anywhere on the swap/transfer/pump.fun path.** The only `simulateTransaction` usage in the whole plugin is inside `dex/orca/utils/sendTransaction.ts` and the Meteora equivalent, as a pre-send compute-budget step *inside* a function that then sends — not reachable as a standalone check.\n\nNet effect: an agent integrating `plugin-wallet` for autonomous/semi-autonomous trading has **no way to validate that a real trade will succeed** — that a route exists right now, what the price impact and slippage are, that the transaction actually builds, and that it fits the compute budget — before the very first real submission. The expensive, informative work (steps 1-2 above: quoting Jupiter, building the tx) already happens on the `SolanaService.swap` dry-run path and is thrown away one line later.\n\nVerified against `develop @ 184a4cc85072165a2cd911cb65c50d6a5c409326`.\n\n### Proposal\n\nAdd a third, **strictly additive** mode alongside today's `prepare`/`execute` (or `dryRun: true|false`): `mode: \"simulate\"`.\n\n- Build the transaction exactly as the live path does today (real quote, real `swapTransaction`/pump.fun `trade-local` response, real deserialize).\n- Instead of signing + `connection.sendTransaction(...)`, call `connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true })` — this runs against an **unsigned** transaction, so `simulate` mode needs only a public key, never a private key.\n- Return the simulation result instead of a `txid`: expected output amount, price-impact/slippage from the quote, the route plan, `unitsConsumed` from the simulation, and `err`/logs when it would revert.\n- `prepare` (today's offline echo) and `execute` (today's real send) are **completely unchanged** — this is a new opt-in branch, not a replacement, so it can't break any existing consumer of `routeWalletAction`/`SolanaService.swap`.\n\n### Why this matters beyond one integration\n\nAny elizaOS agent doing autonomous fund movement hits the same gap: \"dry run\" today either does nothing (offline echo) or does real work and throws it away. A real simulate mode is the only way to validate a trade end-to-end — real liquidity, real route, real compute cost — with zero funds at risk (no private key required). I'm happy to contribute a PR for the Solana side (Jupiter swap + pump.fun) if that's useful; I already have a working mirror of this exact logic in our integration and can generalize it.\n",
+      "createdAt": "2026-07-18T13:39:51Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABJQdR8w",
+      "title": "orchestrator unit suite red on clean develop: 82 failures, 74x 'waveSupervisor?.enabled is not a function' (#16452 harness skew)",
+      "author": "NubsCarson",
+      "number": 16586,
+      "repository": "elizaos/eliza",
+      "body": "## What\n\n`bun run --cwd plugins/plugin-agent-orchestrator test` fails on a **clean develop checkout** (reproduced on a fresh worktree of `origin/develop` @ 9634245b975 after `bun run --cwd packages/core build:node`):\n\n```\nTests  82 failed | 2355 passed | 7 skipped (2444)\n```\n\nFailure signature histogram:\n\n```\n 74  TypeError: waveSupervisor?.enabled is not a function\n  2  Error: ACP provision worker failed (code=1, signal=null)\n  1  TypeError: this.runtime.getSetting is not a function\n  1  AssertionError: expected undefined to be 'done'\n  1  AssertionError: expected [] to deeply equal [ 'auto-spawned' ]\n  1  AssertionError: expected ElizaError: Failed to auto-install eliza-… to match object\n```\n\nTop failing files:\n\n```\n 62  __tests__/unit/orchestrator-task-service.test.ts\n  8  __tests__/unit/control-resume-clears-paused.test.ts\n  4  __tests__/unit/orchestrator-routes.test.ts\n```\n\n## Root cause (probable)\n\n#16452 (wave supervisor) added `waveSupervisor?.enabled()` call sites in `orchestrator-task-service.ts` (e.g. `src/services/orchestrator-task-service.ts:4409`, `:5380`), but the unit harness' mocked service registry returns wave-supervisor stand-ins without an `enabled()` method — 74 of the 82 failures are that single harness skew, not 74 real defects. The remaining 8 look like separate small harness drifts landed around the same window.\n\n## Repro\n\n```bash\ngit worktree add /tmp/wt-dev origin/develop\ncd /tmp/wt-dev && bun run install:light\nbun run --cwd packages/core build:node\nbun run --cwd plugins/plugin-agent-orchestrator test\n```\n\nThe plugin itself works live (TASKS-family spawns verified daily on a production agent) — this is a test-harness regression that masks real signal on every orchestrator PR.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-07-18T02:07:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABJQER4g",
+      "title": "cloud dev tier: package the proven dedicated-VM + BYO-sub + eliza-code shape",
+      "author": "NubsCarson",
+      "number": 16573,
+      "repository": "elizaos/eliza",
+      "body": "## Proposal\n\nOffer the proven \"nubilio shape\" as a cloud **dev tier**: dedicated per-agent Hetzner VM + chat on the user's own Claude/Codex subscription (account pool + rotation) + eliza-code coding sub-agents + the scheduling spine. Most pieces are shipped; this is a packaging/pricing decision, not an engineering program.\n\n## What's already proven (production measurements, 2026-07-17/18)\n\n- **BYO-sub chat via `plugin-cli-inference`**: warm SDK sessions on a Max subscription — opus-4-8 replies ~5-7s, sonnet-5 triage; account pool + device-flow OAuth already in the dashboard; start-path wedge fixed (#16560)\n- **Coding**: eliza-code default (#16515) — live battery 5/5 task classes (multi-file build+tests, debug find+fix in 24s, repo comprehension, delegation routing, inline judgment)\n- **Tool turns**: ~21s with claude planner, ~11s with glm native planner (per-tier choice is config)\n- **Keyless web**: WEB_SEARCH via public Parallel→Exa MCP endpoints + direct-HTTP WEB_FETCH — no search-provider keys\n- **Guardrails shipped**: gateway *lease* tokens for sub-agents, spend-allowance caps, completion residuals gate, exec-approval subsystem (semantics pinned #16568), destructive-bulk confirm gate proposed (#16572)\n\n## Why the VM story works\n\nEach cloud agent already gets a dedicated hardened VM — the VM *is* the sandbox, identical shape to the reference deployment. The orchestrator self-stubs only on store/mobile builds; a dedicated VM classifies as a full-capability host.\n\n## Suggested default plugin set for the tier\n\n`agent-orchestrator`, `coding-tools` (carries keyless web search/fetch), `cli-inference`, `scheduling`, `commands`, `sql`, `discord`/connector of choice, `mcp` — i.e. current cloud defaults + the coding column. Direct-key `openai`/`anthropic` stay settings-gated toggles.\n\n## Open questions for the team\n\n1. Pricing: flat tier vs metered compute on top of BYO-sub inference (which costs the platform ~nothing)\n2. Default-on vs opt-in for the coding column on the tier\n3. Config surface: collapse the cli-inference per-tier knobs to just small+large (separate simplification PR planned)\n\nEvidence trail: #16515 #16522 #16542 #16546 #16560 #16568 #16553 #16572 + the live batteries referenced therein.\n",
+      "createdAt": "2026-07-18T00:26:16Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOMT5cIs7zbbGK",
@@ -17,8 +66,8 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-18T23:21:04Z",
       "mergedAt": null,
-      "additions": 9885,
-      "deletions": 110
+      "additions": 10944,
+      "deletions": 128
     },
     {
       "id": "PR_kwDOMT5cIs7zbB6E",
@@ -41,8 +90,8 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-18T22:47:01Z",
       "mergedAt": null,
-      "additions": 1320,
-      "deletions": 148
+      "additions": 1659,
+      "deletions": 178
     },
     {
       "id": "PR_kwDOMT5cIs7zNDh-",
@@ -73,7 +122,7 @@
     "additions": 8091,
     "deletions": 1336,
     "files": 148,
-    "commitCount": 142
+    "commitCount": 145
   },
   "completedItems": [
     {
@@ -668,11 +717,21 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "noobshow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106539860?v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2.2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
   "newPRs": 62,
   "mergedPRs": 45,
-  "newIssues": 0,
+  "newIssues": 4,
   "closedIssues": 0,
-  "activeContributors": 7
+  "activeContributors": 8
 }
