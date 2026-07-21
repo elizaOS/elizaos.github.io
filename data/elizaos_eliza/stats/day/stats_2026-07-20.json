@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-20 to 2026-07-21, elizaos/eliza had 36 new PRs (40 merged), 0 new issues, and 10 active contributors.",
+  "overview": "From 2026-07-20 to 2026-07-21, elizaos/eliza had 37 new PRs (41 merged), 0 new issues, and 7 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABJYat4g",
@@ -113,7 +113,7 @@
       "body": "## Summary\n\nDurable turn / outbox state machine that closes the crash window **deliberately\nleft open by #16696**. #16696 suppresses a duplicate inbound Discord turn once\nthe inbound memory is persisted. That fixed double-dispatch but left a worse\ngap: a crash **after inbound persistence but before the outbound reply** caused\npermanent replay suppression, so the message was ingested and **no reply was\never sent** (SOLIZA cutover charter rows **D4/D5**).\n\n> ⚠️ **Stacked on #16696** (`sol/discord-inbound-idempotency`). Review the top\n> commit only; base #16696 first. If #16696 merges, rebasing this onto `develop`\n> is a no-op on the shared lines.\n\n## Design\n\nAdd a durable turn record keyed by the Discord message id with an explicit\nlifecycle:\n\n```\nRECEIVED ──▶ DISPATCHED ──▶ REPLIED   (terminal)\n                    └──────▶ FAILED    (terminal, retries exhausted)\n```\n\nOn redelivery / process restart, instead of blindly returning when the inbound\nmemory exists:\n\n- **terminal (REPLIED / FAILED)** → genuine no-op\n- **non-terminal + a reply memory already exists** → reconcile to REPLIED, **no\n  resend**\n- **non-terminal, no reply, retry budget remains** → **resume** the reply path\n- **retry budget exhausted** → explicit terminal **FAILED** (no silent drop)\n\n### Delivery model: send-then-record + reconcile probe (documented choice)\n\nThe connector already writes a durable **outbound reply memory** for every\nmessage it emits (`content.inReplyTo = <inbound id>`,\n`metadata.platformMessageId = <discord reply id>`). That reply memory **is** the\nauthoritative record-of-send. Rather than add a second \"reserved-before-send\"\noutbox row that can itself desync from Discord on a crash, we **reconcile\nagainst the reply memory the send path already produces**: before re-dispatching\na resumed turn we probe for an existing reply to this inbound; if one exists the\nreply already went out (crash in the send↔record gap) and we reconcile to\nREPLIED without resending. Bounded retries are safe because the send path is\ncontent-idempotent via #15601's outbound reservation and #13054's outbound\nmemory dedupe.\n\nThe **#16696 pre-persistence retry semantics are preserved**: a failure before\nthe durable claim leaves nothing persisted and stays retryable.\n\n## Validation\n\nFocused Vitest, run **green locally** in the worktree (`bun install` + generated\ni18n keywords):\n\n```\n✓ plugins/plugin-discord/__tests__/turn-state.test.ts (11 tests)\n✓ plugins/plugin-discord/__tests__/messages-inbound-idempotency.test.ts (5 tests)\n✓ plugins/plugin-discord/__tests__/messages-durable-turn.test.ts (6 tests)\nTest Files  3 passed (3)\n     Tests  22 passed (22)\n```\n\nFull discord messages regression lane (65 tests) also green.\n\nCrash-simulation coverage (mandated cases): (a) crash after persist before\ndispatch → resume replies once; (b) crash after dispatch before reply record →\nresume replies once, no double send; (b2) reply already delivered before crash →\nreconcile, no resend; (c) redelivery after REPLIED → no-op; (d) bounded retry\nexhaustion → terminal FAILED, no silent drop; plus pre-persistence failure stays\nretryable.\n\n- `bunx @biomejs/biome check` on touched files: pass\n- `git diff --check`: pass\n\nCo-authored-by: wakesync <shadow@shad0w.xyz>\n\nSigned-off-by: [sol-orch]\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before screenshots `N/A - backend-only Discord connector change, no UI surface`.\n\n<!-- evidence-row:after-screenshots -->\n- [ ] After screenshots `N/A - backend-only Discord connector change, no UI surface`.\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] A video walkthrough `N/A - durable turn state-machine behavior is covered by automated crash-simulation tests, no UI flow`.\n\n<!-- evidence-row:backend-logs -->\n- [ ] Backend logs `N/A - no live Discord credentials used; focused Vitest drives the real MessageManager ordering with network sends stubbed and simulated crash injection`.\n\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend logs `N/A - no frontend change`.\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] Real-LLM trajectory `N/A - model output quality is unchanged; this change governs durable reply lifecycle at the connector boundary`.\n\n<!-- evidence-row:domain-artifacts -->\n- [ ] Domain artifacts `N/A - no visual, OCR, audio, or document domain artifact applies`.\n",
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-20T08:00:00Z",
-      "mergedAt": null,
+      "mergedAt": "2026-07-21T03:34:08Z",
       "additions": 1489,
       "deletions": 3
     },
@@ -125,16 +125,16 @@
       "body": "## What\n\nBounded retention for the append-only core memory partitions (`memories` + the `embeddings` that cascade with them). These grow one row per turn/fact/fragment/document forever with no upstream pruning — the failure class behind an unbounded-PGlite disk-fill. Nothing in the runtime bounds them today.\n\n## Growth surfaces (audit)\n\n| table | growth | prior bound | this PR |\n|---|---|---|---|\n| `memories` | 1 row / turn·fact·fragment·doc | none | **age + count prune** |\n| `embeddings` | 1:1 w/ memories, up to ~12KB/row (3072-dim) | cascade-on-memory-delete only | pruned via cascade in `deleteManyMemories` |\n| `logs` | 1 row / structured log | cascade on entity/room delete only | out of scope (flagged for follow-up — biggest table empirically) |\n| `central_messages` | 1 row / message | cascade on channel delete only | out of scope (flagged) |\n| `memory_access_logs` | append-only | none | out of scope (flagged) |\n\n`memories`/`embeddings` is the dominant always-growing surface (every turn), so it is addressed first. Empirically on a scratch DB after a smoke run, `logs` was actually the largest table (736 rows / 2.4 MB vs memories 188 rows / 288 KB) — flagged as the next retention target.\n\n## Design\n\n- `memory-retention.ts` — **pure, deterministic planner.** Two orthogonal bounds per (room, partition): age (`retentionDays`) and count (`maxRowsPerRoom`). A row is evicted iff *either* bound would evict it; the newest rows are always preserved. Deletion set is oldest-first and clamp-able (`maxDeletePerSweep`). **OFF by default** — no active bound yields an empty plan, so merging this changes no behavior until an operator opts in.\n- `memory-retention-service.ts` — registered runtime `Service`. Resolves config from `getSetting` (host-folded) with a `process.env` fallback; schedules a sweep only when a bound is active (unref'd timers, re-entrancy guard, restart-safe with no persisted cursor). Batches deletes through the adapter's `deleteManyMemories`, which drops each memory's embeddings in the same transaction. Scope is the canonical memory partitions only — never `logs`, `central_messages`, or auth-audit tables.\n\n## Config (all optional; absent ⇒ bound disabled)\n\n```\nELIZA_MEMORY_RETENTION_DAYS\nELIZA_MEMORY_RETENTION_MAX_ROWS_PER_ROOM\nELIZA_MEMORY_RETENTION_MAX_DELETE_PER_SWEEP\nELIZA_MEMORY_RETENTION_INTERVAL_MINUTES   # default 360 (6h)\n```\n\n## Tests — 20/20 green\n\n`vitest run packages/agent/src/runtime/memory-retention.test.ts`\n\nPlanner: off-by-default, non-positive-bounds-disabled, age bound, count bound, both bounds, per-room isolation, oldest-first ordering + clamp, missing-timestamp keep-safe, config parsing. Service (fake adapter): off-by-default no-op, synthetic 500-row growth → prune keeps the bound with newest surviving, age prune, **ONLY memory partitions touched (no logs/central_messages/auth-audit)**, shared per-sweep delete budget across partitions, restart-safe/idempotent, re-entrancy guard, safe `stop()`.\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before screenshots `N/A - backend-only change (agent runtime service + pure module), no UI surface`.\n<!-- evidence-row:after-screenshots -->\n- [ ] After screenshots `N/A - backend-only change, no UI surface`.\n<!-- evidence-row:walkthrough-video -->\n- [ ] Walkthrough video `N/A - backend-only deterministic module, covered by unit tests`.\n<!-- evidence-row:backend-logs -->\n- [ ] Backend logs `N/A - no server run in this PR; the code path is proven by 20 deterministic unit tests (planner + service against a fake adapter). Coverage-on-changed-files gate exercises the module`.\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend logs `N/A - no frontend change`.\n<!-- evidence-row:llm-trajectory -->\n- [ ] Real-LLM trajectory `N/A - no model calls; eviction is marker/timestamp deterministic`.\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: retention planner + service unit tests (20/20 green): https://github.com/0xSolace/eliza/blob/87173204066eec00ce8b01c962d14d24d1a5f4c2/packages/agent/src/runtime/memory-retention.test.ts . Empirical growth-surface table + growth projection in the fleet receipt (SOLIZA-M5-RETENTION-2026-07-20).\n",
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-20T23:00:44Z",
-      "mergedAt": null,
-      "additions": 895,
+      "mergedAt": "2026-07-21T05:24:08Z",
+      "additions": 1191,
       "deletions": 1
     }
   ],
   "codeChanges": {
-    "additions": 16477,
+    "additions": 16512,
     "deletions": 1721,
-    "files": 176,
-    "commitCount": 124
+    "files": 178,
+    "commitCount": 127
   },
   "completedItems": [
     {
@@ -646,6 +646,16 @@
         "packages/app/test/cloud-pair-session-token.test.ts",
         "scripts/security/coverage-lcov-excluded.txt"
       ]
+    },
+    {
+      "title": "test(scheduling): await declared plugin services in real-runtime boot barrier",
+      "prNumber": 16717,
+      "type": "tests",
+      "body": "## Root cause\n\n`createRealTestRuntime` returned as soon as `runtime.initialize()` resolved, but plugin services register **asynchronously**: `registerPlugin` fires a fire-and-forget `_ensureServiceStarted` that awaits `initPromise` and then",
+      "files": [
+        "packages/app-core/test/helpers/real-runtime.ts",
+        "plugins/plugin-personal-assistant/test/helpers/runtime.ts"
+      ]
     }
   ],
   "topContributors": [
@@ -690,9 +700,9 @@
       "summary": null
     }
   ],
-  "newPRs": 36,
-  "mergedPRs": 40,
+  "newPRs": 37,
+  "mergedPRs": 41,
   "newIssues": 0,
   "closedIssues": 12,
-  "activeContributors": 10
+  "activeContributors": 7
 }
