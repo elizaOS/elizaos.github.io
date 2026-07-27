@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-26 to 2026-08-02, elizaos/eliza had 8 new PRs (2 merged), 10 new issues, and 6 active contributors.",
+  "overview": "From 2026-07-26 to 2026-08-02, elizaos/eliza had 22 new PRs (13 merged), 18 new issues, and 12 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABKPy0sA",
@@ -17,19 +17,31 @@
       "createdAt": "2026-07-26T21:31:34Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 5
+      "commentCount": 6
     },
     {
-      "id": "I_kwDOMT5cIs8AAAABKMIuOw",
-      "title": "fix(cloud): make large-agent image upgrades rollback-safe without hydrating shared Postgres",
+      "id": "I_kwDOMT5cIs8AAAABKQJDdQ",
+      "title": "Staging managed-canary recovery must expose privacy-safe delete failure diagnostics",
       "author": "NubsCarson",
-      "number": 17172,
+      "number": 17184,
       "repository": "elizaos/eliza",
-      "body": "## Problem\n\nThe production admin-canary upgrade for the demo agent failed safely before cutover because the mandatory pre-upgrade snapshot exceeded the Cloud raw hydration budget:\n\n- production deploy: `main@054fc9feff4f95dc97409cc7b703e2e45600ebcc`\n- canary workflow: `30183809168`\n- canary job: `771bc989-3244-41d7-bb03-c9ff565be8c6`\n- sanitized actor-bound cause: `Pre-upgrade snapshot failed: Snapshot payload exceeds the raw hydration budget (268435456 bytes) — refusing to retain it`\n\nThe current v1 agent snapshot eagerly materializes one JSON document containing every agent-owned shared-Postgres row, including derived embeddings, plus base64 local files. Cloud accepts up to 256 MiB, while `/api/restore` and backup-chain reconstruction cap at 128 MiB, so a 128–256 MiB snapshot can authorize a cutover but be impossible to restore. R2 offload happens only after the whole payload has already been downloaded, parsed, reserialized, encrypted, and retained.\n\nFor managed Cloud agents, old and new containers use the same external Postgres database. Copying that database into the container snapshot is both wasteful and semantically dangerous: the current rollback restore deletes/reinserts live shared rows while the current image may still be serving.\n\nThis extends #16639; it is the rollout-blocking correctness closure discovered by the exact production canary.\n\n## Required architecture\n\n### 1. Immediate v1 safety alignment\n\n- Define one canonical v1 maximum restorable wire size shared by agent restore, Cloud fetch, backup reconstruction, and verification; it must not exceed 128 MiB.\n- Add source-side aggregate/raw/expanded budgeting so the agent aborts before eagerly retaining every component.\n- Budget failures are typed, observable, privacy-safe, non-retryable, and occur before cutover.\n- Keep manual/auto v1 behavior for genuinely small backups; do not raise heap or body limits.\n\n### 2. Legacy-to-v2 standby bridge\n\nThe first rollout crosses an image-protocol boundary: the old image emits only v1 and rejects a v2 database reference. A projected v1 payload cannot make old restore safe because an empty/partial `postgres-rows` restore deletes data.\n\n- Add a distinct durable legacy-standby lifecycle; do not reuse `replacement_cleanup_*`, whose reconciler semantics mean “garbage to destroy.”\n- After the new image is provisioned and healthy, stop-preserve the exact old container, volume, VPN identity, image digest, environment generation, and capacity ownership.\n- Atomically cut traffic to the new placement while retaining the old stopped container as rollback authority.\n- Any failed acceptance CAS-switches back to that exact standby without calling old `/api/restore`.\n- Standby retirement requires a verified v2 restore point and explicit acceptance; time alone may never retire it.\n- Recovery/reconciliation must be crash-safe and generation/CAS fenced.\n\n### 3. Additive v2 backup protocol\n\n- `POST /api/snapshot` accepts a bounded purpose/capability contract.\n- Shared/BYO Postgres is represented by a credential-free, agent-bound connection-identity fingerprint/reference; restore requires an exact match and performs zero SQL deletes/inserts.\n- PGlite remains a real captured/restored database component.\n- Local media, vault, character/config, and state are streamed as deterministic bounded archive chunks.\n- Reuse `agent_sandbox_backups` and the existing tenant-scoped backup namespace. Store an encrypted descriptor plus chunk objects; do not introduce a second backup store.\n- Each fixed-size chunk uses authenticated encryption with AAD binding organization, sandbox, backup, schema, index, and size. Hashes/nonces/tags live in the descriptor; commit the descriptor only after every chunk verifies.\n- Restore streams, decrypts, verifies, and stages all components before destructive apply. Reject traversal, symlinks, malformed/truncated streams, wrong tenant/agent/database identity, and partial data.\n- Reconcile the required R2 bindings into the provisioning daemon. Existing whole-string object helpers must not carry v2.\n\n### 4. Rollout\n\n- Prefer a narrow bridge image first, then the feature image, so rollback-protocol risk is isolated.\n- The first legacy→v2 canary retains the old standby through real v2 restore proof.\n- After the v2 image becomes the declared rollback floor, subsequent blue/green upgrades use v2 backups and the ordinary cleanup path.\n- Never bypass the mandatory restore point, silently drop local state, or treat the external-Postgres reference as a disaster backup.\n\n## Acceptance and evidence\n\n- [ ] Exact-limit v1 passes; limit+1 fails before cutover; Cloud and restore limits cannot diverge.\n- [ ] Source-side snapshot collection stays bounded and cancels promptly.\n- [ ] A >256 MiB legacy fixture crosses the protocol boundary with bounded worker memory while the old standby remains rollback-capable.\n- [ ] Crash/retry at every standby phase converges exactly once without destroying the serving or rollback placement.\n- [ ] Failed acceptance CAS-restores the exact old standby without `/api/restore`.\n- [ ] v2 shared-Postgres restore validates identity, issues zero SQL, and preserves rows written after snapshot.\n- [ ] PGlite, media, vault, character/config, and state round-trip exactly, including corrupt/truncated/adversarial cases.\n- [ ] No backup descriptor becomes visible until every encrypted chunk is durable and verified; orphan chunks are reconciled safely.\n- [ ] Existing small v1 manual backup/restore remains green.\n- [ ] Real production canary succeeds for the exact published digest, then proves `/api/health` zero failed plugins, Cerebras chat, Notes/Calendar create/show/edit/switch/delete, restart persistence, PWA, and physical LP3.\n- [ ] Structured backend logs, memory/stream metrics, exact SHAs/digests, real HTTP evidence, browser/device screenshots, and a walkthrough are attached and reviewed.\n\n## Rejected shortcuts\n\nRaising payload/heap limits, gzip-only wrapping, raw JSON-to-R2 after hydration, empty/partial Postgres v1 dumps, skipping rollback, same-node volume assumptions, or destroying the old container before acceptance.",
-      "createdAt": "2026-07-26T02:36:20Z",
+      "body": "## Problem\n\nThe exact post-merge staging recovery canary for #17173 (run 30224564063, deployed commit `e00283274bd6490f6fedc02fd56f9de92dbe29fd`) found one stale dedicated canary and received `202` for its identity-bound delete, but the async `agent_delete` job exhausted its attempts after 200.9 seconds. The public canary artifact correctly redacts IDs and raw errors, but currently collapses the terminal job to `job_failed`, leaving no sanctioned way to distinguish provider stop, credential revocation, lifecycle ownership, or row-delete failure before a retry.\n\nNo replacement agent was created, no chat request ran, and staging health remains green. A blind retry is not acceptable because post-stop failures can be retried after provider-side capacity mutation.\n\n## Scope\n\nAdd a workflow-dispatch-only, staging-environment, read-only diagnostic mode to the existing managed dedicated canary workflow. It must:\n\n- accept only an exact `r<run-id>a<attempt>` suffix;\n- query the staging database read-only for exactly one matching sandbox and its newest `agent_delete` job;\n- emit only a strict allowlisted, privacy-safe diagnostic (statuses, attempts, known result booleans, classified error code, timestamps/durations; no IDs, names, URLs, IPs, database strings, credentials, or raw arbitrary JSON);\n- fail closed on zero/multiple targets, malformed rows, or unclassified sensitive text;\n- perform zero POST/DELETE/UPDATE/DDL requests or SQL;\n- share the canary concurrency group so it cannot race a live canary;\n- preserve the normal canary path byte-for-byte unless diagnostic mode is explicitly selected;\n- include executable workflow-contract/privacy tests.\n\n## Acceptance\n\n1. Local workflow-contract and sanitizer tests pass.\n2. A branch-ref diagnostic dispatch against the failed suffix returns a classified terminal job packet without mutating staging.\n3. The packet is sufficient to decide whether a source fix or safe retry is required.\n4. Evidence is linked here and in the PR; production is untouched.\n",
+      "createdAt": "2026-07-26T23:17:32Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 2
+      "commentCount": 4
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABKQ1nrg",
+      "title": "fix(cloud): correlate preserved canary deletion errors with bounded history",
+      "author": "NubsCarson",
+      "number": 17199,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe post-merge read-only staging diagnostic run 30231515082 stopped fail-closed at the preserved sandbox error boundary after the bounded delete-job history had sanitized successfully. The sandbox writer stores a canonical permanent-delete wrapper, while recovery re-enqueue preserves that wrapper as newer delete jobs are added. Coarse error-code equality is insufficient for an unclassified cause and the raw value must never leave the runner.\n\nParent lifecycle investigation: #17184. Previous bounded-history fix: #17198.\n\n## Scope\n\n- Parse exactly one canonical permanent-delete wrapper and bind its attempt count.\n- Correlate the raw cause only in memory to an exact exhausted failed job within the already bounded newest-three history.\n- Reuse that job sanitized classification/profile; emit no raw value, hash, source index, or new sandbox profile.\n- Preserve fail-closed behavior for unmatched, ambiguous, nested, malformed, direct opaque, result-error, lifecycle, counter, and ordering boundaries.\n- Preserve schema v3 and the read-only workflow.\n\n## Acceptance criteria\n\n- Exact cause + attempts + terminal lifecycle correlation is required.\n- deletion_failed binds the latest job; deletion_pending may bind an older retained failure after recovery re-enqueue.\n- Deletion ownership and a positive persisted failure count are required for the canonical wrapper.\n- Adversarial tests cover cause/counter/status/order mismatch, wrapper lookalikes/nesting, all three bounded positions, same-shape secret variants, and forbidden-output scanning.\n- Focused tests, Biome, diff check, full verify, and independent exact-object review pass.\n- A new read-only diagnostic is not dispatched until the merged source is exact and separately authorized; no delete retry, manual database write, global pin, or staging mutation is part of this issue.\n\n## Evidence\n\n- Backend logs: N/A - the public workflow annotation identifies only the classifier boundary and exposes no raw value.\n- Frontend logs: N/A - backend workflow-only change.\n- Screenshots: N/A - no user interface change.\n- Video: N/A - no user interface change.\n- Real-model trajectory: N/A - no model behavior change.\n- Domain artifact: N/A - the prior run intentionally uploaded no artifact after fail-closed classification.",
+      "createdAt": "2026-07-27T02:18:30Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
     },
     {
       "id": "I_kwDOMT5cIs8AAAABKP6whw",
@@ -41,7 +53,7 @@
       "createdAt": "2026-07-26T22:07:29Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 1
+      "commentCount": 2
     },
     {
       "id": "I_kwDOMT5cIs8AAAABKP6tug",
@@ -53,22 +65,34 @@
       "createdAt": "2026-07-26T22:07:16Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABKP5L3w",
-      "title": "[Parent suite] Make calendar availability source-complete and account-safe",
-      "author": "lalalune",
-      "number": 17176,
-      "repository": "elizaos/eliza",
-      "body": "Parent epic: #17175\n\nImplement the calendar truth foundation required before family scheduling can make availability claims.\n\nAcceptance criteria:\n- preserve connector account and grant identity for calendars, events, sync state, and pruning;\n- drain Google calendar/event pages and persist incremental sync tokens per account/calendar;\n- recover expired cursors with a full snapshot and apply cancellation tombstones without cross-account deletion;\n- preserve attendee RSVP/role, transparency, visibility, and explicit send-update semantics;\n- expose complete/partial/unavailable source health so missing data never reads as free time;\n- provide privacy-only guest free/busy and deterministic conflict evaluation;\n- prove multi-account isolation, partial failure, cursor deltas, 410 recovery, DST/all-day/tentative/declined/private-busy behavior with automated tests.\n\nEvidence must include real provider or sandbox-provider logs and domain artifacts; mocks alone do not close this issue.",
-      "createdAt": "2026-07-26T22:00:24Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
+      "commentCount": 2
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs73Fk8q",
+      "title": "feat(lifeops): build trustworthy parent coordination foundations",
+      "author": "lalalune",
+      "number": 17206,
+      "body": "# Relates to\n\nRelates to #17175, #17176, #17177, #17178, #17179, and #17181.\n\nThe research, architecture, capability ledger, connector plan, persona,\n48-scenario corpus, implementation phases, and evidence status are documented\nin\n[`packages/docs/ongoing-development/research/11-agentic-parent-suite.md`](https://github.com/elizaOS/eliza/blob/feat/agentic-parent-suite/packages/docs/ongoing-development/research/11-agentic-parent-suite.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest\n      `origin/develop` with zero conflicts (`8132bc67366`).\n- [x] `bun install` and `bun run verify` were run after sync.\n- [ ] A reviewer can confirm the complete live-provider product journey without\n      reading the code. This remains a draft because live OAuth/webhook/provider\n      proof is incomplete and G1 correctly failed.\n\n# Sync with develop\n\n- [x] Rebased onto the latest `origin/develop`; zero conflicts.\n- [x] `bun run verify` passes post-sync.\n\n# Risks\n\n**Large.** This is a broad foundation PR (297 files) spanning calendar source\nidentity, availability, recurrence/timezone behavior, native Apple permission\nsemantics, Google watch lifecycle, immutable approval and mutation receipts,\nhousehold resource capacity, personal-assistant domains, one shared scheduler,\nconnector contracts, UI, benchmark provenance, and a SQL migration.\n\nPrimary risks are incorrect authority or tenant binding, duplicated external\neffects during retry, recurrence/DST mistakes, stale source truth, webhook\nabuse, accidental data disclosure across households/calendars, native\npermission-mode drift, and UI states that hide a partial provider failure. The\nnew paths fail closed, use source/tenant/version/idempotency bindings, and have\nfocused real-PGlite and contract coverage; live providers remain a draft gate.\n\n# Background\n\n## What does this PR do?\n\n- Adds the full world-traveling co-parent persona and G1-G48 test catalog, plus\n  a 12,792-word implementation report grounded in 31 official, research,\n  safety, and first-person sources.\n- Adds source-aware calendar availability across selected Google, Apple,\n  Microsoft, and ICS feeds, including health/freshness/provenance and explicit\n  partial/error states.\n- Adds durable Google push-channel bindings, strict notification validation,\n  dedupe/order checks, scheduled retries and renewals, restart reconstruction,\n  quota classification, and controlled 410 resync.\n- Adds immutable calendar mutation proposals, exact owner/editor routing,\n  approval CAS, replay receipts, series/version/tenant/source binding, Apple\n  add-only semantics, and truthful invitation decline behavior.\n- Adds deterministic caregiver/vehicle/restraint capacity solving with\n  authorization, accessibility, freshness, handoff, transition,\n  distinct-resource, invalidation, and shared-review constraints.\n- Extends one shared `ScheduledTask` architecture and typed dispatch results; it\n  does not add a second scheduler.\n- Adds school-source reconciliation, household operations, family\n  communications, food/inventory, parenting guidance,\n  weather/routes/activity oracle, and childcare/work-scenario foundations with\n  explicit source and safety contracts.\n- Adds a calendar source manager UI and native permission presentation, plus\n  desktop/mobile screenshots and a walkthrough harness.\n- Fixes LifeOpsBench acting-agent provenance so adapter/provider/model are\n  distinct from evaluator/judge identity and incomplete artifacts are rejected.\n\n## What kind of change is this?\n\nFeatures, improvements, tests, documentation, and one additive database\nmigration.\n\n# Documentation changes needed?\n\n- [x] Documentation is required and included.\n- [x] The MVP persona documentation and ongoing-development index are updated.\n- [x] The detailed report records what exists, what is missing, which work\n      belongs to the LLM, which pieces require deterministic\n      primitives/connectors, human failure modes, implementation phases,\n      G1-G48 scenarios, and the exact evidence contract.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. Read the executive status and capability ledger in the report linked above.\n2. Inspect the calendar source manager screenshots/video and the real G1\n   failure trajectory in the evidence rows.\n3. Review the durable Google watch test, owner calendar mutation gateway\n   integration test, and resource-capacity PGlite integration test.\n4. Confirm the report's explicit `0/48 complete` statement before interpreting\n   the implementation status.\n\n## Detailed testing completed\n\n- `bun install` completed in the clean rebased worktree, including the required\n  971 MiB artifact sync.\n- `bun run verify`: **578/578 successful Turbo tasks** across 254 packages;\n  lint, build, typecheck, dependency/script audits, 8,661-test-file anti-focus\n  scan, and 28 dist-path consumer checks passed.\n- Complete personal-assistant suite: **1,629 passed in 204 files, 8 intentional\n  skips**, followed by a clean package TypeScript check.\n- Calendar connector/service suite: **348 passed, 2 intentional live-provider\n  skips**; Google connector suite 38 passed; connector shim 30 passed;\n  public-route audit 5 passed.\n- Source manager: 60 component/hook assertions and 63 focused\n  accessibility/visual checks passed; five rendered iterations were reviewed.\n- Immutable calendar mutation and owner-editor paths: 31 real-PGlite\n  integration cases; EventEditor/routes/client contracts: 35 cases.\n- Native Apple seam: 7 cases; Swift bridge contract: 15 cases.\n- Household resource capacity: 15 real-PGlite cases; owner/affected-party\n  resolution: 20 cases.\n- LifeOpsBench changed-area regressions: 62 passed under Python 3.12.\n- Focused evidence rerun: Google watch 8 passed; owner mutation gateway 13\n  passed; resource capacity 15 passed.\n- App audit: 252 views, 218 good, 25 manual-review, 9 pre-existing unrelated\n  `needs-work`, 0 broken. Calendar desktop was good; three smaller calendar\n  viewports were manually reviewed with no reported\n  quality/console/overflow/color/hover defect.\n- iOS cloud simulator build/install/launch succeeded. A real EventKit\n  transaction was not possible without a reachable authenticated cloud\n  backend.\n- Real G1 model run: 12 turns with an acting-agent/evaluator/judge provenance\n  chain and workload hash. It scored 0.0 and was manually reviewed. It repeated\n  generic calendar searches, lacked a source-connect action, invented contact\n  details, attempted an unapproved write, and then duplicated it. This is useful\n  failure evidence, not a passing journey.\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] ![before-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-calendar-source-before.jpg)\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-calendar-source-after.jpg)\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-calendar-source-walkthrough.mp4\n<!-- evidence-row:backend-logs -->\n- [x] [17206-backend-domain-tests.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-backend-domain-tests.log)\n<!-- evidence-row:frontend-logs -->\n- [x] [17206-app-audit-report.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-app-audit-report.json)\n<!-- evidence-row:llm-trajectory -->\n- [x] [17206-g1-live-failure-trajectory.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-g1-live-failure-trajectory.json)\n<!-- evidence-row:domain-artifacts -->\n- [x] [17206-verify.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-verify.log)\n<!-- evidence-row:ocr-review -->\n- [x] [17206-calendar-source-ocr-review.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17206-calendar-source-ocr-review.json)\n\n# Evidence Details\n\nThe evidence rows will contain JPG desktop/mobile before and after comparisons,\nMP4 source-manager walkthrough, real-PGlite backend logs, the full app audit\nreport, OCR review, the provenance-valid G1 live trajectory, the clean\nrepository verification log, and iOS build/install/launch proof. Every artifact\nwas manually inspected and secret-scanned before upload.\n\n## Known gaps / failures\n\n- **0 of G1-G48 currently satisfies the complete live evidence contract.** The\n  report says this explicitly and lists the missing proof per scenario family.\n- The most important newly observed product gap is an agent-facing typed source\n  list/select/connect/reconnect action. Owner UI/routes exist, but the acting\n  agent could not invoke them in G1.\n- Live multi-account Google/Microsoft OAuth, shared/guest grant acquisition,\n  Apple EventKit mutation, uniquely routed public Google webhook delivery,\n  provider WAF/rate-limit proof, and real-provider receipt review remain\n  pending.\n- Raw school inbox/document/photo/portal ingestion, real maps/travel-time\n  composition, production grocery inventory/purchase, authenticated family\n  messaging/reply, and acoustic speaker identity remain incomplete.\n- The global app audit is not represented as clean: it passed 253 Playwright\n  checks but its ratchet remains red because of nine unrelated pre-existing\n  views.\n- The iOS evidence proves the exact branch built, installed, and launched; it\n  does not prove EventKit execution because no authenticated cloud backend was\n  reachable.\n- The real G1 trajectory is a failed run and must not be treated as qualifying\n  success evidence.\n- The exhaustive Python benchmark suite was not completed; the 62 directly\n  affected Python 3.12 regressions passed. The full TypeScript\n  personal-assistant suite and repository-wide verify both completed.\n\nThis PR stays draft until reviewers decide whether to split the broad foundation\nor continue adding live-provider evidence on this branch.\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-27T19:23:22Z",
+      "mergedAt": null,
+      "additions": 83959,
+      "deletions": 3252
+    },
+    {
+      "id": "PR_kwDOMT5cIs72yOSj",
+      "title": "Fix/skunkscan funding token transfer wiring",
+      "author": "SkunkscanAI",
+      "number": 17202,
+      "body": "## Summary\r\n- `analyzers/funding.ts` now falls back to the first incoming SPL token transfer for\r\n  initial-funding-source detection when no native SOL transfer is found, and tags the\r\n  result as native/token/unknown via a new `fundingTransferType` field.\r\n- Fixed a pre-existing wiring bug in `pipeline/walletPipeline.ts`: `analyzeWalletFunding`\r\n  was receiving the raw Helius `SolanaParsedTransaction` (fields `fromUserAccount`/\r\n  `toUserAccount`/`amount`) where it expects the normalized `ParsedWalletTransaction`\r\n  (`from`/`to`/`amountSol`/`tokenTransfers`). `parseSolanaTransaction()` existed in\r\n  `parsers/transaction.ts` but was never called anywhere, so this analyzer's\r\n  native-transfer detection silently never matched at runtime.\r\n\r\n## Evidence (PR_EVIDENCE.md)\r\n- **Real LLM-call trajectory**: N/A — no agent/action/prompt/model behavior involved.\r\n- **Backend/frontend logs**: N/A — pure data-transformation analyzer, no live service to log.\r\n- **Screenshots/video**: N/A — no UI surface.\r\n- **Type-check diff (before/after)**: Ran `bun run --cwd packages/agent typecheck`,\r\n  stashing these 4 files out for a baseline (102 pre-existing errors) vs. restored\r\n  (101 errors). The only change is the disappearance of the exact wiring-bug error\r\n  this PR fixes (`walletPipeline.ts` SolanaParsedTransaction→ParsedWalletTransaction\r\n  mismatch); zero new errors introduced by these 4 files.\r\n- No existing tests cover this analyzer (`packages/agent/src/skunkscan` has no test\r\n  files at all), so no test suite evidence to attach.\r\n\r\n## Test plan\r\n- [ ] `bun run --cwd packages/agent typecheck` (still has 101 pre-existing unrelated errors, none new)\r\n- [ ] Manual review of `analyzers/funding.ts` branch logic",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-27T07:40:09Z",
+      "mergedAt": null,
+      "additions": 13578,
+      "deletions": 20083
+    },
     {
       "id": "PR_kwDOMT5cIs70ICN-",
       "title": "fix: restore LifeOps onboarding flows",
@@ -82,6 +106,18 @@
       "deletions": 602
     },
     {
+      "id": "PR_kwDOMT5cIs71lg9X",
+      "title": "fix(chat): make streaming persistence and telemetry exact",
+      "author": "lalalune",
+      "number": 17140,
+      "body": "Closes #17098\n\n## Outcome\n\nThis makes chat streaming a single, observable provider → runtime → SSE → React → database pipeline and removes latency policy from correctness CI.\n\nThe runtime now has one owner for assistant-message persistence, the SSE completion frame carries the exact committed IDs, the client reconciles optimistic messages in place, and normal streaming performs no post-response history reload. Failed persistence emits an error and never a fake `done`.\n\n## Runtime and persistence\n\n- Return the exact response-memory IDs committed by `DefaultMessageService`.\n- Reuse those IDs in the chat route instead of writing or reading the assistant response a second time.\n- Preserve callback-before-persistence delivery for fast first response, with the same-room persistence barrier added upstream, while withholding SSE `done` until the write succeeds.\n- Mark genuinely ephemeral responses explicitly; never invent a database ID.\n- Treat delta streams as deltas. The previous overlap heuristic could corrupt `Fast streaming stays smooth.` into `Fastreaming staysmooth.`.\n- Remove the hidden 30-second runtime-ready gate.\n- Remove the implicit 180-second chat-generation abort, 60-second browser SSE idle abort, 60-second trajectory-finalization abort, and 5-second conversation-restore race. Cancellation is now caller-owned through `AbortSignal` unless a caller explicitly configures a boundary.\n- Move trajectory persistence/finalization off the visible-response path while tracking it as post-delivery work.\n\n## Providers, cache, and database\n\n- Providers selected for a compose run execute concurrently through one `Promise.all`.\n- Stage 1 excludes context it cannot consume; the planner reuses all already-composed provider results and refreshes only `RECENT_MESSAGES` when an early reply changed history.\n- Replace mutable one-second identity/entity caches with exact turn-scoped promise memoization, rejection eviction, and explicit invalidation.\n- Memoize sender-role, room, and related-entity reads within a turn.\n- Skip attachment-history database work for ordinary text turns.\n- Make SQL memory creation one atomic `INSERT ... ON CONFLICT DO NOTHING RETURNING`, removing the read-before-write race and extra database round trip.\n- Cache only successful shared-agent scope authorization. Failed 401/403/404 hydration is never persisted, so a corrected credential, tier, or agent row is observed on the next authoritative attempt instead of serving a stale denial for 30 seconds.\n\n## Browser behavior\n\n- Reconcile optimistic user/assistant IDs in place from the completion frame.\n- Do not reload conversation history after an ordinary successful response.\n- Reload only when the response is action/incomplete or committed IDs are unavailable.\n- Replace requestAnimationFrame token throttling—which can stop making progress in background tabs—with microtask burst coalescing and a synchronous terminal flush.\n- Remove the reconnect debounce/speculative resend path; user-triggered resend starts immediately and remains explicit.\n- Add the missing `rate_limited` SSE contract.\n\n## CI and telemetry\n\n- Replace the ~1,000-line latency workflow with a small, manual, observational workflow.\n- Remove numeric latency acceptance thresholds, regression ratchets, production-code-changed/test-changed gates, and the workflow self-test enforcing those policies.\n- Run direct and gateway observations concurrently and upload raw JSONL. Telemetry reports numbers; it does not decide correctness.\n- Remove numeric enforcement from inference-auth latency tooling.\n- Add a real browser telemetry harness using the production route, production stream client, `useChatSend`, React transcript, real HTTP/SSE, and PGLite.\n- Expand the Cerebras runner to cover the complete production chat flow plus an explicit concurrent sweep of every registered provider.\n\n## PR review\n\n- #16882: closed unmerged. The proposed provider deadline would turn latency into missing context and make a slow dependency look healthy.\n- #16820: closed unmerged. Browser telemetry is retained here, but the numeric merge gate and changed-production-requires-changed-test policy are removed.\n- #17037: merged and retained. Dashboard replies have one transport owner.\n- #17057: merged; its useful DB coalescing is retained, while this branch replaces mutable TTL-based identity/entity reuse with exact turn-scoped memoization.\n- #17060: merged and retained. Cerebras strict object schemas remain recursively closed instead of being stripped.\n- #17076: merged and retained as a cache-only shared inference hot path. This branch removes its remaining negative-scope TTL, which could serve stale denial after state was already corrected.\n\n## Final live telemetry\n\nTwo consecutive final-base runs generated at 2026-07-23T22:00:03Z and\n2026-07-23T22:03:19Z. Together they cover 60 live Cerebras\n`gemma-4-31b` production turns.\n\n### End-to-end chat\n\n| Measure | p50 | p90 | p95 | max |\n| --- | ---: | ---: | ---: | ---: |\n| Full visible response | 396.114 ms | 799.086 ms | 869.371 ms | 2582.162 ms |\n| First visible token | 389.000 ms | 773.000 ms | 817.000 ms | 2528.000 ms |\n| LLM inference | 353.584 ms | 742.264 ms | 842.271 ms | 2564.000 ms |\n| Provider composition | 8.222 ms | 25.000 ms | 32.198 ms | 141.000 ms |\n| Message ingress | 2.000 ms | 4.545 ms | 7.000 ms | 95.849 ms |\n| Message delivery | 3.000 ms | 5.000 ms | 7.000 ms | 57.000 ms |\n| Message-service overhead | 4.042 ms | 14.736 ms | 21.162 ms | 149.989 ms |\n| Background quiescence | 20.657 ms | 111.116 ms | 184.010 ms | 1040.171 ms |\n\n- 60/60 turns succeeded and each made exactly one live LLM call.\n- 1,440/1,440 provider executions completed with zero errors.\n- Cerebras reported 92,416 cached input tokens out of 150,504 prompt tokens\n  (61.4043%).\n- Every distinct proof token was present in both the returned and streamed\n  response.\n\nThe `50 ms` figure is not normal synchronous message-service overhead. Across\nboth runs the exclusive wrapper remainder is 4.0 ms at p50. The outlier run\ncontained one synchronized PGLite/storage stall: participant-state reached\n91 ms, FACTS 55 ms, RECENT_MESSAGES 50 ms, and delivery persistence 57 ms in\nthe same turn. Another turn inflated many otherwise trivial providers together.\nThat shape proves process-wide database/event-loop scheduling, not serial\nprovider execution. The 149.989 ms wrapper outlier was a gap between compose\ncompletion and stage-one preprocessing; it disappeared on the immediate repeat\n(22 ms max), consistent with Bun GC/event-loop scheduling.\n\nThe remaining end-to-end outliers were model-side: the repeat had two Cerebras\ncalls at 2.1–2.56 seconds while local provider and delivery spans remained\nnormal. Detached message events, evaluators, and run-ended work occur after\nterminal response visibility; they can still contend with local PGLite, but no\nlonger delay the visible response.\n\nNormal production compose selected ten providers (60 calls/provider):\n\n| Provider | p50 | p90 | p95 | max |\n| --- | ---: | ---: | ---: | ---: |\n| FACTS | 8.000 | 24.625 | 32.248 | 141.228 |\n| RECENT_MESSAGES | 4.463 | 7.657 | 18.198 | 107.292 |\n| CHANNEL_TOPICS | 0.252 | 0.463 | 0.593 | 1.603 |\n| UI_CONTEXT | 0.248 | 0.454 | 0.624 | 1.504 |\n| RUNTIME_MODEL_CONTEXT | 0.222 | 0.423 | 0.602 | 1.487 |\n| ATTACHMENTS | 0.199 | 0.375 | 0.487 | 1.452 |\n| RECENT_ERRORS | 0.165 | 0.317 | 0.404 | 1.412 |\n| REPLY_CONTEXT | 0.148 | 0.257 | 0.340 | 0.375 |\n| PLATFORM_CHAT_CONTEXT | 0.094 | 0.185 | 0.212 | 0.235 |\n| PLATFORM_USER_CONTEXT | 0.085 | 0.165 | 0.188 | 0.205 |\n\n### Explicit all-provider concurrent sweep\n\nThe sweep deliberately bypasses final state reuse so every provider is actually\nmeasured. Each row is 60 executions; 1,440/1,440 provider executions succeeded\nwith zero errors, aborts, or deadline failures.\n\n| Provider | p50 | p90 | p95 | max |\n| --- | ---: | ---: | ---: | ---: |\n| DOCUMENTS | 7.491 | 31.684 | 60.638 | 164.308 |\n| ACTIONS | 3.632 | 25.288 | 40.220 | 157.934 |\n| WORLD | 7.896 | 42.848 | 51.243 | 261.548 |\n| FACTS | 7.854 | 42.824 | 51.191 | 261.463 |\n| RELATIONSHIPS | 6.426 | 29.583 | 47.463 | 102.455 |\n| RECENT_MESSAGES | 3.691 | 22.084 | 45.523 | 57.487 |\n| CHOICE | 2.494 | 17.818 | 33.796 | 148.654 |\n| FOLLOW_UPS | 2.234 | 15.985 | 38.917 | 47.786 |\n| ENTITIES | 2.110 | 15.870 | 36.503 | 47.702 |\n| CHANNEL_TOPICS | 1.512 | 11.292 | 18.659 | 147.387 |\n| CHARACTER | 1.337 | 13.989 | 18.499 | 147.294 |\n| USER_EMOTION_SIGNAL | 1.240 | 13.974 | 18.356 | 101.909 |\n| RUNTIME_MODEL_CONTEXT | 1.253 | 13.988 | 18.365 | 101.918 |\n| UI_CONTEXT | 1.259 | 13.996 | 18.366 | 101.921 |\n| CONTACTS | 1.092 | 8.499 | 14.924 | 101.764 |\n| CURRENT_TIME | 1.086 | 8.493 | 14.922 | 101.740 |\n| ATTACHMENTS | 1.056 | 8.467 | 14.859 | 101.748 |\n| ACTION_STATE | 0.582 | 7.798 | 16.030 | 45.975 |\n| PROVIDERS | 0.633 | 1.702 | 13.621 | 44.842 |\n| RECENT_ERRORS | 0.579 | 1.342 | 13.594 | 44.815 |\n| CONTEXT_BENCH | 0.555 | 1.204 | 13.574 | 44.797 |\n| REPLY_CONTEXT | 0.540 | 1.178 | 13.566 | 44.788 |\n| PLATFORM_CHAT_CONTEXT | 0.499 | 1.065 | 13.527 | 44.754 |\n| PLATFORM_USER_CONTEXT | 0.494 | 1.058 | 13.522 | 44.751 |\n\nUnits are milliseconds. Synchronized inflation of cheap providers in the first\nrun produced the sweep tails. The immediate repeat normalized to\n7.386/18.719/20.294 ms at p50/p95/max, confirming providers remain concurrent\nrather than additive.\n\n### Deliberately slow browser trace\n\nWith the model fixture emitting one token per second, visible server frames\narrived at 1089.23, 2091.32, 3093.43, and 4093.66 ms; browser DOM mutations\narrived at 1090.7, 2092.6, 3094.6, and 4137.5 ms. The completion frame reached\nthe browser at 4135.7 ms.\n\nProvider output, reconstructed SSE text, completion text, React state, PGLite row, and rendered DOM were all exactly `Fast streaming stays smooth.`. The persisted assistant/user IDs exactly matched the completion frame. React committed seven times and performed zero history reloads.\n\n## Verification\n\n- `bun install`: clean lockfile/install.\n- `bun run verify`: 578/578 tasks successful in 2m33s on the final rebased tree; all lint, typecheck, test-integrity, script/view inventory, and 28 dist-consumer checks passed.\n- Latest readiness/streaming/persistence/recap semantic suite: 90/90 passed.\n- Focused core/agent/UI streaming: 127 passed.\n- Real conversation restore: 5 passed.\n- Real PGLite memory integration: 38 passed.\n- Shared scope, admission gate, and voice hot path: 68 passed.\n- Real Miniflare Durable Object serialization: passed.\n- Real browser telemetry: passed; screenshot generated and manually inspected.\n- App visual audit: chat view good at all four desktop/mobile/rest/hover viewports with no chat render, overflow, or overlay defects.\n\n## Evidence applicability\n\n- Live model trajectory/log: represented by the 60 distinct proof-bearing turns and raw JSON reports produced by the runner.\n- Database artifact: real PGLite user/assistant rows were read back and compared to the SSE completion IDs/text.\n- Screenshot: generated and manually inspected locally; binary upload is N/A from the GitHub CLI-only environment.\n- Video: N/A — this is transport/runtime behavior; the one-token-per-second trace records the full timing sequence numerically and the screenshot records final pixels.\n- Live Eliza Cloud direct/gateway trace: N/A — this environment has Cerebras credentials but no Eliza Cloud, BitRouter, AI Gateway, or Cloudflare credentials. The local workerd/Miniflare and real PGLite paths were exercised instead.\n\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - no rendered UI component or visual styling changed; this is stream transport and state reconciliation\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-chat-telemetry-final2.png)\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - no visual interaction changed; the deliberately slow browser trace above records every server frame, browser frame, DOM mutation, and terminal commit\n\n<!-- evidence-row:backend-logs -->\n- [x] [17140-eliza-cerebras-chat-final3.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-cerebras-chat-final3.json)\n\n<!-- evidence-row:frontend-logs -->\n- [x] [17140-eliza-chat-telemetry-final2.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-chat-telemetry-final2.json)\n\n<!-- evidence-row:llm-trajectory -->\n- [x] [17140-eliza-cerebras-chat-final3.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-cerebras-chat-final3.json)\n\n<!-- evidence-row:domain-artifacts -->\n- [x] [17140-eliza-chat-telemetry-final2.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-chat-telemetry-final2.json)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-23T21:53:31Z",
+      "mergedAt": "2026-07-27T17:16:54Z",
+      "additions": 3284,
+      "deletions": 3499
+    },
+    {
       "id": "PR_kwDOMT5cIs72d1gL",
       "title": "fix(cloud): recover stale managed canaries safely",
       "author": "NubsCarson",
@@ -92,51 +128,81 @@
       "mergedAt": "2026-07-26T22:54:56Z",
       "additions": 1481,
       "deletions": 105
-    },
-    {
-      "id": "PR_kwDOMT5cIs72cysK",
-      "title": "feat(core): add canonical small/large model-pair resolver",
-      "author": "NubsCarson",
-      "number": 17171,
-      "body": "Closes #17170. Extracted from the still-valid core portion of #16591.\n\n## Summary\n\nAdds the typed, browser-safe core resolver for canonical small/large model slots and exports it consistently from Node, browser, and edge entrypoints.\n\nThis is deliberately only the foundation. It does not wire providers, CLI inference, host seeding/display, or Cloud configuration.\n\n## Contract\n\n- Runtime setting outranks injected environment.\n- Blank runtime values defer to environment.\n- Explicit malformed/mistyped runtime values fail closed.\n- Known family qualifications are accepted only for the matching family.\n- Native slash IDs and family-pinned slash IDs remain intact.\n- Empty, control-character, double-known-prefix, and unknown-caller-family inputs are rejected.\n\n## Verification\n\n- Focused resolver/barrel tests: 42/42\n- Resolver coverage: 100% statements, branches, functions, and lines\n- Full core: 4,254 pass / 1 intentional skip\n- Core typecheck: pass\n- Node/browser/edge/testing build + declaration output: pass\n- Actual built-entry import smoke across Node/browser/edge: pass\n- Biome on all six changed files: pass\n- `git diff --check`: pass\n- Independent review bound to `b6a93c3b35a8e279fc5bfd967938f535b5a85005`: PASS, no P0/P1\n\n## Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - typed core configuration foundation; no UI or existing visual behavior changes.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - typed core configuration foundation; no UI changes.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - no interactive surface.\n<!-- evidence-row:backend-logs -->\n- [x] N/A - this foundation has no runtime consumer yet; executable proof is the built-entry smoke and full core test matrix above.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - no frontend consumer or behavior.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no provider or model invocation path is wired by this PR.\n<!-- evidence-row:domain-artifacts -->\n- [x] N/A - no provider, deployment, database, or device artifact is produced by this foundation.\n\n## Follow-up units\n\n1. Provider adapters with provider-specific precedence/family tests.\n2. CLI Claude/Codex tier mapping with live session proof.\n3. Host seeding/display and Cloud allowlists/defaults after adapters.",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-26T02:17:05Z",
-      "mergedAt": null,
-      "additions": 486,
-      "deletions": 0
-    },
-    {
-      "id": "PR_kwDOMT5cIs72pLH8",
-      "title": "fix(cloud): bound the v1 snapshot retain budget by what restore can consume (#17172 §1)",
-      "author": "standujar",
-      "number": 17180,
-      "body": "# Relates to\n\nImplements **#17172 §1 only** (\"Immediate v1 safety alignment\"). §2–4 (legacy standby bridge, additive v2 backup protocol, rollout) are deliberately **out of scope** — that is the larger architecture the card's owner should keep. Claimed on-issue with that scope before starting.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` and `bun run verify` were run after sync, or any failure is recorded below with the exact unrelated blocker.\n- [x] A reviewer can confirm the change works without reading the code, from the evidence attached below.\n\n# Sync with develop\n\n- [x] Branched from the latest `origin/develop`; zero conflicts.\n- [x] Targeted verification recorded under **Testing** (changed-package tests + typecheck).\n\n# Risks\n\nLow, and strictly in the safe direction: the retain budget only ever gets **smaller** (256 MiB → 128 MiB), never larger. Nothing that restores today stops restoring; what stops is retaining a payload that could never be restored. Small manual/auto v1 backups are untouched, and no heap or body limit is raised (the issue's rejected-shortcuts list is respected).\n\n# Background\n\n## What does this PR do?\n\nThe production canary failed because Cloud **retained** a snapshot larger than anything on the restore path can **consume**:\n\n| Side | Constant | Before | After |\n|---|---|---|---|\n| retain | `SNAPSHOT_MAX_RAW_BYTES` (`eliza-sandbox.ts`) | **256 MiB** | canonical (128 MiB), env-clamped |\n| restore | `MAX_BACKUP_BODY_BYTES` (`packages/agent/src/api/server.ts`) | 128 MiB | canonical |\n| reconstruct | `MAX_RECONSTRUCTED_BACKUP_CHAIN_BYTES` (`agent-sandboxes.ts`) | 128 MiB | canonical |\n\nA 128–256 MiB snapshot was therefore retained, authorized a cutover, and could never be restored.\n\n- New `packages/shared/src/agent-backup-limits.ts` holds **`MAX_RESTORABLE_AGENT_BACKUP_BYTES` (128 MiB)** — the one canonical v1 restorable wire size. `@elizaos/shared` is already a dependency of **both** `packages/agent` and `packages/cloud/shared`, so retain, restore and reconstruction import one source of truth with no import cycle. This mirrors the existing `chat-upload-limits.ts` precedent (a leaf limits module both sides import so they cannot drift).\n- `resolveRetainableAgentBackupBytes()` resolves the `ELIZA_SNAPSHOT_MAX_RAW_BYTES` operator override **clamped to the canonical limit**. The override keeps its real purpose (lowering the budget for a staging soak or a constrained worker) but can no longer re-open the divergence by configuration alone — which it could before.\n- The breach still fails exactly where it already did: **while streaming, before retention** (`readBodyWithinBudget`), so a too-large snapshot is never persisted and never authorizes a cutover.\n\n## Deliberately NOT changed: the verifier's decrypt budget\n\n`DEFAULT_MAX_DECRYPT_BYTES` (256 MiB, `agent-backup-verifier.ts`) is left alone on purpose. It is a **per-cycle aggregate** budget spanning a batch of backups, not a per-backup wire size — a different axis. Lowering it to 128 MiB would be a *regression*: one max-size backup would consume an entire cycle, so the sweep would verify a single backup per cycle. At 256 MiB a max-size (128 MiB) backup always fits with room to spare, and `chargeBudget` already distinguishes `payload-exceeds-cycle-budget` (permanent, stop sampling) from `cycle-budget-exhausted` (transient, defer) — so the \"can never verify\" case is already handled correctly.\n\n## What kind of change is this?\n\nBug fix (correctness: removes a retainable-but-unrestorable backup state).\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation; the new module documents the contract at its definition.\n\n# Testing\n\n## Where should a reviewer start?\n\n`packages/shared/src/agent-backup-limits.test.ts` — it pins the whole contract: the canonical ceiling is 128 MiB; an override that **lowers** is honored; an override that **raises** (including the exact pre-fix 256 MiB that produced the unrestorable canary snapshot) is clamped; malformed/non-positive fall back; exact-limit passes and limit+1 clamps; and a final invariant case asserting no input can ever resolve a retain budget above the restorable ceiling — the guard that fails if someone raises one side without the other.\n\n## Detailed testing steps\n\nNone: automated tests are acceptable. `packages/shared` vitest lane: **7 pass / 0 fail** on the new suite. The pre-existing budget tests in `eliza-sandbox.test.ts` (from #16639/#16647) pass explicit budgets into `readBodyWithinBudget`/`assertSnapshotExpandedBudgets`, so they are unaffected by the default change.\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] Before full-page screenshots: `N/A - backup size-limit correctness in .ts; no rendered surface.`\n<!-- evidence-row:after-screenshots -->\n- [x] After full-page screenshots: `N/A - backup size-limit correctness in .ts; no rendered surface.`\n<!-- evidence-row:walkthrough-video -->\n- [x] Video walkthrough: `N/A - no user flow; the contract is pinned by the changed test lane.`\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs: `N/A - reproducing the original failure needs a >128 MiB production agent snapshot (the canary in #17172 carries that evidence); the deterministic reproduction of the retain-vs-restore divergence lives in the changed lane.`\n<!-- evidence-row:frontend-logs -->\n- [x] Frontend console and network logs: `N/A - no frontend change.`\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory: `N/A - no agent/action/provider/prompt/model change; backup size limits only.`\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: `N/A - no DB rows; the artifact is the resolved retain budget, asserted directly.`\n\n# Evidence Details\n\nThe load-bearing new property is the **clamp**, not the constant: before this PR an operator could set `ELIZA_SNAPSHOT_MAX_RAW_BYTES=268435456` and silently recreate the exact canary failure. The test asserts that specific value now resolves to the canonical 128 MiB, plus a general invariant over a range of inputs so the property holds for anything an operator types.\n\n## Known gaps / failures\n\nOnly §1 of #17172 is addressed — §2 (legacy→v2 standby bridge), §3 (additive v2 chunked backup protocol) and §4 (rollout) remain open on the card and are the substantial architecture. This PR makes the current v1 path *safe* (no unrestorable retention) but does not make large agents *backupable* — a >128 MiB agent will now fail cleanly before cutover instead of retaining a dead snapshot, which is the intended §1 behavior (\"budget failures are typed, observable, non-retryable, and occur before cutover\") and exactly why §3 exists.\n\n[stan-cloud]\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-26T22:14:47Z",
-      "mergedAt": null,
-      "additions": 240,
-      "deletions": 7
-    },
-    {
-      "id": "PR_kwDOMT5cIs72cn0L",
-      "title": "fix(discord): register outbound DM recipients before send",
-      "author": "NubsCarson",
-      "number": 17167,
-      "body": "## Summary\n\nReconstructs the narrow, still-missing outbound Discord DM participant fix from #16624 on current `develop`.\n\nEntity-targeted DMs now register the recipient in the exact runtime DM room before the external send. Raw Discord snowflakes resolve through the canonical entity mapper; canonical UUID targets remain canonical. A failed registration sends and persists nothing, releases the dedupe reservation, and allows an identical retry.\n\nRelates to #16623. Supersedes only the Discord participant portion of #16624; it intentionally excludes `read_with_contact`, argument aliases, and relevant-conversations performance changes.\n\n## Risk\n\nMedium: connector send boundary. The change is limited to entity-targeted DMs and fails closed before external delivery.\n\n## Verification\n\n- Focused service boundary: 10/10\n- Full `plugin-discord`: 475/475\n- Package typecheck: pass\n- Package build: pass\n- Biome on both changed files: pass\n- `git diff --check`: pass\n- Independent review bound to `c192b193f0b9092fa96be7e4c478c826110f3944`: PASS, no P0/P1\n\n## Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - connector/runtime behavior; no UI changed.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - connector/runtime behavior; no UI changed.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - no visual surface changed.\n<!-- evidence-row:backend-logs -->\n- [x] N/A - no sandbox Discord credential is available in this environment; the PR remains draft and cannot merge until this row is replaced by the real send → participant → recall log.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - no frontend changed.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no model, prompt, or planner behavior changed.\n<!-- evidence-row:domain-artifacts -->\n- [x] N/A - no sandbox Discord credential is available in this environment; the PR remains draft and cannot merge until this row is replaced by the live message and participant-room memory artifact.\n\n## Current limitation\n\nNo Discord sandbox token/account is configured on this Mac or in its dedicated Keychain service, so live connector evidence has not been fabricated. The deterministic real-service-boundary tests are green; merge readiness waits on the live round trip.",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-26T02:00:43Z",
-      "mergedAt": null,
-      "additions": 202,
-      "deletions": 13
     }
   ],
   "codeChanges": {
-    "additions": 1681,
-    "deletions": 205,
-    "files": 16,
-    "commitCount": 15
+    "additions": 8286,
+    "deletions": 3823,
+    "files": 77,
+    "commitCount": 56
   },
   "completedItems": [
+    {
+      "title": "fix(chat): make streaming persistence and telemetry exact",
+      "prNumber": 17140,
+      "type": "bugfix",
+      "body": "Closes #17098\n\n## Outcome\n\nThis makes chat streaming a single, observable provider → runtime → SSE → React → database pipeline and removes latency policy from correctness CI.\n\nThe runtime now has one owner for assistant-message persistence,",
+      "files": [
+        ".github/workflows/chat-latency-live.yml",
+        "packages/agent/package.json",
+        "packages/agent/scripts/cerebras-chat-flow-latency.ts",
+        "packages/agent/src/api/__tests__/conversation-stream-sse-contract.test.ts",
+        "packages/agent/src/api/__tests__/conversation-streaming.test.ts",
+        "packages/agent/src/api/__tests__/persistence-after-done.test.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/runtime-ready-gate.test.ts",
+        "packages/agent/src/api/runtime-ready-gate.ts",
+        "packages/agent/src/api/server-types.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/services/client-chat-sender.ts",
+        "packages/app-core/src/api/conversation-restore-relaunch.test.ts",
+        "packages/app-core/test/app/chat-streaming-telemetry.real.e2e.test.ts",
+        "packages/app-core/test/fixtures/chat-streaming-telemetry-harness.tsx",
+        "packages/cloud/shared/src/lib/services/shared-runtime/resolve-shared-agent.test.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/resolve-shared-agent.ts",
+        "packages/core/src/__tests__/identity-clusters-memo.test.ts",
+        "packages/core/src/entities.ts",
+        "packages/core/src/features/basic-capabilities/providers/attachments.ts",
+        "packages/core/src/features/basic-capabilities/providers/recentMessages.ts",
+        "packages/core/src/identity-clusters.ts",
+        "packages/core/src/roles.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/__tests__/trajectory-recorder.test.ts",
+        "packages/core/src/runtime/trajectory-recorder.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/trajectory-context.ts",
+        "packages/core/src/trajectory-utils.ts",
+        "packages/core/src/types/message-service.ts",
+        "packages/scripts/__tests__/chat-latency-workflow.test.ts",
+        "packages/scripts/cloud/chat-latency.mjs",
+        "packages/scripts/cloud/chat-latency.test.mjs",
+        "packages/scripts/cloud/inference-auth-latency.mjs",
+        "packages/scripts/cloud/inference-auth-latency.test.mjs",
+        "packages/ui/src/api/client-agent-stream.test.ts",
+        "packages/ui/src/api/client-base-stream-abort.test.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/api/client-chat.ts",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/test/stubs/node-util.ts",
+        "plugins/plugin-sql/src/__tests__/integration/memory.real.test.ts",
+        "plugins/plugin-sql/src/base.ts",
+        "packages/agent/src/api/__tests__/conversation-failurekind-roundtrip.test.ts",
+        "packages/cloud/shared/src/lib/cache/keys.ts",
+        ".github/workflows/cerebras-chat-flow-live.yml",
+        "packages/agent/src/api/__tests__/chat-idempotency.test.ts",
+        "packages/agent/src/api/__tests__/conversation-idempotency.test.ts",
+        "packages/core/scripts/provider-latency-report.test.ts",
+        "packages/core/scripts/provider-latency-report.ts",
+        "packages/core/src/__tests__/inference-timing.test.ts",
+        "packages/core/src/inference-timing.ts",
+        "packages/core/src/services/message.deliver-then-persist.test.ts",
+        "packages/ui/src/api/client-types-chat.ts",
+        "packages/ui/src/components/composites/chat/chat-transcript.memoization.test.tsx",
+        "packages/ui/src/components/composites/chat/chat-transcript.tsx"
+      ]
+    },
     {
       "title": "fix(cloud): recover stale managed canaries safely",
       "prNumber": 17173,
@@ -168,17 +234,131 @@
         "packages/cloud/shared/src/lib/services/provisioning-jobs-snapshot-gate.test.ts",
         "packages/scripts/cloud/admin/agent-image-canary-live.test.ts"
       ]
+    },
+    {
+      "title": "fix(cloud): correlate preserved canary deletion errors",
+      "prNumber": 17200,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #17199. Supplies the privacy-safe diagnosis needed by #17184 without changing delete, retry, or recovery behavior.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `de",
+      "files": [
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): sanitize bounded canary job history",
+      "prNumber": 17198,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #17197. Supports the bounded diagnosis for #17184 without changing delete behavior.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is based on the late",
+      "files": [
+        ".github/workflows/managed-dedicated-canary.yml",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): profile unclassified canary delete errors",
+      "prNumber": 17196,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #17191. Supports the bounded diagnosis for #17184.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n      wi",
+      "files": [
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): close recovery diagnostic gaps",
+      "prNumber": 17195,
+      "type": "bugfix",
+      "body": "## Summary\n\n- reserve timeout and worker-restart recovery namespaces before broad terminal classification\n- require canonical recovery and terminal strings to match exact source grammar\n- bind terminal retry counts to persisted attempts, ma",
+      "files": [
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): separate delete recovery provenance",
+      "prNumber": 17193,
+      "type": "bugfix",
+      "body": "## Summary\n\n- separate exact worker-restart and timeout retry breadcrumbs from terminal error codes\n- bind embedded retry counters to durable attempts/maxAttempts and require attempts below max\n- accept recovery provenance only on the reach",
+      "files": [
+        ".github/workflows/managed-dedicated-canary.yml",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): classify canary worker interruptions",
+      "prNumber": 17190,
+      "type": "bugfix",
+      "body": "## Summary\n\n- classify only the jobs repository’s exact terminal startup-recovery interruption as worker_restart_interrupted\n- bind the regression to the real state transition: sandbox stays deletion_pending with no sandbox error; the faile",
+      "files": [
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): classify exclusive canary job conflicts",
+      "prNumber": 17189,
+      "type": "bugfix",
+      "body": "## Summary\n\n- classify the worker’s exact dynamic exclusive-lifecycle conflict message as the existing privacy-safe `lifecycle_conflict` code\n- require anchored canonical UUIDs at both identifier positions and an explicit allowlist of all t",
+      "files": [
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): classify canary delete lifecycle blockers",
+      "prNumber": 17188,
+      "type": "bugfix",
+      "body": "## Summary\n\n- add privacy-safe distinct classifications for the two canonical delete precondition failures not covered by the initial diagnostic\n- classify `replacement_cleanup_pending` separately from `provisioning_in_progress`\n- preserve ",
+      "files": [
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): adapt staging database URL for psql",
+      "prNumber": 17187,
+      "type": "bugfix",
+      "body": "## Summary\n\n- adapt the staging database URI for the `psql` diagnostic by removing only one exact provider hint, `uselibpqcompat=true`\n- preserve PostgreSQL identity, credentials, SSL mode, channel binding, and every other query option\n- fa",
+      "files": [
+        ".github/workflows/managed-dedicated-canary.yml",
+        "packages/scripts/cloud/admin/libpq-connection-url.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): diagnose stale canary deletes safely",
+      "prNumber": 17186,
+      "type": "bugfix",
+      "body": "## Summary\n\n- add a workflow-dispatch-only, staging-only read-only diagnostic for one exact managed-canary suffix\n- query exactly one sandbox plus its three newest `agent_delete` jobs inside `BEGIN READ ONLY`, with `default_transaction_read",
+      "files": [
+        ".github/workflows/managed-dedicated-canary.yml",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 174.02317546775464,
-      "prScore": 165.58517546775465,
-      "issueScore": 8,
+      "totalScore": 382.8470157603965,
+      "prScore": 363.6710157603966,
+      "issueScore": 18.3,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 112.83216913951321,
+      "prScore": 87.65616913951321,
+      "issueScore": 12.3,
+      "reviewScore": 12,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
@@ -192,6 +372,26 @@
       "summary": null
     },
     {
+      "username": "SkunkscanAI",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/296437481?v=4",
+      "totalScore": 38.718773896576096,
+      "prScore": 38.718773896576096,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "roninjin10",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35039927?u=94370136033f1a4d900b4857c2ae13964bf51f96&v=4",
+      "totalScore": 20.372742863074038,
+      "prScore": 20.372742863074038,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "atimics",
       "avatarUrl": "https://avatars.githubusercontent.com/u/210085965?u=3f00dcf01b5518b94c2b5f268394d303c82fab85&v=4",
       "totalScore": 17.988984046564276,
@@ -202,13 +402,23 @@
       "summary": null
     },
     {
-      "username": "lalalune",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 12.738000000000001,
+      "username": "Felon8",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/228996412?v=4",
+      "totalScore": 4,
       "prScore": 0,
-      "issueScore": 12.3,
+      "issueScore": 4,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tdpeta754-design",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/289535920?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -222,9 +432,9 @@
       "summary": null
     }
   ],
-  "newPRs": 8,
-  "mergedPRs": 2,
-  "newIssues": 10,
-  "closedIssues": 0,
-  "activeContributors": 6
+  "newPRs": 22,
+  "mergedPRs": 13,
+  "newIssues": 18,
+  "closedIssues": 1,
+  "activeContributors": 12
 }
