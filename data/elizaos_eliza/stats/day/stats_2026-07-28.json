@@ -1,0 +1,373 @@
+{
+  "interval": {
+    "intervalStart": "2026-07-28T00:00:00.000Z",
+    "intervalEnd": "2026-07-29T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-07-28 to 2026-07-29, elizaos/eliza had 30 new PRs (14 merged), 19 new issues, and 11 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABKjrmMA",
+      "title": "P0: agent deletion is failing 100% in production (160/160 jobs, 37 agents stuck) + 78% overall job failure rate",
+      "author": "standujar",
+      "number": 17249,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nA live production audit of the provisioning pipeline (2026-07-29) found **agent deletion is failing 100% of the time**, and has been for days. This is customer-visible and accelerating.\n\nOver the last 7 days: **554 failed jobs vs 153 completed** (78% failure rate).\n\n## 1. `agent_delete` is completely broken — 160/160 failures, one identical cause\n\nEvery failed `agent_delete` job in the window carries the same error:\n\n```\nvalue.toISOString is not a function\n```\n\n- 160 failures, all identical, most recent **2026-07-28 18:03 UTC** (still current).\n- All of them exhausted `attempts >= max_attempts` — so each one also burned the full retry budget.\n- Consequence: **37 agents are stuck in `deletion_failed`**, up from 5 five days ago, and accelerating: **17 of them in the last 24 hours alone**.\n- Customers who ask to delete an agent get a failure, the agent stays, and it keeps occupying node capacity.\n\n`value.toISOString is not a function` is Drizzle's timestamp serializer receiving a **string where a `Date` is expected** — the same class as the cache/JSON round-trip defect fixed in #16859/#16860 for `resolveSharedAgent`.\n\nOne concrete candidate worth checking first (not yet proven to be the site): `prepareAgentBackupInsertData` (`packages/cloud/shared/src/db/repositories/agent-sandboxes.ts`) does\n\n```ts\nconst createdAt = data.created_at ?? new Date();\n// ...\ncreated_at: createdAt,\n```\n\n`??` only guards `null`/`undefined` — a value that already crossed a JSON boundary as an ISO **string** passes straight through into the timestamp column. The 4 non-restart `agent_snapshot` failures in the same window are literally `Failed query: insert into \"agent_sandbox_backups\" (...)`, which is that insert.\n\n## 2. `agent_snapshot`: 386 failures, 381 of them not the job's fault\n\n```\nJob interrupted by worker restart 2 times - max attempts reached   (381)\nFailed query: insert into \"agent_sandbox_backups\" ...              (4)\nJob timed out 2 times - max attempts reached                       (1)\n```\n\nThe worker keeps restarting mid-snapshot, and **each restart consumes an attempt**. Two restarts exhaust `max_attempts` and the job is marked permanently failed — even though nothing about the job itself failed. A restart is an infrastructure event, not a job defect, and should not spend the job's retry budget (the codebase already has the shape for this: `retryLaterWithoutIncrementingAttempts`).\n\nWhy the worker restarts so often is the second half of this: it is consistent with the heap abort in #17154 and with the unbounded source-side snapshot capture in #17172 §1 (a large agent's capture is materialized entirely in the worker's heap).\n\n## 3. The fleet is at or over capacity\n\n| node | capacity | running |\n|---|---|---|\n| eliza-core-prod-2 | 24 | 24 |\n| eliza-core-prod-3 | 24 | **25** |\n| eliza-core-prod-4 | 24 | 24 |\n| eliza-core-prod-5 | 24 | 24 |\n| eliza-core-prod-6 | 24 | 24 |\n\nprod-3 is **over** its declared capacity, and every robot is full, so new work is spilling onto autoscaled cloud nodes (3 × 4 running). Note the interaction: the 37 undeletable agents and the 45 in `error` are holding slots that should have been reclaimed — the delete failure is directly feeding the capacity pressure.\n\nAlso present: a `knowledge_processing` job stuck `in_progress` since **2025-12-31** (~7 months), which no sweeper has reclaimed.\n\n## Why these compound\n\nThe three interact rather than being independent:\n1. Deletes fail → agents accumulate (`deletion_failed` 37, `error` 45) → capacity fills.\n2. Snapshots fail on worker restart → upgrades/deletes that depend on a restore point are less safe.\n3. Full capacity → more scheduling pressure → longer boots → more exposure to the sweeper/timeout classes (#17215).\n\n## Asks\n\n- [ ] Pin and fix the `toISOString` write in the delete path — deterministic, 100% reproducible, highest customer impact.\n- [ ] A worker restart must not consume a job's retry budget (`retryLaterWithoutIncrementingAttempts` semantics for interruption).\n- [ ] Recover the 37 `deletion_failed` + 45 `error` rows once the above land (see #17162 for the 44-agent precedent and its recovery constraints).\n- [ ] Reconcile declared capacity vs actual (prod-3 at 25/24), and reclaim the 7-month-stuck `in_progress` job.\n\nEvidence gathered live against production (counts, error strings, timings; no customer identifiers). Related: #17215 (sweeper vs in-flight cold boots), #17154 (worker heap abort), #17172 (snapshot budgets), #17162 (the 2026-07-13 stranding), #17185 (delete must release capacity exactly once). [stan-cloud]\n",
+      "createdAt": "2026-07-28T22:22:50Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABKbNb6Q",
+      "title": "fix(cloud): stuck-provisioning sweeper errors in-flight agent_wake/agent_resume — the mechanism behind 19 of the 2026-07-13 stranded agents",
+      "author": "standujar",
+      "number": 17215,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\n`markStuckProvisioningWithoutActiveJobAsError` exempts only two job types, but **four** job types legitimately hold a row in `provisioning`. A `agent_wake` or `agent_resume` that takes longer than 10 minutes — while still well inside its **own 15-minute cold-boot budget** — has its sandbox flipped to terminal `error` mid-flight, and the container can then be reaped out from under the still-running job.\n\nThis is not hypothetical. It is the mechanism behind **19 of the 44 agents stranded on 2026-07-13** (RCA in #17162): those 19 carry exactly the message this predicate writes.\n\n## The defect\n\n`packages/cloud/shared/src/db/repositories/agent-sandboxes.ts:747` writes:\n\n> `Agent was stuck in provisioning state with no active provisioning job.`\n\nand 13 lines below, `:760`, decides who is exempt:\n\n```sql\nAND ${jobs.type} IN ('agent_provision', 'agent_restart')\n```\n\nThe same two-type predicate appears three times in that file (`:360`, `:760`, `:1040`).\n\nBut `provisioning` is also owned by wake and resume:\n\n- `eliza-sandbox.ts` `executeResume` → `this.provision(...)`\n- `eliza-sandbox.ts` `executeWake` → `this.provision(...)` (two call sites)\n\nand `provision()` takes the row to `status: 'provisioning'` via `trySetProvisioning`.\n\nBoth types are declared **cold boot** with a 15-minute budget (`provisioning-jobs.ts`: `AGENT_RESUME` / `AGENT_WAKE` in `COLD_BOOT_JOB_TYPES`, `COLD_BOOT_STALE_JOB_THRESHOLD_MS = 15 * 60 * 1000`), while the sweeper cutoff is **10 minutes** (`packages/cloud/api/cron/cleanup-stuck-provisioning/route.ts`, `STUCK_THRESHOLD_MINUTES = 10`, fired every 5 min).\n\nSo the window `10 min < elapsed < 15 min` is a legitimate cold boot that the sweeper treats as abandoned.\n\n## Why it is worse than a bad status\n\n`error` is in `TERMINAL_SANDBOX_STATUSES`, and the orphan reconciler reaps a terminal-status container with **no age grace**. So the container the wake/resume just created is `docker rm`'d while its job is still running — the agent is destroyed mid-boot, and the row is left terminal with no retry.\n\n## Prior art in this same predicate\n\n`agent_restart` was added to this exact `IN (...)` list precisely because a warm-claim restart legitimately owns a `provisioning` row and was being flipped to `error`. That fix was correct — it just stopped one type short of the other two that do the same thing. The route's own doc comment states the intended rule as *\"no jobs row in ('pending','in_progress')\"*, with **no** type filter at all, which is further evidence the narrow list is an oversight rather than a deliberate allow-list.\n\n## Evidence it already fired\n\nFrom the live prod audit in #17162 (2026-07-13, 04:00–18:00 UTC): 44 dedicated agents in terminal `error` across 42 orgs, of which **19** carry `Agent was stuck in provisioning state with no active provisioning job` — the string written at `agent-sandboxes.ts:747`. 37 of those orgs had no other running agent.\n\n## Acceptance criteria\n\n- [ ] A job type that can legitimately own a `provisioning` row is never treated as abandoned by the sweeper. Prefer importing the same `COLD_BOOT_JOB_TYPES` constant the daemon uses, so the two lists cannot drift apart again (the drift is the bug; a second hand-maintained list would reproduce it).\n- [ ] The sweeper threshold is not shorter than the longest cold-boot budget it can observe — today 10 min vs 15 min.\n- [ ] All three occurrences of the predicate (`:360`, `:760`, `:1040`) move together, or share one source.\n- [ ] A regression test pins that a `provisioning` row owned by an in-flight `agent_wake`/`agent_resume` past the sweeper cutoff is **not** flipped to `error`.\n- [ ] Recovery for rows already stranded by this path is considered separately (#17162 tracks the 44).\n\nFound by post-merge gap audit of the canary/provisioning-lifecycle cluster. [stan-cloud]\n",
+      "createdAt": "2026-07-28T03:31:41Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABKj65jA",
+      "title": "fix(android): reject relocated privileged components in release AAB policy",
+      "author": "lalalune",
+      "number": 17255,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe bundle-aware Cloud release audit merged in #17067 is package-independent only for the four LP3 classes. Ordinary entries in `ANDROID_CLOUD_STRIPPED_COMPONENTS` are compared after qualification against the application ID, and forbidden permissions are collected only from `<uses-permission*>` elements.\n\nA dynamic-feature/library manifest can therefore relocate a forbidden repo-owned service and carry its privileged binding on the component itself, for example:\n\n```xml\n<service\n  android:name=\"com.feature.ElizaAccessibilityService\"\n  android:permission=\"android.permission.BIND_ACCESSIBILITY_SERVICE\" />\n```\n\nThat component is not application-ID-qualified, is not one of the LP3-only suffix checks, and its `android:permission` is not inspected. The matching non-LP3 class is also absent from the package-independent DEX scan. A release AAB can therefore pass while retaining a Cloud/Play-forbidden privileged service in a feature module.\n\n## Acceptance criteria\n\n- Apply package-independent exact-basename/suffix matching to every repo-owned component/class in the canonical stripped policy, not just LP3.\n- Inspect component/provider `android:permission`, `android:readPermission`, and `android:writePermission` attributes for forbidden bindings in every module manifest, while retaining `<uses-permission*>` checks.\n- Scan every module DEX and smuggled DEX asset for all repo-owned stripped component classes without broad substring false positives.\n- Add real multi-module AAB regressions for a relocated non-LP3 component plus `BIND_ACCESSIBILITY_SERVICE`, and a relocated non-LP3 DEX class; each must fail closed.\n- Preserve the existing Cloud ordinary-build invariants and positive LP3 direct-debug path.\n- Pass focused app-core audit tests, typecheck/build, Biome/diff/error-policy checks, and the real release-AAB fixture lane.\n\n## Evidence\n\nFound by adversarial post-merge review of current `origin/develop` (`00d6f6cdae`), specifically `packages/app-core/scripts/lib/android-cloud-artifact-audit.mjs` manifest policy around lines 722-800 and DEX policy around 861-888. No duplicate issue or PR was found by repository search.",
+      "createdAt": "2026-07-28T23:07:58Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABKbyAyA",
+      "title": "fix(cloud): add schema-v4 lifecycle proof to the managed canary diagnostic",
+      "author": "NubsCarson",
+      "number": 17217,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe merged privacy-safe managed canary diagnostic in #17200 intentionally emits schema v3. It can prove the stale delete job exhausted its attempts, but it cannot represent the rollback-standby and never-routed restore-validation authority introduced by #17172.\n\nThe #17172 source contract is now frozen at `2fc20c254b96e8413b03a59318e7002826e5e730` on exact `develop@48f00bb491b73d761dcba148aee468b266ee78cd` with migrations `0184_rollback_standby_state.sql` and `0185_agent_snapshot_restore_validations.sql`.\n\n## Scope\n\nExtend only the existing read-only managed dedicated canary diagnostic surface:\n\n- `packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts`\n- its focused tests\n- `.github/workflows/managed-dedicated-canary.yml`\n- the workflow contract test\n\nDo not edit #17172 migrations, schema, repositories, reader, rollout, provisioning, device, or runtime code in this issue.\n\n## Required schema-v4 contract\n\n- Preserve every schema-v3 field and meaning additively.\n- Emit `schemaVersion: 4` only after a fail-closed live-schema preflight proves the required 0184/0185 columns and constraints exist.\n- Include transaction capture time, current locator-presence booleans, closed lifecycle authority, deletion ownership, replacement-cleanup state, routed-runtime state, exact pointed source/decision job clocks and allowlisted outcomes, and closed standby state.\n- Accept only these standby states: `pausing | paused_pre_cutover | paused | retiring | rollback_pending | rollback_cleanup_pending`.\n- Validate the never-routed restore proof from the frozen #17172 contract:\n  - validation states: `planned | candidate_provisioning | restore_committed | never_routed_retired`\n  - route: `restore_validation_private_control`\n  - receipt schema `2`\n  - transfer protocol `chunked-v1`\n  - `route_exposed_at` remains null\n  - complete committed receipt plus all four retirement/absence proof timestamps\n- Consume the production reader contract `PostgresVerifiedRestorePointReader.readVerifiedV2CandidateRestoreInTx` semantically; never infer authority from latest-job ordering or timestamps alone.\n- Existing stale deletion-owned rows must remain classifiable without fabricating standby or restore state.\n\n## Privacy and safety\n\nThe canonical artifact must contain no agent/job/backup/restore IDs, names/suffixes, image references/digests, URLs, IPs, raw errors/results, hashes, snapshot bytes/files, credentials, or provider state. IDs may participate in internal joins only.\n\nThis diagnostic is evidence only. It must never authorize a retry, delete, provider mutation, database write, deployment, or device action.\n\n## Acceptance\n\n- Exact schema-v4 golden and a schema-v3 projection proving old fields/semantics are unchanged.\n- Real read-only SQL preflight rejects missing/partial 0184 or 0185 schema before emitting JSON.\n- Tests cover every standby/validation enum, unknown/case/punctuation lookalikes, missing keys, dual lifecycle authority, contradictory cleanup/locator state, wrong pointed job state, inverted clocks, partial/reused/previously-routed restore proof, and malicious privacy values.\n- Workflow contract proves `BEGIN READ ONLY`, timeout, 0600 files, cleanup traps, bounded target/history, and diagnose-vs-mutation mutual exclusion.\n- Focused tests, Biome, diff check, error-policy ratchet, package/static gates, and independent P0/P1 review pass.\n- After #17172 merges and its migrations deploy, run exactly one protected read-only staging diagnostic and manually inspect the canonical artifact. No delete retry follows automatically.\n\n## Dependency\n\nBlocked from live staging proof until #17172 is merged and migrations 0184/0185 are deployed. Local implementation may proceed against its frozen exact contract.\n",
+      "createdAt": "2026-07-28T05:16:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABKj3x8A",
+      "title": "Provisioning resilience audit: 7 verified defects (orphan reaper deletes live customer containers, cold-boot budget shorter than the path it covers, recovery skips dependent-row writeback)",
+      "author": "standujar",
+      "number": 17253,
+      "repository": "elizaos/eliza",
+      "body": "Adversarial resilience audit of the provisioning lifecycle, run against `origin/develop`. Five independent lenses (crash safety, idempotency, budget coherence, failure classification, concurrency) produced 15 candidate defects; each was then handed to independent verifiers instructed to **refute** it. **8 were refuted and are deliberately not reported here** — the 7 below are the ones that survived, with the verifier's severity, not the finder's.\n\nTwo of the seven are already addressed by open work; the other five are unclaimed. Sections are independent — claim them individually.\n\n---\n\n## 1. Orphan reconciler reaps live warm-claimed customer containers — `high`\n\n`packages/cloud/shared/src/lib/services/docker-node-workloads.ts:87-91`\n\nThe orphan diff keys a container on the id embedded in its **name**. A warm-pool container keeps the name it was born with, which carries the **pool** row's id — and that pool row is deleted at claim time. So after a claim, the live customer container maps to an id with no DB row, and the sweep classifies it `no_db_row` and force-removes it.\n\nThis hits **every agent created through the warm-pool fast path** — the default happy path. The agent goes unreachable mid-conversation while its row still says `running` with a `bridge_url` pointing at a dead container; the heartbeat only flips it to `disconnected` after the 120s grace, and for non-`dedicated-always` tiers it never self-heals. It is logged as a routine `Reaped orphan container … reason: no_db_row`, so it reads as correct behaviour in the logs.\n\nWhat has spared production so far is that the reconciler is gated off by default (`ORPHAN_RECONCILER_ENABLED`, `provisioning-worker.ts:223`). **Arming it on an environment with warm pool enabled would delete live customer containers.** Worth a comment on the flag saying so until it is fixed.\n\nFix direction: resolve keys against `agent_sandboxes.container_name = 'agent-' || key`, or OR-in `warm_claim_source_pool_id IN (keys)` which `claimWarmContainer` already persists. Add a container-age grace on the `no_db_row` branch as defence in depth.\n\n## 2. The cold-boot job budget is shorter than the provision path it is supposed to cover — `high`\n\n`provisioning-jobs.ts:877` (`COLD_BOOT_STALE_JOB_THRESHOLD_MS = 900_000`), leaf budgets in `docker-sandbox-provider.ts:524/533/545/550/553`\n\nThe stale-job threshold is 15 minutes. The sum of the leaf SSH timeouts on the **single** provision path is ~19.8 minutes. A dedicated agent on a slow node — cold registry pull, slow SSH, a `docker pull` heading for its 300s cap — crosses 15 minutes of wall clock while perfectly healthy.\n\nThe daemon then **re-claims its own still-running job**, and the first act of the retry is to force-remove the container the first attempt just booted and delete its headscale node. The original attempt then fails against a container that no longer exists and marks the row `error`. Every retry burns another full cold pull and hits the same wall, so retrying makes it strictly worse; after 3 attempts the customer gets a permanent failure.\n\nThis one refines #17215/#17231 rather than duplicating it. Raising the *sweeper* threshold does not help here — the job budget itself is below the real worst case, so the job dies before the sweeper is even relevant.\n\nFix direction: a renewable lease. Have the executing daemon periodically bump `started_at` (or a dedicated `heartbeat_at` that `recoverStaleJobs`, `jobs.ts:675-687`, keys on) so a still-running job is never re-claimed. Raising the constant alone just moves the cliff.\n\n## 3. Recovery flips a job to `failed` without the dependent-row writeback — `high`\n\n`packages/cloud/shared/src/db/repositories/jobs.ts:788-815`\n\nThe normal permanent-failure path runs a writeback that settles the dependent row. The stale/startup **recovery** path flips the job to `failed` without it.\n\nFor `APP_DEPLOY` the app is left `deployment_status='building'` forever: the deploy-status endpoint reports BUILDING indefinitely — precisely the failure the writeback comment at `provisioning-jobs.ts:3025-3032` says it prevents — and every redeploy is rejected with `409 A deployment is already in progress`. Only a manual `UPDATE apps SET deployment_status='failed'` unblocks it. The same gap applies to `CONTAINER_PROVISION` and to `AGENT_UPGRADE`.\n\nThis is the same *shape* as the 44-agent stranding in #17162 and the 37 undeletable agents in #17249: a job dies by a route that skips the settlement its normal path performs, and the row is stranded in a non-terminal state with no sweeper that owns it.\n\nFix direction: resolve `buildPermanentFailureWriteback(job, …)` inside `recoverJobFromSnapshot` (`jobs.ts:796-813`) and run it in the same transaction as the `status: \"failed\"` flip, keeping the existing CAS fence.\n\n## 4. Provision-retry container adoption is dead code — `high`\n\n`eliza-sandbox.ts:8924` (throw site `8605-8614`, handle built at `9508-9525`)\n\n`transferReplacementToPrimary` always throws on an adopted handle, so the preserve-and-adopt mechanism built for the SSH-blip case (#15310 §6) is **guaranteed** to end in a destroyed container plus a terminal `error` row. The customer watches a woken agent sit at `provisioning` for ~2 minutes, then hard-fail with an internal metadata error, and the already-healthy container is deleted.\n\nThe documented backstop cannot save it either: the daemon's `reconcileStuckProvisioning` selects only rows with no active provision job, and the job is pending for the whole retry.\n\nFix direction: move `const incoming = this.replacementLocatorFromHandle(handle)` from `:8924` into the `if (locator)` branch — it is only needed to prove identity against an existing durable fence — leaving `:8933-8938` as the sole check for the fence-less adoption case. Add a test that exercises the real `transferReplacementToPrimary`; the current coverage uses a prototype stand-in, which is why this stayed invisible.\n\n## 5. Warm-pool container stranded at `running` with `pool_ready_at IS NULL` — `medium`\n\n`containers/agent-warm-pool-creator.ts:36-45`\n\n`provision()` commits `status='running'` and `markPoolEntryReady` is a strictly later, separate write. A crash between them strands the row `unclaimed / running / pool_ready_at=NULL`, which is:\n\n- **counted as ready** by `countAllPoolEntries` (`agent-sandboxes.ts:1094-1108` guards `node_id` but omits `pool_ready_at` — its own comment at :1101-1104 asserts the invariant it then breaks, unlike `countUnclaimedPool` at :1076),\n- **refused** by `claimWarmContainer` (:1334),\n- **skipped** by `decideDrain` and missed by `findStuckPoolProvisioning`.\n\nUnclaimable, undrainable, unreapable — while the container keeps running on a Hetzner node, keeps its headscale registration, holds an `allocated_count` slot and is billed indefinitely. Only manual SQL recovers it.\n\nThe verifier corrected the finder here, and the correction is worth keeping: this does **not** permanently starve the pool, because `targetPoolSize` is demand-driven and the first cold fallthrough lifts it. The real damage is a permanent −1 pool slot plus a container billed forever with no automated reclaim.\n\nFix direction: make readiness atomic — stamp `pool_ready_at` in the same statement that flips a pool row to `running`, or leave pool rows in `provisioning` so `markPoolEntryReady` is the sole writer of `running`. Defence in depth: add `isNotNull(pool_ready_at)` to the ready branch of `countAllPoolEntries`, and extend `findStuckPoolProvisioning` to match `status='running' AND pool_ready_at IS NULL AND updated_at < cutoff`.\n\n## 6. `WarmPoolManager.healthCheck()` has no production caller — `medium`\n\n`containers/agent-warm-pool.ts:300-358`\n\nThe `*/2 * * * *` entry in `cloudflare-cron.ts:54` is absent from `[triggers] crons` in `wrangler.toml:67-78`, and the route is a `cronSupersededByDaemon` stub whose daemon replacement wires a different cycle. So `healthCheck()` — and with it `findStuckPoolProvisioning` — never runs in production. Dead warm-pool containers are never reaped and can be handed to a customer.\n\nNote the scoping: the broader version of this claim (that it causes permanent pool-budget starvation) was **refuted** — `markStuckProvisioningWithoutActiveJobAsError` does run on the real `*/5` trigger and catches the `provisioning` case within ~15 min. Only the narrow claim survives.\n\n## 7. Already covered by open work — do not double-claim\n\nTwo confirmed findings land on predicates that #17231 already changes:\n\n- the stuck-provisioning sweeper condemning rows owned by in-flight cold-boot jobs (`agent-sandboxes.ts:760`) — `high`\n- the daemon reconciler sharing the same blind spot (`agent-sandboxes.ts:356-362`) — `medium`\n\nBoth are the two-job-type predicate replaced by `COLD_BOOT_JOB_TYPES` in #17231, which is open for review. Flagging them here because four independent lenses rediscovered this defect, which is a reasonable argument for prioritising that review — but see §2: the threshold change in that PR does not close the budget-coherence gap, and I would not want it read as if it did.\n\n---\n\nMethod note: the 8 refuted candidates included several plausible-looking claims that fell apart on inspection (a \"no `pool_status` guard\" that turns out to be load-bearing, a retry-forever claim contradicted by the attempt accounting). They are omitted rather than listed as low-confidence, so this list can be treated as reviewed rather than triaged. [stan-cloud]\n",
+      "createdAt": "2026-07-28T22:58:33Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs7xVXct",
+      "title": "fix(app): harden Android device evidence and deep-link delivery",
+      "author": "lalalune",
+      "number": 16320,
+      "body": "# Relates to\n\nRelates to #13580 and #13581. This closes the agent-resolvable hosted-emulator and evidence-delivery residuals. The arm64 LOCAL round trip remains open until a runner with labels `self-hosted`, `linux`, `ARM64`, `android-device` is provisioned.\n\nDefinition of Done: full standard in `CONTRIBUTING.md`.\n\n- [x] Targets `develop`; exact head `e44bd654f26` is based on current `origin/develop` (`0f8045c6744d6dd696a57ba0a053f9f2ee55355c`).\n- [x] Focused real-path tests, changed-file coverage, Android compilation, and `bun run verify` pass.\n- [x] The exact-head mandatory app audit passed 246/246 views with no broken or needs-work verdicts.\n- [ ] The exact-head API-34 PR/device and full-hosted emulator runs are in progress; every resulting artifact will be opened before the draft is promoted.\n\n# What this fixes\n\nThe Android lane had several independent false-proof paths:\n\n- `reactivecircus/android-emulator-runner` executes each nonblank script line in a separate `sh -c`, so multiline Bash state, traps, PIDs, continuations, and `pipefail` were lost;\n- a cold native `appUrlOpen` could arrive while the startup splash listener was mounted but still restoring reset/session state; reading `gatewayUrl` falsely acknowledged the command immediately before restore cleared the newly selected remote;\n- hosted emulators expose a hardware keyboard, suppressing the real software IME even after the probe requested it, and the verifier sampled UIAutomator only once;\n- Android toybox did not finalize `screenrecord` through the previous `pkill -INT` path, leaving an `ftyp/free/mdat` file with no `moov` box;\n- failed verifier commands and non-finalized recordings could still look like uploaded proof.\n\nThe branch moves emulator work into committed Bash processes, queues and drains early native deep links, exposes renderer readiness, acknowledges/replays CONNECT delivery within a bounded window, and ensures only the correct startup owner can claim a deep link. It also forces the emulator software-IME policy, polls the actual IME hierarchy, terminates `screenrecord` by PID with SIGINT, waits for encoder/transport exit, and rejects incomplete ISO-BMFF output.\n\n# Final remote-loopback correction\n\nThe final hosted run exposed one more device-only ambiguity: the remote-mac harness deliberately forwards the host through `http://127.0.0.1:31337`, while the Android client previously treated every loopback-shaped URL as the bundled native agent. That hijacked the forwarded request and returned `local_agent_unavailable` even though the remote coordinator was healthy.\n\nThe exact head now resolves Android routing from persisted runtime mode, durable Cloud-session precedence, and build defaults before deciding whether loopback HTTP belongs to the native bridge. IPC remains unambiguously native. The mounted-App regression drives a real `CONNECT_EVENT` through deferred first-run adoption and asserts the observable `adopt → complete → retry` outcome sequence, remote mode, shell state, and success notice.\n\nFinal local gates: 10 changed UI test files pass 143/143; the enforced changed-file coverage gate remains above 50% for every executable target (81.05% mean for the final routing slice); test-realness reports zero regressions; and `bun run verify` passes 573/573 Turbo tasks plus all audits and 28/28 dist-path consumers.\n\n# Review map\n\nStart with:\n\n1. `.github/workflows/android-device-e2e.yml` and `scripts/mobile/android-emulator-webview-ci.sh`;\n2. `packages/app/src/mobile-lifecycle.ts`, `packages/ui/src/events/index.ts`, and `packages/ui/src/state/use-startup-shell-controller.ts`;\n3. `packages/app/scripts/lib/android-capture.mjs` and `packages/app/scripts/android-assistant-verify.mjs`;\n4. the exact-head Actions runs and downloaded artifacts linked below once complete.\n\n# Verification\n\nExact head: `e44bd654f26`\n\n- Exact changed-test lane: 29 Bun + 77 Vitest (106/106), including real command bytes, playable MP4 finalization, native delivery, and startup transitions.\n- App scripts: prior branch-wide suite 500 Bun + 562 Vitest; all edited focused slices remain green.\n- App/UI typechecks pass.\n- Android debug Java compile: 484 tasks, success (excluding the unrelated missing `copyForkLlamaLib` artifact).\n- Changed-file gate: all seven executable targets clear 50%; startup reducer 92.96%, startup ownership 90%, verifier library 99.54%, capture 75.19%, lifecycle 83.33%, verifier CLI 69.64%, events 57.89%; mean 81.22%.\n- `bun run verify`: 573/573 Turbo tasks, all follow-on audits, and 28/28 dist-path consumers.\n- Mandatory exact-head `bun run --cwd packages/app audit:app`: 246/246 passed; 0 broken and 0 needs-work verdicts after manual review.\n- Final exact-head PR/device run: https://github.com/elizaOS/eliza/actions/runs/29329810149\n- Final exact-head full API-34 dispatch: https://github.com/elizaOS/eliza/actions/runs/29329831684\n- Final exact-head app aesthetic audit: https://github.com/elizaOS/eliza/actions/runs/29329810125\n- Replacement exact-head PR/device run: https://github.com/elizaOS/eliza/actions/runs/29308643258\n- Replacement exact-head full API-34 dispatch: https://github.com/elizaOS/eliza/actions/runs/29308665988\n- First diagnostic PR device run: https://github.com/elizaOS/eliza/actions/runs/29304246350\n- First diagnostic full API-34 dispatch: https://github.com/elizaOS/eliza/actions/runs/29304250797\n\nThe diagnostic runs are intentionally retained: they prove the old shell failure was removed and expose the three exact device-level defects repaired by the final commit. They are not represented as passing acceptance evidence.\n\n# Risk\n\nMedium. This changes mobile lifecycle ordering and CI evidence acceptance, but replay is bounded, ownership is phase-typed, failed states remain failures, and the real hosted emulator lanes will run before the draft is promoted. No model or prompt behavior changes.\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] [Before: forwarded remote wrongly rendered Cloud sign-in](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/16320-before-cloud-onboarding.jpg)\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - there is no rendered design change; the required exact-head full app audit passed 246/246 views and was manually reviewed and its applicable mobile/desktop captures will be manually reviewed.\n<!-- evidence-row:walkthrough-video -->\n- [x] [Diagnostic API-34 run and its captured device bundle](https://github.com/elizaOS/eliza/actions/runs/29304250797) show the pre-fix truncated recording; replacement exact-head MP4 proof is being collected.\n<!-- evidence-row:backend-logs -->\n- [x] [Diagnostic PR/device logs](https://github.com/elizaOS/eliza/actions/runs/29304246350) and [full dispatch logs](https://github.com/elizaOS/eliza/actions/runs/29304250797) identify startup acknowledgement, IME, and encoder-finalization failures; replacement exact-head logs are pending.\n<!-- evidence-row:frontend-logs -->\n- [x] [Diagnostic WebView/Playwright run](https://github.com/elizaOS/eliza/actions/runs/29304250797) proves native ingress reached the renderer but onboarding stayed on cloud sign-in; replacement exact-head state receipt is pending.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no agent, action, provider, prompt, model selection, or model output behavior changes.\n<!-- evidence-row:domain-artifacts -->\n- [x] [Diagnostic Android XML/JSON/screenshots/logcat/recording artifact](https://github.com/elizaOS/eliza/actions/runs/29304250797) was downloaded and inspected; replacement exact-head artifact and digest are pending.\n\n# Manual review of the diagnostic runs\n\nThe first hosted artifacts were downloaded and opened rather than inferred from job status. They showed:\n\n- the cold deep link entered Capacitor but the app remained on cloud sign-in because restore cleared the acknowledged remote;\n- assistant role/default IME were correct, while no software-IME mic was visible on the hardware-keyboard emulator;\n- the pulled recording contained `ftyp`, `free`, and `mdat` but no `moov`, proving a non-empty file was not watchable evidence.\n\nThe final commit has direct regression coverage for each failure. Replacement device artifacts will be reviewed with the same standard.\n\n# Known external gap\n\nThe full embedded Bun + llama LOCAL chat path is arm64-only. No repository runner currently exposes the required physical-device labels, so that row remains explicitly blocked rather than being inferred from the x86_64 emulator.\n\n\n\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-14T01:06:37Z",
+      "mergedAt": null,
+      "additions": 4267,
+      "deletions": 794
+    },
+    {
+      "id": "PR_kwDOMT5cIs73mbi2",
+      "title": "fix(cloud): preserve active provisioning owners",
+      "author": "lalalune",
+      "number": 17235,
+      "body": "# Relates to\n\nCloses #17215. Supersedes #17231 after deeper review of the sweeper/worker race. Refs #17162.\n\n## Exact candidate\n- head: `dbcf6798cf2c235eb42e7f5d05f899e3a87db068`\n- base: `00d6f6cdaeb40d9d70e9664ebaccbd8169718f26`\n\n## Summary\n- derive owner, exclusive, cold-boot, and detached-execution classifications from canonical lifecycle metadata\n- retain separate provisioning recovery and orphan cleanup thresholds while fencing recent terminal owners\n- acquire the per-agent advisory lock and recheck CAS predicates before stuck/orphan/healthy reconciliation mutations\n- add a durable renewable execution lease keyed by job, owner, and monotonically increasing generation\n- install claim and lease atomically, renew while provider work is active, and fence destructive mutations and settlement on the exact live generation\n- keep timed-out execution supervised so its eventual settlement remains observable instead of abandoning an unknown side effect\n- add migration, repository, lifecycle, recovery, and PGlite coverage for takeover and stale-owner races\n\n## Root cause\nJob status is not an execution lease. Provider work may outlive a local timeout or worker process, so a terminal-looking row cannot prove that side effects have quiesced. The earlier bulk recovery also raced lifecycle enqueue because it did not participate in the per-agent advisory lock. This candidate combines locked predicate rechecks with a durable renewable owner/generation lease, and only permits takeover after lease expiry plus the recovery grace period.\n\nProvider APIs still cannot be made transactionally atomic with the database when they do not expose generation or idempotency tokens. The lease therefore prevents concurrent database ownership and stale settlement; it does not claim to undo an external side effect completed by a process that died before persisting its result.\n\n## Validation\n- lifecycle/recovery suites: 52 passed\n- stuck-job PGlite suite: 10 passed\n- repository/PII fixtures: 19 passed\n- Cloud Shared typecheck: passed\n- Biome and migration schema checks: passed\n- fresh migration applied to PGlite: passed\n- fresh exact-head CI is required before ready-for-review\n\nA later local rerun was blocked by a concurrent, unrelated in-progress plugin-sql export edit in the shared checkout. The successful scoped results above were captured before that transient workspace mismatch; this PR remains draft pending clean exact-head CI and independent review.\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [x] Before full-page screenshots: N/A - repository and cron behavior only; no rendered surface.\n\n<!-- evidence-row:after-screenshots -->\n- [x] After full-page screenshots: N/A - repository and cron behavior only; no rendered surface.\n\n<!-- evidence-row:walkthrough-video -->\n- [x] Walkthrough video: N/A - no user-facing flow; the race is exercised at database and service boundaries.\n\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs: [Production incident context](https://github.com/elizaOS/eliza/issues/17162); fresh exact-head Cloud CI output is pending.\n\n<!-- evidence-row:frontend-logs -->\n- [x] Frontend console and network logs: N/A - no frontend change.\n\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory: N/A - no agent, action, provider, prompt, or model behavior changes.\n\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: [Production DB aggregate and incident RCA](https://github.com/elizaOS/eliza/issues/17162) documents affected sandbox rows and the job-loss signature.\n\n## Remaining production evidence\nA staging cold wake/resume exceeding the recovery threshold and a controlled exhausted worker would provide operational corroboration. This PR does not claim that staging proof and remains draft pending fresh exact-head CI plus independent review of the renewable lease and fencing design.",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-28T18:13:45Z",
+      "mergedAt": null,
+      "additions": 2980,
+      "deletions": 446
+    },
+    {
+      "id": "PR_kwDOMT5cIs73mcDr",
+      "title": "fix(core): distinguish document list outcomes",
+      "author": "lalalune",
+      "number": 17236,
+      "body": "# Relates to\n\nCloses #17138. Supersedes #17232 after review found pagination, visibility, fallback-result, adapter-parity, and scale defects.\n\n## Summary\n- move document visibility/filter/query/count/pagination into one versioned adapter capability\n- execute SQL listing as one snapshot-coherent CTE with database-precision-safe cursor ordering\n- use stable millisecond-truncated `(createdAt, id)` SQL cursors that cannot skip microsecond rows\n- filter canonical DOCUMENT memories and enforce bounded limit/offset plus supporting indexes\n- implement the exact capability in both first-party in-memory adapters and fail closed before reads when it is unavailable or version-mismatched\n- return structured `ok`, `query_miss`, `filter_miss`, `page_exhausted`, and `empty_store` outcomes\n- keep matched `documents` distinct from coherently paginated `availableDocuments` fallback pages\n- restore global `entityId` parity while retaining SQL requester/RLS context\n- resolve requester role once and fail fast with `ElizaError` plus `reportError`\n\n## Root cause\nThe original action-only fallback solved one message while preserving a bounded-page blind spot. The first deeper rewrite then scanned the entire corpus and performed per-document authorization lookups. This head makes filtered listing a database contract: one bounded query, exact totals, stable cursors, and explicit outcome semantics consumed by the action.\n\n## Validation\n- exact head: `9471208660df6dcf753d6f3ef58de4edbb4b1f11`, based current `develop` `00d6f6cdaeb40d9d70e9664ebaccbd8169718f26`\n- focused core document tests: 61 passed\n- plugin-inmemorydb document tests: 2 passed\n- real migrated PGlite document suite: 10 passed, with the PostgreSQL-only EXPLAIN case explicitly skipped\n- core, plugin-sql, and plugin-inmemorydb builds and typechecks: passed\n- Biome and diff checks: passed\n- real PostgreSQL 16 RLS suite against an isolated non-superuser database: 9/9 passed, including document role/room visibility\n- live-sweep PostgreSQL image corrected to the repo-standard pgvector image; static workflow contract: 16/16 passed\n- fresh exact-head CI is running; independent re-review is pending\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [x] Before full-page screenshots: N/A - backend action/service behavior only; no rendered surface.\n\n<!-- evidence-row:after-screenshots -->\n- [x] After full-page screenshots: N/A - backend action/service behavior only; no rendered surface.\n\n<!-- evidence-row:walkthrough-video -->\n- [x] Walkthrough video: N/A - no frontend flow.\n\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs: [Original failing live scenario run](https://github.com/elizaOS/eliza/actions/runs/30046774252) contains planner query `list all` and the false empty response; fresh exact-head deterministic and database logs pending.\n\n<!-- evidence-row:frontend-logs -->\n- [x] Frontend console and network logs: N/A - no frontend request or state path changed.\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] Real-LLM trajectory: pending successful exact-head rerun; the available credential reached the real runtime but returned HTTP 402 before planner execution.\n\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: N/A - no deployed artifact is claimed; PGlite tests create and inspect document rows across requester, visibility, timestamp, cursor, filter, and query boundaries.\n\n## Remaining evidence\nThis stays draft until a successful exact-head live-model trajectory is manually reviewed and the fresh independent re-review completes. Native PostgreSQL RLS now passes 9/9 against an isolated non-superuser database.\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-28T18:14:04Z",
+      "mergedAt": null,
+      "additions": 2945,
+      "deletions": 170
+    },
+    {
+      "id": "PR_kwDOMT5cIs7yr3Gh",
+      "title": "feat(native): add typed composer bridges for mobile and desktop",
+      "author": "lalalune",
+      "number": 16511,
+      "body": "# Relates to\n\nRefs #16438. One of the five cards that replace the closed monolith #16200. **Draft — do not merge.**\n\nSibling #16440 (draft PR #16507) landed the typed transcript-event contract in `packages/ui/src/native-transcript/`; this PR mirrors that vocabulary (versioned discriminated union, strict boundary decode, typed errors, no fabricated defaults) for the composer/input direction.\n\n- [x] Targets `develop`, branched from the current `origin/develop` tip (`ba916b085b3`), zero conflicts.\n- [x] `bunx vitest run src/native-composer/` → **56 passed**; `bunx tsgo --noEmit -p packages/ui` → clean (results below).\n- [x] A reviewer can confirm the contract works from the per-file vitest matrix without reading the code.\n\n# Sync with develop\n\n- [x] Branched from the latest `origin/develop`; zero conflicts.\n- [x] Narrow, fast verification only (per the anti-watchdog process rule): scoped vitest + scoped `tsgo`. Full workspace lanes are left to CI.\n\n# Risks\n\n**Low.** Wholly-new, self-contained module (`packages/ui/src/native-composer/`) plus one additive `package.json` subpath export (`@elizaos/ui/native-composer`). No existing file's behavior changes; nothing imports it yet, so it cannot regress a live surface.\n\n# Background\n\n## What does this PR do?\n\nIntroduces the **one typed composer-bridge contract** (`eliza.native-composer/v1`) so an iOS / Android / desktop shell can push content INTO the chat composer and drive it, and the renderer can report the composer's state back — without coupling to the #16200 UI monolith.\n\n- **`contract.ts`** — two versioned discriminated-union logs: `ComposerOperation` (native → renderer: `text.insert`/`text.set`, `attachment.add`/`remove`, `reply.set`/`clear`, `mention.add`, `send`, `cancel`, `focus.set`, `voice.handoff`) and `ComposerEvent` (renderer → native: `draft.changed`, `send.result`, `focus.changed`, `voice.state`). Applying an op returns a typed **`DispatchResult`** (`applied` / `duplicate` / `deferred` / `rejected{reason}`) — **never a bare boolean**. Attachment sources are media-store vocabulary only (`inline` / `data-url` / `remote` / `stored`) — **there is no file-id variant, so a second file store is structurally unrepresentable**.\n- **`decode.ts`** — strict boundary decoder. Every field of an untrusted op/attachment is validated; a malformed frame yields a typed `{ok:false,error}` (error-policy **J3**), never a throw on per-op input and never a fabricated default. Structurally rejects any second-store shape (an unknown attachment `source`, e.g. `file-id`, is refused).\n- **`attachments.ts`** — normalizes a native attachment into the **existing content-addressed store's** vocabulary: `inline`/`data-url` → a `data:` URL the existing outgoing pipeline (`api/media-runtime.ts` → `persistAttachmentUrlIfInline`) persists to `${STATE_DIR}/media/<sha256>` on send; `remote` → an http(s) URL flagged for the existing server-side SSRF-guarded rehost; `stored` → an `/api/media/<hash>` passthrough. First-line private-host guard; the server's DNS-pinned SSRF guard (`packages/core/src/network`) remains authoritative. **No new store, no file IDs.**\n- **`reduce.ts`** — the state machine / behavioral spec: `opId` idempotency (duplicate native callback = no-op), offline-send deferral + reconnect replay, cancellation (`send` vs `draft` scope), and permission/limit enforcement.\n- **`client.ts`** — the renderer-side bridge client: decode → reduce → emit events; `serialize()`/`hydrate()` preserve the draft + idempotency ledger + offline queue across app backgrounding, window reload, and reconnect. Malformed native input degrades to `rejected: \"invalid-input\"` — one bad frame never tears down a live composer.\n\n## What kind of change is this?\n\nFeatures (non-breaking; additive new module + subpath export).\n\n# Documentation changes needed?\n\nNo project-docs change required; the module is self-documenting (prose headers + JSDoc), matching the sibling `native-transcript` contract.\n\n# Testing\n\n## Where should a reviewer start?\n\n`packages/ui/src/native-composer/contract.ts` (the shape), then the four test files that pin the whole acceptance case matrix.\n\n## Detailed testing steps\n\n```\nbunx vitest run src/native-composer/   # (cwd packages/ui) -> 5 files, 56 tests passed\nbunx tsgo --noEmit -p packages/ui      # -> exit 0, no diagnostics\n```\n\nCase matrix covered (per-file vitest, deterministic, no mocks standing in for the thing under test):\n\n- **decode.test.ts** — field-level rejection of every op type; attachment-source validation incl. **structural rejection of a `file-id` second-store shape**; mixed-batch stream decode keeps good ops + collects malformed with index/reason.\n- **attachments.test.ts** — inline/data-url/remote/stored normalization; **oversized** cap; malformed mime; non-base64; **private-host SSRF block** (localhost/127/10/192.168/169.254/internal); non-http scheme; non-content-addressed stored URL; asserts no `fileId` on the produced attachment.\n- **reduce.test.ts** — text/mention/reply edits + oversized rejection; attachment add/remove; **permission-denied** (attach & voice capabilities absent); attachment count cap; send empty/happy/**in-flight concurrency**/**offline-deferred + flush replay**; **cancel** (send vs draft); **duplicate-opId idempotency**; draft-revision preservation; `resolveSend` success clears / failure keeps.\n- **client.test.ts** — malformed raw input → typed rejection (never throws); event emission (draft/focus/voice/send.result); **serialize→hydrate reload preserves idempotency + deferred offline send**; batch replay de-dupes after reconnect.\n- **index.test.ts** — the `@elizaos/ui/native-composer` subpath re-exports the schema/decoder/reducer/client, and the client factory works when imported from the barrel.\n\n# Evidence Gate\n\nAttach each applicable artifact inline, or write `N/A - <reason>`.\n\n<!-- evidence-row:before-screenshots -->\n- [x] Before screenshots `N/A - non-surface change: only .ts contract/logic + tests under packages/ui/src/native-composer and one package.json subpath export. No .tsx/.css/rendered surface, so there is no UI to screenshot.`\n<!-- evidence-row:after-screenshots -->\n- [x] After screenshots `N/A - non-surface change (headless contract + reducer + client); no rendered UI. Behavior is proven by the 54-test vitest matrix instead.`\n<!-- evidence-row:walkthrough-video -->\n- [x] Walkthrough video `N/A - no user-exercisable UI flow in this PR; the renderer-side client is a headless bridge with no DOM. Device (iOS/Android/desktop) wiring is explicitly out of scope here - see \"Web-verified vs device-gated\" below.`\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs `N/A - no server code changed. Attachment routing reuses the EXISTING store + SSRF pipeline (packages/agent/api/media-runtime.ts, packages/core/src/network); this PR adds no route or service.`\n<!-- evidence-row:frontend-logs -->\n- [x] Frontend logs `N/A - the bridge client is pure (no network/fetch/DOM I/O of its own); its behavior is asserted directly in client.test.ts.`\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory `N/A - no agent/action/provider/prompt/model behavior changed. The contract is transport-agnostic and sits above the model layer.`\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts `N/A - no persisted domain artifacts (no DB rows/memories/scheduled tasks/on-chain output). The nearest artifact is the reduced ComposerDraft, whose exact output across the case matrix is pinned by reduce.test.ts + client.test.ts.`\n\n# Evidence Details\n\n## Test results (web-verified, fast per-file vitest)\n\n```\n$ bunx vitest run src/native-composer/     # cwd: packages/ui\n Test Files  5 passed (5)\n      Tests  56 passed (56)\n\n$ bunx tsgo --noEmit -p packages/ui\n (exit 0, no diagnostics)\n```\n\n## Web-verified vs device-gated (explicit)\n\n- **Web-verified here:** the contract, boundary decoder, attachment normalizer, reducer state machine, and renderer-side client — the full case matrix, as fast per-file vitest (results above). The attachment routing reuses the existing content-addressed media store + SSRF guard; no second store or file IDs are introduced (asserted in `attachments.test.ts`).\n- **Store + SSRF routing is proven end-to-end by an existing real test** — the normalizer emits exactly the URL vocabulary the current outgoing pipeline consumes, and `packages/agent/src/api/media-runtime.test.ts` already drives that pipeline against a **real** temp-dir content-addressed store: an inline `data:` URL lands content-addressed at `/api/media/<sha256>.png`, and a link-local `169.254.169.254` host is **SSRF-blocked** (kept + flagged ephemeral). This PR deliberately adds no second store and no server code, so that real test is the routing proof for criterion #3; the two halves (normalizer vocabulary ⇄ existing store/SSRF pipeline) meet at the store URL and are each independently proven with real (non-mock) tests.\n- **Device-gated remainder (NOT done here — needs a real iOS-sim / Android-emu / desktop pass):** the native SwiftUI / Android / Electrobun shells that *emit* these operations and *consume* these events. No native composer bridge is tracked on `develop` today (the earlier #16200 native work exists only in gitignored generated project dirs), so there was nothing to wire. This PR defines the contract so those shells **can** conform. I ran **no** simulator/emulator/desktop pass and claim **no** native verification.\n\n## Known gaps / failures\n\n- Native (iOS/Android/desktop) wiring is intentionally out of scope for this card, as above — the contract is the agent-completable core; native conformance is device-gated and belongs to a follow-up with a real device pass.\n- Full workspace `bun run verify` / build lanes were not run locally (long-running; watchdog-bounded env); scoped vitest + `tsgo` were run instead and CI runs the full lanes.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-16T19:58:14Z",
+      "mergedAt": null,
+      "additions": 2533,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs73nZm7",
+      "title": "fix(app): repair browser shell contracts",
+      "author": "lalalune",
+      "number": 17242,
+      "body": "## Summary\n- preserve exact cold deep links and current `/apps` versus `/views` route ownership\n- retain authenticated server credentials through startup and pairing\n- queue native connection requests across the startup-to-live-shell listener handoff, with single-consumer claiming\n- restore chat footer geometry and bounded streaming render cadence\n- preserve real-touch launcher paging and navigate perf tests through shell events\n- align browser coverage with current launcher, native-only surfaces, Calendar bridge IDs, notification collapse, Model Tester readiness, and route hierarchy\n- make PTY spawn/exit ordering deterministic, including exits that arrive before the spawn response\n\nFixes #17240.\n\n## Exact candidate\n- head: `3221079afe870244e6e5cc26664646cdd4af67e2`\n- base: `00d6f6cdaeb40d9d70e9664ebaccbd8169718f26`\n\n## Root cause\nThe develop browser matrix combined real product regressions with stale UI contracts. The product fixes are kept with the tests that prove them: route reconciliation, credential persistence, replay-safe connect adoption, chat footer layout, streaming cadence, touch paging, and PTY lifecycle ordering. Removed or renamed UI contracts are updated only where the current product behavior is intentional and independently covered.\n\nThe prior exact candidate omitted `packages/ui/src/events/index.ts` and its regression test while retaining imports of `listenForConnectRequests`; exact-head typecheck and Pages build correctly failed. This candidate restores those source paths. Local UI typecheck, focused replay tests, and the production web build now pass.\n\n## Local validation\n- task-coordinator PTY/orchestrator: 13 passed\n- focused UI suites: 120 passed\n- voice: 22 passed\n- model tester: 7 passed\n- phone: 16 passed\n- wallet/canonical route: 9 passed\n- model tester browser: 1 passed\n- Android system app: 1 passed\n- shell inventory: 2 passed\n- replay-safe connect request Vitest: 3 passed\n- UI and affected plugin typechecks: passed\n- app `build:web`: passed\n- Biome and diff checks: passed\n\nA full audit of the cumulative shared checkout captured 254 views with no broken render and 253 Playwright passes, but its strict gate found eight composer-clearance findings from UI commits outside this exact-base candidate. It is not claimed as exact-head evidence. The PR remains draft pending fresh exact-head browser, typecheck/build, and visual jobs plus independent review.\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before full-page screenshots: pending attachment from failing develop artifacts.\n\n<!-- evidence-row:after-screenshots -->\n- [ ] After full-page screenshots: pending exact-head app audit desktop/mobile captures.\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] Walkthrough video: pending exact-head route/auth/chat/touch walkthrough.\n\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs: N/A - no backend service behavior changes.\n\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend console and network logs: pending exact-head browser lane artifacts.\n\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory: N/A - no agent, action, provider, prompt, or model behavior changes.\n\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: N/A - no persisted domain output changes.\n\n## Originating runs\n- https://github.com/elizaOS/eliza/actions/runs/30384397932\n- https://github.com/elizaOS/eliza/actions/runs/30385664894",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-28T18:51:38Z",
+      "mergedAt": null,
+      "additions": 1966,
+      "deletions": 782
+    }
+  ],
+  "codeChanges": {
+    "additions": 3144,
+    "deletions": 725,
+    "files": 49,
+    "commitCount": 73
+  },
+  "completedItems": [
+    {
+      "title": "fix(agent): compare residual holdings on a wallet price-coverage flip instead of re-baselining the whole total",
+      "prNumber": 17137,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFollow-up hardening of the merged wallet balance-delta watcher fix #17039 (producer introduced in #16943). Confirmed P1 from the post-merge adversarial review of #17039: the coverage-flip guard re-baselines the ENTIRE total on",
+      "files": [
+        "packages/agent/src/runtime/wallet-balance-delta.test.ts",
+        "packages/agent/src/runtime/wallet-balance-delta.ts"
+      ]
+    },
+    {
+      "title": "fix(benchmarks): comma-split run --benchmarks so the scheduled orchestrator lane parses its ID list",
+      "prNumber": 17203,
+      "type": "bugfix",
+      "body": "## What\n\n`Benchmark orchestrator (scheduled)` has failed every Monday since Jul 6 (runs #2–#5). The workflow passes its benchmark list as one comma-joined string:\n\n```yaml\nBENCHMARKS: bfcl,action-calling,agentbench,tau_bench,mint,context_be",
+      "files": [
+        ".github/workflows/benchmark-orchestrator-scheduled.yml",
+        "packages/benchmarks/orchestrator/cli.py",
+        "packages/benchmarks/orchestrator/tests/test_cli_benchmark_selection.py"
+      ]
+    },
+    {
+      "title": "fix(agent): preserve trustworthy action callback telemetry",
+      "prNumber": 17248,
+      "type": "bugfix",
+      "body": "## Summary\n\n- preserve action callback attribution only when an explicit callback action name has a matching successful action result\n- keep generic, progress, textless, losing, and failed callbacks out of execution evidence and persisted c",
+      "files": [
+        "packages/agent/src/api/__tests__/conversation-stream-sse-contract.test.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/fallback-action-helpers.test.ts",
+        "packages/agent/src/api/fallback-action-helpers.ts",
+        "packages/agent/test/api/chat-routes-usage.test.ts",
+        "packages/core/src/services/__tests__/outbound-sanitize-boundary.test.ts",
+        "packages/core/src/services/message.deliver-then-persist.test.ts",
+        "packages/core/src/services/message.transcript-visibility.test.ts",
+        "packages/core/src/types/components.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): preserve action callback telemetry",
+      "prNumber": 17244,
+      "type": "bugfix",
+      "body": "## Summary\n\n- retain direct callback observation when deriving `usedActionCallbacks`\n- retain explicit `result.mode === \"actions\"` support for action-only responses\n- keep usage and token telemetry single-counted across mixed paths\n- cover ",
+      "files": [
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/test/api/chat-routes-usage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): make Windows contracts deterministic",
+      "prNumber": 17238,
+      "type": "bugfix",
+      "body": "## Summary\n- normalize checked-out Java source line endings before asserting the LP3 contract\n- convert fixture file URLs with `fileURLToPath` so Windows drive paths remain valid\n- verify diagnostic artifact content everywhere while enforci",
+      "files": [
+        "packages/app-core/scripts/run-mobile-build-android-lp3-color-policy.test.mjs",
+        "packages/cloud/api/__tests__/inference-admission-gate.miniflare.test.ts",
+        "packages/core/src/services/message.transcript-visibility.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): align scenario preflight contracts",
+      "prNumber": 17234,
+      "type": "bugfix",
+      "body": "## Summary\n- give credentialed Cerebras workflow steps stable IDs while preserving their current labels\n- assert provider-secret placement and command semantics through those IDs instead of display text\n- refresh the LifeOps verification-co",
+      "files": [
+        ".github/workflows/cerebras-chat-flow-live.yml",
+        "packages/scripts/__tests__/cerebras-toolcall-stream-workflow.test.ts",
+        "packages/scripts/__tests__/lifeops-catalog-coverage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): restore classifier contract compatibility",
+      "prNumber": 17229,
+      "type": "bugfix",
+      "body": "Closes #17228.\n\n## What changed\n\n- accept either canonical `bun run typecheck` or the exact bounded `NODE_OPTIONS='--max-old-space-size=8192' node packages/scripts/run-turbo.mjs run typecheck --concurrency=4` merge-gate command\n- reject unb",
+      "files": [
+        "packages/scripts/__tests__/ci-path-gate.test.mjs",
+        "packages/scripts/__tests__/ci-turbo-cache-contract.test.ts",
+        "packages/scripts/ci-merge-gate-contract.mjs",
+        "packages/scripts/ci-path-gate.mjs",
+        "packages/scripts/ci-path-gate.self-test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): bound security check completion grace",
+      "prNumber": 17227,
+      "type": "bugfix",
+      "body": "## Summary\n\n- allow approved gitleaks runs a four-minute completion grace after the original approval deadline\n- grant grace only when the latest required check actually started by that deadline\n- require successful completion timestamps in",
+      "files": [
+        ".github/workflows/security-advisory-gate.yml",
+        "scripts/security/security-advisory-gate.mjs",
+        "scripts/security/security-advisory-gate.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): bound hosted typecheck concurrency",
+      "prNumber": 17225,
+      "type": "bugfix",
+      "body": "## Summary\n\nBound the full Turbo typecheck graph to four concurrent tasks in the hosted Quality Fork and Tests jobs. The graph, package coverage, and exit propagation remain unchanged; only simultaneous task pressure is reduced.\n\nCloses #17",
+      "files": [
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/test.yml"
+      ]
+    },
+    {
+      "title": "test(model-tester): await ready metric status",
+      "prNumber": 17221,
+      "type": "tests",
+      "body": "## Summary\n\nThe Model Tester view tests previously waited for a static label that rendered before the asynchronous status fetch completed, then raced the ready-count assertion. Await the accessible `Ready probes` status value itself in both",
+      "files": [
+        "plugins/app-model-tester/src/ModelTesterAppView.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(runtime): await and report service startup",
+      "prNumber": 17219,
+      "type": "bugfix",
+      "body": "## Summary\n\n- wait for registered ACP and Birdclaw services during cold action validation\n- keep unregistered or failed services unavailable without fabricating success\n- route runtime service startup exceptions through `reportError` and `R",
+      "files": [
+        "packages/core/src/runtime.ts",
+        "packages/core/src/services/notification.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/tasks-service-readiness.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/common.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-birdclaw/src/actions/birdclaw.test.ts",
+        "plugins/plugin-birdclaw/src/actions/birdclaw.ts"
+      ]
+    },
+    {
+      "title": "fix(scheduling): deterministic local-time resolution across DST",
+      "prNumber": 17209,
+      "type": "bugfix",
+      "body": "## What this is\n\nA narrow extraction of the deterministic owner-local time resolver from @lalalune's draft #17206, rebased onto current `develop` (`27d21400c9a`).\n\nAfter Shaw's blocking reviews, this PR is now **DST resolver work only**. It",
+      "files": [
+        "plugins/plugin-scheduling/src/anchors/anchor-registry.test.ts",
+        "plugins/plugin-scheduling/src/anchors/anchor-registry.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/consolidation-policy.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dst-boundaries.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/due-property.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/due.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/local-time.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/next-fire-at.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): skip oversized Bun cache in bounded jobs",
+      "prNumber": 17208,
+      "type": "bugfix",
+      "body": "## What\n\nDisables the Bun install cache in the two bounded jobs where restoring or saving the 1.609 GB cache costs more than a fresh dependency install:\n\n- Env Audit (`10m` job), which timed out restoring an oversized exact-key Bun 1.3.14 c",
+      "files": [
+        ".github/workflows/feed-env-audit.yml",
+        ".github/workflows/quality-fork.yml"
+      ]
+    },
+    {
+      "title": "fix(registry): bump Wealthville plugin to 0.2.1",
+      "prNumber": 17207,
+      "type": "bugfix",
+      "body": "## What\n\nRecreates the safe two-line portion of #17166 directly on current `develop`, without that PRs diverged `main` history. Updates the source registry entry and generated wire registry for `@wealthville/plugin-wealthville` from `0.2.0`",
+      "files": [
+        "packages/registry/entries/third-party/wealthville__plugin-wealthville.json",
+        "packages/registry/generated-registry.json"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 536.376746347254,
+      "prScore": 356.83874634725396,
+      "issueScore": 30.1,
+      "reviewScore": 149,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 219.9990763782264,
+      "prScore": 219.5610763782264,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 107.44170220988826,
+      "prScore": 100.70370220988826,
+      "issueScore": 6.3,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Vohlsyr",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/166810444?v=4",
+      "totalScore": 26.22974338385115,
+      "prScore": 26.22974338385115,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "KXHXK",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/99810755?u=135aa4bcc175480d72e80c1a0a191075d785ba39&v=4",
+      "totalScore": 18.805908118654582,
+      "prScore": 18.465908118654582,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 2.3000000000000003,
+      "prScore": 0,
+      "issueScore": 2.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 30,
+  "mergedPRs": 14,
+  "newIssues": 19,
+  "closedIssues": 0,
+  "activeContributors": 11
+}

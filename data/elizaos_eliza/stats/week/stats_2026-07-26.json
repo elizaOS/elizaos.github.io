@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-26 to 2026-08-02, elizaos/eliza had 22 new PRs (13 merged), 18 new issues, and 12 active contributors.",
+  "overview": "From 2026-07-26 to 2026-08-02, elizaos/eliza had 52 new PRs (27 merged), 37 new issues, and 15 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABKPy0sA",
@@ -32,6 +32,18 @@
       "commentCount": 4
     },
     {
+      "id": "I_kwDOMT5cIs8AAAABKP5L3w",
+      "title": "[Parent suite] Make calendar availability source-complete and account-safe",
+      "author": "lalalune",
+      "number": 17176,
+      "repository": "elizaos/eliza",
+      "body": "Parent epic: #17175\n\nImplement the calendar truth foundation required before family scheduling can make availability claims.\n\nAcceptance criteria:\n- preserve connector account and grant identity for calendars, events, sync state, and pruning;\n- drain Google calendar/event pages and persist incremental sync tokens per account/calendar;\n- recover expired cursors with a full snapshot and apply cancellation tombstones without cross-account deletion;\n- preserve attendee RSVP/role, transparency, visibility, and explicit send-update semantics;\n- expose complete/partial/unavailable source health so missing data never reads as free time;\n- provide privacy-only guest free/busy and deterministic conflict evaluation;\n- prove multi-account isolation, partial failure, cursor deltas, 410 recovery, DST/all-day/tentative/declined/private-busy behavior with automated tests.\n\nEvidence must include real provider or sandbox-provider logs and domain artifacts; mocks alone do not close this issue.",
+      "createdAt": "2026-07-26T22:00:24Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
       "id": "I_kwDOMT5cIs8AAAABKQ1nrg",
       "title": "fix(cloud): correlate preserved canary deletion errors with bounded history",
       "author": "NubsCarson",
@@ -44,28 +56,16 @@
       "commentCount": 3
     },
     {
-      "id": "I_kwDOMT5cIs8AAAABKP6whw",
-      "title": "[Parent suite] Add scoped household roles and versioned schedule agreements",
-      "author": "lalalune",
-      "number": 17178,
+      "id": "I_kwDOMT5cIs8AAAABKjrmMA",
+      "title": "P0: agent deletion is failing 100% in production (160/160 jobs, 37 agents stuck) + 78% overall job failure rate",
+      "author": "standujar",
+      "number": 17249,
       "repository": "elizaos/eliza",
-      "body": "Parent epic: #17175\n\nImplement household coordination on the existing EntityStore/RelationshipStore, approval queue, audit ledger, and scheduler.\n\nAcceptance criteria:\n- typed roles cover owner, co-parent, partner, caregiver, child, and professional without assuming one default parent;\n- grants distinguish free/busy, event detail, propose, approve, mutate, and export scopes with expiry/revocation;\n- schedule proposals and accepted agreements are distinct immutable versions;\n- affected adults approve material changes and stale approvals are invalidated;\n- custody/holiday exceptions and concurrent proposals resolve deterministically without leaking private details;\n- append-only audit and scoped export show source, actor, decision, version, approval, and outcome;\n- real PGlite tests cover revoked caregivers, co-parent privacy, concurrent proposals, stale approval, and export redaction.\n\nDo not add a second household graph or scheduler.",
-      "createdAt": "2026-07-26T22:07:29Z",
+      "body": "## Summary\n\nA live production audit of the provisioning pipeline (2026-07-29) found **agent deletion is failing 100% of the time**, and has been for days. This is customer-visible and accelerating.\n\nOver the last 7 days: **554 failed jobs vs 153 completed** (78% failure rate).\n\n## 1. `agent_delete` is completely broken — 160/160 failures, one identical cause\n\nEvery failed `agent_delete` job in the window carries the same error:\n\n```\nvalue.toISOString is not a function\n```\n\n- 160 failures, all identical, most recent **2026-07-28 18:03 UTC** (still current).\n- All of them exhausted `attempts >= max_attempts` — so each one also burned the full retry budget.\n- Consequence: **37 agents are stuck in `deletion_failed`**, up from 5 five days ago, and accelerating: **17 of them in the last 24 hours alone**.\n- Customers who ask to delete an agent get a failure, the agent stays, and it keeps occupying node capacity.\n\n`value.toISOString is not a function` is Drizzle's timestamp serializer receiving a **string where a `Date` is expected** — the same class as the cache/JSON round-trip defect fixed in #16859/#16860 for `resolveSharedAgent`.\n\nOne concrete candidate worth checking first (not yet proven to be the site): `prepareAgentBackupInsertData` (`packages/cloud/shared/src/db/repositories/agent-sandboxes.ts`) does\n\n```ts\nconst createdAt = data.created_at ?? new Date();\n// ...\ncreated_at: createdAt,\n```\n\n`??` only guards `null`/`undefined` — a value that already crossed a JSON boundary as an ISO **string** passes straight through into the timestamp column. The 4 non-restart `agent_snapshot` failures in the same window are literally `Failed query: insert into \"agent_sandbox_backups\" (...)`, which is that insert.\n\n## 2. `agent_snapshot`: 386 failures, 381 of them not the job's fault\n\n```\nJob interrupted by worker restart 2 times - max attempts reached   (381)\nFailed query: insert into \"agent_sandbox_backups\" ...              (4)\nJob timed out 2 times - max attempts reached                       (1)\n```\n\nThe worker keeps restarting mid-snapshot, and **each restart consumes an attempt**. Two restarts exhaust `max_attempts` and the job is marked permanently failed — even though nothing about the job itself failed. A restart is an infrastructure event, not a job defect, and should not spend the job's retry budget (the codebase already has the shape for this: `retryLaterWithoutIncrementingAttempts`).\n\nWhy the worker restarts so often is the second half of this: it is consistent with the heap abort in #17154 and with the unbounded source-side snapshot capture in #17172 §1 (a large agent's capture is materialized entirely in the worker's heap).\n\n## 3. The fleet is at or over capacity\n\n| node | capacity | running |\n|---|---|---|\n| eliza-core-prod-2 | 24 | 24 |\n| eliza-core-prod-3 | 24 | **25** |\n| eliza-core-prod-4 | 24 | 24 |\n| eliza-core-prod-5 | 24 | 24 |\n| eliza-core-prod-6 | 24 | 24 |\n\nprod-3 is **over** its declared capacity, and every robot is full, so new work is spilling onto autoscaled cloud nodes (3 × 4 running). Note the interaction: the 37 undeletable agents and the 45 in `error` are holding slots that should have been reclaimed — the delete failure is directly feeding the capacity pressure.\n\nAlso present: a `knowledge_processing` job stuck `in_progress` since **2025-12-31** (~7 months), which no sweeper has reclaimed.\n\n## Why these compound\n\nThe three interact rather than being independent:\n1. Deletes fail → agents accumulate (`deletion_failed` 37, `error` 45) → capacity fills.\n2. Snapshots fail on worker restart → upgrades/deletes that depend on a restore point are less safe.\n3. Full capacity → more scheduling pressure → longer boots → more exposure to the sweeper/timeout classes (#17215).\n\n## Asks\n\n- [ ] Pin and fix the `toISOString` write in the delete path — deterministic, 100% reproducible, highest customer impact.\n- [ ] A worker restart must not consume a job's retry budget (`retryLaterWithoutIncrementingAttempts` semantics for interruption).\n- [ ] Recover the 37 `deletion_failed` + 45 `error` rows once the above land (see #17162 for the 44-agent precedent and its recovery constraints).\n- [ ] Reconcile declared capacity vs actual (prod-3 at 25/24), and reclaim the 7-month-stuck `in_progress` job.\n\nEvidence gathered live against production (counts, error strings, timings; no customer identifiers). Related: #17215 (sweeper vs in-flight cold boots), #17154 (worker heap abort), #17172 (snapshot budgets), #17162 (the 2026-07-13 stranding), #17185 (delete must release capacity exactly once). [stan-cloud]\n",
+      "createdAt": "2026-07-28T22:22:50Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 2
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABKP6tug",
-      "title": "[Parent suite] Gate scheduling sends on immutable approvals and durable receipts",
-      "author": "lalalune",
-      "number": 17177,
-      "repository": "elizaos/eliza",
-      "body": "Parent epic: #17175\n\nReplace direct negotiation-side connector sends with a fail-closed approval and receipt rail.\n\nAcceptance criteria:\n- start/propose/finalize/cancel persist exact outbound drafts and never dispatch directly;\n- approval binds recipient, channel, subject/body bytes, negotiation/proposal version, and content hash;\n- state mutation plus approval/outbox is atomic, idempotent, and race-safe;\n- execution revalidates current negotiation, proposal, affected parties, and material changes;\n- approved sends use provider idempotency keys and persist typed attempts/receipts before reporting completion;\n- retries cannot duplicate external messages and provider ambiguity remains visibly unresolved;\n- cross-subject access, tampering, stale approvals, concurrent enqueue, queue failure, and all supported transports are covered with PGlite/provider-seam tests.\n\nMocks alone do not close this issue; attach sandbox/live connector receipts and reviewed logs.",
-      "createdAt": "2026-07-26T22:07:16Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 2
+      "commentCount": 3
     }
   ],
   "topPRs": [
@@ -78,8 +78,8 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-27T19:23:22Z",
       "mergedAt": null,
-      "additions": 83959,
-      "deletions": 3252
+      "additions": 370415,
+      "deletions": 10231
     },
     {
       "id": "PR_kwDOMT5cIs72yOSj",
@@ -106,6 +106,18 @@
       "deletions": 602
     },
     {
+      "id": "PR_kwDOMT5cIs7xVXct",
+      "title": "fix(app): harden Android device evidence and deep-link delivery",
+      "author": "lalalune",
+      "number": 16320,
+      "body": "# Relates to\n\nRelates to #13580 and #13581. This closes the agent-resolvable hosted-emulator and evidence-delivery residuals. The arm64 LOCAL round trip remains open until a runner with labels `self-hosted`, `linux`, `ARM64`, `android-device` is provisioned.\n\nDefinition of Done: full standard in `CONTRIBUTING.md`.\n\n- [x] Targets `develop`; exact head `e44bd654f26` is based on current `origin/develop` (`0f8045c6744d6dd696a57ba0a053f9f2ee55355c`).\n- [x] Focused real-path tests, changed-file coverage, Android compilation, and `bun run verify` pass.\n- [x] The exact-head mandatory app audit passed 246/246 views with no broken or needs-work verdicts.\n- [ ] The exact-head API-34 PR/device and full-hosted emulator runs are in progress; every resulting artifact will be opened before the draft is promoted.\n\n# What this fixes\n\nThe Android lane had several independent false-proof paths:\n\n- `reactivecircus/android-emulator-runner` executes each nonblank script line in a separate `sh -c`, so multiline Bash state, traps, PIDs, continuations, and `pipefail` were lost;\n- a cold native `appUrlOpen` could arrive while the startup splash listener was mounted but still restoring reset/session state; reading `gatewayUrl` falsely acknowledged the command immediately before restore cleared the newly selected remote;\n- hosted emulators expose a hardware keyboard, suppressing the real software IME even after the probe requested it, and the verifier sampled UIAutomator only once;\n- Android toybox did not finalize `screenrecord` through the previous `pkill -INT` path, leaving an `ftyp/free/mdat` file with no `moov` box;\n- failed verifier commands and non-finalized recordings could still look like uploaded proof.\n\nThe branch moves emulator work into committed Bash processes, queues and drains early native deep links, exposes renderer readiness, acknowledges/replays CONNECT delivery within a bounded window, and ensures only the correct startup owner can claim a deep link. It also forces the emulator software-IME policy, polls the actual IME hierarchy, terminates `screenrecord` by PID with SIGINT, waits for encoder/transport exit, and rejects incomplete ISO-BMFF output.\n\n# Final remote-loopback correction\n\nThe final hosted run exposed one more device-only ambiguity: the remote-mac harness deliberately forwards the host through `http://127.0.0.1:31337`, while the Android client previously treated every loopback-shaped URL as the bundled native agent. That hijacked the forwarded request and returned `local_agent_unavailable` even though the remote coordinator was healthy.\n\nThe exact head now resolves Android routing from persisted runtime mode, durable Cloud-session precedence, and build defaults before deciding whether loopback HTTP belongs to the native bridge. IPC remains unambiguously native. The mounted-App regression drives a real `CONNECT_EVENT` through deferred first-run adoption and asserts the observable `adopt → complete → retry` outcome sequence, remote mode, shell state, and success notice.\n\nFinal local gates: 10 changed UI test files pass 143/143; the enforced changed-file coverage gate remains above 50% for every executable target (81.05% mean for the final routing slice); test-realness reports zero regressions; and `bun run verify` passes 573/573 Turbo tasks plus all audits and 28/28 dist-path consumers.\n\n# Review map\n\nStart with:\n\n1. `.github/workflows/android-device-e2e.yml` and `scripts/mobile/android-emulator-webview-ci.sh`;\n2. `packages/app/src/mobile-lifecycle.ts`, `packages/ui/src/events/index.ts`, and `packages/ui/src/state/use-startup-shell-controller.ts`;\n3. `packages/app/scripts/lib/android-capture.mjs` and `packages/app/scripts/android-assistant-verify.mjs`;\n4. the exact-head Actions runs and downloaded artifacts linked below once complete.\n\n# Verification\n\nExact head: `e44bd654f26`\n\n- Exact changed-test lane: 29 Bun + 77 Vitest (106/106), including real command bytes, playable MP4 finalization, native delivery, and startup transitions.\n- App scripts: prior branch-wide suite 500 Bun + 562 Vitest; all edited focused slices remain green.\n- App/UI typechecks pass.\n- Android debug Java compile: 484 tasks, success (excluding the unrelated missing `copyForkLlamaLib` artifact).\n- Changed-file gate: all seven executable targets clear 50%; startup reducer 92.96%, startup ownership 90%, verifier library 99.54%, capture 75.19%, lifecycle 83.33%, verifier CLI 69.64%, events 57.89%; mean 81.22%.\n- `bun run verify`: 573/573 Turbo tasks, all follow-on audits, and 28/28 dist-path consumers.\n- Mandatory exact-head `bun run --cwd packages/app audit:app`: 246/246 passed; 0 broken and 0 needs-work verdicts after manual review.\n- Final exact-head PR/device run: https://github.com/elizaOS/eliza/actions/runs/29329810149\n- Final exact-head full API-34 dispatch: https://github.com/elizaOS/eliza/actions/runs/29329831684\n- Final exact-head app aesthetic audit: https://github.com/elizaOS/eliza/actions/runs/29329810125\n- Replacement exact-head PR/device run: https://github.com/elizaOS/eliza/actions/runs/29308643258\n- Replacement exact-head full API-34 dispatch: https://github.com/elizaOS/eliza/actions/runs/29308665988\n- First diagnostic PR device run: https://github.com/elizaOS/eliza/actions/runs/29304246350\n- First diagnostic full API-34 dispatch: https://github.com/elizaOS/eliza/actions/runs/29304250797\n\nThe diagnostic runs are intentionally retained: they prove the old shell failure was removed and expose the three exact device-level defects repaired by the final commit. They are not represented as passing acceptance evidence.\n\n# Risk\n\nMedium. This changes mobile lifecycle ordering and CI evidence acceptance, but replay is bounded, ownership is phase-typed, failed states remain failures, and the real hosted emulator lanes will run before the draft is promoted. No model or prompt behavior changes.\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] [Before: forwarded remote wrongly rendered Cloud sign-in](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/16320-before-cloud-onboarding.jpg)\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - there is no rendered design change; the required exact-head full app audit passed 246/246 views and was manually reviewed and its applicable mobile/desktop captures will be manually reviewed.\n<!-- evidence-row:walkthrough-video -->\n- [x] [Diagnostic API-34 run and its captured device bundle](https://github.com/elizaOS/eliza/actions/runs/29304250797) show the pre-fix truncated recording; replacement exact-head MP4 proof is being collected.\n<!-- evidence-row:backend-logs -->\n- [x] [Diagnostic PR/device logs](https://github.com/elizaOS/eliza/actions/runs/29304246350) and [full dispatch logs](https://github.com/elizaOS/eliza/actions/runs/29304250797) identify startup acknowledgement, IME, and encoder-finalization failures; replacement exact-head logs are pending.\n<!-- evidence-row:frontend-logs -->\n- [x] [Diagnostic WebView/Playwright run](https://github.com/elizaOS/eliza/actions/runs/29304250797) proves native ingress reached the renderer but onboarding stayed on cloud sign-in; replacement exact-head state receipt is pending.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no agent, action, provider, prompt, model selection, or model output behavior changes.\n<!-- evidence-row:domain-artifacts -->\n- [x] [Diagnostic Android XML/JSON/screenshots/logcat/recording artifact](https://github.com/elizaOS/eliza/actions/runs/29304250797) was downloaded and inspected; replacement exact-head artifact and digest are pending.\n\n# Manual review of the diagnostic runs\n\nThe first hosted artifacts were downloaded and opened rather than inferred from job status. They showed:\n\n- the cold deep link entered Capacitor but the app remained on cloud sign-in because restore cleared the acknowledged remote;\n- assistant role/default IME were correct, while no software-IME mic was visible on the hardware-keyboard emulator;\n- the pulled recording contained `ftyp`, `free`, and `mdat` but no `moov`, proving a non-empty file was not watchable evidence.\n\nThe final commit has direct regression coverage for each failure. Replacement device artifacts will be reviewed with the same standard.\n\n# Known external gap\n\nThe full embedded Bun + llama LOCAL chat path is arm64-only. No repository runner currently exposes the required physical-device labels, so that row remains explicitly blocked rather than being inferred from the x86_64 emulator.\n\n\n\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-14T01:06:37Z",
+      "mergedAt": null,
+      "additions": 4267,
+      "deletions": 794
+    },
+    {
       "id": "PR_kwDOMT5cIs71lg9X",
       "title": "fix(chat): make streaming persistence and telemetry exact",
       "author": "lalalune",
@@ -116,25 +128,13 @@
       "mergedAt": "2026-07-27T17:16:54Z",
       "additions": 3284,
       "deletions": 3499
-    },
-    {
-      "id": "PR_kwDOMT5cIs72d1gL",
-      "title": "fix(cloud): recover stale managed canaries safely",
-      "author": "NubsCarson",
-      "number": 17173,
-      "body": "## Summary\n\n- add an authenticated, organization-scoped conditional Eliza-agent DELETE contract that owns an exact name, creation timestamp, and execution tier under the existing lifecycle advisory lock\n- fail closed around replacement cleanup, warm claims, in-progress work, retry ownership, and recent detached lifecycle execution; only quiescent stale work may be cancelled before the exact CAS\n- recover the one explicitly supplied stale managed-canary suffix through normal GET/DELETE/job APIs, then require final 404 proof before provisioning a fresh canary\n- bind recovery intent into workflow dispatch evidence and keep the evidence schema privacy-safe\n\n## Why\n\nThe staging managed-dedicated canary is blocked by one old exact canary row from run 30081355987. Generic deletion, direct database edits, and prefix-wide cleanup are unsafe. This change provides a bounded exact-identity recovery path without weakening deployment or environment protections.\n\nRefs #17158\n\n## Proof\n\n- bun run test:cloud — all 11 batches passed, 0 failures\n- bun run verify:cloud — 85/85 tasks passed\n- bun run verify — 578/578 lint/typecheck tasks plus all repository audits and 28 dist-path consumer checks passed\n- bun run build:cloud — passed\n- bun run build:core — 71/71 tasks passed\n- focused canary/workflow tests — 48 passed, 0 failed\n- API DELETE route tests — 6 passed, 0 failed\n- focused Cloud shared real-PGlite lifecycle tests — 37 passed, 0 failed\n- production Worker dry-run — passed\n- git diff --check — clean\n- independent blocker review — APPROVED, no remaining P0/P1\n\n## Safety invariants\n\n- no direct database mutation or ad-hoc host/container cleanup\n- no broad prefix delete\n- no token or suffix disclosure in artifacts\n- no second provision while a known provision job is still nonterminal\n- no environment-policy change or self-approval bypass\n- normal no-body/whitespace DELETE behavior remains backward compatible\n\n## UI evidence\n\nN/A — no UI or renderer path changed.\n\n## Post-merge rollout\n\n1. Deploy the exact merge SHA to staging API and provisioning worker.\n2. Dispatch one sanctioned staging canary with stale suffix r30081355987a1.\n3. Require recovery confirmation, fresh canary proof, cleanup confirmation, and terminal green.\n4. Only then selectively backport the exact proven change to production and repeat the protected canary before physical LP3 Notes/Calendar validation.\n\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - backend and control-plane only; no UI pixels changed\n\n<!-- evidence-row:after-screenshots -->\n- [ ] N/A - backend and control-plane only; no UI pixels changed\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - no user-facing UI flow changed\n\n<!-- evidence-row:backend-logs -->\n- [x] [30187410103](https://github.com/elizaOS/eliza/actions/runs/30187410103)\n\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - no frontend source or runtime path changed\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no prompt, action, provider, or model behavior changed\n\n<!-- evidence-row:domain-artifacts -->\n- [ ] N/A - the exact staging canary artifact is intentionally produced only after the merged SHA is deployed\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-26T04:12:21Z",
-      "mergedAt": "2026-07-26T22:54:56Z",
-      "additions": 1481,
-      "deletions": 105
     }
   ],
   "codeChanges": {
-    "additions": 8286,
-    "deletions": 3823,
-    "files": 77,
-    "commitCount": 56
+    "additions": 11430,
+    "deletions": 4548,
+    "files": 120,
+    "commitCount": 129
   },
   "completedItems": [
     {
@@ -204,6 +204,16 @@
       ]
     },
     {
+      "title": "fix(agent): compare residual holdings on a wallet price-coverage flip instead of re-baselining the whole total",
+      "prNumber": 17137,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFollow-up hardening of the merged wallet balance-delta watcher fix #17039 (producer introduced in #16943). Confirmed P1 from the post-merge adversarial review of #17039: the coverage-flip guard re-baselines the ENTIRE total on",
+      "files": [
+        "packages/agent/src/runtime/wallet-balance-delta.test.ts",
+        "packages/agent/src/runtime/wallet-balance-delta.ts"
+      ]
+    },
+    {
       "title": "fix(cloud): recover stale managed canaries safely",
       "prNumber": 17173,
       "type": "bugfix",
@@ -233,6 +243,17 @@
         "packages/cloud/shared/src/lib/services/eliza-sandbox-warm-claim-key-push.test.ts",
         "packages/cloud/shared/src/lib/services/provisioning-jobs-snapshot-gate.test.ts",
         "packages/scripts/cloud/admin/agent-image-canary-live.test.ts"
+      ]
+    },
+    {
+      "title": "fix(benchmarks): comma-split run --benchmarks so the scheduled orchestrator lane parses its ID list",
+      "prNumber": 17203,
+      "type": "bugfix",
+      "body": "## What\n\n`Benchmark orchestrator (scheduled)` has failed every Monday since Jul 6 (runs #2–#5). The workflow passes its benchmark list as one comma-joined string:\n\n```yaml\nBENCHMARKS: bfcl,action-calling,agentbench,tau_bench,mint,context_be",
+      "files": [
+        ".github/workflows/benchmark-orchestrator-scheduled.yml",
+        "packages/benchmarks/orchestrator/cli.py",
+        "packages/benchmarks/orchestrator/tests/test_cli_benchmark_selection.py"
       ]
     },
     {
@@ -338,37 +359,191 @@
         "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts",
         "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.ts"
       ]
+    },
+    {
+      "title": "fix(agent): preserve trustworthy action callback telemetry",
+      "prNumber": 17248,
+      "type": "bugfix",
+      "body": "## Summary\n\n- preserve action callback attribution only when an explicit callback action name has a matching successful action result\n- keep generic, progress, textless, losing, and failed callbacks out of execution evidence and persisted c",
+      "files": [
+        "packages/agent/src/api/__tests__/conversation-stream-sse-contract.test.ts",
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/src/api/fallback-action-helpers.test.ts",
+        "packages/agent/src/api/fallback-action-helpers.ts",
+        "packages/agent/test/api/chat-routes-usage.test.ts",
+        "packages/core/src/services/__tests__/outbound-sanitize-boundary.test.ts",
+        "packages/core/src/services/message.deliver-then-persist.test.ts",
+        "packages/core/src/services/message.transcript-visibility.test.ts",
+        "packages/core/src/types/components.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): preserve action callback telemetry",
+      "prNumber": 17244,
+      "type": "bugfix",
+      "body": "## Summary\n\n- retain direct callback observation when deriving `usedActionCallbacks`\n- retain explicit `result.mode === \"actions\"` support for action-only responses\n- keep usage and token telemetry single-counted across mixed paths\n- cover ",
+      "files": [
+        "packages/agent/src/api/chat-routes.ts",
+        "packages/agent/test/api/chat-routes-usage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): make Windows contracts deterministic",
+      "prNumber": 17238,
+      "type": "bugfix",
+      "body": "## Summary\n- normalize checked-out Java source line endings before asserting the LP3 contract\n- convert fixture file URLs with `fileURLToPath` so Windows drive paths remain valid\n- verify diagnostic artifact content everywhere while enforci",
+      "files": [
+        "packages/app-core/scripts/run-mobile-build-android-lp3-color-policy.test.mjs",
+        "packages/cloud/api/__tests__/inference-admission-gate.miniflare.test.ts",
+        "packages/core/src/services/message.transcript-visibility.test.ts",
+        "packages/scripts/cloud/admin/managed-dedicated-canary-diagnostic.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): align scenario preflight contracts",
+      "prNumber": 17234,
+      "type": "bugfix",
+      "body": "## Summary\n- give credentialed Cerebras workflow steps stable IDs while preserving their current labels\n- assert provider-secret placement and command semantics through those IDs instead of display text\n- refresh the LifeOps verification-co",
+      "files": [
+        ".github/workflows/cerebras-chat-flow-live.yml",
+        "packages/scripts/__tests__/cerebras-toolcall-stream-workflow.test.ts",
+        "packages/scripts/__tests__/lifeops-catalog-coverage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): restore classifier contract compatibility",
+      "prNumber": 17229,
+      "type": "bugfix",
+      "body": "Closes #17228.\n\n## What changed\n\n- accept either canonical `bun run typecheck` or the exact bounded `NODE_OPTIONS='--max-old-space-size=8192' node packages/scripts/run-turbo.mjs run typecheck --concurrency=4` merge-gate command\n- reject unb",
+      "files": [
+        "packages/scripts/__tests__/ci-path-gate.test.mjs",
+        "packages/scripts/__tests__/ci-turbo-cache-contract.test.ts",
+        "packages/scripts/ci-merge-gate-contract.mjs",
+        "packages/scripts/ci-path-gate.mjs",
+        "packages/scripts/ci-path-gate.self-test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): bound security check completion grace",
+      "prNumber": 17227,
+      "type": "bugfix",
+      "body": "## Summary\n\n- allow approved gitleaks runs a four-minute completion grace after the original approval deadline\n- grant grace only when the latest required check actually started by that deadline\n- require successful completion timestamps in",
+      "files": [
+        ".github/workflows/security-advisory-gate.yml",
+        "scripts/security/security-advisory-gate.mjs",
+        "scripts/security/security-advisory-gate.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): bound hosted typecheck concurrency",
+      "prNumber": 17225,
+      "type": "bugfix",
+      "body": "## Summary\n\nBound the full Turbo typecheck graph to four concurrent tasks in the hosted Quality Fork and Tests jobs. The graph, package coverage, and exit propagation remain unchanged; only simultaneous task pressure is reduced.\n\nCloses #17",
+      "files": [
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/test.yml"
+      ]
+    },
+    {
+      "title": "test(model-tester): await ready metric status",
+      "prNumber": 17221,
+      "type": "tests",
+      "body": "## Summary\n\nThe Model Tester view tests previously waited for a static label that rendered before the asynchronous status fetch completed, then raced the ready-count assertion. Await the accessible `Ready probes` status value itself in both",
+      "files": [
+        "plugins/app-model-tester/src/ModelTesterAppView.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(runtime): await and report service startup",
+      "prNumber": 17219,
+      "type": "bugfix",
+      "body": "## Summary\n\n- wait for registered ACP and Birdclaw services during cold action validation\n- keep unregistered or failed services unavailable without fabricating success\n- route runtime service startup exceptions through `reportError` and `R",
+      "files": [
+        "packages/core/src/runtime.ts",
+        "packages/core/src/services/notification.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/tasks-service-readiness.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/common.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts",
+        "plugins/plugin-birdclaw/src/actions/birdclaw.test.ts",
+        "plugins/plugin-birdclaw/src/actions/birdclaw.ts"
+      ]
+    },
+    {
+      "title": "fix(scheduling): deterministic local-time resolution across DST",
+      "prNumber": 17209,
+      "type": "bugfix",
+      "body": "## What this is\n\nA narrow extraction of the deterministic owner-local time resolver from @lalalune's draft #17206, rebased onto current `develop` (`27d21400c9a`).\n\nAfter Shaw's blocking reviews, this PR is now **DST resolver work only**. It",
+      "files": [
+        "plugins/plugin-scheduling/src/anchors/anchor-registry.test.ts",
+        "plugins/plugin-scheduling/src/anchors/anchor-registry.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/consolidation-policy.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dst-boundaries.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/due-property.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/due.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/local-time.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/next-fire-at.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): skip oversized Bun cache in bounded jobs",
+      "prNumber": 17208,
+      "type": "bugfix",
+      "body": "## What\n\nDisables the Bun install cache in the two bounded jobs where restoring or saving the 1.609 GB cache costs more than a fresh dependency install:\n\n- Env Audit (`10m` job), which timed out restoring an oversized exact-key Bun 1.3.14 c",
+      "files": [
+        ".github/workflows/feed-env-audit.yml",
+        ".github/workflows/quality-fork.yml"
+      ]
+    },
+    {
+      "title": "fix(registry): bump Wealthville plugin to 0.2.1",
+      "prNumber": 17207,
+      "type": "bugfix",
+      "body": "## What\n\nRecreates the safe two-line portion of #17166 directly on current `develop`, without that PRs diverged `main` history. Updates the source registry entry and generated wire registry for `@wealthville/plugin-wealthville` from `0.2.0`",
+      "files": [
+        "packages/registry/entries/third-party/wealthville__plugin-wealthville.json",
+        "packages/registry/generated-registry.json"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "NubsCarson",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 382.8470157603965,
-      "prScore": 363.6710157603966,
-      "issueScore": 18.3,
-      "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 649.2089154867672,
+      "prScore": 444.4949154867672,
+      "issueScore": 42.400000000000006,
+      "reviewScore": 161,
+      "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
-      "username": "lalalune",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 112.83216913951321,
-      "prScore": 87.65616913951321,
-      "issueScore": 12.3,
-      "reviewScore": 12,
-      "commentScore": 0.8759999999999999,
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 385.1470157603965,
+      "prScore": 363.6710157603966,
+      "issueScore": 20.400000000000002,
+      "reviewScore": 0,
+      "commentScore": 1.0759999999999998,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 219.9990763782264,
+      "prScore": 219.5610763782264,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "standujar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 38.73500061157744,
-      "prScore": 38.29700061157744,
-      "issueScore": 0,
+      "totalScore": 146.1767028214657,
+      "prScore": 139.0007028214657,
+      "issueScore": 6.3,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
@@ -382,6 +557,16 @@
       "summary": null
     },
     {
+      "username": "Vohlsyr",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/166810444?v=4",
+      "totalScore": 26.22974338385115,
+      "prScore": 26.22974338385115,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "roninjin10",
       "avatarUrl": "https://avatars.githubusercontent.com/u/35039927?u=94370136033f1a4d900b4857c2ae13964bf51f96&v=4",
       "totalScore": 20.372742863074038,
@@ -389,6 +574,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "KXHXK",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/99810755?u=135aa4bcc175480d72e80c1a0a191075d785ba39&v=4",
+      "totalScore": 18.805908118654582,
+      "prScore": 18.465908118654582,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -432,9 +627,9 @@
       "summary": null
     }
   ],
-  "newPRs": 22,
-  "mergedPRs": 13,
-  "newIssues": 18,
+  "newPRs": 52,
+  "mergedPRs": 27,
+  "newIssues": 37,
   "closedIssues": 1,
-  "activeContributors": 12
+  "activeContributors": 15
 }
