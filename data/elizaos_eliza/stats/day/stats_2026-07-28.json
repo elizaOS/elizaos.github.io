@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-28 to 2026-07-29, elizaos/eliza had 30 new PRs (14 merged), 19 new issues, and 11 active contributors.",
+  "overview": "From 2026-07-28 to 2026-07-29, elizaos/eliza had 31 new PRs (16 merged), 19 new issues, and 11 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABKjrmMA",
@@ -106,6 +106,18 @@
       "deletions": 170
     },
     {
+      "id": "PR_kwDOMT5cIs73N1Fe",
+      "title": "feat(discord): P4 group-room coordination — speaker lease, latest-human-edge-wins, bot-loop budget",
+      "author": "0xSolace",
+      "number": 17213,
+      "body": "## P4 multiplayer coordination: group-room primitive in the Discord connector\n\nMultiple humans + multiple agents in one room currently produce three structural failures: two agents answering the same human message, agents replying to superseded (\"stale\") human edges, and bot-to-bot reply loops. The Sol+Vera coordination protocol solved this behaviorally; this PR productizes it as a **runtime primitive** in `plugins/plugin-discord`, opt-in via `DISCORD_GROUP_COORDINATION_ENABLED` (default **off** — zero behavior change for existing deployments).\n\n**Scope note:** deliberately does NOT touch outbound DM participant registration (#17167, @nubs's lane).\n\n### What it does\n\nNew module `group-coordination.ts`, wired into `MessageManager.handleMessage` + the gateway `messageCreate` listener:\n\n1. **One active speaker per human edge.** Before committing a model turn, an agent must win a durable *speaker lease* keyed `(channelId, edgeMessageId)`. The lease row id uses `stringToUuid` (agent-**independent**, unlike `createUniqueUuid`) so all agents sharing a coordination store contend on the same row. The claim is the adapter's existing atomic `onConflictDoNothing` insert followed by a read-back — the read-back decides the winner, both racers converge on the same holder. No CAS, no advisory locks, no new schema.\n2. **Safe expiry/reclaim.** Leases carry `expiresAt`. A crashed holder's edge is reclaimed at **generation+1** (another atomic unique-row insert; expired rows are never mutated). A revived stale holder fails `verifySpeakerLease` (expired / superseded / not-holder) and **aborts before the third-party send** and before persisting any reply.\n3. **Latest-human-edge-wins.** The gateway records each human (non-bot) message as the channel's edge. A claimed turn superseded by a newer human edge aborts at claim time *and* again pre-send. Explicit addressing (mention/reply-to-bot) overrides staleness — explicitly addressed work is never dropped — and a coalesced batch containing the latest edge stays current, so bursts coalesce per policy without dropping addressed work.\n4. **Bot-to-bot loop prevention.** Bot messages never advance the human edge. A bot-authored message earns a reply only when it explicitly addresses this bot AND the per-channel consecutive bot-reply budget (`DISCORD_BOT_REPLY_BUDGET`, default 1, reset on every human message) is not exhausted. Two mutually-mentioning bots structurally stall after the budget until a human speaks.\n5. **Auditable receipts.** Every decision (lease-claim won/lost/reclaimed/renewed, stale-edge abort, lost-lease abort, bot-loop suppression) persists a row in `discord_coordination_receipts` scoped to the room, with edge id, outcome, generation, and holder.\n\nRetry/redelivery cannot double-send: the lease claim is idempotent per holder (\"renewed\"), and the existing durable-turn machine (#16696 lineage) reconciles a redelivery to REPLIED from the persisted reply memory.\n\n### Tests (all green at exact head `eb5a727a7f3`)\n\n- **`__tests__/group-coordination.test.ts`** (18) — protocol unit suite: concurrent claim race → one winner + loser observes winner; idempotent retry; expiry → generation+1 reclaim; two successors race an expired lease → one reclaimer; superseded verification; edge currency incl. explicit-mention override, coalesced-batch currency, out-of-order monotonic guard; bot budget + human-reset; receipt persistence + store-failure safety; config defaults.\n- **`__tests__/messages-group-coordination.test.ts`** (6) — two REAL `MessageManager`s (two agents) share one store and race the same human message → exactly one third-party send, both leave lease receipts agreeing on the winner; newer human edge mid-generation → pre-send abort with receipt; explicit mention still sends; unaddressed bot message suppressed (ingested, receipted); addressed bot reply honors budget then exhausts; restart redelivery is a no-op (no double send).\n- **`test/group-coordination-pglite.test.ts`** (5) — real `AgentRuntime` + in-process **PGlite** via the repo's shared test-runtime helper: the claim race, idempotent retry, crash→expiry→g+1 reclaim, revived-holder superseded abort, and receipt rows proven against the actual plugin-sql `onConflictDoNothing` seam (the atomicity the protocol depends on).\n- Full `plugin-discord` unit suite: **66 files / 501 tests pass** including the new ones; durable-turn, inbound-idempotency, staleness, coalesce suites untouched-green. Biome clean; `tsc` introduces no new errors in touched files.\n\n### Not in scope\n\n- No prod deploy, no workflow edits.\n- No changes to #17167 (outbound DM participant registration) or its branch.\n- Cross-process lease contention through one shared DB is exercised via two holder identities on one PGlite store; a multi-runtime docker-compose soak (the P4 \"week in a room with Shadow+Shaw+Nubs\" green bar) is the follow-up dogfood step.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-28T02:10:03Z",
+      "mergedAt": null,
+      "additions": 2805,
+      "deletions": 2
+    },
+    {
       "id": "PR_kwDOMT5cIs7yr3Gh",
       "title": "feat(native): add typed composer bridges for mobile and desktop",
       "author": "lalalune",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 2533,
       "deletions": 0
-    },
-    {
-      "id": "PR_kwDOMT5cIs73nZm7",
-      "title": "fix(app): repair browser shell contracts",
-      "author": "lalalune",
-      "number": 17242,
-      "body": "## Summary\n- preserve exact cold deep links and current `/apps` versus `/views` route ownership\n- retain authenticated server credentials through startup and pairing\n- queue native connection requests across the startup-to-live-shell listener handoff, with single-consumer claiming\n- restore chat footer geometry and bounded streaming render cadence\n- preserve real-touch launcher paging and navigate perf tests through shell events\n- align browser coverage with current launcher, native-only surfaces, Calendar bridge IDs, notification collapse, Model Tester readiness, and route hierarchy\n- make PTY spawn/exit ordering deterministic, including exits that arrive before the spawn response\n\nFixes #17240.\n\n## Exact candidate\n- head: `3221079afe870244e6e5cc26664646cdd4af67e2`\n- base: `00d6f6cdaeb40d9d70e9664ebaccbd8169718f26`\n\n## Root cause\nThe develop browser matrix combined real product regressions with stale UI contracts. The product fixes are kept with the tests that prove them: route reconciliation, credential persistence, replay-safe connect adoption, chat footer layout, streaming cadence, touch paging, and PTY lifecycle ordering. Removed or renamed UI contracts are updated only where the current product behavior is intentional and independently covered.\n\nThe prior exact candidate omitted `packages/ui/src/events/index.ts` and its regression test while retaining imports of `listenForConnectRequests`; exact-head typecheck and Pages build correctly failed. This candidate restores those source paths. Local UI typecheck, focused replay tests, and the production web build now pass.\n\n## Local validation\n- task-coordinator PTY/orchestrator: 13 passed\n- focused UI suites: 120 passed\n- voice: 22 passed\n- model tester: 7 passed\n- phone: 16 passed\n- wallet/canonical route: 9 passed\n- model tester browser: 1 passed\n- Android system app: 1 passed\n- shell inventory: 2 passed\n- replay-safe connect request Vitest: 3 passed\n- UI and affected plugin typechecks: passed\n- app `build:web`: passed\n- Biome and diff checks: passed\n\nA full audit of the cumulative shared checkout captured 254 views with no broken render and 253 Playwright passes, but its strict gate found eight composer-clearance findings from UI commits outside this exact-base candidate. It is not claimed as exact-head evidence. The PR remains draft pending fresh exact-head browser, typecheck/build, and visual jobs plus independent review.\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before full-page screenshots: pending attachment from failing develop artifacts.\n\n<!-- evidence-row:after-screenshots -->\n- [ ] After full-page screenshots: pending exact-head app audit desktop/mobile captures.\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] Walkthrough video: pending exact-head route/auth/chat/touch walkthrough.\n\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs: N/A - no backend service behavior changes.\n\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend console and network logs: pending exact-head browser lane artifacts.\n\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory: N/A - no agent, action, provider, prompt, or model behavior changes.\n\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: N/A - no persisted domain output changes.\n\n## Originating runs\n- https://github.com/elizaOS/eliza/actions/runs/30384397932\n- https://github.com/elizaOS/eliza/actions/runs/30385664894",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-28T18:51:38Z",
-      "mergedAt": null,
-      "additions": 1966,
-      "deletions": 782
     }
   ],
   "codeChanges": {
-    "additions": 3144,
-    "deletions": 725,
-    "files": 49,
-    "commitCount": 73
+    "additions": 3418,
+    "deletions": 763,
+    "files": 56,
+    "commitCount": 149
   },
   "completedItems": [
     {
@@ -156,6 +156,29 @@
         ".github/workflows/benchmark-orchestrator-scheduled.yml",
         "packages/benchmarks/orchestrator/cli.py",
         "packages/benchmarks/orchestrator/tests/test_cli_benchmark_selection.py"
+      ]
+    },
+    {
+      "title": "fix(ci): retry the Windows 0xC0000142 turbo child-process crash once from cache",
+      "prNumber": 17252,
+      "type": "bugfix",
+      "body": "## Summary\r\n\r\nWindows CI's three turbo-invoking shards (`core-runtime`, `app-and-cli`, `build-and-helper-smokes`) fail intermittently with **zero diagnostic output**: a task child process dies with `0xC0000142` (`STATUS_DLL_INIT_FAILED`) be",
+      "files": [
+        "packages/scripts/__tests__/run-turbo-windows-init-crash-retry.test.ts",
+        "packages/scripts/run-turbo.mjs"
+      ]
+    },
+    {
+      "title": "fix(ui): remove gate-banned backdrop blur and focus-ring utilities from chat surfaces",
+      "prNumber": 17250,
+      "type": "bugfix",
+      "body": "## Summary\n\nDevelop's Tests workflow ([run 30398014368](https://github.com/elizaOS/eliza/actions/runs/30398014368)) fails its Client Tests lane on exactly two UI source gates:\n\n- `src/no-backdrop-blur-gate.test.ts` — backdrop-filter found i",
+      "files": [
+        "packages/ui/src/components/chat/message-search/MessageSearchPanel.tsx",
+        "packages/ui/src/components/composites/chat/chat-message-actions.test.tsx",
+        "packages/ui/src/components/composites/chat/chat-message-actions.tsx",
+        "packages/ui/src/components/composites/chat/chat-message.tsx",
+        "packages/ui/src/styles/styles.css"
       ]
     },
     {
@@ -346,7 +369,7 @@
     },
     {
       "username": "KXHXK",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/99810755?u=135aa4bcc175480d72e80c1a0a191075d785ba39&v=4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/99810755?u=fbc0c11a3a674232b0bc811502f28c623d4beec2&v=4",
       "totalScore": 18.805908118654582,
       "prScore": 18.465908118654582,
       "issueScore": 0,
@@ -365,8 +388,8 @@
       "summary": null
     }
   ],
-  "newPRs": 30,
-  "mergedPRs": 14,
+  "newPRs": 31,
+  "mergedPRs": 16,
   "newIssues": 19,
   "closedIssues": 0,
   "activeContributors": 11

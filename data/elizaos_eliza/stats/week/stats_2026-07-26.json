@@ -5,8 +5,20 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-07-26 to 2026-08-02, elizaos/eliza had 52 new PRs (27 merged), 37 new issues, and 15 active contributors.",
+  "overview": "From 2026-07-26 to 2026-08-02, elizaos/eliza had 89 new PRs (48 merged), 39 new issues, and 19 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABKjrmMA",
+      "title": "P0: agent deletion is failing 100% in production (160/160 jobs, 37 agents stuck) + 78% overall job failure rate",
+      "author": "standujar",
+      "number": 17249,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nA live production audit of the provisioning pipeline (2026-07-29) found **agent deletion is failing 100% of the time**, and has been for days. This is customer-visible and accelerating.\n\nOver the last 7 days: **554 failed jobs vs 153 completed** (78% failure rate).\n\n## 1. `agent_delete` is completely broken — 160/160 failures, one identical cause\n\nEvery failed `agent_delete` job in the window carries the same error:\n\n```\nvalue.toISOString is not a function\n```\n\n- 160 failures, all identical, most recent **2026-07-28 18:03 UTC** (still current).\n- All of them exhausted `attempts >= max_attempts` — so each one also burned the full retry budget.\n- Consequence: **37 agents are stuck in `deletion_failed`**, up from 5 five days ago, and accelerating: **17 of them in the last 24 hours alone**.\n- Customers who ask to delete an agent get a failure, the agent stays, and it keeps occupying node capacity.\n\n`value.toISOString is not a function` is Drizzle's timestamp serializer receiving a **string where a `Date` is expected** — the same class as the cache/JSON round-trip defect fixed in #16859/#16860 for `resolveSharedAgent`.\n\nOne concrete candidate worth checking first (not yet proven to be the site): `prepareAgentBackupInsertData` (`packages/cloud/shared/src/db/repositories/agent-sandboxes.ts`) does\n\n```ts\nconst createdAt = data.created_at ?? new Date();\n// ...\ncreated_at: createdAt,\n```\n\n`??` only guards `null`/`undefined` — a value that already crossed a JSON boundary as an ISO **string** passes straight through into the timestamp column. The 4 non-restart `agent_snapshot` failures in the same window are literally `Failed query: insert into \"agent_sandbox_backups\" (...)`, which is that insert.\n\n## 2. `agent_snapshot`: 386 failures, 381 of them not the job's fault\n\n```\nJob interrupted by worker restart 2 times - max attempts reached   (381)\nFailed query: insert into \"agent_sandbox_backups\" ...              (4)\nJob timed out 2 times - max attempts reached                       (1)\n```\n\nThe worker keeps restarting mid-snapshot, and **each restart consumes an attempt**. Two restarts exhaust `max_attempts` and the job is marked permanently failed — even though nothing about the job itself failed. A restart is an infrastructure event, not a job defect, and should not spend the job's retry budget (the codebase already has the shape for this: `retryLaterWithoutIncrementingAttempts`).\n\nWhy the worker restarts so often is the second half of this: it is consistent with the heap abort in #17154 and with the unbounded source-side snapshot capture in #17172 §1 (a large agent's capture is materialized entirely in the worker's heap).\n\n## 3. The fleet is at or over capacity\n\n| node | capacity | running |\n|---|---|---|\n| eliza-core-prod-2 | 24 | 24 |\n| eliza-core-prod-3 | 24 | **25** |\n| eliza-core-prod-4 | 24 | 24 |\n| eliza-core-prod-5 | 24 | 24 |\n| eliza-core-prod-6 | 24 | 24 |\n\nprod-3 is **over** its declared capacity, and every robot is full, so new work is spilling onto autoscaled cloud nodes (3 × 4 running). Note the interaction: the 37 undeletable agents and the 45 in `error` are holding slots that should have been reclaimed — the delete failure is directly feeding the capacity pressure.\n\nAlso present: a `knowledge_processing` job stuck `in_progress` since **2025-12-31** (~7 months), which no sweeper has reclaimed.\n\n## Why these compound\n\nThe three interact rather than being independent:\n1. Deletes fail → agents accumulate (`deletion_failed` 37, `error` 45) → capacity fills.\n2. Snapshots fail on worker restart → upgrades/deletes that depend on a restore point are less safe.\n3. Full capacity → more scheduling pressure → longer boots → more exposure to the sweeper/timeout classes (#17215).\n\n## Asks\n\n- [ ] Pin and fix the `toISOString` write in the delete path — deterministic, 100% reproducible, highest customer impact.\n- [ ] A worker restart must not consume a job's retry budget (`retryLaterWithoutIncrementingAttempts` semantics for interruption).\n- [ ] Recover the 37 `deletion_failed` + 45 `error` rows once the above land (see #17162 for the 44-agent precedent and its recovery constraints).\n- [ ] Reconcile declared capacity vs actual (prod-3 at 25/24), and reclaim the 7-month-stuck `in_progress` job.\n\nEvidence gathered live against production (counts, error strings, timings; no customer identifiers). Related: #17215 (sweeper vs in-flight cold boots), #17154 (worker heap abort), #17172 (snapshot budgets), #17162 (the 2026-07-13 stranding), #17185 (delete must release capacity exactly once). [stan-cloud]\n",
+      "createdAt": "2026-07-28T22:22:50Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 7
+    },
     {
       "id": "I_kwDOMT5cIs8AAAABKPy0sA",
       "title": "[Epic] Ship the agentic parent suite with trustworthy household coordination",
@@ -41,7 +53,7 @@
       "createdAt": "2026-07-26T22:00:24Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 3
+      "commentCount": 4
     },
     {
       "id": "I_kwDOMT5cIs8AAAABKQ1nrg",
@@ -51,18 +63,6 @@
       "repository": "elizaos/eliza",
       "body": "## Problem\n\nThe post-merge read-only staging diagnostic run 30231515082 stopped fail-closed at the preserved sandbox error boundary after the bounded delete-job history had sanitized successfully. The sandbox writer stores a canonical permanent-delete wrapper, while recovery re-enqueue preserves that wrapper as newer delete jobs are added. Coarse error-code equality is insufficient for an unclassified cause and the raw value must never leave the runner.\n\nParent lifecycle investigation: #17184. Previous bounded-history fix: #17198.\n\n## Scope\n\n- Parse exactly one canonical permanent-delete wrapper and bind its attempt count.\n- Correlate the raw cause only in memory to an exact exhausted failed job within the already bounded newest-three history.\n- Reuse that job sanitized classification/profile; emit no raw value, hash, source index, or new sandbox profile.\n- Preserve fail-closed behavior for unmatched, ambiguous, nested, malformed, direct opaque, result-error, lifecycle, counter, and ordering boundaries.\n- Preserve schema v3 and the read-only workflow.\n\n## Acceptance criteria\n\n- Exact cause + attempts + terminal lifecycle correlation is required.\n- deletion_failed binds the latest job; deletion_pending may bind an older retained failure after recovery re-enqueue.\n- Deletion ownership and a positive persisted failure count are required for the canonical wrapper.\n- Adversarial tests cover cause/counter/status/order mismatch, wrapper lookalikes/nesting, all three bounded positions, same-shape secret variants, and forbidden-output scanning.\n- Focused tests, Biome, diff check, full verify, and independent exact-object review pass.\n- A new read-only diagnostic is not dispatched until the merged source is exact and separately authorized; no delete retry, manual database write, global pin, or staging mutation is part of this issue.\n\n## Evidence\n\n- Backend logs: N/A - the public workflow annotation identifies only the classifier boundary and exposes no raw value.\n- Frontend logs: N/A - backend workflow-only change.\n- Screenshots: N/A - no user interface change.\n- Video: N/A - no user interface change.\n- Real-model trajectory: N/A - no model behavior change.\n- Domain artifact: N/A - the prior run intentionally uploaded no artifact after fail-closed classification.",
       "createdAt": "2026-07-27T02:18:30Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 3
-    },
-    {
-      "id": "I_kwDOMT5cIs8AAAABKjrmMA",
-      "title": "P0: agent deletion is failing 100% in production (160/160 jobs, 37 agents stuck) + 78% overall job failure rate",
-      "author": "standujar",
-      "number": 17249,
-      "repository": "elizaos/eliza",
-      "body": "## Summary\n\nA live production audit of the provisioning pipeline (2026-07-29) found **agent deletion is failing 100% of the time**, and has been for days. This is customer-visible and accelerating.\n\nOver the last 7 days: **554 failed jobs vs 153 completed** (78% failure rate).\n\n## 1. `agent_delete` is completely broken — 160/160 failures, one identical cause\n\nEvery failed `agent_delete` job in the window carries the same error:\n\n```\nvalue.toISOString is not a function\n```\n\n- 160 failures, all identical, most recent **2026-07-28 18:03 UTC** (still current).\n- All of them exhausted `attempts >= max_attempts` — so each one also burned the full retry budget.\n- Consequence: **37 agents are stuck in `deletion_failed`**, up from 5 five days ago, and accelerating: **17 of them in the last 24 hours alone**.\n- Customers who ask to delete an agent get a failure, the agent stays, and it keeps occupying node capacity.\n\n`value.toISOString is not a function` is Drizzle's timestamp serializer receiving a **string where a `Date` is expected** — the same class as the cache/JSON round-trip defect fixed in #16859/#16860 for `resolveSharedAgent`.\n\nOne concrete candidate worth checking first (not yet proven to be the site): `prepareAgentBackupInsertData` (`packages/cloud/shared/src/db/repositories/agent-sandboxes.ts`) does\n\n```ts\nconst createdAt = data.created_at ?? new Date();\n// ...\ncreated_at: createdAt,\n```\n\n`??` only guards `null`/`undefined` — a value that already crossed a JSON boundary as an ISO **string** passes straight through into the timestamp column. The 4 non-restart `agent_snapshot` failures in the same window are literally `Failed query: insert into \"agent_sandbox_backups\" (...)`, which is that insert.\n\n## 2. `agent_snapshot`: 386 failures, 381 of them not the job's fault\n\n```\nJob interrupted by worker restart 2 times - max attempts reached   (381)\nFailed query: insert into \"agent_sandbox_backups\" ...              (4)\nJob timed out 2 times - max attempts reached                       (1)\n```\n\nThe worker keeps restarting mid-snapshot, and **each restart consumes an attempt**. Two restarts exhaust `max_attempts` and the job is marked permanently failed — even though nothing about the job itself failed. A restart is an infrastructure event, not a job defect, and should not spend the job's retry budget (the codebase already has the shape for this: `retryLaterWithoutIncrementingAttempts`).\n\nWhy the worker restarts so often is the second half of this: it is consistent with the heap abort in #17154 and with the unbounded source-side snapshot capture in #17172 §1 (a large agent's capture is materialized entirely in the worker's heap).\n\n## 3. The fleet is at or over capacity\n\n| node | capacity | running |\n|---|---|---|\n| eliza-core-prod-2 | 24 | 24 |\n| eliza-core-prod-3 | 24 | **25** |\n| eliza-core-prod-4 | 24 | 24 |\n| eliza-core-prod-5 | 24 | 24 |\n| eliza-core-prod-6 | 24 | 24 |\n\nprod-3 is **over** its declared capacity, and every robot is full, so new work is spilling onto autoscaled cloud nodes (3 × 4 running). Note the interaction: the 37 undeletable agents and the 45 in `error` are holding slots that should have been reclaimed — the delete failure is directly feeding the capacity pressure.\n\nAlso present: a `knowledge_processing` job stuck `in_progress` since **2025-12-31** (~7 months), which no sweeper has reclaimed.\n\n## Why these compound\n\nThe three interact rather than being independent:\n1. Deletes fail → agents accumulate (`deletion_failed` 37, `error` 45) → capacity fills.\n2. Snapshots fail on worker restart → upgrades/deletes that depend on a restore point are less safe.\n3. Full capacity → more scheduling pressure → longer boots → more exposure to the sweeper/timeout classes (#17215).\n\n## Asks\n\n- [ ] Pin and fix the `toISOString` write in the delete path — deterministic, 100% reproducible, highest customer impact.\n- [ ] A worker restart must not consume a job's retry budget (`retryLaterWithoutIncrementingAttempts` semantics for interruption).\n- [ ] Recover the 37 `deletion_failed` + 45 `error` rows once the above land (see #17162 for the 44-agent precedent and its recovery constraints).\n- [ ] Reconcile declared capacity vs actual (prod-3 at 25/24), and reclaim the 7-month-stuck `in_progress` job.\n\nEvidence gathered live against production (counts, error strings, timings; no customer identifiers). Related: #17215 (sweeper vs in-flight cold boots), #17154 (worker heap abort), #17172 (snapshot budgets), #17162 (the 2026-07-13 stranding), #17185 (delete must release capacity exactly once). [stan-cloud]\n",
-      "createdAt": "2026-07-28T22:22:50Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 3
@@ -78,8 +78,20 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-07-27T19:23:22Z",
       "mergedAt": null,
-      "additions": 370415,
-      "deletions": 10231
+      "additions": 393296,
+      "deletions": 12132
+    },
+    {
+      "id": "PR_kwDOMT5cIs73zFib",
+      "title": "fix: repair reviewed runtime and develop CI regressions",
+      "author": "lalalune",
+      "number": 17266,
+      "body": "# Relates to\n\nRelates to #13406 and the reviewed open-PR queue.\n\n- [x] This PR targets `develop` and is based on the latest `origin/develop`\n      (`769b017123c8e01b46cc9a5785e4c47382dbd3f9`) with zero conflicts.\n- [x] Dependencies were installed and the requested lint, build, and typecheck\n      gates were run after the final repair.\n- [x] A reviewer can confirm the UI portion from the attached screenshots,\n      walkthrough, OCR report, and exact automated test results.\n\n# Sync with develop\n\n- [x] Fetched the latest `origin/develop`; the branch base is its current head.\n- [x] `bun run lint`, `bun run build`, and `bun run typecheck` pass post-sync.\n\n# Risks\n\nLarge. This consolidates independently reviewed repairs across cloud lifecycle\nfencing, document queries, approval execution, Android startup/deep links,\nLinux ISO proof, browser contracts, and shared UI shell behavior. The main\nrisks are cross-package contract drift and platform-specific CI behavior.\nThose are covered by focused integration suites, full monorepo gates, the app\nvisual audit, and the exact-head PR workflow matrix.\n\n# Background\n\n## What does this PR do?\n\nThis is the integration branch produced by the open-PR review queue. It keeps\nonly reviewed, production-oriented repairs and addresses the real failures\nobserved on the current `develop` head:\n\n- fences cloud provisioning job ownership, generations, recovery, and cleanup;\n- unifies bounded document-list semantics across core, SQL, and in-memory stores;\n- makes approvals subject-scoped, replay-safe, and delivery-observable;\n- repairs Android first-run, deep-link replay, and device harness contracts;\n- makes Linux ISO dependency resolution and boot proof deterministic;\n- repairs Home/Launcher navigation, route ownership, auth startup, view lifecycle,\n  streaming cadence, and cross-platform browser fixtures;\n- keeps real network tests out of ordinary unit lanes while preserving explicit\n  post-merge execution;\n- hardens Windows path handling and script/JUnit result validation;\n- installs lockfile-matched Playwright Chromium before Nightly runs the real browser-extension smoke.\n\n## What kind of change is this?\n\nBug fixes and test/CI reliability improvements. No intentional breaking API\nchange.\n\n# Documentation changes needed?\n\nDocumentation was updated where the Linux OS build and verification contracts\nchanged. Other repairs preserve existing public contracts.\n\n# Testing\n\n## Where should a reviewer start?\n\nStart with the commits grouped by subsystem, then the exact failure repairs:\n\n- `c24199d915a` Windows/script/JUnit failure visibility\n- `f1e3fdcaebc` and `b0f9769953d` Home/Launcher real-input navigation\n- `96f589cfa58` cloud provisioning execution fencing\n- `02beecd1bbe` document authorization and mutation contracts\n- `9e40e253f06` approval subject access and provider delivery\n- `9c48d3947b7` shared real-test lane isolation\n- `9f43ff09416` Nightly Playwright provisioning and canonical browser-smoke resolution\n\n## Detailed testing steps\n\n- `bun run lint` - 235/235 tasks passed.\n- `bun run build` - 176/176 tasks passed; view bundle guard 27/27.\n- `bun run typecheck` - 343/343 tasks passed.\n- `bun run --cwd packages/app audit:app` - 254 Playwright captures passed;\n  computed verdicts: 0 broken, 0 needs-work.\n- `bun run --cwd packages/shared test` - 114 files, 1,296 tests passed.\n- Shared test inventory: real wake-word packaging absent by default, present\n  exactly once in `post-merge`, and absent when `VITEST_EXCLUDE_REAL=1`.\n- Cloud provisioning composite - 91 tests passed.\n- Focused Home/Launcher mouse and CDP-touch navigation - 2 tests passed.\n- Recorded Home widget priority and real rail navigation - 1 test passed.\n- Focused UI/plugin suites - 242 tests passed across shell, views, messages,\n  meetings, and simple views.\n- Browser extension - lint passed, 6 unit files / 34 tests passed, and the real\n  built-extension Chromium smoke completed successfully.\n- Nightly workflow - actionlint and the CI workflow dedup contract passed.\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] ![before-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17266-eliza-pr-before-home.jpg)\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17266-eliza-pr-after-home-launcher.jpg)\n\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17266-eliza-pr-home-launcher-walkthrough.mp4\n\n<!-- evidence-row:backend-logs -->\n- [ ] N/A - no production environment was mutated; backend behavior is proven through real PGlite and integration boundaries plus exact CI reruns.\n\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - the recorded keyless flow completed with the page diagnostics guard reporting no browser console or page errors.\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no model, prompt, provider, or inference selection behavior changed; repaired actions use deterministic authorization and persistence paths.\n\n<!-- evidence-row:domain-artifacts -->\n- [ ] N/A - no production DB, wallet, chain, or owner account was mutated; real PGlite and integration tests prove the state transitions.\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nN/A - no model, prompt, provider, or inference selection behavior changed.\n\n## Backend + frontend logs\n\nThe exact local and Actions results are summarized above. The recorded UI flow\nuses the page diagnostics guard and completed without browser console/page\nerrors.\n\n## Screenshots (before / after) + video walkthrough\n\nThe rows above are populated by `scripts/pr-evidence.mjs` immediately after PR\ncreation. The after contact sheet contains desktop Home, mobile Home, and mobile\nLauncher. The MP4 records the exact passing Home-to-Launcher interaction.\n\n## Audio / voice walkthrough\n\nN/A - no TTS, STT, transcript, or voice transport behavior changed.\n\n## Known gaps / failures\n\n- Historical `develop` Windows, Scenario, and Nightly runs exposed real failures.\n  Every failed child was assigned an independent investigator; this branch contains\n  the identified repairs. Exact-head PR workflows are the required platform\n  confirmation, followed by a post-merge Nightly run for the scheduled-only path.\n- The checkout contains unrelated pre-existing dirty `package.json`, local\n  benchmark directories, `.eliza-local` state, and `packages/ui/PRODUCT.md`.\n  None is staged or included in this PR.\n\n<!-- evidence-row:ocr-review -->\n- [x] [17266-ocr-triage.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17266-ocr-triage.json)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-29T05:13:39Z",
+      "mergedAt": "2026-07-29T06:45:19Z",
+      "additions": 16550,
+      "deletions": 3937
     },
     {
       "id": "PR_kwDOMT5cIs72yOSj",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 4267,
       "deletions": 794
-    },
-    {
-      "id": "PR_kwDOMT5cIs71lg9X",
-      "title": "fix(chat): make streaming persistence and telemetry exact",
-      "author": "lalalune",
-      "number": 17140,
-      "body": "Closes #17098\n\n## Outcome\n\nThis makes chat streaming a single, observable provider → runtime → SSE → React → database pipeline and removes latency policy from correctness CI.\n\nThe runtime now has one owner for assistant-message persistence, the SSE completion frame carries the exact committed IDs, the client reconciles optimistic messages in place, and normal streaming performs no post-response history reload. Failed persistence emits an error and never a fake `done`.\n\n## Runtime and persistence\n\n- Return the exact response-memory IDs committed by `DefaultMessageService`.\n- Reuse those IDs in the chat route instead of writing or reading the assistant response a second time.\n- Preserve callback-before-persistence delivery for fast first response, with the same-room persistence barrier added upstream, while withholding SSE `done` until the write succeeds.\n- Mark genuinely ephemeral responses explicitly; never invent a database ID.\n- Treat delta streams as deltas. The previous overlap heuristic could corrupt `Fast streaming stays smooth.` into `Fastreaming staysmooth.`.\n- Remove the hidden 30-second runtime-ready gate.\n- Remove the implicit 180-second chat-generation abort, 60-second browser SSE idle abort, 60-second trajectory-finalization abort, and 5-second conversation-restore race. Cancellation is now caller-owned through `AbortSignal` unless a caller explicitly configures a boundary.\n- Move trajectory persistence/finalization off the visible-response path while tracking it as post-delivery work.\n\n## Providers, cache, and database\n\n- Providers selected for a compose run execute concurrently through one `Promise.all`.\n- Stage 1 excludes context it cannot consume; the planner reuses all already-composed provider results and refreshes only `RECENT_MESSAGES` when an early reply changed history.\n- Replace mutable one-second identity/entity caches with exact turn-scoped promise memoization, rejection eviction, and explicit invalidation.\n- Memoize sender-role, room, and related-entity reads within a turn.\n- Skip attachment-history database work for ordinary text turns.\n- Make SQL memory creation one atomic `INSERT ... ON CONFLICT DO NOTHING RETURNING`, removing the read-before-write race and extra database round trip.\n- Cache only successful shared-agent scope authorization. Failed 401/403/404 hydration is never persisted, so a corrected credential, tier, or agent row is observed on the next authoritative attempt instead of serving a stale denial for 30 seconds.\n\n## Browser behavior\n\n- Reconcile optimistic user/assistant IDs in place from the completion frame.\n- Do not reload conversation history after an ordinary successful response.\n- Reload only when the response is action/incomplete or committed IDs are unavailable.\n- Replace requestAnimationFrame token throttling—which can stop making progress in background tabs—with microtask burst coalescing and a synchronous terminal flush.\n- Remove the reconnect debounce/speculative resend path; user-triggered resend starts immediately and remains explicit.\n- Add the missing `rate_limited` SSE contract.\n\n## CI and telemetry\n\n- Replace the ~1,000-line latency workflow with a small, manual, observational workflow.\n- Remove numeric latency acceptance thresholds, regression ratchets, production-code-changed/test-changed gates, and the workflow self-test enforcing those policies.\n- Run direct and gateway observations concurrently and upload raw JSONL. Telemetry reports numbers; it does not decide correctness.\n- Remove numeric enforcement from inference-auth latency tooling.\n- Add a real browser telemetry harness using the production route, production stream client, `useChatSend`, React transcript, real HTTP/SSE, and PGLite.\n- Expand the Cerebras runner to cover the complete production chat flow plus an explicit concurrent sweep of every registered provider.\n\n## PR review\n\n- #16882: closed unmerged. The proposed provider deadline would turn latency into missing context and make a slow dependency look healthy.\n- #16820: closed unmerged. Browser telemetry is retained here, but the numeric merge gate and changed-production-requires-changed-test policy are removed.\n- #17037: merged and retained. Dashboard replies have one transport owner.\n- #17057: merged; its useful DB coalescing is retained, while this branch replaces mutable TTL-based identity/entity reuse with exact turn-scoped memoization.\n- #17060: merged and retained. Cerebras strict object schemas remain recursively closed instead of being stripped.\n- #17076: merged and retained as a cache-only shared inference hot path. This branch removes its remaining negative-scope TTL, which could serve stale denial after state was already corrected.\n\n## Final live telemetry\n\nTwo consecutive final-base runs generated at 2026-07-23T22:00:03Z and\n2026-07-23T22:03:19Z. Together they cover 60 live Cerebras\n`gemma-4-31b` production turns.\n\n### End-to-end chat\n\n| Measure | p50 | p90 | p95 | max |\n| --- | ---: | ---: | ---: | ---: |\n| Full visible response | 396.114 ms | 799.086 ms | 869.371 ms | 2582.162 ms |\n| First visible token | 389.000 ms | 773.000 ms | 817.000 ms | 2528.000 ms |\n| LLM inference | 353.584 ms | 742.264 ms | 842.271 ms | 2564.000 ms |\n| Provider composition | 8.222 ms | 25.000 ms | 32.198 ms | 141.000 ms |\n| Message ingress | 2.000 ms | 4.545 ms | 7.000 ms | 95.849 ms |\n| Message delivery | 3.000 ms | 5.000 ms | 7.000 ms | 57.000 ms |\n| Message-service overhead | 4.042 ms | 14.736 ms | 21.162 ms | 149.989 ms |\n| Background quiescence | 20.657 ms | 111.116 ms | 184.010 ms | 1040.171 ms |\n\n- 60/60 turns succeeded and each made exactly one live LLM call.\n- 1,440/1,440 provider executions completed with zero errors.\n- Cerebras reported 92,416 cached input tokens out of 150,504 prompt tokens\n  (61.4043%).\n- Every distinct proof token was present in both the returned and streamed\n  response.\n\nThe `50 ms` figure is not normal synchronous message-service overhead. Across\nboth runs the exclusive wrapper remainder is 4.0 ms at p50. The outlier run\ncontained one synchronized PGLite/storage stall: participant-state reached\n91 ms, FACTS 55 ms, RECENT_MESSAGES 50 ms, and delivery persistence 57 ms in\nthe same turn. Another turn inflated many otherwise trivial providers together.\nThat shape proves process-wide database/event-loop scheduling, not serial\nprovider execution. The 149.989 ms wrapper outlier was a gap between compose\ncompletion and stage-one preprocessing; it disappeared on the immediate repeat\n(22 ms max), consistent with Bun GC/event-loop scheduling.\n\nThe remaining end-to-end outliers were model-side: the repeat had two Cerebras\ncalls at 2.1–2.56 seconds while local provider and delivery spans remained\nnormal. Detached message events, evaluators, and run-ended work occur after\nterminal response visibility; they can still contend with local PGLite, but no\nlonger delay the visible response.\n\nNormal production compose selected ten providers (60 calls/provider):\n\n| Provider | p50 | p90 | p95 | max |\n| --- | ---: | ---: | ---: | ---: |\n| FACTS | 8.000 | 24.625 | 32.248 | 141.228 |\n| RECENT_MESSAGES | 4.463 | 7.657 | 18.198 | 107.292 |\n| CHANNEL_TOPICS | 0.252 | 0.463 | 0.593 | 1.603 |\n| UI_CONTEXT | 0.248 | 0.454 | 0.624 | 1.504 |\n| RUNTIME_MODEL_CONTEXT | 0.222 | 0.423 | 0.602 | 1.487 |\n| ATTACHMENTS | 0.199 | 0.375 | 0.487 | 1.452 |\n| RECENT_ERRORS | 0.165 | 0.317 | 0.404 | 1.412 |\n| REPLY_CONTEXT | 0.148 | 0.257 | 0.340 | 0.375 |\n| PLATFORM_CHAT_CONTEXT | 0.094 | 0.185 | 0.212 | 0.235 |\n| PLATFORM_USER_CONTEXT | 0.085 | 0.165 | 0.188 | 0.205 |\n\n### Explicit all-provider concurrent sweep\n\nThe sweep deliberately bypasses final state reuse so every provider is actually\nmeasured. Each row is 60 executions; 1,440/1,440 provider executions succeeded\nwith zero errors, aborts, or deadline failures.\n\n| Provider | p50 | p90 | p95 | max |\n| --- | ---: | ---: | ---: | ---: |\n| DOCUMENTS | 7.491 | 31.684 | 60.638 | 164.308 |\n| ACTIONS | 3.632 | 25.288 | 40.220 | 157.934 |\n| WORLD | 7.896 | 42.848 | 51.243 | 261.548 |\n| FACTS | 7.854 | 42.824 | 51.191 | 261.463 |\n| RELATIONSHIPS | 6.426 | 29.583 | 47.463 | 102.455 |\n| RECENT_MESSAGES | 3.691 | 22.084 | 45.523 | 57.487 |\n| CHOICE | 2.494 | 17.818 | 33.796 | 148.654 |\n| FOLLOW_UPS | 2.234 | 15.985 | 38.917 | 47.786 |\n| ENTITIES | 2.110 | 15.870 | 36.503 | 47.702 |\n| CHANNEL_TOPICS | 1.512 | 11.292 | 18.659 | 147.387 |\n| CHARACTER | 1.337 | 13.989 | 18.499 | 147.294 |\n| USER_EMOTION_SIGNAL | 1.240 | 13.974 | 18.356 | 101.909 |\n| RUNTIME_MODEL_CONTEXT | 1.253 | 13.988 | 18.365 | 101.918 |\n| UI_CONTEXT | 1.259 | 13.996 | 18.366 | 101.921 |\n| CONTACTS | 1.092 | 8.499 | 14.924 | 101.764 |\n| CURRENT_TIME | 1.086 | 8.493 | 14.922 | 101.740 |\n| ATTACHMENTS | 1.056 | 8.467 | 14.859 | 101.748 |\n| ACTION_STATE | 0.582 | 7.798 | 16.030 | 45.975 |\n| PROVIDERS | 0.633 | 1.702 | 13.621 | 44.842 |\n| RECENT_ERRORS | 0.579 | 1.342 | 13.594 | 44.815 |\n| CONTEXT_BENCH | 0.555 | 1.204 | 13.574 | 44.797 |\n| REPLY_CONTEXT | 0.540 | 1.178 | 13.566 | 44.788 |\n| PLATFORM_CHAT_CONTEXT | 0.499 | 1.065 | 13.527 | 44.754 |\n| PLATFORM_USER_CONTEXT | 0.494 | 1.058 | 13.522 | 44.751 |\n\nUnits are milliseconds. Synchronized inflation of cheap providers in the first\nrun produced the sweep tails. The immediate repeat normalized to\n7.386/18.719/20.294 ms at p50/p95/max, confirming providers remain concurrent\nrather than additive.\n\n### Deliberately slow browser trace\n\nWith the model fixture emitting one token per second, visible server frames\narrived at 1089.23, 2091.32, 3093.43, and 4093.66 ms; browser DOM mutations\narrived at 1090.7, 2092.6, 3094.6, and 4137.5 ms. The completion frame reached\nthe browser at 4135.7 ms.\n\nProvider output, reconstructed SSE text, completion text, React state, PGLite row, and rendered DOM were all exactly `Fast streaming stays smooth.`. The persisted assistant/user IDs exactly matched the completion frame. React committed seven times and performed zero history reloads.\n\n## Verification\n\n- `bun install`: clean lockfile/install.\n- `bun run verify`: 578/578 tasks successful in 2m33s on the final rebased tree; all lint, typecheck, test-integrity, script/view inventory, and 28 dist-consumer checks passed.\n- Latest readiness/streaming/persistence/recap semantic suite: 90/90 passed.\n- Focused core/agent/UI streaming: 127 passed.\n- Real conversation restore: 5 passed.\n- Real PGLite memory integration: 38 passed.\n- Shared scope, admission gate, and voice hot path: 68 passed.\n- Real Miniflare Durable Object serialization: passed.\n- Real browser telemetry: passed; screenshot generated and manually inspected.\n- App visual audit: chat view good at all four desktop/mobile/rest/hover viewports with no chat render, overflow, or overlay defects.\n\n## Evidence applicability\n\n- Live model trajectory/log: represented by the 60 distinct proof-bearing turns and raw JSON reports produced by the runner.\n- Database artifact: real PGLite user/assistant rows were read back and compared to the SSE completion IDs/text.\n- Screenshot: generated and manually inspected locally; binary upload is N/A from the GitHub CLI-only environment.\n- Video: N/A — this is transport/runtime behavior; the one-token-per-second trace records the full timing sequence numerically and the screenshot records final pixels.\n- Live Eliza Cloud direct/gateway trace: N/A — this environment has Cerebras credentials but no Eliza Cloud, BitRouter, AI Gateway, or Cloudflare credentials. The local workerd/Miniflare and real PGLite paths were exercised instead.\n\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - no rendered UI component or visual styling changed; this is stream transport and state reconciliation\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-chat-telemetry-final2.png)\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - no visual interaction changed; the deliberately slow browser trace above records every server frame, browser frame, DOM mutation, and terminal commit\n\n<!-- evidence-row:backend-logs -->\n- [x] [17140-eliza-cerebras-chat-final3.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-cerebras-chat-final3.json)\n\n<!-- evidence-row:frontend-logs -->\n- [x] [17140-eliza-chat-telemetry-final2.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-chat-telemetry-final2.json)\n\n<!-- evidence-row:llm-trajectory -->\n- [x] [17140-eliza-cerebras-chat-final3.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-cerebras-chat-final3.json)\n\n<!-- evidence-row:domain-artifacts -->\n- [x] [17140-eliza-chat-telemetry-final2.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-2/17140-eliza-chat-telemetry-final2.json)\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-07-23T21:53:31Z",
-      "mergedAt": "2026-07-27T17:16:54Z",
-      "additions": 3284,
-      "deletions": 3499
     }
   ],
   "codeChanges": {
-    "additions": 11430,
-    "deletions": 4548,
-    "files": 120,
-    "commitCount": 129
+    "additions": 16100,
+    "deletions": 5728,
+    "files": 268,
+    "commitCount": 333
   },
   "completedItems": [
     {
@@ -211,6 +211,16 @@
       "files": [
         "packages/agent/src/runtime/wallet-balance-delta.test.ts",
         "packages/agent/src/runtime/wallet-balance-delta.ts"
+      ]
+    },
+    {
+      "title": "build(deps): bump the uv group across 2 directories with 2 updates",
+      "prNumber": 17183,
+      "type": "other",
+      "body": "Bumps the uv group with 2 updates in the /packages/benchmarks/OSWorld directory: [gitpython](https://github.com/gitpython-developers/GitPython) and [httplib2](https://github.com/httplib2/httplib2).\nBumps the uv group with 1 update in the /p",
+      "files": [
+        "packages/benchmarks/OSWorld/uv.lock",
+        "packages/benchmarks/swe_bench/pyproject.toml"
       ]
     },
     {
@@ -361,6 +371,39 @@
       ]
     },
     {
+      "title": "fix(ci): retry the Windows 0xC0000142 turbo child-process crash once from cache",
+      "prNumber": 17252,
+      "type": "bugfix",
+      "body": "## Summary\r\n\r\nWindows CI's three turbo-invoking shards (`core-runtime`, `app-and-cli`, `build-and-helper-smokes`) fail intermittently with **zero diagnostic output**: a task child process dies with `0xC0000142` (`STATUS_DLL_INIT_FAILED`) be",
+      "files": [
+        "packages/scripts/__tests__/run-turbo-windows-init-crash-retry.test.ts",
+        "packages/scripts/run-turbo.mjs"
+      ]
+    },
+    {
+      "title": "refactor(cloud): stop re-writing deletion_started_at when re-enqueueing a delete",
+      "prNumber": 17251,
+      "type": "refactor",
+      "body": "## What\n\nOn the delete re-enqueue path, `deletion_started_at` was preserved across a retry by reading the stored value off the row and writing it straight back:\n\n```ts\nconst deletionStartedAt =\n  isRecoveryReEnqueue && sandbox.deletion_star",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/deletion-started-at-preservation.test.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): remove gate-banned backdrop blur and focus-ring utilities from chat surfaces",
+      "prNumber": 17250,
+      "type": "bugfix",
+      "body": "## Summary\n\nDevelop's Tests workflow ([run 30398014368](https://github.com/elizaOS/eliza/actions/runs/30398014368)) fails its Client Tests lane on exactly two UI source gates:\n\n- `src/no-backdrop-blur-gate.test.ts` — backdrop-filter found i",
+      "files": [
+        "packages/ui/src/components/chat/message-search/MessageSearchPanel.tsx",
+        "packages/ui/src/components/composites/chat/chat-message-actions.test.tsx",
+        "packages/ui/src/components/composites/chat/chat-message-actions.tsx",
+        "packages/ui/src/components/composites/chat/chat-message.tsx",
+        "packages/ui/src/styles/styles.css"
+      ]
+    },
+    {
       "title": "fix(agent): preserve trustworthy action callback telemetry",
       "prNumber": 17248,
       "type": "bugfix",
@@ -469,6 +512,24 @@
       ]
     },
     {
+      "title": "fix(personal-assistant): gate private context by audience",
+      "prNumber": 17212,
+      "type": "bugfix",
+      "body": "## Summary\n\nR2 replaces the blocked R1 design. Shaw's two reviews were correct.\n\n- normalize stored room type and message channel type to an authoritative audience **class**; `DM`, `SELF`, `VOICE_DM`, and `API` are private surfaces\n- enforc",
+      "files": [
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/__tests__/model-stream-chunk-hooks.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/calendar.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/audience-policy.integration.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/audience-policy.ts",
+        "plugins/plugin-personal-assistant/src/plugin.ts",
+        "plugins/plugin-personal-assistant/src/providers/cross-channel-context.ts",
+        "plugins/plugin-personal-assistant/src/providers/lifeops.ts",
+        "plugins/plugin-personal-assistant/src/providers/pending-approvals.ts",
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
       "title": "fix(scheduling): deterministic local-time resolution across DST",
       "prNumber": 17209,
       "type": "bugfix",
@@ -503,47 +564,321 @@
         "packages/registry/entries/third-party/wealthville__plugin-wealthville.json",
         "packages/registry/generated-registry.json"
       ]
+    },
+    {
+      "title": "build(deps-dev): land the dev-dependencies group with a complete Biome sweep and regenerated lockfiles",
+      "prNumber": 17291,
+      "type": "other",
+      "body": "## Summary\n\nLands dependabot's dev-dependencies group (#17278 — credit to dependabot for the 9 updates: `@biomejs/biome` 2.5.6, `@playwright/test`/`playwright` 1.62.0, `turbo` 2.10.7, `verdaccio` 6.9.0, `hardhat` 3.11.1, `vercel` 58.4.0, `m",
+      "files": [
+        "biome.json",
+        "bun.lock",
+        "package.json",
+        "packages/app-core/biome.json",
+        "packages/app-core/platforms/electrobun/biome.json",
+        "packages/app-core/platforms/electrobun/package.json",
+        "packages/cloud/api/package.json",
+        "packages/cloud/routing/package.json",
+        "packages/cloud/services/agent-server/package.json",
+        "packages/cloud/services/gateway-discord/package.json",
+        "packages/cloud/services/gateway-webhook/package.json",
+        "packages/cloud/services/operator/package.json",
+        "packages/cloud/shared/biome.json",
+        "packages/cloud/shared/package.json",
+        "packages/contracts/biome.json",
+        "packages/contracts/package.json",
+        "packages/core/biome.json",
+        "packages/elizaos/templates/min-plugin/package.json",
+        "packages/elizaos/templates/min-project/biome.json",
+        "packages/elizaos/templates/min-project/package.json",
+        "packages/elizaos/templates/plugin/biome.json",
+        "packages/elizaos/templates/plugin/package.json",
+        "packages/elizaos/templates/project/apps/app/biome.json",
+        "packages/elizaos/templates/project/apps/app/electrobun/package.json",
+        "packages/elizaos/templates/project/apps/app/package.json",
+        "packages/examples/_plugin/biome.json",
+        "packages/examples/bluesky/package.json",
+        "packages/examples/cloud/clone-ur-crush/package.json",
+        "packages/examples/code/biome.json",
+        "packages/examples/discord/package.json",
+        "packages/examples/elizagotchi/biome.json",
+        "packages/examples/farcaster/package.json",
+        "packages/examples/next/biome.json",
+        "packages/examples/twitter-xai/package.json",
+        "packages/examples/vercel/package.json",
+        "packages/feed/apps/web/package.json",
+        "packages/feed/package.json",
+        "packages/feed/packages/testing/package.json",
+        "packages/feed/tools/chroma/package.json",
+        "packages/feed/tools/e2e/package.json",
+        "packages/homepage/package.json",
+        "packages/os/homepage/package.json",
+        "packages/ui/biome.json",
+        "plugins/plugin-agent-orchestrator/package.json",
+        "plugins/plugin-agent-skills/biome.json",
+        "plugins/plugin-agent-skills/package.json",
+        "plugins/plugin-anthropic-proxy/biome.json",
+        "plugins/plugin-anthropic/biome.json",
+        "plugins/plugin-anthropic/package.json",
+        "plugins/plugin-app-control/biome.json"
+      ]
+    },
+    {
+      "title": "build(deps): bump @capacitor/keyboard from 8.0.3 to 8.0.5",
+      "prNumber": 17281,
+      "type": "other",
+      "body": "Bumps [@capacitor/keyboard](https://github.com/ionic-team/capacitor-keyboard) from 8.0.3 to 8.0.5.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ionic-team/capacitor-keyboard/releases\">@​capacito",
+      "files": [
+        "packages/app-core/package.json",
+        "packages/app/package.json",
+        "packages/ui/package.json"
+      ]
+    },
+    {
+      "title": "build(deps): bump @capacitor/push-notifications from 8.0.3 to 8.1.2",
+      "prNumber": 17280,
+      "type": "other",
+      "body": "Bumps [@capacitor/push-notifications](https://github.com/ionic-team/capacitor-plugins) from 8.0.3 to 8.1.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ionic-team/capacitor-plugins/releases\">@​",
+      "files": [
+        "packages/app/package.json"
+      ]
+    },
+    {
+      "title": "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.200 to 0.3.220",
+      "prNumber": 17279,
+      "type": "other",
+      "body": "Bumps [@anthropic-ai/claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-typescript) from 0.3.200 to 0.3.220.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-agent-sd",
+      "files": [
+        "packages/benchmarks/claude-subscription-gateway/package.json",
+        "plugins/plugin-cli-inference/package.json"
+      ]
+    },
+    {
+      "title": "build(deps): bump anthropics/claude-code-action from 1.0.174 to 1.0.183",
+      "prNumber": 17277,
+      "type": "other",
+      "body": "Bumps [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) from 1.0.174 to 1.0.183.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-code-action/releas",
+      "files": [
+        ".github/workflows/claude.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/weekly-maintenance.yml"
+      ]
+    },
+    {
+      "title": "build(deps): bump ruby/setup-ruby from 1.320.0 to 1.321.0",
+      "prNumber": 17276,
+      "type": "other",
+      "body": "Bumps [ruby/setup-ruby](https://github.com/ruby/setup-ruby) from 1.320.0 to 1.321.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ruby/setup-ruby/releases\">ruby/setup-ruby's releases</a>.</em></",
+      "files": [
+        ".github/workflows/android-release.yml",
+        ".github/workflows/apple-store-release.yml"
+      ]
+    },
+    {
+      "title": "build(deps): bump softprops/action-gh-release from 3.0.1 to 3.0.2",
+      "prNumber": 17274,
+      "type": "other",
+      "body": "Bumps [softprops/action-gh-release](https://github.com/softprops/action-gh-release) from 3.0.1 to 3.0.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/softprops/action-gh-release/releases\">softpr",
+      "files": [
+        ".github/workflows/build-android.yml",
+        ".github/workflows/build-debian-package.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/build-vm-image.yml",
+        ".github/workflows/elizaos-os-full-release.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/release-electrobun.yml"
+      ]
+    },
+    {
+      "title": "build(deps): bump imjasonh/setup-crane from 0.6 to 0.7",
+      "prNumber": 17273,
+      "type": "other",
+      "body": "Bumps [imjasonh/setup-crane](https://github.com/imjasonh/setup-crane) from 0.6 to 0.7.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/imjasonh/setup-crane/releases\">imjasonh/setup-crane's releases",
+      "files": [
+        ".github/workflows/build-agent-image.yml"
+      ]
+    },
+    {
+      "title": "build(deps): update pandas requirement from ~=3.0.3 to ~=3.0.5 in /packages/benchmarks/OSWorld",
+      "prNumber": 17272,
+      "type": "other",
+      "body": "Updates the requirements on [pandas](https://github.com/pandas-dev/pandas) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/pandas-dev/pandas/releases\">pandas's release",
+      "files": [
+        "packages/benchmarks/OSWorld/requirements.txt"
+      ]
+    },
+    {
+      "title": "build(deps): update tqdm requirement from ~=4.69.0 to ~=4.70.0 in /packages/benchmarks/OSWorld",
+      "prNumber": 17271,
+      "type": "other",
+      "body": "Updates the requirements on [tqdm](https://github.com/tqdm/tqdm) to permit the latest version.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/tqdm/tqdm/releases\">tqdm's releases</a>.</em></p>\n<blo",
+      "files": [
+        "packages/benchmarks/OSWorld/pyproject.toml",
+        "packages/benchmarks/OSWorld/requirements.txt",
+        "packages/benchmarks/OSWorld/setup.py"
+      ]
+    },
+    {
+      "title": "build(deps): bump gitpython from 3.1.52 to 3.1.54 in /packages/benchmarks/swe_bench in the pip group across 1 directory",
+      "prNumber": 17267,
+      "type": "other",
+      "body": "Bumps the pip group with 1 update in the /packages/benchmarks/swe_bench directory: [gitpython](https://github.com/gitpython-developers/GitPython).\n\nUpdates `gitpython` from 3.1.52 to 3.1.54\n<details>\n<summary>Release notes</summary>\n<p><em>",
+      "files": [
+        "packages/benchmarks/swe_bench/pyproject.toml"
+      ]
+    },
+    {
+      "title": "fix: repair reviewed runtime and develop CI regressions",
+      "prNumber": 17266,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRelates to #13406 and the reviewed open-PR queue.\n\n- [x] This PR targets `develop` and is based on the latest `origin/develop`\n      (`769b017123c8e01b46cc9a5785e4c47382dbd3f9`) with zero conflicts.\n- [x] Dependencies were ins",
+      "files": [
+        ".github/ci-windows-command-inventory.json",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/develop-live.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/windows-ci.yml",
+        "packages/agent/src/api/approval-routes.test.ts",
+        "packages/agent/src/api/approval-routes.ts",
+        "packages/agent/src/index.ts",
+        "packages/agent/src/services/approval/index.ts",
+        "packages/agent/src/services/approval/service.test.ts",
+        "packages/agent/src/services/approval/service.ts",
+        "packages/agent/src/services/approval/store.ts",
+        "packages/agent/src/services/approval/types.ts",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/DeepLinkBufferPlugin.java",
+        "packages/app-core/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app-core/scripts/lib/stage-android-agent.mjs",
+        "packages/app-core/scripts/run-mobile-build-cloud-main-activity.test.mjs",
+        "packages/app-core/scripts/run-mobile-build.mjs",
+        "packages/app-core/scripts/serve-real-local-agent.ts",
+        "packages/app-core/scripts/stage-android-agent.test.mjs",
+        "packages/app/package.json",
+        "packages/app/scripts/lib/android-capture.mjs",
+        "packages/app/scripts/lib/android-capture.test.mjs",
+        "packages/app/src/deep-link-handler.ts",
+        "packages/app/src/main.android-entrypoint.test.ts",
+        "packages/app/src/main.ios-interactive-entrypoint.test.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/src/mobile-lifecycle.ts",
+        "packages/app/test/android/android-harness.ts",
+        "packages/app/test/android/onboarding-to-home.android.spec.ts",
+        "packages/app/test/mobile-lifecycle.test.ts",
+        "packages/app/test/setup.ts",
+        "packages/app/test/ui-smoke/all-pages-clicksafe.spec.ts",
+        "packages/app/test/ui-smoke/apps-model-training-interactions.spec.ts",
+        "packages/app/test/ui-smoke/assistant-home-flow.spec.ts",
+        "packages/app/test/ui-smoke/auth-startup.spec.ts",
+        "packages/app/test/ui-smoke/automations.spec.ts",
+        "packages/app/test/ui-smoke/browser-skills-agent-bridge.spec.ts",
+        "packages/app/test/ui-smoke/builtin-views-visual.spec.ts",
+        "packages/app/test/ui-smoke/chat-stream-render.spec.ts",
+        "packages/app/test/ui-smoke/chat-streaming-thinking.spec.ts",
+        "packages/app/test/ui-smoke/connectors.spec.ts",
+        "packages/app/test/ui-smoke/documents-view.spec.ts",
+        "packages/app/test/ui-smoke/drag-and-drop.spec.ts",
+        "packages/app/test/ui-smoke/gesture-matrix.spec.ts",
+        "packages/app/test/ui-smoke/helpers/launcher-navigation.ts",
+        "packages/app/test/ui-smoke/helpers/view-header.ts",
+        "packages/app/test/ui-smoke/home-widget-priority.spec.ts",
+        "packages/app/test/ui-smoke/launcher-cloud-gating.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): clear the six chronic story-gate regressions and the Windows vacuous-green gate guard",
+      "prNumber": 17264,
+      "type": "bugfix",
+      "body": "## Summary\r\n\r\nThe **UI Story Gate** workflow (and the same gate inside the Develop Exhaustive Lane) has failed every develop run since 7/25 on exactly six regressions ([run 30409569328](https://github.com/elizaOS/eliza/actions/runs/30409569",
+      "files": [
+        "packages/ui/src/components/shell/NotificationsHomeCenter.stories.tsx",
+        "packages/ui/src/styles/base.css",
+        "packages/ui/src/styles/theme.css",
+        "packages/ui/test/story-gate/run-story-gate.mjs"
+      ]
+    },
+    {
+      "title": "fix(cloud): unbreak deletion retries crashing on raw-row string timestamps",
+      "prNumber": 17260,
+      "type": "bugfix",
+      "body": "## What\n\nThe P0 from #17249: **every retry of a failed agent deletion crashes before doing anything** — `value.toISOString is not a function`, 160/160 delete jobs failing in production, 37 agents trapped in `deletion_failed` and growing ~17",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/delete-retry-string-timestamp.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): make the cloud-settings token scan allowlist match on Windows",
+      "prNumber": 17259,
+      "type": "bugfix",
+      "body": "## Summary\n\n`packages/ui/src/cloud/settings/cloud-settings-theme-tokens.test.ts` fails on every Windows checkout while Linux CI stays green: `collectFiles` builds child paths with `join()`, so Windows produces backslash-separated keys (`bil",
+      "files": [
+        "packages/ui/src/cloud/settings/cloud-settings-theme-tokens.test.ts"
+      ]
+    },
+    {
+      "title": "fix(android): reject relocated privileged AAB components",
+      "prNumber": 17257,
+      "type": "bugfix",
+      "body": "## Summary\n\n- reject stripped Android components even when a feature module relocates them outside the application package\n- inspect component `permission`, `readPermission`, and `writePermission` bindings\n- scan every discovered or smuggle",
+      "files": [
+        "packages/app-core/scripts/lib/android-cloud-artifact-audit.mjs",
+        "packages/app-core/scripts/run-mobile-build-android-aab-audit.test.mjs",
+        "packages/app-core/test/fixtures/android/README.md",
+        "packages/app-core/test/fixtures/android/RelocateAndroidManifestFixture.java"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 649.2089154867672,
-      "prScore": 444.4949154867672,
-      "issueScore": 42.400000000000006,
-      "reviewScore": 161,
+      "totalScore": 1056.18636175007,
+      "prScore": 826.03436175007,
+      "issueScore": 44.400000000000006,
+      "reviewScore": 184,
+      "commentScore": 1.7519999999999998,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 394.7240986523737,
+      "prScore": 387.1100986523737,
+      "issueScore": 6.3,
+      "reviewScore": 0,
       "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 385.1470157603965,
+      "totalScore": 385.3470157603966,
       "prScore": 363.6710157603966,
       "issueScore": 20.400000000000002,
       "reviewScore": 0,
-      "commentScore": 1.0759999999999998,
+      "commentScore": 1.2759999999999998,
       "summary": null
     },
     {
       "username": "0xSolace",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
-      "totalScore": 219.9990763782264,
+      "totalScore": 220.19907637822638,
       "prScore": 219.5610763782264,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
-      "username": "standujar",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 146.1767028214657,
-      "prScore": 139.0007028214657,
-      "issueScore": 6.3,
+      "username": "phoebe-aomi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257297269?v=4",
+      "totalScore": 46.0817738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 2.1,
       "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -567,6 +902,16 @@
       "summary": null
     },
     {
+      "username": "aoright",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102943475?u=386388815e0edb1a9eac3c739c37f89fb9a43d46&v=4",
+      "totalScore": 24.410590406840235,
+      "prScore": 24.410590406840235,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "roninjin10",
       "avatarUrl": "https://avatars.githubusercontent.com/u/35039927?u=94370136033f1a4d900b4857c2ae13964bf51f96&v=4",
       "totalScore": 20.372742863074038,
@@ -578,7 +923,7 @@
     },
     {
       "username": "KXHXK",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/99810755?u=135aa4bcc175480d72e80c1a0a191075d785ba39&v=4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/99810755?u=fbc0c11a3a674232b0bc811502f28c623d4beec2&v=4",
       "totalScore": 18.805908118654582,
       "prScore": 18.465908118654582,
       "issueScore": 0,
@@ -591,6 +936,16 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/210085965?u=3f00dcf01b5518b94c2b5f268394d303c82fab85&v=4",
       "totalScore": 17.988984046564276,
       "prScore": 17.988984046564276,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ShiroKSH",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/218489957?u=efe2cf2bf5d1a017ca6055165d37454c407ba9d7&v=4",
+      "totalScore": 13.553291913552123,
+      "prScore": 13.553291913552123,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -627,9 +982,9 @@
       "summary": null
     }
   ],
-  "newPRs": 52,
-  "mergedPRs": 27,
-  "newIssues": 37,
+  "newPRs": 89,
+  "mergedPRs": 48,
+  "newIssues": 39,
   "closedIssues": 1,
-  "activeContributors": 15
+  "activeContributors": 19
 }
