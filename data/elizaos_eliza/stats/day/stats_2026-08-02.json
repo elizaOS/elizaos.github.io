@@ -1,0 +1,434 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-02T00:00:00.000Z",
+    "intervalEnd": "2026-08-03T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-08-02 to 2026-08-03, elizaos/eliza had 21 new PRs (9 merged), 7 new issues, and 15 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABLHHRng",
+      "title": "[agent] Extract eliza.army into standalone elizaOS/army repository",
+      "author": "lalalune",
+      "number": 17569,
+      "repository": "elizaos/eliza",
+      "body": "## Project / Coordination\n\n- Project board: N/A - repository extraction infrastructure work\n- Parent tracker or epic: N/A - standalone migration request\n- Coordination Discussion: N/A - scoped to this issue and its pull request\n- Suggested lane tag: army-repository-split\n\n## Contribution Provenance\n\nAI assistance is self-reported provenance, not a request for hidden reasoning.\nUse the exact runtime values; do not include secrets, tokens, private prompts,\nsession IDs, or chain-of-thought.\n\n- AI assistance: yes\n- AI provider/model: openai / gpt-5\n- Client / agent tooling: Codex desktop\n- Contribution skill revision: elizaOS/eliza@ba62c0234e7c761beff1217cb7dea7451f33e481:packages/skills/skills/contribute-to-eliza\n- Attribution status: self-reported\n\n## Scope\n\nExtract the eliza.army contribution site, canonical contribution skill, leaderboard pipeline, tests, and deployment/release workflows into a new public `elizaOS/army` repository. Remove the extracted package and army-owned CI/CD from this monorepo, and decouple remaining general repository governance from the old package name.\n\n## Acceptance Criteria\n\n- [ ] Public `elizaOS/army` repository exists with `develop` as its default branch and preserved source history.\n- [ ] The standalone repository builds, typechecks, lints, and tests without depending on the eliza monorepo checkout.\n- [ ] eliza.army Cloudflare Pages CI/CD and release-candidate invalidation run from `elizaOS/army`.\n- [ ] Canonical `contribute-to-eliza` skill and its validation/tests live in `elizaOS/army`.\n- [ ] `packages/eliza-computer` and army-owned workflows/code are removed from `elizaOS/eliza`.\n- [ ] Remaining elizaOS/eliza checks no longer refer to the retired package or eliza.army deployment surface.\n- [ ] Both repository changes ship through pull requests against `develop`.\n\n## Evidence Plan\n\n- [ ] Screenshots or recording: N/A - repository and CI migration does not change rendered site pixels\n- [ ] Logs: standalone install, typecheck, lint, unit, build, and browser test logs\n- [ ] Real-LLM trajectories: N/A - no agent/model/prompt behavior changes\n- [ ] Domain artifacts: new repository URL, migrated history, workflow inventory, and zero-reference scan in the source monorepo\n- [ ] CI or local commands: targeted package checks in army plus root verification in eliza\n\n## Claim / Status Notes\n\nWork begins immediately under lane `army-repository-split`.\n\n— [army-repository-split]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5\",\"client\":\"codex-desktop\",\"skill_revision\":\"elizaOS/eliza@ba62c0234e7c761beff1217cb7dea7451f33e481:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-08-02T04:17:23Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABLGcjUQ",
+      "title": "[agent] fix(deploy): idle runner pruner fails open — undeterminable runners pruned with --allow-active",
+      "author": "ss251",
+      "number": 17566,
+      "repository": "elizaos/eliza",
+      "body": "## Project / Coordination\n\n- Project board: N/A - runner-fleet reliability defect found while independently reviewing #17544.\n- Parent tracker or epic: relates to #15398 (cleanup bundle) and #17534 / #17544 (control-dir protection).\n- Coordination Discussion: N/A.\n- Suggested lane tag: claude-code-ss251\n\n## Scope\n\n`packages/deploy/runner-workspace-cleanup/bin/eliza-prune-idle-runner-workspaces.sh` **fails open on a destructive path**: when it cannot determine which systemd unit owns a runner directory, it classifies that runner as *orphaned* and prunes its `_work` tree with `--allow-active`, which deliberately disables the tool's own safety guard.\n\nThe script is explicit that a miss is not an error:\n\n```bash\n# Every stage tolerates a miss: no match means orphaned, not an error.\nagent_name=\"\"\nif [[ -r \"${runner_dir}.runner\" ]]; then\n  agent_name=\"$(sed -n 's/.*\"agentName\"...' \"${runner_dir}.runner\" | head -1 || true)\"\nfi\nunit=\"\"\nif [[ -n \"$agent_name\" ]]; then ... fi\nif [[ -z \"$unit\" ]]; then\n  echo \"prune $name — no runner unit resolves to it (orphaned)\"\nfi\n```\n\nTolerating a miss is right for the case the comment is defending (a genuinely deregistered runner, #15398). The defect is that **\"absent\" and \"unreadable/unparseable\" collapse into the same branch**, and that branch deletes.\n\n### Defect 1 — unreadable or unparseable `.runner` reads as orphaned\n\n`[[ -r ... ]]` failing, a transient I/O error, a `.runner` being rewritten during registration or a runner self-update, or any schema change to `agentName` all yield `agent_name=\"\"` → `unit=\"\"` → **prune with `--allow-active` on a runner that may be mid-job**. There is no distinction between \"this runner does not exist\" and \"I could not tell\".\n\n### Defect 2 — `grep -F` substring match can resolve the wrong unit\n\n```bash\n| sed 's/^actions\\.runner\\.//' | grep -F -- \"$agent_name\" | head -1\n```\n\n`grep -F` is an unanchored substring match, so agent `runner-1` matches unit `…runner-10` first (`head -1` over `list-units` order). The script then consults **the wrong unit's** `is-active` state: if `runner-10` happens to be inactive while `runner-1` is running a job, `runner-1` is pruned as inactive. Both halves of the guard — the active check and the orphan check — are defeated by the same mismatch.\n\n### Why this matters now\n\n`--allow-active` is passed on this path by design (the comment explains why the tool's host-global `pgrep` guard is the wrong scope under `ProtectProc=invisible`). That is defensible **only if** the per-runner proof above is sound. Under either defect the proof is unsound and the last safety net is gone.\n\nObserved consequences on `eliza-robot-6` this week — live jobs losing files mid-run:\n\n- `Type Check`, job [91356781391](https://github.com/elizaOS/eliza/actions/runs/30694519256/job/91356781391) (run 30694519256, `quality-fork.yml`): died **4 s into `actions/checkout`** with `Missing file at path: /opt/actions-runners/runner-6/_work/_temp/_runner_file_commands/save_state_231cd9bf-d25a-4158-826f-06df318efd1f`; every later step including `Run typecheck` was `skipped`. The PR was never type-checked, and the red X had nothing to do with its diff.\n- #17534 cites two further runs (30692175805, 30691649390) with the same signature.\n\n#17544 removes the **blast radius** by protecting `_temp`/`_actions`/`_tool`/`_update`/`_PipelineMapping`, and it should land. It does not address the **misclassification**: after it, a live runner mistaken for orphaned still has its repository checkouts deleted mid-job. That is this issue.\n\nNote this also falsifies an unconditional claim in `packages/deploy/runner-workspace-cleanup/README.md` (\"Never interrupting a live job — two halves, both race-free\").\n\n## Required behavior\n\n- Distinguish *absent* from *undeterminable*. Only a runner with no `.runner` at all — or one whose unit demonstrably does not exist — may be treated as orphaned.\n- On an unreadable or unparseable `.runner`, **skip and count it**, do not prune. Fail closed on the destructive branch while keeping the sweep going for other runners (the `set -e` lesson from #15398 stands).\n- Resolve the unit by exact match on the unit suffix, not an unanchored substring, so `runner-1` can never resolve to `runner-10`.\n- Preserve current behavior for genuine orphans, and keep per-runner error isolation and the exit-code accounting.\n\n## Acceptance Criteria\n\n- [ ] A runner directory whose `.runner` exists but is unreadable or unparseable is **not** pruned; it is reported and counted as undeterminable.\n- [ ] A runner whose agentName is a strict prefix/substring of another runner's (`runner-1` vs `runner-10`) resolves to its own unit; a running `runner-1` is never pruned because `runner-10` is inactive.\n- [ ] Genuine orphans (no `.runner`, or a unit that truly does not exist) are still pruned — the #15398 multi-orphan sweep still reports `pruned=2`.\n- [ ] Both new behaviors are covered in `packages/deploy/runner-workspace-cleanup/smoke-test.sh`, driven through the **real** helper and **real** tool with only `systemctl` stubbed, matching the existing §10 pattern.\n- [ ] Demonstrated red/green: with the fix reverted the new assertions fail; with it applied the whole smoke test passes. Both outputs attached.\n- [ ] `README.md`'s race-freedom claim is amended to state the conditions under which it holds.\n\n## Evidence Plan\n\n- [ ] Screenshots or recording: N/A - shell/CI infrastructure with no rendered surface.\n- [ ] Logs: full `smoke-test.sh` output before the fix (failing new assertions) and after (passing), plus the helper's sweep log showing the undeterminable runner skipped and the genuine orphan pruned in the same run.\n- [ ] Real-LLM trajectories: N/A - no model, prompt, or agent behavior involved.\n- [ ] Domain artifacts: the temporary runner tree after the sweep, showing the live runner's `_work` intact and the orphan's reclaimed.\n- [ ] CI or local commands: `bash packages/deploy/runner-workspace-cleanup/smoke-test.sh`.\n\n## Claim / Status Notes\n\nI intend to claim and implement this immediately after filing; claim comment follows in the same session.\n\n## Contribution Provenance\n\n- AI assistance: yes\n- AI provider/model: Anthropic / claude-fable-5\n- Client / agent tooling: Claude Code\n- Contribution skill revision: elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\n- Attribution status: self-reported\n\n— [claude-code-ss251]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-fable-5\",\"client\":\"Claude Code\",\"skill_revision\":\"elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-08-02T01:15:43Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABLLD1zA",
+      "title": "docs(agents): migration table points at four commands that do not exist",
+      "author": "greatcodeeer",
+      "number": 17590,
+      "repository": "elizaos/eliza",
+      "body": "## Scope\n\nThe \"Removed Root Command Migrations\" table in root `CLAUDE.md` / `AGENTS.md` sends readers to four commands that do not exist. Following the guide produces `error: Script not found`.\n\nVerified against `origin/develop` (`59b6f8b8`) by checking every documented replacement against `package.json`:\n\n| Documented replacement | Exists at root? |\n| --- | --- |\n| `bun run audit:test-integrity:all` | **no** |\n| `bun run audit:test-integrity:lane-coverage` | **no** |\n| `bun run audit:test-integrity` | **no** |\n| `bun run audit:test-integrity:self-test` | **no** |\n| `bun run audit:test-integrity:no-vi-mocks` | yes |\n\n```\n$ bun run audit:test-integrity\nerror: Script not found \"audit:test-integrity\"\n\n$ node -e 'const s=require(\"./package.json\").scripts;\n  console.log(Object.keys(s).filter(k=>k.startsWith(\"audit:test-integrity\")).join(\", \"))'\naudit:test-integrity:no-vi-mocks\n```\n\nThe underlying tooling is gone too, so these are not simply unregistered scripts: `packages/scripts/` contains `lint-no-vi-mocks.mjs` and no `test-integrity` or `lane-coverage` counterpart. The one surviving entry maps to it:\n\n```\n\"audit:test-integrity:no-vi-mocks\": \"node packages/scripts/lint-no-vi-mocks.mjs\"\n```\n\nAll other rows in the table check out — I verified the `--cwd` targets against their own package manifests (`packages/app` `test:e2e`, `packages/browser-extension` `test`, `packages/app-core` `voice:duet`, `packages/examples/smartglasses` `hardware:doctor` all exist). This is specifically the `test:lint*` family.\n\n## Why this matters\n\n`CLAUDE.md` states its own bar: \"A wrong header is worse than no header,\" and the migration table exists precisely so a reader who knows the old command lands on the working one. Four of its five `test:lint*` rows currently land on a hard error.\n\nThe audience makes it sharper than a normal docs nit: this file is the repository guide **for agents**, and the table is the first thing an agent consults when a remembered command disappears. An agent that runs `bun run audit:test-integrity`, gets `Script not found`, and has no working alternative either invents a substitute or reports a blocked task — both worse than the table simply being accurate.\n\n## Acceptance criteria\n\n- [ ] The `test:lint*` rows in root `CLAUDE.md` name only commands that exist, or state plainly that the check was retired with its tooling and no replacement exists.\n- [ ] `AGENTS.md` receives the identical edit — the repo convention is that the two files are byte-identical, and `bun run check:agents-claude` enforces it.\n- [ ] Every remaining replacement in the table still resolves: root targets against root `package.json`, `--cwd <dir>` targets against that package's manifest.\n- [ ] No change to any script or tooling — this is documentation matching reality.\n\n## Evidence plan\n\n- [ ] Screenshots / video: N/A - documentation change with no rendered surface.\n- [ ] Logs: before/after resolution of every documented replacement, pasted inline.\n- [ ] Real-LLM trajectories: N/A - no model, prompt, action, or provider behavior changes.\n- [ ] Domain artifacts: N/A - the resolution check output is the artifact.\n- [ ] Commands: `bun run check:agents-claude`, plus the per-row resolution check above.\n\n## Blockers\n\nOne open question for a maintainer, which decides the wording rather than blocking the work: were `test-integrity` / `lane-coverage` **retired deliberately** (so the rows should say so), or **lost accidentally** (so they want the tooling restored instead)? I can write it either way; I have assumed \"retired\" since the tooling is absent from `packages/scripts/`.\n\n## Note on origin\n\nFound while running the repo's own audits against a clean `develop` looking for a contribution — `audit:scripts`, `audit:alias-read-guard`, `audit:turbo-build-deps`, `audit:build-model`, `check:agents-claude`, `audit:scripts:inventory`, `audit:focused-tests`, and `audit:stale-js:self-test` all pass; this was the one thing that did not. Happy to take it, and equally happy for it to be closed if the table is knowingly aspirational.\n\nAI provider/model: Anthropic / claude-opus-5\nClient / agent tooling: Claude Code (Claude Agent SDK)\nContribution skill revision: elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [greatcodeeer-agent]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"client\":\"Claude Code (Claude Agent SDK)\",\"skill_revision\":\"elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-08-02T22:25:00Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABLKwHHA",
+      "title": "ci(evidence): gate help omits the pasted-transcript path it accepts",
+      "author": "greatcodeeer",
+      "number": 17588,
+      "repository": "elizaos/eliza",
+      "body": "## Scope\n\n`scripts/check-pr-evidence.mjs` accepts **four** ways to satisfy a non-visual evidence row, but its failure help advertises only two. Authors who did the right thing — pasted a real transcript, exactly as `CONTRIBUTING.md` § Evidence prescribes — are told they need something else.\n\nThe gate's failure output ends with:\n\n> Rules: visual rows on UI-touching PRs need REAL media (an uploaded image/video, not a link to the PR or /checks page); every other row needs an artifact link or 'N/A - <reason>'.\n\nThe implementation is broader. `isRowSatisfied` is also satisfied by `hasInlineTranscriptEvidence`, whose own comment states the reasoning:\n\n> CONTRIBUTING.md § Evidence and the root AGENTS.md both prescribe \"long logs in a `<details>` block\", so a row that follows the documented standard must satisfy the gate — requiring a URL for every non-visual row contradicts the standard the gate cites and reports a real pasted transcript as `blank`.\n\nSo the code deliberately supports the pasted-transcript path, and the help text omits it.\n\nVerified against `origin/develop` (`725b43ea`):\n\n```js\nimport * as gate from \"./scripts/check-pr-evidence.mjs\";\n\nconst pasted = `- [x] Backend logs:\n\\`\\`\\`\n[develop-pr-gate] poll 1: passed=0 waiting=3 failed=0\n[develop-pr-gate] poll 2: passed=2 waiting=1 failed=0\n[develop-pr-gate] poll 3: passed=3 waiting=0 failed=0\n[develop-pr-gate] all required checks green after 92s\n\\`\\`\\``;\n\ngate.isRowSatisfied(pasted);   // true  — 243 chars, 4 lines\n```\n\nShorten that same transcript below the `INLINE_TRANSCRIPT_MIN_CHARS = 120` / `INLINE_TRANSCRIPT_MIN_LINES = 3` thresholds and it returns `false`, with no message explaining which threshold was missed.\n\n## Why this matters\n\nTwo bad outcomes, both of which lose information:\n\n1. An author with a real log reads \"needs an artifact link or N/A\", uploads a file to the `pr-evidence` release that did not need to exist, or\n2. — worse — marks the row `N/A - <reason>` and the genuine evidence never lands in the PR at all.\n\nThe second is a quality regression the gate exists to prevent. It also disproportionately affects outside contributors, who cannot upload release assets at all (no write access), so `N/A` looks like their only option.\n\n## Acceptance criteria\n\n- [ ] The gate's failure help lists the inline-transcript path alongside artifact links and `N/A - <reason>`, and states the `INLINE_TRANSCRIPT_MIN_LINES` / `INLINE_TRANSCRIPT_MIN_CHARS` thresholds.\n- [ ] A row that is a pasted transcript but falls *under* a threshold reports which one it missed, rather than a bare `blank`.\n- [ ] `runSelfTest` gains a case pinning that a compliant pasted transcript satisfies the gate, so the documented forms and the implemented forms cannot drift apart again.\n- [ ] No change to what the gate accepts or rejects — this is help text plus one regression test, not a policy change.\n\n## Evidence plan\n\n- [ ] Screenshots / video: N/A - CLI help-text change with no rendered surface.\n- [ ] Logs: before/after `node scripts/check-pr-evidence.mjs` failure output on the same fixture, pasted inline.\n- [ ] Real-LLM trajectories: N/A - no model, prompt, action, or provider behavior changes.\n- [ ] Domain artifacts: N/A - the self-test result is the artifact.\n- [ ] Commands: `node scripts/check-pr-evidence.mjs --self-test`.\n\n## Blockers\n\nNone. Contained to `scripts/check-pr-evidence.mjs`.\n\n## Note on origin\n\nFound while running the gate across the open PR queue during an independent review: every PR I sampled (#17576, #17579, #17581, #17584, #17585) fails it, and I hit the same confusion on my own merged PR #17552 — my backend-logs row pointed at output quoted elsewhere in the body, which reads as `blank`. Happy to take this if it is wanted; equally happy for it to be closed if the current wording is deliberate.\n\nAI provider/model: Anthropic / claude-opus-5\nClient / agent tooling: Claude Code (Claude Agent SDK)\nContribution skill revision: elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [greatcodeeer-agent]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"client\":\"Claude Code (Claude Agent SDK)\",\"skill_revision\":\"elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-08-02T20:58:51Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABLKtp0g",
+      "title": "Allow LP3 debug builds to use USB-forwarded local runtimes",
+      "author": "NubsCarson",
+      "number": 17586,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe LP3 debug APK runs its Capacitor renderer from an HTTPS origin. Even with `adb reverse`, Android rejects the cleartext loopback runtime URL before the app can use the Mac-hosted Eliza agent. That forces demo devices back through Cloud onboarding or a stale remote agent and prevents deterministic local-device proof.\n\n## Scope\n\nAllow only the LP3 **debug** flavor to reach the USB-forwarded loopback runtime. Release builds and non-loopback traffic must retain the existing network policy.\n\n## Acceptance criteria\n\n- [ ] The LP3 debug manifest opts into a dedicated network-security config that permits cleartext loopback traffic only.\n- [ ] Release manifests and production network policy are unchanged.\n- [ ] The Android build audit proves the generated debug manifest and configuration.\n- [ ] A same-signer in-place APK install preserves device data/auth state.\n- [ ] A physical LP3 reaches the Mac runtime through `adb reverse` and completes real chat, Notes, and Calendar flows.\n- [ ] Exact APK, renderer manifest, screenshots, video, and structured proof are attached to the PR.\n\n## Non-goals\n\n- No authentication bypass.\n- No broad cleartext allowance.\n- No production Cloud or device-state mutation outside the installed debug APK and explicit USB reverse.\n",
+      "createdAt": "2026-08-02T20:47:00Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs75uWIz",
+      "title": "refactor: clean up repository and harden CI",
+      "author": "lalalune",
+      "number": 17585,
+      "body": "This PR is a massive refactor to clean up and remove anything not necessary to the progress of Eliza in our new direction",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-02T19:59:12Z",
+      "mergedAt": null,
+      "additions": 63225,
+      "deletions": 4804370
+    },
+    {
+      "id": "PR_kwDOMT5cIs70pY3x",
+      "title": "fix(packaging): define hermetic Linux runtime closure",
+      "author": "lalalune",
+      "number": 16755,
+      "body": "Closes #16446.\n\n## Summary\n\n- materialize the transitive Linux runtime closure from the current repository source instead of relying on a published npm package or a dependency-rich checkout\n- package pinned Node and Bun runtimes for amd64 and arm64, verify archive checksums, reject dangling links and foreign-architecture ELF files, and preserve required native binaries\n- make Snap, Debian, and Flatpak workflows fail closed on frozen-install, installed-launcher, version, architecture, offline-start, lifecycle, and health assertions\n- keep the source Snap development-grade for beta/edge while deriving stable grade only for candidate/stable publication from trusted release inputs\n- emit checksums, manifests, installed-runtime logs, SBOMs, and provenance attestations from the exact tested artifacts\n- isolate pull-request package builds to read-only GitHub permissions; provenance attestation and release upload run only in trusted, non-PR jobs\n- replace obsolete Flatpak npm-source generation with a current-source staging driver and tighten Store sandbox permissions\n\n## Exact-head local validation\n\nBase: `cc008ffcbbdd38604bb1fbd422a199affa6d4575`  \nHead: `c9f7cc9ffe2bcdff0290e433e256eac33ad92c3b`\n\n- rebased cleanly onto current `origin/develop`\n- `bun install --ignore-scripts --frozen-lockfile`: passed; lockfile unchanged\n- Snap semantic contract: passed for Bun 1.3.14, Node 24.15.0, amd64, and arm64\n- original focused Linux contract set: 146/146 passed; post-amendment Snap contract: 69/69 passed with 95.95% validator line coverage\n- packaging harness after the permission-boundary repair: 132 passed, 0 failed, 0 skipped\n- `actionlint` on the Snap and Debian workflows, `shellcheck` on the installed-Snap smoke, targeted Biome, and `git diff --check`: passed\n- full `bun run verify`: passed, including 573/573 Turbo tasks, all policy/script/realness audits, and 28/28 dist consumers\n- verification-generated declaration residue was removed from the worktree; the published tree is clean\n\n## Exact-package evidence gate\n\nThis PR remains intentionally draft while the exact-head GitHub jobs build and install the real Linux artifacts. Local structural tests are not represented as installed-package proof. The current exact-head runs are:\n\n- [Debian amd64 + arm64 build/verification](https://github.com/elizaOS/eliza/actions/runs/29888144323)\n- [Snap amd64 + arm64 build/verification](https://github.com/elizaOS/eliza/actions/runs/29888144271)\n- [Flatpak build/verification](https://github.com/elizaOS/eliza/actions/runs/29888144306)\n- [packaging configuration and distribution checks](https://github.com/elizaOS/eliza/actions/runs/29888144304)\n- [changed-file coverage](https://github.com/elizaOS/eliza/actions/runs/29888144282)\n\nAn earlier diagnostic run is not final evidence: its Flatpak artifact succeeded, but manual inspection found that provenance recorded GitHub's synthetic PR merge SHA and that the uploaded checksum path did not match the flattened artifact. Those defects are repaired at this head. The same diagnostic cycle exposed the Snap `@types/node` closure gap and insufficient runtime-copier coverage; both are repaired and regression-tested here.\n\nA later Snap diagnostic built and statically verified the real arm64 package, then exposed that its installed-runtime script changed into a read-only directory while retaining a relative evidence path. This head canonicalizes that evidence directory before the directory change and mutation-tests the invariant. It also removes OIDC and attestation write scopes from every pull-request build step; only the separate non-PR post-build job can attest the checksum-verified uploaded artifact.\n\nBefore ready-for-review, the exact-head job artifacts and logs will be manually inspected for architecture, checksums, manifests, SBOM/provenance, installed launcher behavior, lifecycle/uninstall behavior, offline startup, and health output. Any unsupported acceptance item will remain explicitly identified rather than inferred from structural tests.\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\nN/A - packaging/runtime closure only; no rendered interface changes.\n\n<!-- evidence-row:after-screenshots -->\nN/A - packaging/runtime closure only; no rendered interface changes.\n\n<!-- evidence-row:walkthrough-video -->\nN/A - no interactive UI flow changed; exact-head installed-package command logs are the applicable walkthrough and are linked above.\n\n<!-- evidence-row:backend-logs -->\nLocal exact-head proof: 573/573 repository verify tasks and 132/132 executable packaging assertions passed. Installed-runtime/startup/health logs are being produced by the exact-head [Debian job](https://github.com/elizaOS/eliza/actions/runs/29888144323), [Snap job](https://github.com/elizaOS/eliza/actions/runs/29888144271), and [Flatpak job](https://github.com/elizaOS/eliza/actions/runs/29888144306); this draft does not claim their completion before GitHub reports it.\n\n<!-- evidence-row:frontend-logs -->\nN/A - no frontend runtime or network behavior changed.\n\n<!-- evidence-row:llm-trajectory -->\nN/A - no action, prompt, provider, planner, or model behavior changed.\n\n<!-- evidence-row:domain-artifacts -->\nThe exact-head [Debian artifacts](https://github.com/elizaOS/eliza/actions/runs/29888144323), [Snap artifacts](https://github.com/elizaOS/eliza/actions/runs/29888144271), and [Flatpak artifact](https://github.com/elizaOS/eliza/actions/runs/29888144306) produce the real packages, checksums, manifests, SBOMs, and provenance. The PR remains draft until those outputs exist and have been downloaded and manually inspected.\n\n<!-- evidence-row:ocr-review -->\nN/A - no pixels or visual text changed.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-07-22T01:58:04Z",
+      "mergedAt": null,
+      "additions": 5219,
+      "deletions": 8721
+    },
+    {
+      "id": "PR_kwDOMT5cIs75V1kS",
+      "title": "fix(agent): make benchmark and boot work owner-controlled",
+      "author": "lalalune",
+      "number": 17531,
+      "body": "Closes #17527\n\n## What this fixes\n\nThe benchmark process previously used a fixed 120-second `Promise.race`, did not abort the losing message turn, and exited without owning runtime/database shutdown. The same boot path also launched dynamic imports, plugin registration, cache warmups, maintenance DB work, and a five-second skill-command timer without a lifecycle owner. A benchmark could therefore stop reporting while work continued, or close SQL while startup jobs were still reading and writing.\n\nThis changes ownership instead of adding another deadline:\n\n- removes the benchmark timeout option and timer race from both CLI entry points;\n- passes a process-owned `AbortSignal` through the real message-service path;\n- handles SIGINT/SIGTERM through cancellation plus normal shutdown rather than `process.exit()`;\n- preserves partial streamed output while reporting success only for a completed, valid response;\n- drains deferred imports, plugin registration, hooks, warmups, and tracked post-delivery work before adapter close;\n- removes arbitrary deferred-plugin, trajectory-drain, hot-reload, and plugin-initialization timeouts;\n- makes memory telemetry flush single-flight and awaited, without intercepting SIGTERM;\n- removes plugin-openai's detached startup `GET /models` validation request;\n- moves workbench migration, attachment backfill scheduling, and media-GC scheduling into a runtime-owned maintenance service that starts after SQL migrations;\n- registers task workers before TaskService starts, then creates their idempotent queue rows only when SQL is ready;\n- registers loaded skills as commands during dependency-ordered plugin initialization instead of an unowned five-second timer.\n\n## Live Cerebras proof\n\nFresh real run on this branch with Cerebras `gemma-4-31b`:\n\n- exact response: `BENCHMARK-OWNER-ALLOWED-FINAL`\n- benchmark response: **929 ms**\n- model stage: **853 ms**\n- full boot: **1,883 ms**\n- process wall including boot and clean shutdown: **4,280 ms**\n- prompt/completion: **4,142 / 52 tokens**\n- cache read: **3,328 prompt tokens (80.35%)**\n- native trajectory: `finished`, one physical model request\n- after process exit: zero active trajectory rows, zero post-close DB operations, zero pre-migration task reads, zero unhandled rejections\n\nProvider work remained parallel. The 13 observed provider durations were 1.32–15.30 ms; the slowest was FACTS at 15.30 ms. The largest boot cost was local SQL registration at 1,113 ms, followed by runtime initialization at 344 ms and blocking plugin resolution at 248 ms.\n\n[Machine-readable live evidence](https://github.com/elizaOS/eliza/releases/download/pr-evidence-6/pr-17527-live-evidence.json) (`sha256:d5c2a87ac0c42f4d703a0d35a260f3bf3e5c1a43a2dff88c0269551c07eae8e3`).\n\n### Telemetry caveat discovered by this run\n\nThe native trajectory proves one Cerebras request, but the DB aggregate reports two LLM calls and exactly doubles token totals. That is a separate double-recording defect between generic runtime instrumentation and plugin-level wire telemetry, not a second network request. It is explicitly recorded in the evidence and is being fixed independently so this PR stays about task/lifecycle ownership.\n\n## Verification\n\n- `bun run build` — `packages/agent`\n- `bun run typecheck` — `packages/agent`\n- focused agent/app-core lifecycle suite: **9 files, 58 tests passed**\n- `bun run typecheck && bun run test && bun run build` — `plugins/plugin-agent-skills`: **10 files, 44 tests passed**\n- Biome check of all touched source/test files\n- `git diff --check`\n- package `CLAUDE.md` / `AGENTS.md` equality check\n- manually inspected the native JSON trajectory, DB trajectory aggregate, boot telemetry, provider spans, process exit, and shutdown logs\n\n## Evidence applicability\n\n- UI screenshots/video: N/A — CLI/runtime lifecycle only; no rendered surface changed.\n- Frontend console/network logs: N/A — no frontend changed.\n- Backend/runtime logs: inspected during the live run; shutdown completed without late DB access.\n- Real-LLM trajectory: attached above via the compact evidence report; source native trajectory was inspected directly.\\n\\n## Evidence Gate\\n\\n<!-- evidence-row:before-screenshots -->\\n- [x] Before screenshots: N/A - CLI/runtime lifecycle only; no rendered UI changes.\\n\\n<!-- evidence-row:after-screenshots -->\\n- [x] After screenshots: N/A - CLI/runtime lifecycle only; no rendered UI changes.\\n\\n<!-- evidence-row:walkthrough-video -->\\n- [x] Walkthrough video: N/A - no browser, desktop, mobile, or other visual interaction changed.\\n\\n<!-- evidence-row:backend-logs -->\\n- [x] Backend logs: [machine-readable live Cerebras evidence](https://github.com/elizaOS/eliza/releases/download/pr-evidence-6/pr-17527-live-evidence.json) records boot, provider spans, completed response, trajectory state, clean shutdown, and zero late database operations.\\n\\n<!-- evidence-row:frontend-logs -->\\n- [x] Frontend console/network logs: N/A - no frontend source, state, or requests changed.\\n\\n<!-- evidence-row:llm-trajectory -->\\n- [x] Real-LLM trajectory: [live Cerebras evidence](https://github.com/elizaOS/eliza/releases/download/pr-evidence-6/pr-17527-live-evidence.json) records the exact `BENCHMARK-OWNER-ALLOWED-FINAL` response and one physical `finished` model request.\\n\\n<!-- evidence-row:domain-artifacts -->\\n- [x] Domain artifacts: [live lifecycle report](https://github.com/elizaOS/eliza/releases/download/pr-evidence-6/pr-17527-live-evidence.json), SHA-256 `d5c2a87ac0c42f4d703a0d35a260f3bf3e5c1a43a2dff88c0269551c07eae8e3`, manually inspected as described above.\\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-01T08:45:37Z",
+      "mergedAt": "2026-08-02T03:35:08Z",
+      "additions": 2677,
+      "deletions": 1032
+    },
+    {
+      "id": "PR_kwDOMT5cIs75bo1f",
+      "title": "fix(ci): enforce Linux ISO release contracts",
+      "author": "aandreakis",
+      "number": 17554,
+      "body": "# Relates to\n\nFixes #17222.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](https://github.com/elizaOS/eliza/blob/develop/CONTRIBUTING.md).\n\n- [x] Targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] Frozen install and root `bun run verify` passed after sync.\n- [ ] A reviewer can confirm the complete change without reading the code. The repaired real ISO build and dual-firmware boot evidence run is active.\n\n# Sync with develop\n\n- [x] Rebased onto `origin/develop` at `e37924817dd4`; zero conflicts.\n- [x] `bun install --frozen-lockfile` completed with published Bun 1.3.14 and no lockfile change.\n- [x] `bun run verify` passed all 581/581 Turbo tasks and every downstream build-model, dependency-edge, secret, script-inventory, view-inventory, focused-test, and dist-path audit.\n- [x] Current contribution head: `d9a7b2b4c461b69bb711992a13beb00657ddddb0`.\n\n# Risks\n\nMedium. This changes release CI ordering, expands OS validation to PRs targeting `develop`, adds the missing UEFI optical-media boot path to the pinned Tails live-build fork, and makes the VM smoke probe use Tails' gated test channel instead of racing a serial login. A malformed, incomplete, non-bootable, or unhealthy ISO now fails earlier and more often by design. Runtime and UI code are untouched.\n\n# Background\n\n## What does this PR do?\n\n- Runs the live Tails APT snapshot resolver immediately after checkout, before cache restoration, tool setup, or workspace installation.\n- Registers the ISO workflow with the OS validation workflow for `develop` PRs.\n- Replaces the previous filename grep with a parsed YAML contract covering canonical amd64-only release, exact snapshot-map export, static-only non-amd64 work, shipped-bootloader firmware validation, retained diagnostics, SLSA provenance, complete runtime SBOM, and fail-closed artifacts.\n- Adds 20 baseline/mutation tests and wires the existing exact-clean-pin test into `static-smoke.sh`.\n- Packages Tails' signed shim and GRUB loaders into a deterministic FAT image, then applies a fail-closed compatibility patch to the exact pinned live-build fork so xorriso advertises it as a UEFI El Torito entry alongside unchanged ISOLINUX BIOS boot.\n- Uses Tails' existing VM-only `org.tails.remote_shell.0` channel, gated by the explicit `autotest_never_use_this_option` kernel flag, to release GDM and check the real `amnesia` user service plus `127.0.0.1:31337/api/health`. No production authentication or direct-kernel bypass is introduced.\n- Uses acknowledged, short readiness requests that report the actual user-bus, service, curl, and health-payload states. Transient states retry; protocol failures fail immediately; only the guest-produced service-active/health-ready marker passes.\n- Makes the builder cache key cover the boot hook and live-build patch.\n\n## What kind of change is this?\n\nBug fix (non-breaking CI/release reliability and bootability change).\n\n# Documentation changes needed?\n\nUpdated `packages/os/linux/docs/build-infrastructure.md` with the signed EFI image, compatibility patch, and dual-El-Torito build contract.\n\n# Testing\n\n## Where should a reviewer start?\n\nStart with `packages/os/linux/scripts/linux-iso-workflow-contract.test.mjs`, then inspect `tails/config/binary_local-hooks/60-efi-el-torito`, `patches/live-build-uefi-el-torito.patch`, and `scripts/smoke-test-iso.sh`.\n\n## Detailed testing steps\n\n1. `ELIZAOS_STATIC_SOURCE_ONLY=1 ./scripts/static-smoke.sh` from `packages/os/linux` — passed post-rebase, including ISO smoke orchestration, exact-pin, snapshot override, package-list, UEFI image/patch, and 20 workflow contract tests.\n2. The deterministic QEMU harness passed real orchestration cases for both firmware paths, delayed readiness/retry, remote-protocol failure, userspace-without-health failure, false-positive prevention, and bounded TERM/KILL teardown.\n3. Live snapshot preflight passed with `debian=2026080103`, `debian-security=2026080103`, and `torproject=2026050704`.\n4. Node 24.15.0 Linux workflow contract suite — 20 passed, 0 failed.\n5. `actionlint` on both changed workflows — passed with no findings.\n6. Shellcheck warning severity on the changed shell scripts — passed.\n7. The live-build patch dry-ran successfully against exact pinned fork commit `a20d501b63f2ca3a9ed372b5c24699c9a5434e90`.\n8. Real `dosfstools` + `mtools` reproducibility test with Debian-signed shim and GRUB: two builds made seconds apart were byte-identical (`sha256:a0cdcf79c24fa0d73132739249c73c4c46d34b37a5110f18915f6f9e31370d18`).\n9. Real xorriso synthetic ISO inspection reported one bootable BIOS entry and one bootable UEFI entry backed by the generated FAT image.\n10. Real Debian/QEMU 10.0.11 accepted the exact virtio pipe/device arguments used by the smoke probe.\n11. `bun install --frozen-lockfile` and root `bun run verify` with published Bun 1.3.14 passed after the latest rebase; verify completed 581/581 Turbo tasks.\n12. First hosted evidence attempt exposed the upstream unpublished Bun declaration before ISO work: https://github.com/aandreakis/eliza/actions/runs/30710213799\n13. The first unblocked hosted build produced a real 2.06 GB ISO and correctly failed because it had no UEFI El Torito entry: https://github.com/aandreakis/eliza/actions/runs/30710399551\n14. The next build produced BIOS and UEFI El Torito entries and booted through SeaBIOS into Linux userspace, then exposed the serial-password race: https://github.com/aandreakis/eliza/actions/runs/30713963268\n15. The next build again produced both boot entries and reached the Tails live session through SeaBIOS. Its remote channel acknowledged `signal_ready`, proving the new observation path, but the TCG-backed user session arrived at the old ten-minute outer timeout: https://github.com/aandreakis/eliza/actions/runs/30717357426\n16. Current hosted build/SeaBIOS/OVMF/SBOM/provenance run: https://github.com/aandreakis/eliza/actions/runs/30720695681\n\n# Evidence Gate\n\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - no UI surface or rendered pixels change.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - no UI surface or rendered pixels change.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - this is a headless release-workflow change with no user flow.\n<!-- evidence-row:backend-logs -->\n- [ ] PENDING - the current hosted build and dual-firmware boot run is active.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - no frontend request, response, state, or console behavior changes.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no agent, action, provider, prompt, or model behavior changes.\n<!-- evidence-row:domain-artifacts -->\n- [ ] PENDING - ISO, SHA-256, SPDX SBOM, boot diagnostics, and provenance artifacts will be inspected after the hosted run completes.\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nN/A - no agent, action, provider, prompt, or model behavior changes.\n\n## Backend + frontend logs\n\nThe first real build reached ISO assembly after 58m55s and produced a 2.06 GB artifact. Manual review of retained xorriso diagnostics found one bootable BIOS entry and no UEFI entry; the workflow failed observably with `ERROR: ISO has no bootable UEFI El Torito image` and the test was not weakened.\n\nThe next real build reported bootable BIOS `/isolinux/isolinux.bin` and UEFI `/boot/grub/efi.img` entries, then reached Linux userspace through SeaBIOS. It failed before OVMF because the harness treated Tails' graphical `login` flag as a passwordless serial-getty contract. The repair switched to Tails' own VM-only test channel without changing authentication.\n\nRun 30717357426 built the real ISO in 1h06m59s, retained both boot entries, reached Linux and the `amnesia` session through SeaBIOS, and received `[1, \"success\"]` from the gated Tails remote channel. The old single guest-side retry command and ten-minute host bound expired as GDM/user@1000 became ready. The current repair uses short acknowledged requests with observable `bus/service/health` states and a 15-minute per-firmware bound; it does not relax the service-active or `ready:true` pass condition.\n\nThe current run checks out evidence SHA `73cf36ebccc0`, which is exact PR head `d9a7b2b4c461` plus only the isolated `packageManager` change from unpublished Bun 1.4.0 to published Bun 1.3.14. `git diff d9a7b2b4c461..73cf36ebccc0` contains that one line and nothing else.\n\nFrontend logs: N/A - no frontend behavior changes.\n\n## Screenshots (before / after) + video walkthrough\n\nN/A - no UI surface changes.\n\n## Audio / voice walkthrough\n\nN/A - no voice, transcript, TTS, STT, or audio behavior changes.\n\n## Known gaps / failures\n\n1. `origin/develop` currently declares unpublished `bun@1.4.0`; setup-bun receives a 404 before ISO work. #17044 is actively claimed by another contributor and owns repository-wide Bun alignment, so this PR does not duplicate it. The evidence branch changes only that declaration to published Bun 1.3.14; exact-head hosted evidence remains pending until #17044 lands.\n2. Cross-repository PR workflows require maintainer approval. The Develop PR Gate and Security Advisory Gate can remain pending/action-required until their child workflows are approved.\n3. This remains a draft until the amd64 ISO boots through both SeaBIOS and OVMF and the retained ISO/checksum/SBOM/provenance artifacts are manually inspected.\n\nAI provider/model: OpenAI / gpt-5.6-sol\nClient / agent tooling: Codex CLI 0.146.0\nContribution skill revision: elizaOS/eliza@4b0bad53a7fd5cc0c1f0c507c849f27ebb53b1d3:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [codex-root]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex CLI 0.146.0\",\"skill_revision\":\"elizaOS/eliza@4b0bad53a7fd5cc0c1f0c507c849f27ebb53b1d3:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-01T17:22:41Z",
+      "mergedAt": null,
+      "additions": 1616,
+      "deletions": 269
+    },
+    {
+      "id": "PR_kwDOMT5cIs75nQ-m",
+      "title": "test(app): require semantic OCR coverage for audited views",
+      "author": "aandreakis",
+      "number": 17581,
+      "body": "# Relates to\n\nCloses #17120.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [x] `bun install` and `bun run verify` were run after sync.\n- [x] A reviewer can confirm the change works without reading the code from the evidence attached below.\n\n# Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `OpenAI/gpt-5.6-sol`\n<!-- attribution-row:client -->\n- Client / agent tooling: `Codex`\n<!-- attribution-row:skill-revision -->\n- Skill revision: `elizaOS/eliza@4b0bad53a7fd5cc0c1f0c507c849f27ebb53b1d3:packages/skills/skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Attribution status: `self-reported`\n\n# Sync with develop\n\n- [x] Rebased onto `origin/develop` at `725b43ea42411f27ccafc98f4ed43bf181192ff6`; zero conflicts.\n- [x] `bun install` completed after sync.\n- [x] `bun run verify` passed locally at the current `ddd29fa8fdd9e418ed9d549ec8b077bd287469ac` head: 581/581 Turbo tasks plus all follow-on integrity audits. The linked [pre-portability verify log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17581-exact-verify.log) and [pre-portability 254-case audit/OCR log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17581-exact-audit.log) cover the preceding `69a5e91d3b2` head; the current hosted App Aesthetic Audit is the authoritative cross-platform run for the final OCR-normalization commit.\n\n# Risks\n\nLow. Stable view-copy changes now intentionally fail the semantic audit until the policy is updated. Remote-bundle exemptions fail closed once bundle provenance appears. The launcher layout adjustment only changes the full-page variant; the embedded launcher remains unchanged and has an explicit regression test. The visual audit now consumes ordinary hosted-runner minutes and may take roughly an hour, but it no longer executes pull-request code on the persistent self-hosted fleet or reports false success after audit failures.\n\n# Background\n\n## What does this PR do?\n\n- Replaces the sparse optional OCR expectation map with a closed discriminated policy registry covering all 63 audited slugs and all 252 slug/viewport rows.\n- Adds narrow typed exemptions for one native-platform surface and four unavailable remote bundles, each with a durable reason and an observable fallback contract.\n- Extracts the shared capture-case registry and adds drift tests against canonical built-in navigation and plugin view cases, so a new surface without a policy fails closed.\n- Preserves remote bundle provenance in the audit report and invalidates an unregistered-bundle exemption as soon as the real bundle is captured.\n- Moves the audit off the persistent self-hosted fleet and makes aesthetic/OCR failures and missing artifacts fail the workflow instead of being masked by `continue-on-error`.\n- Repairs the full-page launcher clearance exposed by strict audit mode and makes the recorded mobile interaction test scroll the visible launcher viewport, asserting the final tile clears the fixed composer.\n- Updates the OCR triage operator documentation.\n\n## What kind of change is this?\n\nBug fix and test-infrastructure improvement.\n\n# Documentation changes needed?\n\nThe operator-facing OCR triage documentation is updated in `packages/app/scripts/OCR_TRIAGE.md`. No user-facing documentation change is required.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. Inspect `packages/app/test/audit/ocr-view-expectations.test.ts` for the closed-registry and fail-closed guarantees.\n2. Inspect the attached OCR JSON: 252 total, 232 verified, 20 narrowly exempted, 0 broken, 0 regressions, and 0 `no expectation declared` findings.\n3. Compare the mobile launcher before screenshot with the post-touch-scroll screenshot, then watch the MP4 through the Browser tile launch.\n\n## Detailed testing steps\n\n- `bun run --cwd packages/app audit:app` — 254 Playwright capture tests passed; 252 findings: 227 good, 25 needs-eyeball, 0 needs-work, 0 broken. OCR: 232 verified, 20 typed exemptions, 0 broken/regressions.\n- Focused OCR/manifest/policy unit lane — 61 tests passed.\n- Packaged OCR portability rerun over the downloaded hosted artifact — 252 processed, 231 verified, 21 needs-eyeball, 0 broken/regressions.\n- `bun run --cwd packages/app test` — 1,183 tests passed.\n- `bun run --cwd packages/ui test` — 9,006 tests passed, 7 skipped by existing suite policy.\n- `bun run --cwd packages/app typecheck`, `lint`, and `build` — passed.\n- `bun run --cwd packages/ui typecheck`, `lint`, and `build` — passed.\n- Recorded mobile launcher interaction — passed; real touch scroll reached `scrollTop=84`, the final tile cleared the composer, Browser launched, and page/HTTP error arrays remained empty.\n- `bun run verify` after final sync and install — passed, 581/581 Turbo tasks.\n- Manual review — all 253 captured images across desktop landscape, mobile portrait, mobile landscape, and iPad portrait were opened and reviewed; the five exempt surfaces visibly matched their declared fallbacks.\n\n# Evidence Gate\n\n<!-- evidence-head:ddd29fa8fdd9e418ed9d549ec8b077bd287469ac -->\n\n<!-- evidence-row:before-screenshots -->\n- [x] Mobile: <img width=\"240\" alt=\"Before: mobile launcher\" src=\"https://github.com/user-attachments/assets/d6eadb78-bb6a-4911-b46a-2ce51f11cc74\" /> Desktop: <img width=\"420\" alt=\"Before: desktop launcher\" src=\"https://github.com/user-attachments/assets/d10d40af-538c-4d5a-90d8-ac1342280100\" />\n<!-- evidence-row:after-screenshots -->\n- [x] Mobile after touch scroll: <img width=\"240\" alt=\"After: mobile launcher final row clear of composer\" src=\"https://github.com/user-attachments/assets/347aa861-c19a-4033-b585-fea533520b15\" /> Desktop: <img width=\"420\" alt=\"After: desktop launcher\" src=\"https://github.com/user-attachments/assets/6f6e3673-682a-4bac-819a-aee9820566c8\" />\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/user-attachments/assets/07d7af69-a976-4405-8c9d-5457f7723d18\n<!-- evidence-row:backend-logs -->\n- [x] N/A - This is a hermetic frontend audit and layout-only UI change; it does not exercise server business logic.\n<!-- evidence-row:frontend-logs -->\n- [x] Recorded frontend console/network output:\n\n<details><summary>Frontend console + network log (real recorded flow)</summary>\n\n```json\n{\n  \"aestheticAudit\": {\n    \"totalRows\": 252,\n    \"consoleErrorRows\": 0,\n    \"renderIssueRows\": 0,\n    \"overlayIssueRows\": 0,\n    \"hoverFailureRows\": 0,\n    \"qualityIssueRows\": 0\n  },\n  \"launcherInteraction\": {\n    \"viewport\": \"mobile\",\n    \"layout\": \"single-vertical-grid\",\n    \"scrollTopAfterTouch\": 84,\n    \"finalUrl\": \"http://127.0.0.1:55168/browser\",\n    \"pageErrors\": [],\n    \"httpErrors\": [],\n    \"console\": [\n      \"info: %c Info font-size: 12px; color: #0099ff; [startup-coordinator] phase=ready\",\n      \"info: %c Info font-size: 12px; color: #0099ff; [ViewLifecycle] \\\"views\\\" mounted → active (show)\",\n      \"info: %c Info font-size: 12px; color: #0099ff; [ViewLifecycle] \\\"browser\\\" mounted → active (show)\",\n      \"info: %c Info font-size: 12px; color: #0099ff; [ViewLifecycle] \\\"views\\\" active → evicted (inactive)\"\n    ]\n  }\n}\n```\n\n</details>\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - No agent action, provider, prompt, planner, or model behavior changed.\n<!-- evidence-row:domain-artifacts -->\n- [x] Audit output inventory and SHA-256 manifest (253 reviewed screenshots in each complete archive):\n\n<details><summary>Domain artifact hashes</summary>\n\n```text\nfa84a62273e0779a429635bfefcceea6d96ec41a452214f7e58c386c6be6aede  17120-aesthetic-audit-report.json\n5c7e33d17ef6853ccc1760638edd75544bacdfbd410aa9cd208d9acd3077abff  17120-after-desktop-launcher.jpg\n3bb9687a7a343513eee85cc5bd8e96b35f9f2b66787c4649b04c6d3aa0daf289  17120-after-mobile-launcher.jpg\n2ca50d596ffa441f3b233ed3b7ec98ab937d6574d478ab5411dd831eefaf77a9  17120-all-view-screenshots.tar.gz\n646e2db2a3a235b5d7879f0686c05373f6a4ab9d0b4eeebf71f4af83ca28c05b  17120-all-view-screenshots.zip\nb0a8bbe9d40a2975699bce8336f8ebab8e7abd58192b02da07c53473005c2d20  17120-audit-browser-log.json\n5c7e33d17ef6853ccc1760638edd75544bacdfbd410aa9cd208d9acd3077abff  17120-before-desktop-launcher.jpg\n96371cdd6119fb70e978a96a7888d3490a8140743d842b7cdf0d2f2cb75d8421  17120-before-mobile-launcher.jpg\n7f57f2383d55fc67fa47410a965bec770bf12f8dad240cc1fa66dd9135c467b3  17120-launcher-browser-observations.json\nbade9da89113acfbaae31bf8935fe57f54bddc173d121587274eda77a606b5fe  17120-launcher-walkthrough.mp4\ncdb64ccdc7c43a0afcf8792207710a11660aa85d7d9315ff88b9da62212c5185  17120-mobile-browser-tile-launched.jpg\nfe620c4515d86b0532264b88028864f6e552b6523ecc6a55591885e290f852e5  17120-mobile-launcher-after-touch-scroll.jpg\n5678683600177a4069593b0ee67ba4e22f87961dd6004ade44bb317fa18cafc8  17120-ocr-triage.json\nab211a20756a05265ab4912f9bc165f3090df8d3675466e7936076e02f673028  17120-screenshot-sha256.txt\n```\n\n</details>\n<!-- evidence-row:ocr-review -->\n- [x] [Complete 252-row OCR triage JSON](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17581-b40d-ocr-triage.json) — manually reviewed: 232 verified, 20 typed exemptions, 0 broken/regressions.\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nN/A - No agent action, provider, prompt, planner, or model behavior changed.\n\n## Backend + frontend logs\n\nBackend: N/A - the path is hermetic frontend capture and static OCR triage.\n\nThe evidence-row above contains the reviewed audit and interaction output. Unabridged downloads: [audit browser log JSON](https://github.com/user-attachments/files/30630546/17120-audit-browser-log.json) and [launcher browser observations JSON](https://github.com/user-attachments/files/30630547/17120-launcher-browser-observations.json).\n\n## Audit + OCR artifacts\n\n- [Complete 252-row aesthetic audit report](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17581-b40d-app-audit-report.json)\n- [Complete 252-row OCR triage report](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17581-b40d-ocr-triage.json)\n- [All 253 reviewed screenshots](https://github.com/user-attachments/files/30630550/17120-all-view-screenshots.zip)\n- [Per-screenshot SHA-256 manifest](https://github.com/user-attachments/files/30630554/17120-screenshot-sha256.txt)\n- [Evidence-bundle SHA-256 manifest](https://github.com/user-attachments/files/30630555/17120-evidence-sha256.txt)\n\n## Screenshots (before / after) + video walkthrough\n\n### Before\n\n- [Desktop full-page launcher](https://github.com/user-attachments/assets/d10d40af-538c-4d5a-90d8-ac1342280100)\n- [Mobile full-page launcher; last row is trapped beneath the fixed composer](https://github.com/user-attachments/assets/d6eadb78-bb6a-4911-b46a-2ce51f11cc74)\n\n### After\n\n- [Desktop full-page launcher](https://github.com/user-attachments/assets/6f6e3673-682a-4bac-819a-aee9820566c8)\n- [Mobile full-page launcher at rest](https://github.com/user-attachments/assets/dd79c3c4-6ecf-4620-a305-5a3f8033fada)\n- [Mobile after a real touch scroll; Shopify and Vector Browser are fully clear of the composer](https://github.com/user-attachments/assets/347aa861-c19a-4033-b585-fea533520b15)\n- [Browser tile launched](https://github.com/user-attachments/assets/e34e093a-b363-4b2d-9311-925b67c2d2ff)\n\n### Walkthrough video\n\nhttps://github.com/user-attachments/assets/07d7af69-a976-4405-8c9d-5457f7723d18\n\n## Audio / voice walkthrough\n\nN/A - No voice, transcript, TTS, STT, or audio behavior changed.\n\n## Known gaps / failures\n\nNone. The backend-log and live-LLM rows are N/A because those systems are outside this frontend audit/layout change; all applicable UI evidence was captured and manually reviewed.\n\nAI provider/model: OpenAI / gpt-5.6-sol\nClient / agent tooling: Codex\nContribution skill revision: elizaOS/eliza@4b0bad53a7fd5cc0c1f0c507c849f27ebb53b1d3:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [codex-ocr-coverage]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex\",\"skill_revision\":\"elizaOS/eliza@4b0bad53a7fd5cc0c1f0c507c849f27ebb53b1d3:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-02T10:13:31Z",
+      "mergedAt": "2026-08-02T21:22:35Z",
+      "additions": 864,
+      "deletions": 330
+    }
+  ],
+  "codeChanges": {
+    "additions": 5275,
+    "deletions": 1503,
+    "files": 93,
+    "commitCount": 139
+  },
+  "completedItems": [
+    {
+      "title": "fix(ci): align fork timeout contract",
+      "prNumber": 17491,
+      "type": "bugfix",
+      "body": "Repairs the real post-merge script-test failure exposed by Tests run 30664993399 after #17485.\n\n#17485 intentionally increased the fork build timeout from 32 to 45 minutes based on measured cold build plus homepage smoke duration, but its r",
+      "files": [
+        "packages/scripts/__tests__/ci-turbo-cache-contract.test.ts"
+      ]
+    },
+    {
+      "title": "fix: app-build pipeline reliability — winnable verification, fresh-deploy guarantee, human voice",
+      "prNumber": 17479,
+      "type": "bugfix",
+      "body": "## Problem\n\nA \"make me a tiny app\" request on a live bot exposed a chain of defects that made first builds slow, leaky, or falsely failed — measured live at 192s+ with a wasted 67s retry loop, versus ~71s clean:\n\n1. **Unwinnable creates**: ",
+      "files": [
+        "packages/agent/src/api/server-helpers-swarm.ts",
+        "packages/core/src/index.node.ts",
+        "packages/core/src/runtime/__tests__/planner-loop-failure-correlation.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/elizaos/templates/min-project/vite.config.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/swarm-coordinator-service.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/transcript-sanitizer.test.ts",
+        "plugins/plugin-agent-orchestrator/src/services/sub-agent-router.ts",
+        "plugins/plugin-agent-orchestrator/src/services/swarm-coordinator-service.ts",
+        "plugins/plugin-agent-orchestrator/src/services/transcript-sanitizer.ts",
+        "plugins/plugin-app-control/src/actions/app-create.ts",
+        "plugins/plugin-app-control/src/actions/views-create.ts",
+        "plugins/plugin-app-control/src/params.test.ts",
+        "plugins/plugin-app-control/src/params.ts",
+        "plugins/plugin-app-control/src/services/app-verification.ts",
+        "plugins/plugin-app-control/src/actions/app.test.ts",
+        "plugins/plugin-app-control/src/services/__tests__/app-verification.integration.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): add focused tests for LifeOps activity-signals smoke classification",
+      "prNumber": 17553,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe dev-smoke browser failure classifier in `browser-failure-policy.ts` correctly ignores the intentionally unavailable LifeOps activity-signals 503 and its matching Chromium console error, but had zero test coverage. This PR ad",
+      "files": [
+        "packages/app/test/dev-smoke/browser-failure-policy.test.ts",
+        "packages/app/scripts/browser-failure-policy.test.ts"
+      ]
+    },
+    {
+      "title": "ci(develop-pr): gate changed plugin packages with their own unit tests",
+      "prNumber": 17552,
+      "type": "tests",
+      "body": "# Relates to\n\nCloses #17550.\n\n# Risk\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n- [x] `bun install` and `bun run verify` were run after sync, or any failure is\n      recorded below with its exact comman",
+      "files": [
+        ".github/workflows/develop-pr.yml",
+        "packages/scripts/ci-workflow-invariants.mjs",
+        "packages/scripts/develop-pr-aggregate.mjs",
+        "packages/scripts/develop-pr-aggregate.self-test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): protect runner control directories from pruning",
+      "prNumber": 17535,
+      "type": "bugfix",
+      "body": "Closes #17534.\n\n## Summary\n\n- exclude GitHub Actions runner-owned control directories from workspace prune plans\n- keep stale ordinary repository workspaces eligible for deletion\n- add regression coverage for every protected directory\n\nThe ",
+      "files": [
+        "packages/scripts/cloud/admin/prune-runner-workspaces.test.ts",
+        "packages/scripts/cloud/admin/prune-runner-workspaces.ts",
+        "packages/deploy/runner-workspace-cleanup/smoke-test.sh"
+      ]
+    },
+    {
+      "title": "fix(agent): make benchmark and boot work owner-controlled",
+      "prNumber": 17531,
+      "type": "bugfix",
+      "body": "Closes #17527\n\n## What this fixes\n\nThe benchmark process previously used a fixed 120-second `Promise.race`, did not abort the losing message turn, and exited without owning runtime/database shutdown. The same boot path also launched dynamic",
+      "files": [
+        "packages/agent/AGENTS.md",
+        "packages/agent/CLAUDE.md",
+        "packages/agent/src/api/attachment-knowledge-backfill.test.ts",
+        "packages/agent/src/api/attachment-knowledge-backfill.ts",
+        "packages/agent/src/api/media-runtime.test.ts",
+        "packages/agent/src/api/media-runtime.ts",
+        "packages/agent/src/cli/benchmark.test.ts",
+        "packages/agent/src/cli/benchmark.ts",
+        "packages/agent/src/cli/index.ts",
+        "packages/agent/src/runtime/agent-skills-lifecycle.test.ts",
+        "packages/agent/src/runtime/agent-wallets.ts",
+        "packages/agent/src/runtime/boot-telemetry.test.ts",
+        "packages/agent/src/runtime/boot-telemetry.ts",
+        "packages/agent/src/runtime/deferred-boot-owner.test.ts",
+        "packages/agent/src/runtime/deferred-boot-owner.ts",
+        "packages/agent/src/runtime/eliza-embedding-boot-order.test.ts",
+        "packages/agent/src/runtime/eliza-plugin.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/runtime-maintenance.test.ts",
+        "packages/agent/src/runtime/runtime-maintenance.ts",
+        "packages/app-core/scripts/dev-startup-smoke.mjs",
+        "packages/app-core/scripts/dev-ui.mjs",
+        "packages/app-core/src/cli/program/register.benchmark.test.ts",
+        "packages/app-core/src/cli/program/register.benchmark.ts",
+        "packages/app/playwright.dev-smoke.config.ts",
+        "packages/benchmarks/app-eval/AGENTS.md",
+        "packages/benchmarks/app-eval/CLAUDE.md",
+        "packages/benchmarks/app-eval/README.md",
+        "packages/benchmarks/app-eval/adapter.py",
+        "packages/benchmarks/app-eval/run-benchmarks.test.ts",
+        "packages/benchmarks/app-eval/run-benchmarks.ts",
+        "packages/benchmarks/app-eval/test_adapter.py",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/runtime/plugin-registration-stop.test.ts",
+        "plugins/plugin-agent-skills/src/__tests__/core-test-mock.ts",
+        "plugins/plugin-agent-skills/src/commands.ts",
+        "plugins/plugin-agent-skills/src/init.ts",
+        "plugins/plugin-agent-skills/src/plugin.test.ts",
+        "plugins/plugin-agent-skills/src/plugin.ts",
+        "plugins/plugin-agent-skills/src/tasks/sync-catalog.ts",
+        "plugins/plugin-openai/AGENTS.md",
+        "plugins/plugin-openai/CLAUDE.md",
+        "plugins/plugin-openai/__tests__/cerebras-capability-gating.shape.test.ts",
+        "plugins/plugin-openai/index.ts",
+        "plugins/plugin-openai/init.ts",
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "test(app): require semantic OCR coverage for audited views",
+      "prNumber": 17581,
+      "type": "tests",
+      "body": "# Relates to\n\nCloses #17120.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebas",
+      "files": [
+        ".github/workflows/app-aesthetic-audit.yml",
+        "packages/app/scripts/OCR_TRIAGE.md",
+        "packages/app/scripts/lib/audit-capture-manifest.test.ts",
+        "packages/app/scripts/lib/audit-capture-manifest.ts",
+        "packages/app/scripts/ocr-triage.ts",
+        "packages/app/test/audit/ocr-content-rules.test.ts",
+        "packages/app/test/audit/ocr-triage-provenance.test.ts",
+        "packages/app/test/audit/ocr-view-expectations.test.ts",
+        "packages/app/test/ui-smoke/aesthetic-audit-view-cases.ts",
+        "packages/app/test/ui-smoke/all-views-aesthetic-audit.spec.ts",
+        "packages/app/test/ui-smoke/launcher-interaction.spec.ts",
+        "packages/app/test/ui-smoke/ocr-content-rules.ts",
+        "packages/app/test/ui-smoke/ocr-view-expectations.ts",
+        "packages/scripts/__tests__/app-aesthetic-audit-workflow.test.ts",
+        "packages/ui/src/components/pages/Launcher.test.tsx",
+        "packages/ui/src/components/pages/Launcher.tsx"
+      ]
+    },
+    {
+      "title": "fix(agent): surface connector discovery failure instead of dashboard fallback",
+      "prNumber": 17580,
+      "type": "bugfix",
+      "body": "Relates to #17035.\n\n## Summary\n\nThe dashboard fallback now refuses to claim transport ownership when connector\ndiscovery is unavailable. A runtime contract violation surfaces as a structured\n`ElizaError` instead of being translated into “no",
+      "files": [
+        "packages/agent/src/services/client-chat-sender.test.ts",
+        "packages/agent/src/services/client-chat-sender.ts"
+      ]
+    },
+    {
+      "title": "fix(deploy): stop pruning runners whose state cannot be determined",
+      "prNumber": 17575,
+      "type": "bugfix",
+      "body": "Closes #17566.\n\n## Summary\n\nThe scheduled runner-workspace pruner now deletes only when it can positively establish one of two safe states:\n\n- no runner or service configuration remains, so the directory is orphaned; or\n- the exact systemd ",
+      "files": [
+        "packages/deploy/runner-workspace-cleanup/README.md",
+        "packages/deploy/runner-workspace-cleanup/bin/eliza-prune-idle-runner-workspaces.sh",
+        "packages/deploy/runner-workspace-cleanup/smoke-test.sh"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 217.6323216897283,
+      "prScore": 120.9943216897283,
+      "issueScore": 4.2,
+      "reviewScore": 92,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sharkwon",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/160828180?u=039ac058e89c15dd6b9bff1a30eb8522c2a289bd&v=4",
+      "totalScore": 144.84951574329023,
+      "prScore": 98.91151574329024,
+      "issueScore": 0,
+      "reviewScore": 45.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 111.47712546878762,
+      "prScore": 111.47712546878762,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "m7mdd77",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/88084590?v=4",
+      "totalScore": 80.07704534422199,
+      "prScore": 79.63904534422198,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "aandreakis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/38875124?v=4",
+      "totalScore": 65.9817738965761,
+      "prScore": 59.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greatcodeeer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3224374?u=d56a9778976761a0b0deb565a680273c102919cf&v=4",
+      "totalScore": 51.74694614956559,
+      "prScore": 41.546946149565585,
+      "issueScore": 4,
+      "reviewScore": 6,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 51.439787238594995,
+      "prScore": 42.90178723859499,
+      "issueScore": 2.1,
+      "reviewScore": 6,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 26.501379226837873,
+      "prScore": 24.063379226837874,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "harshith8gowda",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81442483?v=4",
+      "totalScore": 25.603638923341993,
+      "prScore": 25.165638923341994,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "codexbt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/252322218?u=a56274131407ed935b81d6055f4898137d0e7635&v=4",
+      "totalScore": 24.819949246855945,
+      "prScore": 24.381949246855946,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 24.438,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 22,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Zorba-the-buddhah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/166686310?u=db563506a5311201b5a0c221bade469a2f114279&v=4",
+      "totalScore": 19.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 21,
+  "mergedPRs": 9,
+  "newIssues": 7,
+  "closedIssues": 0,
+  "activeContributors": 15
+}
