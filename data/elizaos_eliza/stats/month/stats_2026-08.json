@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-08-01 to 2026-09-01, elizaos/eliza had 75 new PRs (22 merged), 25 new issues, and 20 active contributors.",
+  "overview": "From 2026-08-01 to 2026-09-01, elizaos/eliza had 122 new PRs (41 merged), 41 new issues, and 23 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABK3E0sQ",
@@ -78,8 +78,20 @@
       "repository": "elizaos/eliza",
       "createdAt": "2026-08-02T19:59:12Z",
       "mergedAt": null,
-      "additions": 63225,
-      "deletions": 4804370
+      "additions": 69379,
+      "deletions": 4826268
+    },
+    {
+      "id": "PR_kwDOMT5cIs75ydA6",
+      "title": "fix(i18n): restore the source catalog, purge dead keys, and wire the catalog checker into CI",
+      "author": "ss251",
+      "number": 17606,
+      "body": "Closes #17605\n\n`en.json` is the source catalog every other locale keys off — and it had drifted **705 keys behind source**, because the strict checker built to prevent exactly that (`packages/scripts/check-i18n.mjs`) was invoked from **no CI lane, no package script, nothing**. `defaultValue` masked every miss for English users, which is why it rotted silently; all seven non-English locales render English for those strings and could never translate them. The reverse rot accumulated too: **469 dead keys** (referenced by no literal, no source template prefix, no allowlist entry) sat in every locale, plus one key translated in all seven locales that never existed in en and is used nowhere.\n\n## Commit 1 — catalog repair (locale JSONs only)\n\n- **703 entries restored** to `en.json`, each value extracted **verbatim from its call site's inline `defaultValue`** (zero conflicting defaults across duplicate sites — no invented copy; byte-for-byte what English users already see). Pure line insertions: `703 insertions(+), 0 deletions(-)` on the file's existing formatting.\n- **3,741 dead lines purged** across all eight locales (the 469 dead keys everywhere they existed + the seven-locale orphan `mediagalleryview.SearchActive`). Pure line removals; every file re-parsed after edit. Each deletion is checker-derived: uncovered by literals AND source template prefixes AND the allowlist.\n- The 2 remaining source-missing keys (`settings.cloudOverview.localModeLabel`/`Description`) pass **runtime-conditional** defaults (ternaries on cloud-connection state). Cataloging them would freeze one branch and silently change rendered English (catalog wins over `defaultValue`), and splitting them is a `packages/ui` surface change requiring visual evidence — deliberately out of scope. They are declared, with reasons, in the new `uncatalogued` allowlist field, and the checker fails if such an entry ever outlives its call site.\n\n## Commit 2 — make the checker wireable, then wire it\n\nThe old contract (any locale missing any key = error) made the gate permanently red — presumably why it ended up wired nowhere. New contract, aligned with what CI can hold on every PR:\n\n- **Errors**: literal key missing from the source locale; unused source-locale key; orphaned translation (locale key absent from source); stale `uncatalogued` entry.\n- **Warnings** (errors under `--strict-translations`): non-source locales missing used keys / lagging the source catalog — translation debt stays *visible* on every run without blocking unrelated PRs.\n- `runI18nCheck` exported pure (no console/exit) with **10 fixture tests** covering each failure mode red and green, following the `ci-bun-version-contract` test pattern; the real-repo test asserts `ok:true` **and** that translation-gap warnings are present (a silent pass would hide the backfill the same way the unwired checker did).\n- Wired into `test.yml` beside the other contracts, so no new key can ship uncataloged again.\n\n## Proof (verbatim)\n\n<img width=\"1370\" height=\"702\" alt=\"17606-before-after\" src=\"https://github.com/user-attachments/assets/5e4fc8f9-156c-4c3d-8497-050be2f922dc\" />\n\n<details><summary>before → after</summary>\n\n```\n$ node packages/scripts/check-i18n.mjs; echo exit=$?          # develop, before\n[i18n] en.json missing 705 key(s) used in source:\n  - cloud.account.securityLink   (packages/ui/src/cloud/account-security/AccountPage.tsx:37)\n  …\nexit=1\n\n$ grep -rn \"check-i18n\" package.json packages/*/package.json .github/workflows/*.yml   # develop, before\n(no results — the checker was invoked from nowhere)\n\n$ node packages/scripts/check-i18n.mjs; echo exit=$?          # this branch\n[i18n] es.json is missing 830 translation(s) of en.json keys (falls back to en at runtime)\n… (7 warning lines, one per non-source locale)\n[i18n] OK — 4519 literal keys, 6 wildcard prefixes, 76 dynamic sites; 7709 source keys × 8 locales\nexit=0\n\n$ bun test packages/scripts/__tests__/check-i18n.test.ts\n 10 pass\n 0 fail\n 22 expect() calls\n\n$ bunx biome check packages/scripts/check-i18n.mjs packages/scripts/__tests__/check-i18n.test.ts\nChecked 2 files. No fixes applied.\n\n$ actionlint -config-file .github/actionlint.yaml .github/workflows/test.yml\n(exit 0)\n```\n</details>\n\nThe extraction manifest (key → value for all 703 restored entries) and the deleted-key list are attached in the evidence comment for spot-checking against call sites.\n\n## Evidence\n\n- Screenshots/video: N/A — catalog + checker + CI wiring; rendered English is unchanged everywhere (restored values are the exact strings already rendered via defaults; deleted keys render nowhere).\n- Real-LLM trajectories: N/A — no model behavior.\n- Backend logs: verbatim transcripts above.\n- Domain artifacts: the additions-only/removals-only locale diffs, the extraction manifest, and the deleted-key list (evidence comment).\n<!-- evidence-head:11ece7e4af2fe8d6203642ad06997233efa9bf86 -->\n\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - catalog/checker/CI change; rendered English unchanged everywhere (values are the exact strings already rendered via defaults)\n\n<!-- evidence-row:after-screenshots -->\n- [ ] N/A - catalog/checker/CI change; rendered English unchanged everywhere\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - catalog + checker + CI wiring, no user-exercisable flow\n\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - no frontend runtime code touched (locale JSON + node script + workflow)\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no model behavior\n\n<!-- evidence-row:ocr-review -->\n- [ ] N/A - no rendered views changed\n\n<!-- evidence-row:backend-logs --> - [x] Backend logs: verbatim checker/test transcripts pasted below\n<details><summary>before/after transcripts (verbatim)</summary>\n\n```\n$ node packages/scripts/check-i18n.mjs; echo exit=$?    # develop, before\n[i18n] en.json missing 705 key(s) used in source:\nexit=1\n$ node packages/scripts/check-i18n.mjs; echo exit=$?    # this branch\n[i18n] OK — 4519 literal keys, 6 wildcard prefixes, 76 dynamic sites; 7709 source keys × 8 locales\nexit=0\n$ bun test packages/scripts/__tests__/check-i18n.test.ts\n 10 pass / 0 fail (22 assertions)\n```\n\n</details>\n- [ ] N/A - placeholder\n\n<!-- evidence-row:domain-artifacts --> - [x] Domain artifacts: extraction manifest (703 key→value pairs) and deleted-key list (470), commit-pinned: https://raw.githubusercontent.com/ss251/eliza/d455ac27d3c95f856e1f16a0c88682ac226317a3/i18n-extraction-manifest.json and https://raw.githubusercontent.com/ss251/eliza/d455ac27d3c95f856e1f16a0c88682ac226317a3/i18n-deleted-keys.json — summary pasted below\n<details><summary>artifact summary (verbatim)</summary>\n\n```\ni18n-extraction-manifest.json: 703 entries, each {key, value} with value byte-identical\nto the call site's inline defaultValue (zero conflicting defaults across duplicate sites)\ni18n-deleted-keys.json: 470 keys (469 uncovered-by-any-usage + mediagalleryview.SearchActive),\nremoved from every locale that carried them: en 469, ko 470, es/ja/pt/tl/vi/zh-CN 467 each = 3741 lines\n```\n\n</details>\n- [ ] N/A - placeholder\n\n---\n\nAI provider/model: Anthropic / claude-fable-5\nClient / agent tooling: Claude Code\nContribution skill revision: elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [claude-code-ss251]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-fable-5\",\"client\":\"Claude Code\",\"skill_revision\":\"elizaOS/eliza@e37924817dd457f3c5cc1547531c7054336a3740:packages/skills/skills/contribute-to-eliza\"} -->\n\n\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-03T01:58:39Z",
+      "mergedAt": null,
+      "additions": 50879,
+      "deletions": 49840
     },
     {
       "id": "PR_kwDOMT5cIs746xky",
@@ -94,6 +106,18 @@
       "deletions": 265
     },
     {
+      "id": "PR_kwDOMT5cIs759oKc",
+      "title": "Fix/ethereum contract address case normalization",
+      "author": "SkunkscanAI",
+      "number": 17634,
+      "body": "<!-- Fill every visible section. Keep every evidence row visible; use N/A with a concrete reason when a row does not apply. -->\r\n\r\n# Relates to\r\n\r\n<!--\r\nLink the issue, ticket, or Project card. For agent/kanban work, follow\r\nCONTRIBUTING.md and keep the Project item status current.\r\n-->\r\n\r\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\r\n\r\n- [ ] This PR targets `develop` and is rebased onto the latest `origin/develop`\r\n      with zero conflicts (`git fetch origin && git rebase origin/develop`).\r\n- [ ] `bun install` and `bun run verify` were run after sync, or any failure is\r\n      recorded below with the exact unrelated blocker.\r\n- [ ] A reviewer can confirm the change works without reading the code, from the\r\n      evidence attached below.\r\n\r\n# Contribution provenance\r\n\r\nDeclare the actual assistance used for implementation and review. This is\r\nself-reported provenance, not a request for chain-of-thought. Never include\r\nprompts containing secrets, tokens, private session IDs, or hidden reasoning.\r\nUse exact `provider/model-id` values; `GPT`, `Claude`, or `AI` are not specific\r\nenough. Human-only work must say so explicitly.\r\n\r\n<!-- contribution-attribution:v1 -->\r\n<!-- attribution-row:ai-assistance -->\r\n- AI assistance: `yes` / `no - human-only contribution`\r\n<!-- attribution-row:models -->\r\n- Model(s) used: `provider/model-id` / `None - human-only contribution`\r\n<!-- attribution-row:client -->\r\n- Client / agent tooling: `client-name` / `None - human-only contribution`\r\n<!-- attribution-row:skill-revision -->\r\n- Skill revision: `owner/repo@full-commit-sha:path` / `N/A - no contribution skill used`\r\n<!-- attribution-row:status -->\r\n- Attribution status: `self-reported`\r\n\r\n# Sync with develop\r\n\r\n- [ ] Rebased/merged onto the latest `origin/develop`; zero conflicts.\r\n- [ ] `bun run verify` passes post-sync, or the exact unrelated blocker is\r\n      documented in **Known gaps / failures** below.\r\n\r\n<!-- This risks section must be filled out before the final review and merge. -->\r\n\r\n# Risks\r\n\r\n<!--\r\nLow, medium, large. List what kind of risks and what could be affected.\r\n-->\r\n\r\n# Background\r\n\r\n## What does this PR do?\r\n\r\n## What kind of change is this?\r\n\r\n<!--\r\nBug fixes (non-breaking change which fixes an issue)\r\nImprovements (misc. changes to existing features)\r\nFeatures (non-breaking change which adds functionality)\r\nUpdates (new versions of included code)\r\n-->\r\n\r\n<!-- This \"Why\" section is most relevant if there are no linked issues explaining why. If there is a related issue, it might make sense to skip this why section. -->\r\n<!--\r\n## Why are we doing this? Any context or related work?\r\n-->\r\n\r\n# Documentation changes needed?\r\n\r\n<!--\r\nMy changes do not require a change to the project documentation.\r\nMy changes require a change to the project documentation.\r\nIf documentation change is needed: I have updated the documentation accordingly.\r\n-->\r\n\r\n<!-- Please show how you tested the PR. This will really help if the PR needs to be retested and probably help the PR get merged quicker. -->\r\n\r\n# Testing\r\n\r\n## Where should a reviewer start?\r\n\r\n## Detailed testing steps\r\n\r\n<!--\r\nNone: Automated tests are acceptable.\r\n-->\r\n\r\n<!--\r\n- As [anon/admin], go to [link]\r\n  - [do action]\r\n  - verify [result]\r\n-->\r\n\r\n# Evidence Gate\r\n\r\nEvidence must match the exact commit reviewed. `scripts/pr-evidence.mjs rows`\r\nsets this marker from the live PR head; rerun it after every push.\r\n<!-- evidence-head:replace-with-current-40-character-head-sha -->\r\n\r\nAny change testable on the frontend is not mergeable without a video walkthrough,\r\nbefore/after screenshots, and logs. If you did not attach them, say why.\r\n\r\nAttach each applicable artifact **inline in this PR** (drag-and-drop into the\r\ndescription or a comment), or write `N/A - <reason>` on the row. Do not leave\r\nevidence rows blank. Videos must be **MP4** (GitHub renders them inline);\r\nprefer **JPG over PNG** for screenshots. Do not commit evidence files to the\r\nrepo.\r\n\r\n<!-- evidence-row:before-screenshots -->\r\n- [ ] Before full-page screenshots are attached for every affected UI surface\r\n      (desktop and mobile), or marked `N/A - <reason>`.\r\n<!-- evidence-row:after-screenshots -->\r\n- [ ] After full-page screenshots are attached for every affected UI surface\r\n      (desktop and mobile), or marked `N/A - <reason>`.\r\n<!-- evidence-row:walkthrough-video -->\r\n- [ ] A video walkthrough of the complete user flow is attached, or marked\r\n      `N/A - <reason>`.\r\n<!-- evidence-row:backend-logs -->\r\n- [ ] Backend logs show the real code path firing end to end, or are marked\r\n      `N/A - <reason>`.\r\n<!-- evidence-row:frontend-logs -->\r\n- [ ] Frontend console and network logs show the request/response and state\r\n      change, or are marked `N/A - <reason>`.\r\n<!-- evidence-row:llm-trajectory -->\r\n- [ ] Real-LLM trajectory is attached for agent/action/provider/prompt/model\r\n      changes, or marked `N/A - <reason>`.\r\n<!-- evidence-row:domain-artifacts -->\r\n- [ ] Domain artifacts are attached where applicable (DB rows, memories,\r\n      scheduled tasks, wallet/on-chain output, generated files, audio, etc.), or\r\n      marked `N/A - <reason>`.\r\n<!-- evidence-row:ocr-review -->\r\n- [ ] OCR visual-text review output is attached for UI changes, or marked\r\n      `N/A - <reason>` when the change has no rendered visual surface.\r\n\r\n# Evidence Details\r\n\r\n## Real LLM-call trajectory\r\n\r\nFor agent/action/provider/prompt/model changes, use a real live-model run, not\r\nthe deterministic proxy. Produce with:\r\n\r\n```bash\r\n  packages/scenario-runner/bin/eliza-scenarios run <scenario> --report <out.json>\r\n```\r\n\r\nLink the JSON report, run viewer, native jsonl, or write `N/A - <reason>`.\r\n\r\n## Backend + frontend logs\r\n\r\nBackend: structured logger lines ([ClassName] …) showing the code path firing end to end.\r\nFrontend: console + network trace showing the request/response and state change.\r\nPaste here inline (wrap long output in a `<details>` block), or write\r\n`N/A - <reason>`.\r\n\r\n## Screenshots (before / after) + video walkthrough\r\n\r\nFull-page before AND after screenshots are required for any UI change. Include a\r\nvideo click-through of the flow.\r\n\r\n```bash\r\n  bun run evidence:doctor                 (check capture tools; prints fixes for any missing)\r\n  bun run test:e2e:record                 (general E2E recordings)\r\n  bun run --cwd packages/app audit:app    (app + cloud UI — REQUIRED for UI changes)\r\n```\r\n\r\nA UI-touching diff (rendered `.tsx`/`.css`/`.svg` under `packages/app`,\r\n`packages/ui`, `apps/app`, …) MUST attach real screenshot/video/OCR artifacts —\r\nthe CI evidence gate rejects `N/A` on those rows for such diffs, label or not.\r\nIf a capture tool is missing, `evidence:doctor` prints the install command;\r\ninstall it rather than marking evidence `N/A`.\r\n\r\n### Before\r\n\r\n### After\r\n\r\n### Walkthrough video\r\n\r\nOr write `N/A - <reason>`.\r\n\r\n## Audio / voice walkthrough\r\n\r\nFor voice / transcript / TTS / STT / omnivoice changes, attach captured audio of\r\nthe real round-trip plus a narrated walkthrough. Or write `N/A - <reason>`.\r\n\r\n## Known gaps / failures\r\n\r\nList any command failure, missing artifact, unavailable device, unavailable live\r\nservice, or evidence row marked N/A. Include the exact reason and why it is not a\r\nblocker for this PR.\r\n\r\n<!-- If there is anything about the deployment, please make a note. -->\r\n<!--\r\n# Deploy Notes\r\n-->\r\n\r\n<!--  Copy and paste command line output. -->\r\n<!--\r\n## Database changes\r\n-->\r\n\r\n<!--  Please specify deploy instructions if there is something more than the automated steps. -->\r\n<!--\r\n## Deployment instructions\r\n-->\r\n\r\n<!-- If you are on Discord, please join https://discord.gg/ai16z and state your Discord username here for the contributor role and join us in #development-feed -->\r\n<!--\r\n## Discord username\r\n\r\n-->\r\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-03T11:04:03Z",
+      "mergedAt": null,
+      "additions": 21323,
+      "deletions": 20413
+    },
+    {
       "id": "PR_kwDOMT5cIs7zbbGK",
       "title": "feat(cloud): add disabled mobile PKCE auth lifecycle",
       "author": "NubsCarson",
@@ -104,37 +128,13 @@
       "mergedAt": null,
       "additions": 10955,
       "deletions": 110
-    },
-    {
-      "id": "PR_kwDOMT5cIs75TtYQ",
-      "title": "fix(native): remove runtime deadlines and ship verified device Bun",
-      "author": "lalalune",
-      "number": 17505,
-      "body": "Fixes #17465\n\n## What changed\n\n- removes Android agent startup, watchdog HTTP-health, call, and buffered socket deadlines in favor of process, socket, lifecycle, and owner-cancellation signals\n- removes iOS startup, foreground, and message wall-clock deadlines\n- ships both iOS device and simulator Bun framework slices and verifies the eight-symbol bridge ABI\n- rebuilds the device WebKit/Bun path with the Bun event loop and fail-closed iOS process-spawn symbol stubs\n- makes Android status checks read direct boot/process/socket state instead of paying an HTTP health round trip\n- corrects device capability reporting so unsupported on-device orchestrator modes are not advertised\n- serializes ACP events per session while preserving parallelism across sessions\n- awaits terminal goal verification and model-lease revocation at lifecycle boundaries\n- replaces flaky sleep-based lease assertions with observable completion and reuses an immutable real-git fixture for fast deterministic verification\n\n## Verification\n\n- iOS device artifact: arm64, iOS 16 minimum, 8 bridge exports, zero forbidden process/dynamic-loader/JIT imports, SHA-256 a73cab505f530e18aba9173e71b84058647cdabd00c7fe624ef43868533eeaf8\n- iOS simulator artifact: arm64 simulator, 8 bridge exports, SHA-256 4fa720b86d7607397f77f93b82be56a181aa88bdb001fdb0a74a23406d418ea\n- Android Java plus instrumentation compilation: 512 tasks, success\n- native policy tests: 9/9\n- native Bun plugin tests: 16/16\n- orchestrator suite: 2,619 passed, 13 skipped\n- orchestrator focused lifecycle suites: 67/67\n- orchestrator build, typecheck, and Biome checks pass\n- core, agent, and app-core typechecks pass\n- repository-wide Turbo typecheck plus lint: 579/579 tasks pass\n\nRoot verify currently reaches the final script inventory and reports five orphan CI-policy tests already removed by the separate CI simplification branch; no typecheck, build, or lint failure remains in this branch.\n\n<!-- evidence-row:before-screenshots -->\n- [x] ![before-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17505-pr17505-before-builtin-views.png)\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17505-pr17505-after-builtin-views.png)\n\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17505-pr17505-launcher-walkthrough.mp4\n\n<!-- evidence-row:backend-logs -->\n- [x] [17505#issuecomment-5150214569](https://github.com/elizaOS/eliza/pull/17505#issuecomment-5150214569)\n\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - no frontend network or console behavior changed; this is a CSS layout-boundary correction validated by rendered Playwright audit\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no model prompt, routing, or response behavior changed\n\n<!-- evidence-row:domain-artifacts -->\n- [x] [17505#issuecomment-5150214569](https://github.com/elizaOS/eliza/pull/17505#issuecomment-5150214569)\n\n<!-- evidence-row:ocr-review -->\n- [x] ![ocr-review](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/17505-pr17505-after-builtin-rolodex.png)\n\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-08-01T05:50:10Z",
-      "mergedAt": null,
-      "additions": 8251,
-      "deletions": 7100
-    },
-    {
-      "id": "PR_kwDOMT5cIs75UILd",
-      "title": "fix: integrate reviewed queue and repair develop regressions",
-      "author": "lalalune",
-      "number": 17512,
-      "body": "Closes #17511\n\n## Summary\n\n- integrate the independently reviewed safe heads from #17488, #17497, #17504, #17262, and #17180, with migration-number and lifecycle-fence reconciliation\n- propagate provider cancellation through production adapters and make app-control owner denials terminate without duplicate planner replies\n- repair deterministic develop failures in scenario tests, Windows assertions, homepage visual readiness, Hetzner routing, and training Ruff drift\n- make app/homepage visual gates fail closed, canonicalize the legacy Rolodex route to Relationships, and keep launcher tiles clear of the chat composer\n- force PR visual/quality workflows onto ephemeral hosted runners before uploading checkout-controlled artifacts\n\n## Review disposition\n\nSafe exact heads were integrated only after code and workflow review. The following current heads remain blocked and are not merged: #17506, #17505, #17501, #17499, #17496, #17493, #17479, #17471, #17464, #17460, #17427, #17424, #17423, #17420, and #16755. Blockers include weakened required checks, native cancellation gaps, artifact provenance, callback duplication, packaging closure/symlink escapes, mutable globals, authorization, durability, and missing real evidence.\n\nThe incremental #17497 head `90602b07005a` is also blocked; only its previously reviewed parent `bd27f00dd841` is integrated.\n\n## Exact-head validation\n\nThe full source tree was validated at `ba7d9fc71599d599f10a077e94b9c5f4da3d59ef` over `origin/develop` `7b5dc03ca2037ea375934e405b71944e14aebf0b`. Current head `c6512e05ce48dd3097b3c33bed1d74311eb6ac2f` adds only the CI HOME-path hardening described below.\n\n- `bun run lint`: 235/235 tasks\n- `bun run build`: 176/176 tasks; 27/27 view bundles\n- `bun run typecheck`: 344/344 tasks\n- `bun run --cwd packages/app audit:app`: 254/254 Playwright; 252 captures; broken=0; needs-work=0\n- focused UI/navigation suite: 69/69 tests\n- workflow routing/browser/Turbo contracts: 22/22 tests\n- homepage visual suite: 12/12 views\n- actionlint and Biome: pass\n- final-head Turbo-cache contract: 12/12 tests\n- final-head workflow invariants: 12/12 tests\n- final-head live forced-protoc setup-bun self-test: pass\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [x] ![before-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-before-ui-contact-sheet.jpg)\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-after-ui-contact-sheet.jpg)\n\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-launcher-walkthrough.mp4\n\n<!-- evidence-row:backend-logs -->\n- [x] [17512-backend-release-candidate.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-backend-release-candidate.log)\n\n<!-- evidence-row:frontend-logs -->\n- [x] [17512-frontend-home-screen-e2e.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-frontend-home-screen-e2e.log)\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no prompt, planner, or model-output contract changed; provider changes are cancellation propagation only\n\n<!-- evidence-row:domain-artifacts -->\n- [x] [17512-domain-app-audit-report.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-domain-app-audit-report.json)\n\n<!-- evidence-row:ocr-review -->\n- [x] [17512-ocr-triage.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-5/17512-ocr-triage.json)\n\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-08-01T06:27:52Z",
-      "mergedAt": null,
-      "additions": 7206,
-      "deletions": 1188
     }
   ],
   "codeChanges": {
-    "additions": 18711,
-    "deletions": 4944,
-    "files": 217,
-    "commitCount": 398
+    "additions": 23632,
+    "deletions": 5740,
+    "files": 344,
+    "commitCount": 634
   },
   "completedItems": [
     {
@@ -439,6 +439,32 @@
       ]
     },
     {
+      "title": "fix(ci): isolate fork quality jobs from runner state",
+      "prNumber": 17523,
+      "type": "bugfix",
+      "body": "Fixes #17521.\n\n## What changed\n\n- runs every `Quality (Fork)` lane on `ubuntu-24.04`, removing persistent workspace and runner-service state from untrusted fork validation\n- pins the fork lane to the canonical released CI Bun version (`1.3.",
+      "files": [
+        ".github/actions/cloud-setup-test-env/action.yml",
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/workflows/quality-fork.yml",
+        "packages/scripts/__tests__/ci-turbo-cache-contract.test.ts",
+        "packages/scripts/ci-turbo-cache-contract.mjs",
+        "packages/scripts/ci-workflow-invariants.mjs",
+        "packages/scripts/ci-workflow-invariants.test.mjs",
+        "packages/homepage/src/components/ModelViewers/ModelB.tsx",
+        "packages/homepage/src/pages/landing.tsx",
+        "packages/homepage/tests/e2e/aesthetic-audit.spec.ts",
+        "packages/homepage/tests/e2e/app-routes-flow.spec.ts",
+        "packages/homepage/tests/e2e/contact-sheet-capture.spec.ts",
+        "packages/homepage/tests/e2e/landing-readiness.ts",
+        "packages/homepage/tests/e2e/visual.spec.ts",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/landing-mobile-chromium-linux.png",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/leaderboard-mobile-chromium-linux.png",
+        "packages/scripts/__tests__/quality-fork-browser-contract.test.ts",
+        "packages/scripts/quality-fork-browser-contract.mjs"
+      ]
+    },
+    {
       "title": "fix(ui): keep notification collapse fade symmetric",
       "prNumber": 17518,
       "type": "bugfix",
@@ -448,6 +474,22 @@
         "packages/ui/src/components/shell/NotificationsHomeCenter.tsx",
         "packages/ui/src/components/shell/__e2e__/capture-default-notifications.mjs",
         "packages/ui/src/components/shell/notification-shade-presentation.ts"
+      ]
+    },
+    {
+      "title": "perf(core): maximize prompt cache reuse",
+      "prNumber": 17515,
+      "type": "other",
+      "body": "## Problem\n\nThe Stage-1 message prompt placed volatile provider output, especially CURRENT_TIME, before the large append-only conversation tail. Cerebras caches exact 128-token prefix blocks, so this ordering invalidated almost the entire r",
+      "files": [
+        "packages/agent/scripts/cerebras-chat-flow-latency.ts",
+        "packages/agent/test/cerebras-chat-flow-latency.test.ts",
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/scripts/cloud/chat-latency.mjs",
+        "packages/scripts/cloud/chat-latency.test.mjs",
+        ".github/workflows/cerebras-chat-flow-live.yml",
+        "packages/scripts/__tests__/cerebras-toolcall-stream-workflow.test.ts"
       ]
     },
     {
@@ -488,12 +530,105 @@
       ]
     },
     {
+      "title": "fix(cloud-apps): separate API and callback failures",
+      "prNumber": 17498,
+      "type": "bugfix",
+      "body": "## Summary\n\n- keep the `client.listApps()` error translation scoped to the Cloud SDK request\n- let callback/transport failures propagate to their actual delivery boundary\n- prove a successful inventory followed by a rejecting callback is at",
+      "files": [
+        "plugins/plugin-cloud-apps/__tests__/list-cloud-apps.integration.test.ts",
+        "plugins/plugin-cloud-apps/__tests__/list-cloud-apps.test.ts",
+        "plugins/plugin-cloud-apps/src/actions/list-cloud-apps.ts",
+        "plugins/plugin-cloud-apps/test/fixtures/list-cloud-apps-callback-boundary.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): fail safe when Hetzner fleet variable is missing",
+      "prNumber": 17497,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #17439\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` and `bun ru",
+      "files": [
+        ".github/workflows/README.md",
+        ".github/workflows/android-device-e2e.yml",
+        ".github/workflows/android-release.yml",
+        ".github/workflows/app-aesthetic-audit.yml",
+        ".github/workflows/app-live-e2e.yml",
+        ".github/workflows/app-real-e2e.yml",
+        ".github/workflows/apple-store-release.yml",
+        ".github/workflows/apps-deploy-e2e.yml",
+        ".github/workflows/arm-apps-daemon.yml",
+        ".github/workflows/arm-headscale-control-plane.yml",
+        ".github/workflows/attachment-journey-videos.yml",
+        ".github/workflows/auto-label.yml",
+        ".github/workflows/benchmark-orchestrator-scheduled.yml",
+        ".github/workflows/benchmark-tests.yml",
+        ".github/workflows/benchmark-weekly.yml",
+        ".github/workflows/browser-real-bench.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-android.yml",
+        ".github/workflows/build-debian-package.yml",
+        ".github/workflows/build-example-app-images.yml",
+        ".github/workflows/build-linux-iso.yml",
+        ".github/workflows/build-llama-ffi-android.yml",
+        ".github/workflows/build-vm-image.yml",
+        ".github/workflows/cache-key-stability.yml",
+        ".github/workflows/cerebras-nightly.yml",
+        ".github/workflows/certification-image.yml",
+        ".github/workflows/chat-shell-gestures.yml",
+        ".github/workflows/ci-full-matrix-proof.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/cloud-aesthetic-audit.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-e2e.yml",
+        ".github/workflows/cloud-gateway-discord.yml",
+        ".github/workflows/cloud-gateway-webhook.yml",
+        ".github/workflows/cloud-tests.yml",
+        ".github/workflows/deploy-apps-worker.yml",
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        ".github/workflows/deploy-homepage.yml",
+        ".github/workflows/dev-smoke.yml",
+        ".github/workflows/develop-exhaustive.yml",
+        ".github/workflows/develop-live.yml",
+        ".github/workflows/docker-ci-smoke.yml",
+        ".github/workflows/docs-ci.yml",
+        ".github/workflows/electrobun-submodule-guard.yml",
+        ".github/workflows/elizaos-os-full-release.yml",
+        ".github/workflows/elizaos-os-release.yml",
+        ".github/workflows/external-api-live-drift.yml",
+        ".github/workflows/feed-apply-migrations.yml",
+        ".github/workflows/feed-env-audit.yml",
+        ".github/workflows/feed-rl-training.yml",
+        ".github/workflows/actions-zombie-janitor.yml",
+        ".github/workflows/gitleaks.yml",
+        ".github/workflows/hetzner-e2e-reaper.yml"
+      ]
+    },
+    {
       "title": "fix(signal): import setup routes once and inject pairing collaborators",
       "prNumber": 17493,
       "type": "bugfix",
       "body": "# Relates to\n\nCloses #17417\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n      with zero conflicts (`git fetch origin && git ",
       "files": [
         "plugins/plugin-signal/src/setup-routes.test.ts"
+      ]
+    },
+    {
+      "title": "docs(agents): point retired test:lint rows at commands that exist",
+      "prNumber": 17591,
+      "type": "docs",
+      "body": "# Relates to\n\nCloses #17590.\n\n# Risk\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n- [x] `bun install` and `bun run verify` were run after sync, or any failure is recorded below with its exact command and ",
+      "files": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ]
+    },
+    {
+      "title": "ci(evidence): document the pasted-transcript path the gate accepts",
+      "prNumber": 17589,
+      "type": "docs",
+      "body": "# Relates to\n\nCloses #17588.\n\n# Risk\n\n- [x] This PR targets `develop` and is rebased onto `origin/develop@9bdcf068bd88d39c82927a861df810d0c7810da1` with zero conflicts.\n- [x] A reviewer can confirm the parser behavior and its failure mode f",
+      "files": [
+        "scripts/check-pr-evidence.mjs",
+        "scripts/check-pr-evidence.test.mjs"
       ]
     },
     {
@@ -540,117 +675,313 @@
         "packages/deploy/runner-workspace-cleanup/bin/eliza-prune-idle-runner-workspaces.sh",
         "packages/deploy/runner-workspace-cleanup/smoke-test.sh"
       ]
+    },
+    {
+      "title": "fix(ci): pin Windows gate Bun runtime",
+      "prNumber": 17653,
+      "type": "bugfix",
+      "body": "## Relates to\n\nAdvances #13402 by removing the floating Bun runtime from the required Windows compatibility gate.\n\n## Summary\n\n- replace `bun-version: canary` in `windows-ci.yml` with the canonical `1.3.14` pin\n- add `windows-ci.yml` to the",
+      "files": [
+        ".github/workflows/windows-ci.yml",
+        "packages/scripts/__tests__/ci-bun-version-contract.test.ts",
+        "packages/scripts/ci-bun-version-contract.mjs"
+      ]
+    },
+    {
+      "title": "fix(agent): close sandbox reload ownership gaps",
+      "prNumber": 17648,
+      "type": "bugfix",
+      "body": "Closes #17647. Follow-up to #17642 after its independent review completed after merge.\n\n## Summary\n\n- treats automatic bind-mount overlays as authoritative full snapshots so deleted settings cannot return\n- applies injected identity, connec",
+      "files": [
+        "packages/agent/src/config/config-bind-mount-persistence.test.ts",
+        "packages/agent/src/config/config.ts",
+        "packages/agent/src/runtime/__tests__/sandbox-character.test.ts",
+        "packages/agent/src/runtime/build-character-config.test.ts",
+        "packages/agent/src/runtime/eliza-runtime-settings.test.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/sandbox-character.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): reject caller-authored A2A system policy",
+      "prNumber": 17643,
+      "type": "bugfix",
+      "body": "## Summary\n\n- reject caller-authored `system` messages at the public per-agent A2A boundary\n- preserve ordinary `user` and `assistant` conversation history\n- fail before credit reservation or provider dispatch\n\nBearer/session/API-key authen",
+      "files": [
+        "packages/cloud/api/__tests__/agent-a2a-billing.test.ts",
+        "packages/cloud/api/__tests__/agent-a2a-trust-boundary.integration.test.ts",
+        "packages/cloud/api/a2a/route.ts",
+        "packages/cloud/api/agents/[id]/a2a/route.ts",
+        "packages/cloud/shared/src/lib/api/a2a/chat-messages.test.ts",
+        "packages/cloud/shared/src/lib/api/a2a/chat-messages.ts",
+        "packages/cloud/shared/src/lib/api/a2a/handlers.ts",
+        "packages/cloud/shared/src/lib/api/a2a/platform-cloud.test.ts",
+        "packages/cloud/shared/src/lib/api/a2a/platform-cloud.ts",
+        "packages/cloud/shared/src/lib/api/a2a/request-validation.ts",
+        "packages/cloud/shared/src/lib/api/a2a/skills.money-guard.test.ts",
+        "packages/cloud/shared/src/lib/api/a2a/skills.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): persist bind-mounted config and preserve reload identity",
+      "prNumber": 17642,
+      "type": "bugfix",
+      "body": "# Relates to\n\nLP3 plugin enablement persistence and provisioned-agent restart identity regression.\n\n# Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attributi",
+      "files": [
+        "packages/agent/src/config/config-bind-mount-persistence.test.ts",
+        "packages/agent/src/config/config.ts",
+        "packages/agent/src/runtime/__tests__/sandbox-character.test.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/sandbox-character.ts"
+      ]
+    },
+    {
+      "title": "test(ci): accept stricter visual diff ceilings",
+      "prNumber": 17639,
+      "type": "tests",
+      "body": "## Summary\n\n- repair the script contract broken when #17608 tightened both homepage visual tolerances to `0.02`\n- enforce semantic upper bounds instead of requiring the older `0.08` mobile / `0.05` desktop expression\n- retain all fork-safet",
+      "files": [
+        "packages/scripts/__tests__/quality-fork-browser-contract.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): pin training smoke Ruff version",
+      "prNumber": 17637,
+      "type": "bugfix",
+      "body": "## Relates to\n\nRelates to #17511.\n\n## Summary\n\nThe Training Stack installed the newest Ruff on every run. Ruff 0.16 changed its implicit rule selection, so an unchanged training tree began failing with 1,629 findings that this existing lint",
+      "files": [
+        ".github/workflows/training-stack.yml"
+      ]
+    },
+    {
+      "title": "test(ci): follow skill review requirements pin",
+      "prNumber": 17627,
+      "type": "tests",
+      "body": "## Relates to\n\nCloses #17626.\n\n## Summary\n\nThe trusted contribution validator still expected the PyYAML hash pin inline in skill-review.yml after develop moved it into the skill-creator requirements file. This updates the contract test to v",
+      "files": [
+        "scripts/check-ai-workflow-security.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(ci): restore develop test matrix",
+      "prNumber": 17615,
+      "type": "bugfix",
+      "body": "Closes #17614\n\n## Summary\n- remove stale agent-plugin skill registration tests after ownership moved to plugin-agent-skills\n- centralize hash-pinned Python 3.13 skill-packager dependencies and wire all consumers\n- align deterministic scenar",
+      "files": [
+        ".github/workflows/eliza-computer.yml",
+        ".github/workflows/nightly.yml",
+        ".github/workflows/quality-fork.yml",
+        ".github/workflows/skill-review.yml",
+        ".github/workflows/test.yml",
+        "packages/agent/src/runtime/eliza-plugin.test.ts",
+        "packages/agent/test/api/chat-augmentation-route.test.ts",
+        "packages/eliza-computer/AGENTS.md",
+        "packages/eliza-computer/CLAUDE.md",
+        "packages/eliza-computer/package.json",
+        "packages/eliza-computer/scripts/prepare-site.mjs",
+        "packages/eliza-computer/scripts/prepare-site.test.ts",
+        "packages/eliza-computer/scripts/python-runtime.d.mts",
+        "packages/eliza-computer/scripts/python-runtime.mjs",
+        "packages/scenario-runner/test/scenarios/deterministic-app-control-actions.scenario.ts",
+        "packages/scenario-runner/test/scenarios/deterministic-document-actions.scenario.ts",
+        "packages/scripts/__tests__/ci-turbo-cache-contract.test.ts",
+        "packages/scripts/__tests__/quality-fork-browser-contract.test.ts",
+        "packages/scripts/ci-workflow-invariants.mjs",
+        "packages/scripts/ci-workflow-invariants.test.mjs",
+        "packages/scripts/quality-fork-browser-contract.mjs",
+        "packages/skills/skills/skill-creator/requirements.txt",
+        "plugins/plugin-agent-orchestrator/src/__tests__/auto-goal-verify.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/submit-workspace-action.test.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/tasks-effect-receipts.test.ts",
+        "plugins/plugin-vector-browser/test/VectorBrowserView.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(app): bound inactive LifeOps signal retries",
+      "prNumber": 17612,
+      "type": "bugfix",
+      "body": "<!-- evidence-head:8c3c279792a9fabd67f0d0074a43fa223b15aabb -->\n\nCloses #17611\n\n## Summary\n\n- share the exact inactive-LifeOps `503` response classifier between Dev Smoke and Views Soak\n- preserve wrong-status, wrong-path, malformed-body, a",
+      "files": [
+        "packages/app/scripts/audit-views-soak.mjs",
+        "packages/app/scripts/browser-failure-policy.d.mts",
+        "packages/app/scripts/browser-failure-policy.mjs",
+        "packages/app/test/dev-smoke/browser-failure-policy.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/activity-signals-capture.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/activity-signals-capture.ts"
+      ]
+    },
+    {
+      "title": "fix(homepage): make visual readiness deterministic",
+      "prNumber": 17608,
+      "type": "bugfix",
+      "body": "## Summary\n\nRepairs the deterministic homepage failures visible on `develop` Quality Extended run [30781438912](https://github.com/elizaOS/eliza/actions/runs/30781438912) and supersedes #17448.\n\n- make phone readiness require the final came",
+      "files": [
+        ".github/workflows/quality.yml",
+        "packages/homepage/playwright.config.ts",
+        "packages/homepage/src/components/ModelViewers/ModelB.tsx",
+        "packages/homepage/src/components/ShaderBackground/ShaderBackground.tsx",
+        "packages/homepage/src/pages/landing.tsx",
+        "packages/homepage/tests/e2e/app-routes-flow.spec.ts",
+        "packages/homepage/tests/e2e/landing-readiness.ts",
+        "packages/homepage/tests/e2e/visual-readiness.spec.ts",
+        "packages/homepage/tests/e2e/visual.spec.ts",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/get-started-desktop-chromium-linux.png",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/get-started-mobile-chromium-linux.png",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/landing-desktop-chromium-linux.png",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/landing-mobile-chromium-linux.png",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/leaderboard-desktop-chromium-linux.png",
+        "packages/homepage/tests/e2e/visual.spec.ts-snapshots/leaderboard-mobile-chromium-linux.png"
+      ]
+    },
+    {
+      "title": "fix(evidence): trust fork text uploads on the user-attachments files path",
+      "prNumber": 17601,
+      "type": "bugfix",
+      "body": "Closes #17600\n\nA fork contributor's real text evidence upload (`.log`/`.json`/`.jsonl`/…) mints `https://github.com/user-attachments/files/<id>/<name>` — a shape `trustedArtifact()` did not recognize, so the row reported **`blank`** exactly",
+      "files": [
+        "scripts/check-pr-evidence.mjs",
+        "scripts/check-pr-evidence.test.mjs"
+      ]
+    },
+    {
+      "title": "test(core): cover sliceToFitBudget, which bounds the actionState prompt budget",
+      "prNumber": 17598,
+      "type": "tests",
+      "body": "Closes #17597.\r\n\r\nAdds a unit test for `sliceToFitBudget`, which had none.\r\n\r\n## Why this function\r\n\r\nIt is the only thing bounding the `actionState` provider's action history before\r\nthat history reaches the model\r\n([`actionState.ts:203`](",
+      "files": [
+        "packages/core/src/utils/slice-to-fit-budget.test.ts"
+      ]
+    },
+    {
+      "title": "fix(evidence): stop fabrication markers matching inside identifiers",
+      "prNumber": 17595,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #17594.\n\n# Risk\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`.\n- [x] Focused and full gate tests, Biome, and diff hygiene were replayed after sync.\n- [x] A reviewer can confirm both th",
+      "files": [
+        "scripts/check-pr-evidence.mjs",
+        "scripts/check-pr-evidence.test.mjs"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "lalalune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 641.489848126291,
-      "prScore": 411.213848126291,
-      "issueScore": 22.4,
-      "reviewScore": 207,
-      "commentScore": 0.8759999999999999,
+      "totalScore": 1124.2626658840304,
+      "prScore": 705.5486658840305,
+      "issueScore": 42.4,
+      "reviewScore": 375,
+      "commentScore": 1.3139999999999998,
       "summary": "lalalune: Focused on stabilizing the elizaos/eliza monorepo through critical CI hardening, infrastructure refactoring, and core agent improvements. They successfully merged 5 PRs, including a major update to benchmark and boot owner-control logic in PR #17531 and essential CI protections in PR #17535, while actively managing 18 open PRs aimed at extracting standalone repositories and optimizing core performance. Their high-engagement approach included 44 code reviews and 162 PR comments, demonstrating a primary focus on bug fixes, configuration management, and testing infrastructure."
     },
     {
       "username": "NubsCarson",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 480.70164767645116,
-      "prScore": 469.5256476764512,
+      "totalScore": 663.7702633630793,
+      "prScore": 652.1562633630793,
       "issueScore": 10.3,
       "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.3139999999999998,
       "summary": "NubsCarson: Focused heavily on stabilizing the elizaos/eliza codebase, dedicating 91% of their effort to critical bug fixes and testing. They significantly improved system reliability by addressing tool failure logic in PR #17501 and streamlining core rendering processes in PR #17500. Their work involved extensive codebase maintenance, including 79 commits and 414 modified files, while simultaneously managing a robust pipeline of 8 open PRs and 5 new issues aimed at restoring UI flows and agent runtime functionality."
+    },
+    {
+      "username": "0xSolace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
+      "totalScore": 480.66692781917374,
+      "prScore": 478.22892781917375,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": "0xSolace: Focused exclusively on stabilizing the user interface and core functionality within the elizaos/eliza repository, where they currently have four open pull requests addressing critical issues such as browser navigation, touch action layout, and notification logic. They also initiated a bug report regarding a regression on the home surface (#17502) to ensure UI consistency. Their work this month involved 119 additions and 27 deletions across test and source files, reflecting a dedicated effort toward resolving regressions and improving system reliability."
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 320.9291271663754,
+      "prScore": 254.2151271663754,
+      "issueScore": 18.400000000000002,
+      "reviewScore": 47,
+      "commentScore": 1.3139999999999998,
+      "summary": "ss251: Focused on enhancing system stability and deployment reliability, successfully merging PR #17575 to resolve critical runner pruning issues in elizaos/eliza. They demonstrated a rigorous approach to code quality by providing 12 reviews and 18 PR comments, while also identifying and documenting three new issues related to CI, deployment, and application rendering. Their work this month was dedicated entirely to bugfix efforts, with a balanced distribution of changes across tests, core code, and documentation."
     },
     {
       "username": "aandreakis",
       "avatarUrl": "https://avatars.githubusercontent.com/u/38875124?v=4",
-      "totalScore": 289.8587534182185,
-      "prScore": 276.9827534182185,
-      "issueScore": 0,
+      "totalScore": 316.61910924329686,
+      "prScore": 301.20310924329686,
+      "issueScore": 2.2,
       "reviewScore": 12,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.2159999999999997,
       "summary": "aandreakis: Focused on strengthening CI/CD reliability and testing standards within elizaos/eliza, notably implementing semantic OCR coverage for audited views in PR #17581 and streamlining workflows by removing inert components in PR #17528. They maintained high engagement across the repository, contributing 25 commits and providing 20 issue comments to support ongoing development. Their work was primarily dedicated to bugfix initiatives (68%) and expanding test coverage (28%), with a significant portion of changes concentrated in test and configuration files."
     },
     {
       "username": "sharkwon",
       "avatarUrl": "https://avatars.githubusercontent.com/u/160828180?u=039ac058e89c15dd6b9bff1a30eb8522c2a289bd&v=4",
-      "totalScore": 155.68951574329023,
+      "totalScore": 204.12751574329022,
       "prScore": 98.91151574329024,
       "issueScore": 0,
-      "reviewScore": 56,
-      "commentScore": 0.7779999999999999,
+      "reviewScore": 104,
+      "commentScore": 1.2159999999999997,
       "summary": "sharkwon: Focused on enhancing system reliability and UI stability within the elizaos/eliza repository, notably resolving a critical connector discovery failure in PR #17580. They demonstrated a strong commitment to code quality by providing 11 thorough reviews and maintaining active engagement through 12 total comments across the codebase. Their work this month was primarily dedicated to bug fixes and testing, ensuring robust performance through targeted code and test modifications."
-    },
-    {
-      "username": "ss251",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
-      "totalScore": 129.1487756704533,
-      "prScore": 77.17277567045329,
-      "issueScore": 4.1,
-      "reviewScore": 47,
-      "commentScore": 0.8759999999999999,
-      "summary": "ss251: Focused on enhancing system stability and deployment reliability, successfully merging PR #17575 to resolve critical runner pruning issues in elizaos/eliza. They demonstrated a rigorous approach to code quality by providing 12 reviews and 18 PR comments, while also identifying and documenting three new issues related to CI, deployment, and application rendering. Their work this month was dedicated entirely to bugfix efforts, with a balanced distribution of changes across tests, core code, and documentation."
-    },
-    {
-      "username": "m7mdd77",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/88084590?v=4",
-      "totalScore": 119.45521420396895,
-      "prScore": 118.81721420396894,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.6379999999999999,
-      "summary": "m7mdd77: Focused on enhancing CI/CD integrity and frontend functionality within the elizaos/eliza repository, where they currently have three open pull requests (#17547, #17577, #17576) aimed at enforcing build-model exceptions, implementing fail-fast workflows, and adding a payout profile editor. Their work involved modifying 28 files with 1,231 total line changes, demonstrating a dedicated effort toward system stability and feature support. Their activity this month was centered entirely on bugfix work, with a primary focus on testing, codebase maintenance, and configuration updates."
-    },
-    {
-      "username": "0xSolace",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
-      "totalScore": 113.47712546878762,
-      "prScore": 111.47712546878762,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "0xSolace: Focused exclusively on stabilizing the user interface and core functionality within the elizaos/eliza repository, where they currently have four open pull requests addressing critical issues such as browser navigation, touch action layout, and notification logic. They also initiated a bug report regarding a regression on the home surface (#17502) to ensure UI consistency. Their work this month involved 119 additions and 27 deletions across test and source files, reflecting a dedicated effort toward resolving regressions and improving system reliability."
-    },
-    {
-      "username": "Zorba-the-buddhah",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/166686310?u=db563506a5311201b5a0c221bade469a2f114279&v=4",
-      "totalScore": 84.50918810783058,
-      "prScore": 62.37118810783058,
-      "issueScore": 2,
-      "reviewScore": 19.5,
-      "commentScore": 0.6379999999999999,
-      "summary": "Zorba-the-buddhah: Focused on enhancing cloud infrastructure stability and CI reliability, contributing 4,061 additions across 54 files. They addressed critical cloud-related issues in elizaos/eliza through PRs #17546 and #17545, while also initiating improvements to CI gate polling in issue #17551. Their work involved a balanced mix of code and test updates, supported by 4 code reviews to ensure quality across the repository."
     },
     {
       "username": "greatcodeeer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3224374?u=d56a9778976761a0b0deb565a680273c102919cf&v=4",
-      "totalScore": 77.11884886049243,
-      "prScore": 57.71884886049243,
-      "issueScore": 4,
-      "reviewScore": 15,
-      "commentScore": 0.4,
+      "totalScore": 171.0168393234065,
+      "prScore": 95.17883932340649,
+      "issueScore": 8,
+      "reviewScore": 67,
+      "commentScore": 0.838,
       "summary": "greatcodeeer: Focused on enhancing CI stability and documentation clarity within the elizaos/eliza repository, notably merging PR #17552 to gate plugin packages and improve build processes. They actively contributed to project maintenance by opening two documentation and CI-related issues (#17588, #17590) and providing three code reviews to support team workflows. Their work this month was primarily concentrated on documentation and testing improvements, accounting for the majority of their code changes."
     },
     {
       "username": "harshith8gowda",
       "avatarUrl": "https://avatars.githubusercontent.com/u/81442483?v=4",
-      "totalScore": 67.542031272674,
-      "prScore": 66.66603127267399,
+      "totalScore": 134.118638507179,
+      "prScore": 132.804638507179,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.3139999999999998,
       "summary": "harshith8gowda: Focused on enhancing CI stability and UI reliability within the elizaos/eliza repository, successfully merging a significant smoke test implementation in PR #17553 (+733/-371 lines). They actively contributed to the project's health by managing four additional open PRs aimed at resolving CI timing failures and restoring UI contrast, while also engaging in community discussions through five issue comments. Their work this month was dedicated entirely to bugfix efforts, with a primary emphasis on improving test coverage and codebase maintenance."
+    },
+    {
+      "username": "m7mdd77",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/88084590?v=4",
+      "totalScore": 119.89321420396894,
+      "prScore": 118.81721420396894,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.0759999999999998,
+      "summary": "m7mdd77: Focused on enhancing CI/CD integrity and frontend functionality within the elizaos/eliza repository, where they currently have three open pull requests (#17547, #17577, #17576) aimed at enforcing build-model exceptions, implementing fail-fast workflows, and adding a payout profile editor. Their work involved modifying 28 files with 1,231 total line changes, demonstrating a dedicated effort toward system stability and feature support. Their activity this month was centered entirely on bugfix work, with a primary focus on testing, codebase maintenance, and configuration updates."
+    },
+    {
+      "username": "krutftw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/56069280?v=4",
+      "totalScore": 112.78649285279316,
+      "prScore": 58.34849285279315,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Zorba-the-buddhah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/166686310?u=db563506a5311201b5a0c221bade469a2f114279&v=4",
+      "totalScore": 89.34918810783057,
+      "prScore": 62.37118810783058,
+      "issueScore": 2,
+      "reviewScore": 24,
+      "commentScore": 0.978,
+      "summary": "Zorba-the-buddhah: Focused on enhancing cloud infrastructure stability and CI reliability, contributing 4,061 additions across 54 files. They addressed critical cloud-related issues in elizaos/eliza through PRs #17546 and #17545, while also initiating improvements to CI gate polling in issue #17551. Their work involved a balanced mix of code and test updates, supported by 4 code reviews to ensure quality across the repository."
     },
     {
       "username": "codexbt",
       "avatarUrl": "https://avatars.githubusercontent.com/u/252322218?u=a56274131407ed935b81d6055f4898137d0e7635&v=4",
-      "totalScore": 67.09409884298047,
+      "totalScore": 67.43409884298048,
       "prScore": 66.65609884298047,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.7779999999999999,
       "summary": "codexbt: Focused on enhancing system stability and cross-platform compatibility within the elizaos/eliza repository, with 5 open pull requests addressing critical CI, security, and environment-specific issues. Their work includes implementing security safeguards against unauthenticated access (#17584), resolving Windows-specific CI and CLI pathing errors (#17543, #17522), and optimizing test suite execution (#17582). Through 8 commits and 32 modified files, they demonstrated a primary focus on bugfix work, supplemented by documentation and testing improvements."
     },
     {
@@ -682,6 +1013,16 @@
       "reviewScore": 6,
       "commentScore": 0.43799999999999994,
       "summary": "akshatcoder-hash: Focused on improving system stability by addressing critical signal routing issues in elizaos/eliza, where they successfully merged PR #17493 to ensure proper setup and pairing. Beyond this core contribution, they actively engaged with the community by providing feedback across four issue threads and one pull request review. Their work this month was dedicated entirely to bugfix efforts within the testing suite."
+    },
+    {
+      "username": "SkunkscanAI",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/296437481?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "standujar",
@@ -724,9 +1065,9 @@
       "summary": "minia2a: No activity this month."
     }
   ],
-  "newPRs": 75,
-  "mergedPRs": 22,
-  "newIssues": 25,
-  "closedIssues": 1,
-  "activeContributors": 20
+  "newPRs": 122,
+  "mergedPRs": 41,
+  "newIssues": 41,
+  "closedIssues": 9,
+  "activeContributors": 23
 }
