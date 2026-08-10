@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-08-09 to 2026-08-16, elizaos/eliza had 73 new PRs (41 merged), 51 new issues, and 15 active contributors.",
+  "overview": "From 2026-08-09 to 2026-08-16, elizaos/eliza had 138 new PRs (97 merged), 51 new issues, and 21 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOMT5cIs8AAAABMATZzQ",
@@ -70,73 +70,90 @@
   ],
   "topPRs": [
     {
-      "id": "PR_kwDOMT5cIs78heD6",
-      "title": "fix(cloud): secure Telegram browser onboarding continuation",
-      "author": "arcabotai",
-      "number": 18101,
-      "body": "## Summary\n\n- carry the bot-issued opaque Telegram continuation through provider authentication without trusting browser-supplied Telegram identity\n- verify Telegram HMAC/freshness, resolve the prospective account read-only, and acquire an exclusive continuation claim before Telegram or phone mutation\n- bind claim, redemption, replay, and completion to the canonical user, organization, Telegram identity, mode, and normalized phone\n- make same-identity retries idempotent while rejecting concurrent, stale, cross-account, cross-org, cross-Telegram, and cross-phone attempts\n- make an interrupted attempt recoverable: the exact claim holder resumes its own claim after a transient redemption/completion failure, and a leftover claim on a canonically bound session settles into idempotent completed replays\n- link the Telegram and phone identity pair atomically across the canonical `users` row and the `user_identities` projection that auth lookups read, with canonical fallback lookups so a stale or absent projection cannot strand an account\n- return to Telegram only when the backend authoritatively reports `continuation_redeemed: true`\n\nCloses #17888\n\n## Security invariants\n\n- browser input cannot activate trusted-Telegram mode or assert Telegram identity\n- the opaque continuation is excluded from Telegram HMAC verification input\n- no durable Telegram or phone mutation occurs before exclusive claim acquisition — including plain session-based linking, which validates phone bindings before the Telegram link\n- claim ownership persists through identity mutation and canonical session binding until explicit completion\n- elapsed time alone never transfers mutation authority; the exact claim holder (same deterministic claim id, compatible Telegram/phone/account bindings) resumes, while competing claimants receive `409`\n- claim lineage is derived from the opaque token, signed Telegram id, and normalized phone — the anonymous first attempt and its post-account-creation retry share one lineage, and the account is bound to the claim record the moment it is known\n- the combined Telegram+phone link commits the canonical `users` row and the `user_identities` projection as one transaction; a unique-value collision in either table aborts both writes, so neither table can retain a half-link\n- account-bound observation cannot clear another request's active claim\n- replay-cache presence is not authorization and signed identity is revalidated before replay\n- phone-link failure, phone mismatch, partial user/org binding, or malformed successful claim JSON fail closed\n\n## Review follow-ups\n\nCurrent stack: `9a79c01be` (original) → `cc873f030` (claim resumability) → `ed887a0f1` (atomic identity linking) → `84a4bc0b8` (e2e bot-id fixture) → `ec48c139c` (landing composer test budget) → `d5acbd5df` (identity projection atomicity) → `34ca68a1c` (projection boundary consolidated) → `506ad2cc5` (verified-phone guard + typed link boundary) → `cc591dbf8` (gateway router stale-identity transition guard).\n\n**First blocking review (claim-holder deadlock) — addressed in `cc873f030`:**\n\n- `claimContinuation` resumes the exact holder (same claim id + compatible bindings) instead of `409`; competing claim ids and mismatched Telegram/phone/account bindings remain `409`\n- a leftover claim on a canonically bound session is cleared by its own lineage and settles into completed replays, covering a crash between redemption and completion\n- `createContinuationClaimId` drops account material so the anonymous create-then-retry transition hashes to the same lineage; the claim record itself carries the account binding once known\n- the write-only `expiresAt` lease field is removed; time-based takeover remains impossible in both directions (pinned against legacy records still carrying the field)\n- plain session-based linking validates phone bindings before any durable link; the strict-continuation identity assertion no longer early-outs for trusted transports; the redemption idempotency key includes the continuation token\n- integrated regression composes the real auth route with the real coordinator Durable Objects: transient redemption failure → identical signed retry redeems exactly once; anonymous create-then-retry resumes with a stable claim id; crash between redemption and completion resolves without re-redeeming\n\n**Second blocking review (stale `user_identities` projection) — addressed in `d5acbd5df`, consolidated in `34ca68a1c`:**\n\n- `usersRepository.linkTelegramAndPhoneIdentity` commits the canonical `users` update and an authoritative `user_identities` upsert in ONE transaction; the projection mirrors the freshly returned canonical row, a missing projection row is inserted, and a unique collision in either table rolls back both — neither table can retain a half-link\n- `linkTelegramAndPhoneToUser` routes through that boundary (the service-level test proves no separate canonical update is issued around it)\n- direct auth/routing lookups remain projection-authoritative; the write-side upsert (rather than read-side fallbacks) is what prevents drift from stranding an account into the create-collide-500 chain\n- repository-level regression against the real Drizzle schema (`pushSchema` on isolated PGlite): (1) link then fresh lookups resolve the user by both Telegram ID and phone; (2) a stale cross-user projection collision rolls the canonical write back with no half-link in either table; (3) a legacy user without a projection row gets one created by the link\n\n## Verification\n\nGates run on macOS arm64 with the pinned toolchain (Bun 1.3.14, Node 24.15.0); focused suites, API build, and Biome re-run green at `506ad2cc5`; gateway-webhook identity/e2e suites green at `cc591dbf8` (18 tests, 84 assertions).\n\n| Gate | Result |\n| --- | --- |\n| cloud-api focused suites (route / integration / coordinator / platform-caller) | 39 passed (11+3+15+10), 0 failed |\n| cloud-shared focused suites (identity-link integration regression / user-service error-policy / onboarding-chat / host-contract) | 58 passed, 0 failed under `bun test --isolate` |\n| Cloud API TypeScript build (`tsc6 --noEmit`) | passed |\n| Homepage typecheck + production build | passed (surfaces unchanged by the cloud-only commits; Chromium suite green at this lineage) |\n| Chromium Telegram return coverage | 3 passed (with and without `VITE_TELEGRAM_BOT_ID` in the shell, exercising the `84a4bc0b8` fixture) |\n| Scoped Biome over changed files | passed, no fixes applied |\n| `git diff --check` | passed |\n| Root `bun run verify` | passed (exit 0) at `34ca68a1c` and `506ad2cc5`; re-run at `cc591dbf8` in progress at body-update time |\n\nChromium command used `VITE_TELEGRAM_BOT_ID=123456789` as an explicit fake test fixture; Telegram and Cloud API responses were intercepted locally. A real staging `/start` → provider callback → canonical redemption → bot-return run remains a deployment/release gate because this checkout does not have staging secrets or deployment authority.\n\n## Evidence\n\n<!-- evidence-row:before-screenshots -->\n- [x] Before full-page screenshots (desktop and mobile, rendered from merge-base `8bcba07b8` homepage sources — no return card): https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-before2-desktop.jpg https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-before2-mobile.jpg\n<!-- evidence-row:after-screenshots -->\n- [x] After full-page screenshots (desktop and mobile): https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-after2-desktop.jpg https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-after2-mobile.jpg\n<!-- evidence-row:walkthrough-video -->\n- [x] Walkthrough video of the bot-continuation auth flow (get-started → Telegram connect → phone → server redemption → connected → Return to Telegram): https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-walkthrough2-telegram-return.mp4\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs — test transcripts of the route+Durable Object suites and the PGlite identity-link regression at `34ca68a1c`: https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-backend-verify3.log\n<!-- evidence-row:frontend-logs -->\n- [x] Frontend console/network logs — Playwright Chromium run transcript; the specs assert the auth POST body (`onboarding_session` forwarded once) and that the browser makes zero `/onboarding/chat` continuation calls: https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-frontend-e2e2.log\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory: `N/A - the onboarding chat path is deterministic and model-free (pinned by the \"stays deterministic and model-free\" test); no agent/model/prompt/provider surface changed.`\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts — actual `users` + `user_identities` rows through the atomic link, the fresh sessionless lookups, and the collision rollback (real PGlite), plus the Durable Object claim-lifecycle records: https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-domain-artifacts3.log https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-do-claim-lifecycle.log\n<!-- evidence-row:ocr-review -->\n- [x] OCR visual text review — tesseract.js text readout of the after screenshots, reviewed against the i18n copy: https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18101-ocr-review2.txt\n\n## Evidence context\n\n- Merge base: `fc8a18dc0` (develop); before screenshots rendered from `8bcba07b8` sources (captured surfaces byte-identical across the base move)\n- Original commit: `9a79c01be` (GPT-5.6 via Hermes Agent); atomic-linking, landing-test, and consolidation commits: `ed887a0f1`, `ec48c139c`, `34ca68a1c`; review-fix commits `cc873f030`, `84a4bc0b8`, `d5acbd5df` (Claude Code)\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: yes\n<!-- attribution-row:models -->\n- Model(s) used: openai/gpt-5.6 (original commit), anthropic/claude-fable-5 (review-fix commits)\n<!-- attribution-row:client -->\n- Agent tooling: Hermes Agent (original commit), Claude Code (review-fix commits)\n<!-- attribution-row:skill-revision -->\n- Skill path: N/A - no contribution skill used\n<!-- attribution-row:status -->\n- Provenance status: self-reported\n\n— [cad]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-fable-5\",\"client\":\"Claude Code\",\"skill_revision\":\"N/A - no contribution skill used\"} -->\n<!-- evidence-head:cc591dbf8ad94e9180ecb655cea7eb42f96e97e2 -->\n",
+      "id": "PR_kwDOMT5cIs79NhdU",
+      "title": "release: promote develop to main",
+      "author": "NubsCarson",
+      "number": 18316,
+      "body": "## release: promote develop → main (pinned `b47acfdb9e`)\n\nOperator-authorized launch promotion of the current develop tip to production main. **367 commits** since the last promote (`ff751c2857`, #18028, 2026-08-08).\n\n**Pinned to `b47acfdb9e`** — this PR promotes exactly this SHA. Its CI run certifies the frozen SHA independent of develop churn (the last 11 develop CI runs were superseded/cancelled before finishing, so the moving develop head had **zero** certified-green runs; this pinned PR fixes that).\n\n### Highlights in range\n- **Onboarding / first-touch:** branded shell before hydration (#18269), provisioning-poll dedupe (#18133), auth-cache login-hang deadline (#18249), in-process pairing redemption, org re-provision after agent death (#18044), dedicated-agent dispatch restore (#18069).\n- **Auth / identity security:** HMAC one-time OAuth success proofs (#9257859), Telegram onboarding continuation hardening (#17888), fail-closed google-workspace header/recipient guards, agent-key rotation on caller txn.\n- **Chat quality (overnight batch):** group addressedTo gate (#18183), stage-1-commit failure reply (#18266), verify-failed honest reply (#18275), preserved tool-result delivery (#18180), callback-rewrite meta-narration guard (#18177), knowledge-search diagnostic (#18207).\n- **Provisioning hardening:** per-container memory caps, warm-pool re-probe, IO-starved node quarantine, deletion-capacity retention, terminal-job completed_at (#18297).\n\n### Gate\n- Merge to main ONLY when this PR's checks are green (certifies the pinned SHA).\n- Blocker window in fleet HQ #18309: 4/4 agent lanes CLEAR (vps-agent, kepler, gauss, codex-ios-assistant).\n- Follow-up tracked: kepler's #18304 credential-boundary fix (issue already on prod; promote neutral) lands post-promote as urgent security.\n\n🤖 authorized by operator; staged by vps-agent (fleet HQ #18309)\n\n<!-- evidence-head:b47acfdb9e565462c4244525634441e4c3692614 -->\n\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - release promote of already-reviewed merged commits; per-change UI evidence on the source PRs\n\n<!-- evidence-row:after-screenshots -->\n- [ ] N/A - release promote; source PRs carry UI evidence\n\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - release promote, no new change to demo\n\n<!-- evidence-row:backend-logs -->\n- [ ] N/A - certification is the Gen-2 CI run on the pinned SHA (Tests/Smoke/Server/Client/Plugin), not a code change in this PR\n\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - release promote\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - release promote, no model-facing change originates here\n\n<!-- evidence-row:domain-artifacts -->\n- [ ] N/A - the artifact is the promoted develop tip b47acfdb9e; per-change artifacts on source PRs\n",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-08-09T00:34:40Z",
-      "mergedAt": "2026-08-09T06:11:21Z",
-      "additions": 3704,
-      "deletions": 192
-    },
-    {
-      "id": "PR_kwDOMT5cIs78qQqI",
-      "title": "feat(ui): per-connector Settings detail pages with Delegate/Bot lens",
-      "author": "wtfsayo",
-      "number": 18175,
-      "body": "# Relates to\n\nNo linked issue was created before this work began. This PR is the acceptance record for the Settings → Connectors migration.\n\nDefinition of Done: [`CONTRIBUTING.md`](https://github.com/elizaOS/eliza/blob/develop/CONTRIBUTING.md).\n\n- [x] Targets `develop`; branch rebases/merges from `develop` have remained conflict-free.\n- [ ] Full `bun run verify` and required visual evidence are still pending.\n- [x] Focused behavior is covered by deterministic tests listed below.\n\n# Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai-codex/gpt-5.6-sol`\n<!-- attribution-row:client -->\n- Agent tooling: `pi`\n<!-- attribution-row:skill-revision -->\n- Skill path: `N/A - no contribution skill used`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\n# Summary\n\nMigrates **Settings → Connectors** from inline accordions to a dense index/detail workflow:\n\n- Grouped connector index with a persisted **Delegate / Bot** identity lens.\n- Per-connector routes at `#connectors/<id>` with browser/hardware Back support.\n- Connector enable/load switch first; duplicate schema-level `Enabled` fields are hidden.\n- One config item per row.\n- Text, number, secret, JSON, array, code, and multiline values rest as value chips and open a **Save / Cancel** dialog.\n- Dialog Save stages edits locally; **Save changes / Cancel** commits or discards the complete bundle atomically.\n- Signal and WhatsApp QR states use the same description-left/action-right pattern as other connectors.\n- Required fields use badges without decorative left bars.\n- Stronger contrast for primary/disabled CTAs, neutral actions, and value chips.\n- Deep links and programmatic connector focus remain supported.\n\n# Identity classification\n\nDeclared setup modes are filtered by identity. Plugin-managed inventories are filtered from each stored account record—not the catalog creation default:\n\n- `OWNER` → Delegate\n- `AGENT` → Bot\n- `TEAM` or unknown role → visible in both lenses\n\n| Connector | Delegate | Bot |\n| --- | --- | --- |\n| Discord | Desktop App | OAuth Gateway, Bot Token |\n| Telegram | Personal Account; stored OWNER/TEAM accounts | Cloud Gateway, Bot Token; stored AGENT/TEAM accounts |\n| Slack | Stored OWNER/TEAM accounts | OAuth App, Socket Mode; stored AGENT/TEAM accounts |\n| X | OAuth, local OAuth2, developer tokens; stored OWNER/TEAM accounts | Stored AGENT/TEAM accounts |\n| Signal | QR-linked account; stored OWNER/TEAM accounts | Stored AGENT/TEAM accounts |\n| WhatsApp | QR-linked personal account; stored OWNER/TEAM accounts | Business Cloud API; stored AGENT/TEAM accounts |\n| iMessage | iPhone gateway, direct chat.db, BlueBubbles | Blooio cloud number |\n| BlueBubbles | Cloud and local owner bridge | — |\n\nSingle-form fallback classifications:\n\n- **Bot:** Bluesky, Farcaster, Nostr, Matrix, MS Teams, Mattermost, Google Chat, Feishu, LINE, Zalo Official, Tlon, Nextcloud Talk, Twitch, Blooio.\n- **Delegate:** Instagram, Zalo User, Google Workspace.\n- Unknown third-party connectors intentionally remain visible in both lenses.\n\n## Known identity ambiguities\n\nThe following plugins do not declare account ownership strongly enough to classify every credential with certainty:\n\n- Slack Socket Mode still includes optional `SLACK_USER_TOKEN` in an otherwise bot-oriented schema.\n- Tlon credentials can represent an agent ship or the owner’s ship.\n- Matrix credentials can represent a dedicated bot user or an owner account.\n- Instagram supports personal, brand, and bot-like profiles.\n- Bluesky app passwords can technically belong to either identity.\n- X OAuth2 and OAuth1 modes remain one same-lens schema; this is setup-mode leakage, not a Delegate/Bot error.\n\n# Review fixes included\n\n- Atomic bundle save prevents overlapping plugin restarts and stale-completion draft loss.\n- Failed saves retain drafts; duplicate Save clicks are ignored.\n- Configured secrets cannot be deleted by empty Save/Enter.\n- Optional secrets retain an explicit confirmed **Clear → Clear value** path.\n- Masked secret chips have distinct accessible names (`Edit <field>`).\n- User-opened detail routes use `pushState`; visible Back consumes that entry. Programmatic/deep-linked details retain replace semantics.\n- Default-backed iMessage policy controls no longer require optional CLI/database path overrides.\n- Mixed plugin-managed OWNER/AGENT records are separated by actual stored role; TEAM/unknown remain neutral.\n- Programmatic detail→detail focus preserves the user-pushed history marker so visible Back then hardware Back leave the connectors stack cleanly.\n- Catalog-backed detail modes follow the same `connectorSupportsChannelMode` lens policy as the index (e.g. Google under Bot does not expose plugin-managed inventory).\n- Mobile detail hides the in-content Back control; ViewHeader remains the sole mobile Back target (`hidden` / `md:inline-flex`, `min-h-11`).\n\n# Risks\n\n**Medium.** This changes shared config-field and button primitives plus connector routing/history. Primary risks are incorrect identity filtering, lost config drafts, accidental secret deletion, and duplicate history entries. Focused tests cover each path; visual evidence and full repository verification remain outstanding.\n\n# Testing\n\n## Automated\n\n- [x] UI focused suite: **6 files / focused connector routing/history/config tests passed** (re-run after re-review)\n  - lens and mode filtering\n  - mixed OWNER/AGENT/TEAM/unknown account records\n  - atomic multi-field saves, duplicate saves, stale completions, failures, and Cancel\n  - secret accessible names, empty-save safety, and confirmed deletion\n  - QR action-row states\n  - browser and visible-Back history behavior\n  - duplicate field hiding and structured-value dialogs\n- [x] iMessage manifest regression: **1 test passed**\n- [x] `bun run --cwd packages/ui typecheck`\n- [x] `bun run --cwd plugins/plugin-imessage typecheck`\n- [x] Biome checks for touched files\n- [x] `git diff --check`\n\n## Reviewer walkthrough\n\n1. Open Settings → Connectors and switch Delegate/Bot.\n2. Open Discord, Telegram, Slack, Signal, WhatsApp, iMessage, and BlueBubbles details.\n3. Confirm only identity-appropriate modes/accounts appear.\n4. Edit two config values; verify they stage before one atomic Save changes action.\n5. Open a configured optional secret; verify empty Save is disabled and Clear requires confirmation.\n6. Navigate index → detail → visible Back → browser/hardware Back; verify each history level is consumed once.\n\n# Evidence Gate\n\n<!-- evidence-head:b8b37b722145822644b6322e4077739368e01106 -->\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before desktop/mobile screenshots: pending; not claimed.\n<!-- evidence-row:after-screenshots -->\n- [ ] After desktop/mobile screenshots: pending; not claimed.\n<!-- evidence-row:walkthrough-video -->\n- [ ] MP4 walkthrough: pending; not claimed.\n<!-- evidence-row:backend-logs -->\n- [ ] Backend config-save/restart logs: pending; not claimed.\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend console/network logs: pending; not claimed.\n<!-- evidence-row:llm-trajectory -->\n- [x] Real-LLM trajectory: N/A — no model, prompt, provider, or agent behavior changed.\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: N/A — this UI migration produces no domain artifact.\n<!-- evidence-row:ocr-review -->\n- [ ] OCR visual review: pending; not claimed.\n\n## Known gaps / failures\n\n- `audit:app` was retried with the pinned Node 24 runtime, but the Playwright worker aborted with `Project \"audit-app\" not found`; no screenshots from that run are claimed.\n- Required fork workflows still require maintainer approval before trusted checks can run.\n- Formal reviewer assignment is blocked by fork permissions; exact-head re-review requests are posted as PR comments.\n\nAI provider/model: openai-codex / gpt-5.6-sol\nClient / agent tooling: pi\nContribution skill revision: N/A - no contribution skill used\nAttribution status: self-reported\n— [pi]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai-codex\",\"model\":\"gpt-5.6-sol\",\"client\":\"pi\",\"skill_revision\":\"N/A - no contribution skill used\"} -->\n\n\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-08-09T14:55:21Z",
-      "mergedAt": "2026-08-09T20:21:55Z",
-      "additions": 3652,
-      "deletions": 602
-    },
-    {
-      "id": "PR_kwDOMT5cIs78bEJb",
-      "title": "fix(ui): require verified OAuth markers on /auth/success",
-      "author": "wtfsayo",
-      "number": 18065,
-      "body": "## Summary\n\nFixes #18054.\n\nAnonymous navigation to `/auth/success` no longer renders a trusted \"Connected\" card from query parameters alone.\n\n**Verification contract (this head `084b5512549b7d1a632dc00c8b8d786bfb199035`):**\n\n1. Query parsing yields only a *candidate* (`resolveAuthSuccessCandidate`). Known-provider `*_connected` markers or `connection_id` alone never claim success.\n2. Success requires **one** of:\n   - A **callback-minted short-lived HMAC proof** verified by public `GET /api/v1/oauth/success-proof/verify?proof=…` (covers Twitter/Discord and sessionless API-key OAuth returns to `/auth/success`), and when a `connection_id` is present a sessioned browser must also own that connection; or\n   - An **authenticated ownership lookup** `GET /api/v1/oauth/connections/:id` returning an active connection for the current org/user (sessioned browsers without a proof).\n3. Until verification succeeds the page stays **pending**, then **verified**, **unverified**, or **unavailable** (distinct UI for transport/5xx).\n\n**Backend changes:**\n\n- `mintOAuthSuccessProof` / `verifyOAuthSuccessProof` (HMAC, ~10 min TTL, nonce) in cloud shared OAuth services\n- Generic OAuth2, Twitter (OAuth1a + OAuth2), and Discord callbacks attach `proof` only when the redirect path is exactly `/auth/success`\n- Public path allowlist for `/api/v1/oauth/success-proof/verify`\n- Reserved markers (`proof`, `platform`, `connection_id`, known `*_connected`) are cleared before rewriting so a prior success URL cannot retain a valid proof across an error redirect\n\n**Provider contracts preserved:**\n\n| Callback | Success query shape on `/auth/success` |\n| --- | --- |\n| Generic OAuth2 | `{platform}_connected=true&platform=…&connection_id=…&proof=…` |\n| Twitter | `twitter_connected=true&platform=twitter&proof=…` (no connection_id) |\n| Discord | `discord=connected&platform=discord&discord_connected=true&proof=…` |\n\nForged marker-only URLs stay **unverified**.\n\n## Test plan\n\n- [x] `bun run --cwd packages/ui test src/cloud/public-pages/pages/auth/auth-success-page.test.tsx` → **24 passed**\n- [x] `bun run --cwd packages/cloud/shared test src/lib/services/oauth/success-proof.test.ts` → **7 passed**\n- [x] Focused classifier coverage: forged known-provider markers rejected; Twitter/Discord proof candidates accepted; ownership 404/403 rejected; 503 → unavailable\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `xai/grok-4` (implementation babysit) + `openai/gpt-5.6-sol` (prior codex review rounds on earlier heads)\n<!-- attribution-row:client -->\n- Agent tooling: `Grok Build` / Codex review\n<!-- attribution-row:skill-revision -->\n- Skill path: `N/A - contribute-to-eliza skill was not available in this environment`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\n## Evidence Gate\n\n<!-- evidence-head:a9a7e31da9306f12cd56d09588a16bb2a42b476f -->\n\n<!-- evidence-row:before-screenshots -->\n- [x] Before (pre-fix false trust): naked `/auth/success` rendered a generic Connected card with no backend verification — desktop + mobile: ![before desktop](https://github.com/user-attachments/assets/ca252967-4bfd-4def-ae56-5d31d50cd20d) ![before mobile](https://github.com/user-attachments/assets/5d83e692-8933-49f0-99ff-6d172d0f2ea7)\n\n<!-- evidence-row:after-screenshots -->\n- [x] After exact-head AuthSuccessPage states (desktop + mobile): unverified recovery, verified Connected (only after proof/ownership), pending, unavailable — ![after unverified desktop](https://github.com/user-attachments/assets/1ece765f-afc6-48cf-a35b-db6891bcd242) ![after unverified mobile](https://github.com/user-attachments/assets/996e2aa3-5a01-444d-b153-bc79f04709f7) ![after verified desktop](https://github.com/user-attachments/assets/5146816a-8a52-4a2c-9e00-cdfc9b27f82a) ![after verified mobile](https://github.com/user-attachments/assets/1a4c7209-18fa-4362-a584-ea6b2db6a47b) ![after pending desktop](https://github.com/user-attachments/assets/32e963ff-00a0-42f9-94dc-bdd669460dd6) ![after pending mobile](https://github.com/user-attachments/assets/a3e63064-80e5-4ec6-b565-2a426ab912c0) ![after unavailable desktop](https://github.com/user-attachments/assets/b70d9345-fa77-43e3-ba3e-a3ea619ee81c) ![after unavailable mobile](https://github.com/user-attachments/assets/6b09dcba-65c0-4add-a8b6-900185af3cd3)\n\n<!-- evidence-row:walkthrough-video -->\n- [x] State walkthrough (unverified → pending → verified → unavailable): https://github.com/user-attachments/assets/d43966f3-3619-4c30-a5be-22d108e5cf74\n\n<!-- evidence-row:backend-logs -->\n- [x] Backend/proof unit + public-path transcript: [18065-backend-logs.txt](https://github.com/user-attachments/files/30864179/18065-backend-logs.txt)\n\n<!-- evidence-row:frontend-logs -->\n- [x] Frontend suite + mocked network contract (24/24): [18065-frontend-logs.txt](https://github.com/user-attachments/files/30864178/18065-frontend-logs.txt)\n\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no model, prompt, action, provider, or agent-loop behavior changed in this PR.\n\n<!-- evidence-row:domain-artifacts -->\n- [x] N/A - no DB, wallet, scheduled-task, or on-disk domain artifact path; proofs are ephemeral HMAC tokens only.\n\n<!-- evidence-row:ocr-review -->\n- [x] tesseract OCR text readout + manual visual review of before/after AuthSuccessPage states: [18065-ocr-manual-review.md](https://github.com/user-attachments/files/30864176/18065-ocr-manual-review.md)\n\n## Sync\n\n- Rebased onto current `origin/develop` (linear history).\n- HEAD: `084b5512549b7d1a632dc00c8b8d786bfb199035`\n\n## Non-claims\n\n- Does **not** treat query markers alone as success.\n- Does **not** claim marker-only Twitter success without a backend-minted proof.\n- Does **not** use Discord's guild API as a substitute for the proof/ownership gate.\n\n— [grok-build]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"xai\",\"model\":\"grok-4\",\"client\":\"Grok Build\",\"skill_revision\":\"N/A - contribute-to-eliza skill was not available\"} -->",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-08-08T15:04:36Z",
-      "mergedAt": "2026-08-09T02:53:23Z",
-      "additions": 2082,
-      "deletions": 100
-    },
-    {
-      "id": "PR_kwDOMT5cIs78kg0S",
-      "title": "feat(plugin-taskmarket): delegate work to the TaskMarket marketplace",
-      "author": "jvkassi",
-      "number": 18131,
-      "body": "## What\n\nAdds `@elizaos/plugin-taskmarket` — lets an Eliza agent delegate a request to an external worker paid in USDC on Base ([TaskMarket](https://taskmarket.dev/)) instead of spending more inference on work another worker can do.\n\nThree actions:\n\n| Action | Spends? | Purpose |\n|---|---|---|\n| `TASKMARKET_BROWSE` | no | list / get open tasks |\n| `TASKMARKET_STATUS` | no | balance, reputation, own submissions |\n| `TASKMARKET_CREATE_TASK` | **yes** | post a task (escrows real USDC) |\n\n## Safety\n\n`TASKMARKET_CREATE_TASK` is the only money-moving action, gated three independent ways:\n\n1. `TASKMARKET_ALLOW_TASK_CREATION` — off by default.\n2. `TASKMARKET_MAX_TASK_REWARD_USDC` — enforced **by refusal**, never by silently trimming the reward. Hard-capped at 50.\n3. `userConfirmed` — must come from direct user approval, not from model-generated content.\n\nThe disabled check is duplicated in `validate()` and at handler entry on purpose: `validate()` keeps the tool off the planner's list, the handler check is the backstop against a hallucinated call. Every guard failure returns **before** the network call — the tests assert `fetch` was never invoked on each rejection path.\n\nNo action accepts a submission or releases escrow. Settlement stays with the human. Error text never echoes the bearer token or the request URL (which carries the caller's address).\n\n## Notes from integrating against the live API\n\n- The `/api` base-path prefix is mandatory; every path 404s without it.\n- The bearer token does **not** identify the caller — account routes need an explicit `address` query param, hence the separate required `TASKMARKET_ADDRESS` setting.\n- Amounts are atomic 6-decimal USDC everywhere except `/wallet/balance`. Converted at the client boundary; actions speak whole USDC.\n- Task descriptions run 2–10 KB, so list output truncates (`TASKMARKET_LIST_DESCRIPTION_CHARS`) to keep a full board listing from eating the context window.\n\n## Testing\n\n```\nbun run --cwd plugins/plugin-taskmarket test        # 16 passed\nbun run --cwd plugins/plugin-taskmarket typecheck   # no errors in this package\n```\n\nUnit tests mock `fetch`, which validates this plugin's logic but not the vendor's URL shape — so it was also verified with a **read-only live run** against `api.taskmarket.dev` (balance, task list, task detail, submissions), plus live confirmation that all three creation guards refuse before any POST. Task creation itself is never exercised in tests; it escrows real funds.\n",
-      "repository": "elizaos/eliza",
-      "createdAt": "2026-08-09T06:33:06Z",
+      "createdAt": "2026-08-10T20:51:18Z",
       "mergedAt": null,
-      "additions": 1923,
-      "deletions": 0
+      "additions": 111175,
+      "deletions": 45270
     },
     {
-      "id": "PR_kwDOMT5cIs78ZN1H",
-      "title": "fix(agent): lean-chat Calendar path with gated Google Workspace",
+      "id": "PR_kwDOMT5cIs786G05",
+      "title": "feat: migrate personal Google Workspace to official MCP",
       "author": "wtfsayo",
-      "number": 18050,
-      "body": "<!-- Fill every visible section. Keep every evidence row visible; use N/A with a concrete reason when a row does not apply. -->\n\n# Relates to\n\nStaging lean-chat Calendar connect/enable path (Google Calendar companions, gated Workspace, verified handoffs). Supersedes #18010, #18042, #18043.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop`\n      with zero conflicts (`git fetch origin && git rebase origin/develop`).\n      Rebased again 2026-08-08 onto `ba0dc76f86`; range-diff patch-equivalent (13 commits).\n- [x] Targeted package tests + biome check on changed files pass post-sync.\n      Full `bun run verify` is gated on maintainer fork-workflow approval in CI.\n- [x] A reviewer can confirm the change works without reading the code, from the\n      evidence attached below (unit/integration proof + N/A rows for non-UI).\n\n# Contribution provenance\n\nDeclare the actual assistance used for implementation and review. This is\nself-reported provenance, not a request for chain-of-thought. Never include\nprompts containing secrets, tokens, private session IDs, or hidden reasoning.\nUse exact `provider/model-id` values; `GPT`, `Claude`, or `AI` are not specific\nenough. Human-only work must say so explicitly.\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.4`\n<!-- attribution-row:client -->\n- Agent tooling: `pi`\n<!-- attribution-row:skill-revision -->\n- Skill path: `N/A - no contribution skill used`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\n# Sync with develop\n\n- [x] Rebased/merged onto the latest `origin/develop`; zero conflicts.\n- [x] Targeted tests + biome on changed files pass post-sync. Full monorepo\n      `bun run verify` awaits maintainer approval of fork workflows on CI.\n\n# Risks\n\n**Medium.** Plugin load set and connect-handoff routing for lean-chat Calendar /\nGoogle Workspace. Mis-gating could load Node-only Workspace on mobile or leave\nowners without a working setup card. Mitigations: mobile filter last, OAuth trio\nalignment, `enabled:false` final delete, trusted OAuth URL allowlist, CONFIG ids\nmatched to `/api/plugins`.\n\n# Background\n\n## What does this PR do?\n\nMakes lean-chat Google Calendar connect/sync **workable and safe**:\n\n1. **Scheduling** — Seeded in lean-chat because Calendar is already always selected and hard-depends on it.\n2. **Google Workspace (gated)** — Loads only on explicit Google signals (entries enable, configured googlechat, or full `GOOGLE_CLIENT_ID`+`SECRET`+`REDIRECT_URI`). Empty `{}` googlechat does **not** load. **`enabled: false` is a final deny**.\n3. **Mobile order** — Companion adds run **before** the mobile allow-list so Workspace cannot re-enter iOS/Android load sets.\n4. **Trusted OAuth URLs only** — Verified handoffs require known Google/Microsoft authorize hosts/paths; untrusted hosts refused.\n5. **CALENDAR_SOURCES** — Verified only for allowlisted handoff states; Google → `[CONFIG:google-workspace]`; Microsoft → `[CONFIG:calendar]` with `MICROSOFT_*` pluginParameters.\n6. **CONNECTOR** — Rejects calendar-feed connect phrasing; sanitized config errors; no success without trusted auth URL.\n7. **PLUGIN toggle test** — regression lock for cloud self-API auth headers (runtime already on develop).\n\n## What kind of change is this?\n\nBug fixes (non-breaking) + safety hardenings for lean-chat Calendar enable/connect.\n\n### Non-claims\n- Does not complete OAuth/sync without credentials + consent.\n- Does not default every lean-chat agent to Workspace from the Calendar tile alone.\n- Does not claim a new PLUGIN-toggle production auth fix beyond the regression test.\n- Requires agent image redeploy after merge for staging.\n\n# Documentation changes needed?\n\nMy changes do not require a change to the project documentation.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. `packages/agent/src/runtime/plugin-collector.ts` + lean-chat tests (mobile order, gating, disable).\n2. `plugins/plugin-google-workspace/auto-enable.ts` (trio + empty googlechat + disable).\n3. `plugins/plugin-calendar/src/actions/calendar-sources.ts` (trusted URL, CONFIG ids, incomplete OAuth cards).\n4. `plugins/plugin-personal-assistant/src/actions/connector.ts` (calendar phrase gate, sanitized cards).\n\n## Detailed testing steps\n\n```bash\nbunx vitest run packages/agent/src/runtime/plugin-collector-lean-chat.test.ts\nbunx vitest run packages/agent/src/actions/plugin-toggle.test.ts\nbun run --cwd plugins/plugin-google-workspace test src/auto-enable.test.ts\nbun run --cwd plugins/plugin-calendar test src/actions/calendar-sources.test.ts\nELIZA_LIVE_TEST=1 OPENAI_API_KEY=… OPENAI_BASE_URL=… \\\n  bun run --cwd plugins/plugin-calendar test src/actions/calendar-sources.live-trajectory.test.ts\nbun run --cwd plugins/plugin-personal-assistant test test/connector-config-card.test.ts\nbunx @biomejs/biome check \\\n  packages/agent/src/runtime/plugin-collector-lean-chat.test.ts \\\n  packages/agent/src/runtime/plugin-collector.ts \\\n  plugins/plugin-calendar/src/actions/calendar-sources.test.ts \\\n  plugins/plugin-calendar/src/actions/calendar-sources.ts \\\n  plugins/plugin-google-workspace/src/auto-enable.test.ts \\\n  plugins/plugin-personal-assistant/test/connector-config-card.test.ts\n```\n\nPinned result on this head: **66/66** deterministic + **2/2** live-model trajectory tests pass; biome clean on changed files.\n\nPost-merge staging: redeploy lean-chat agent + manual Google Calendar OAuth E2E.\n\n# Evidence Gate\n\nEvidence must match the exact commit reviewed.\n<!-- evidence-head:3b5563d8f3b16d038fa8da2650bee234ae5be4e6 -->\nEvidence head advanced after biome format-only commit `chore: biome format PR files for lean-chat calendar gate` (no behavioral diff from prior green 66/66 suite).\n\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - backend-only agent plugin gating change with no rendered UI surface files\n<!-- evidence-row:after-screenshots -->\n- [ ] N/A - backend-only agent plugin gating change with no rendered UI surface files\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - backend-only agent plugin gating change with no rendered UI surface files\n<!-- evidence-row:backend-logs -->\n- [x] Post-rebase targeted suite on exact head `3b5563d8f3b16d038fa8da2650bee234ae5be4e6` (Bun 1.3.14 / Node v22.23.1): **66/66 pass**\n<details>\n<summary>backend test logs (collector + toggle + auto-enable + calendar-sources + connector)</summary>\n\n```text\n=== head 3b5563d8f3b16d038fa8da2650bee234ae5be4e6 ===\n=== date 2026-08-08T21:44:20Z ===\n=== plugin-collector-lean-chat ===\n✓ packages/agent/src/runtime/plugin-collector-lean-chat.test.ts (13 tests) 8ms\n Test Files  1 passed (1)\n      Tests  13 passed (13)\n=== plugin-toggle ===\n✓ packages/agent/src/actions/plugin-toggle.test.ts (5 tests) 4ms\n Test Files  1 passed (1)\n      Tests  5 passed (5)\n=== auto-enable ===\n✓ src/auto-enable.test.ts (9 tests) 2ms\n Test Files  1 passed (1)\n      Tests  9 passed (9)\n=== calendar-sources ===\n✓ src/actions/calendar-sources.test.ts (25 tests) 14ms\n Test Files  1 passed (1)\n      Tests  25 passed (25)\n=== connector-config-card ===\n✓ plugins/plugin-personal-assistant/test/connector-config-card.test.ts (14 tests) 7ms\n Test Files  1 passed (1)\n      Tests  14 passed (14)\nINFO suite aggregate: 66 passed / 0 failed\n```\n</details>\n\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - no frontend or packages app or packages ui source changes in this PR\n<!-- evidence-row:llm-trajectory -->\n- [x] Exact-head live-model trajectories on `3b5563d8f3b16d038fa8da2650bee234ae5be4e6` (provider openai-compatible / model gpt-5.4-mini). Path 1 configured authorization handoff (trusted accounts.google.com authorize host/path). Path 2 incomplete OAuth trio recovery ([CONFIG:google-workspace]). Privacy-safe: no Google client secrets; auth URL query strings redacted. Gist mirror: https://gist.github.com/wtfsayo/bcbaf9c804b55b65f8aed93d421b726b\n<details>\n<summary>combined live-model trajectory JSON</summary>\n\n```json\n{\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini\",\"evidenceHead\":\"3b5563d8f3b16d038fa8da2650bee234ae5be4e6\",\"input\":{\"cases\":[\"connect google calendar\",\"please link my google calendar\"],\"description\":\"Live planner selects CALENDAR_SOURCES; real handler returns trusted auth URL or [CONFIG:google-workspace]\"},\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"connect google calendar\"},{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"please link my google calendar\"}],\"output\":{\"configuredAuthorization\":{\"planner\":{\"content\":null,\"tool_calls\":[{\"id\":\"call_nLvRZbn9z0DTLSTCVa3CTqw8\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}],\"finish_reason\":\"tool_calls\"},\"toolName\":\"CALENDAR_SOURCES\",\"toolParameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"actionResult\":{\"success\":false,\"verifiedUserFacing\":true,\"userFacingText\":\"Authorization started for google. The calendar is not connected until the owner completes this URL: https://accounts.google.com/o/oauth2/v2/auth\",\"connection\":{\"state\":\"authorization_required\",\"provider\":\"google\",\"authUrlHostPath\":\"https://accounts.google.com/o/oauth2/v2/auth\"}}},\"incompleteConfig\":{\"planner\":{\"content\":null,\"tool_calls\":[{\"id\":\"call_a9eiE5UqybXwzyegQLhtP5aa\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}],\"finish_reason\":\"tool_calls\"},\"toolName\":\"CALENDAR_SOURCES\",\"toolParameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"actionResult\":{\"success\":false,\"verifiedUserFacing\":true,\"userFacingText\":\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again. [CONFIG:google-workspace]\",\"connection\":{\"state\":\"configuration_required\",\"provider\":\"google\",\"connectorId\":\"google-workspace\"}}}},\"response\":\"{\\\"tool\\\":\\\"CALENDAR_SOURCES\\\",\\\"parameters\\\":{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"},\\\"state\\\":\\\"authorization_required\\\",\\\"authUrlHostPath\\\":\\\"https://accounts.google.com/o/oauth2/v2/auth started for google. The calendar is not connected until the owner completes this URL: https://accounts.google.com/o/oauth2/v2/auth --- {\\\"tool\\\":\\\"CALENDAR_SOURCES\\\",\\\"parameters\\\":{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"},\\\"state\\\":\\\"configuration_required\\\",\\\"connectorId\\\":\\\"google-workspace\\\",\\\"userFacingText\\\":\\\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again.\\n\\n[CONFIG:google-workspace]\\\"}\",\"completion\":\"Authorization started for google. The calendar is not connected until the owner completes this URL: https://accounts.google.com/o/oauth2/v2/auth --- Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again. [CONFIG:google-workspace]\",\"steps\":[{\"kind\":\"planner\",\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"tool_calls\":[{\"id\":\"call_nLvRZbn9z0DTLSTCVa3CTqw8\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}]},{\"kind\":\"action\",\"name\":\"CALENDAR_SOURCES\",\"parameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"connectionState\":\"authorization_required\",\"authUrlHostPath\":\"https://accounts.google.com/o/oauth2/v2/auth\"},{\"kind\":\"planner\",\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"tool_calls\":[{\"id\":\"call_a9eiE5UqybXwzyegQLhtP5aa\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}]},{\"kind\":\"action\",\"name\":\"CALENDAR_SOURCES\",\"parameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"connectionState\":\"configuration_required\",\"connectorId\":\"google-workspace\",\"userFacingText\":\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again. [CONFIG:google-workspace]\"}]}\n```\n</details>\n<details>\n<summary>configured-authorization-handoff JSON</summary>\n\n```json\n{\"id\":\"configured-authorization-handoff\",\"evidenceHead\":\"3b5563d8f3b16d038fa8da2650bee234ae5be4e6\",\"capturedAt\":\"2026-08-08T21:59:37.424Z\",\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"input\":{\"userText\":\"connect google calendar\",\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"connect google calendar\"}]},\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"connect google calendar\"}],\"prompt\":\"system: You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool. user: connect google calendar\",\"request\":{\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"connect google calendar\"}],\"tools\":[\"CALENDAR_SOURCES\",\"CONNECTOR\"]},\"output\":{\"planner\":{\"content\":null,\"tool_calls\":[{\"id\":\"call_nLvRZbn9z0DTLSTCVa3CTqw8\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}],\"finish_reason\":\"tool_calls\"},\"toolName\":\"CALENDAR_SOURCES\",\"toolParameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"actionResult\":{\"success\":false,\"verifiedUserFacing\":true,\"userFacingText\":\"Authorization started for google. The calendar is not connected until the owner completes this URL: https://accounts.google.com/o/oauth2/v2/auth\",\"connection\":{\"state\":\"authorization_required\",\"provider\":\"google\",\"authUrlHostPath\":\"https://accounts.google.com/o/oauth2/v2/auth\"}}},\"response\":\"{\\\"tool\\\":\\\"CALENDAR_SOURCES\\\",\\\"parameters\\\":{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"},\\\"state\\\":\\\"authorization_required\\\",\\\"authUrlHostPath\\\":\\\"https://accounts.google.com/o/oauth2/v2/auth started for google. The calendar is not connected until the owner completes this URL: https://accounts.google.com/o/oauth2/v2/auth\",\"completion\":\"Authorization started for google. The calendar is not connected until the owner completes this URL: https://accounts.google.com/o/oauth2/v2/auth\",\"steps\":[{\"kind\":\"planner\",\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"tool_calls\":[{\"id\":\"call_nLvRZbn9z0DTLSTCVa3CTqw8\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}]},{\"kind\":\"action\",\"name\":\"CALENDAR_SOURCES\",\"parameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"connectionState\":\"authorization_required\",\"authUrlHostPath\":\"https://accounts.google.com/o/oauth2/v2/auth\"}],\"usage\":{\"completion_tokens\":47,\"total_tokens\":549,\"prompt_tokens\":502,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cached_creation_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":21}}}\n```\n</details>\n<details>\n<summary>incomplete-config-recovery JSON</summary>\n\n```json\n{\"id\":\"incomplete-config-recovery\",\"evidenceHead\":\"3b5563d8f3b16d038fa8da2650bee234ae5be4e6\",\"capturedAt\":\"2026-08-08T21:59:39.182Z\",\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"input\":{\"userText\":\"please link my google calendar\",\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"please link my google calendar\"}]},\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"please link my google calendar\"}],\"prompt\":\"system: You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool. user: please link my google calendar\",\"request\":{\"messages\":[{\"role\":\"system\",\"content\":\"You are an elizaOS planner. For calendar connect/link/setup requests choose CALENDAR_SOURCES with operation=connect and the exact provider. Never use CONNECTOR for Google Calendar. Call exactly one tool.\"},{\"role\":\"user\",\"content\":\"please link my google calendar\"}],\"tools\":[\"CALENDAR_SOURCES\",\"CONNECTOR\"]},\"output\":{\"planner\":{\"content\":null,\"tool_calls\":[{\"id\":\"call_a9eiE5UqybXwzyegQLhtP5aa\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}],\"finish_reason\":\"tool_calls\"},\"toolName\":\"CALENDAR_SOURCES\",\"toolParameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"actionResult\":{\"success\":false,\"verifiedUserFacing\":true,\"userFacingText\":\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again. [CONFIG:google-workspace]\",\"connection\":{\"state\":\"configuration_required\",\"provider\":\"google\",\"connectorId\":\"google-workspace\"}}},\"response\":\"{\\\"tool\\\":\\\"CALENDAR_SOURCES\\\",\\\"parameters\\\":{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"},\\\"state\\\":\\\"configuration_required\\\",\\\"connectorId\\\":\\\"google-workspace\\\",\\\"userFacingText\\\":\\\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again.\\n\\n[CONFIG:google-workspace]\\\"}\",\"completion\":\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again. [CONFIG:google-workspace]\",\"steps\":[{\"kind\":\"planner\",\"provider\":\"openai-compatible\",\"model\":\"gpt-5.4-mini-2026-03-17\",\"tool_calls\":[{\"id\":\"call_a9eiE5UqybXwzyegQLhtP5aa\",\"type\":\"function\",\"function\":{\"name\":\"CALENDAR_SOURCES\",\"arguments\":\"{\\\"operation\\\":\\\"connect\\\",\\\"provider\\\":\\\"google\\\"}\"}}]},{\"kind\":\"action\",\"name\":\"CALENDAR_SOURCES\",\"parameters\":{\"operation\":\"connect\",\"provider\":\"google\"},\"connectionState\":\"configuration_required\",\"connectorId\":\"google-workspace\",\"userFacingText\":\"Google Calendar needs @elizaos/plugin-google-workspace enabled with GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI configured. Open the setup card, then connect again. [CONFIG:google-workspace]\"}],\"usage\":{\"completion_tokens\":60,\"total_tokens\":564,\"prompt_tokens\":504,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cached_creation_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":34}}}\n```\n</details>\n\n<!-- evidence-row:domain-artifacts -->\n- [ ] N/A - no database schema migration wallet or scheduled task row mutations in this change\n<!-- evidence-row:ocr-review -->\n- [ ] N/A - backend-only change has no rendered visual surface to OCR\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nExact-head live capture on `3b5563d8f3b16d038fa8da2650bee234ae5be4e6` (gpt-5.4-mini):\n\n1. **Configured authorization** — user \"connect google calendar\" → live planner selected `CALENDAR_SOURCES` connect/google → real handler returned `authorization_required` with trusted Google authorize host/path and verified user-facing text.\n2. **Incomplete-config recovery** — user \"please link my google calendar\" → same tool selection → incomplete GOOGLE_CLIENT_* error mapped to verified `[CONFIG:google-workspace]` (`connectorId: google-workspace`).\n\nFull JSON is in the Evidence Gate llm-trajectory row. Full owner OAuth consent remains post-merge staging.\n\n\n## Backend + frontend logs\n\nPost-rebase vitest on exact head `3b5563d8f3…`: collector 13 + toggle 5 + auto-enable 9 + calendar-sources 25 + connector 14 = **66/66 pass**. Frontend N/A.\n\n## Screenshots (before / after) + video walkthrough\n\n`N/A - no rendered UI surface in the diff.`\n\n## Known gaps / failures\n\n- Fork CI Develop PR Gate / Security Advisory Gate red until a maintainer **approves** required workflows (`develop-pr.yml`, gitleaks, pr.yaml, stale-base-guard).\n- Live trajectories attached for model→`CALENDAR_SOURCES`→handoff; full Google OAuth consent with real credentials remains post-merge staging after agent image redeploy.\n- Full monorepo `bun run verify` not re-run locally; targeted suites + live trajectory suite + biome on changed files are green on rebased head.\n- `pr-evidence` release upload returns 404 for fork contributors; trajectories inlined in the evidence row and mirrored to a public gist.\n\n\nAI provider/model: OpenAI / gpt-5.4\nClient / agent tooling: pi\nContribution skill revision: N/A - no contribution skill used\nAttribution status: self-reported\n— [pi]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.4\",\"client\":\"pi\",\"skill_revision\":\"N/A - no contribution skill used\"} -->\n\n\n\n\n\n",
+      "number": 18279,
+      "body": "# Relates to\n\nCloses #18278.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` and `bun run verify` were run after sync.\n- [ ] A reviewer can confirm the complete live Google OAuth path from inline evidence. This remains a draft until live credentials and UI recording evidence are available.\n\n# Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.6-sol`\n<!-- attribution-row:client -->\n- Agent tooling: `Codex`\n<!-- attribution-row:skill-revision -->\n- Skill path: `elizaOS/eliza@3bd3b34f6ac97a7861a5de903c72e7e089adc620:packages/skills/skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\n# Sync with develop\n\n- [x] Rebased onto `origin/develop` at `3bd3b34f6ac97a7861a5de903c72e7e089adc620`; the only conflict was the paired plugin-mcp guide, resolved by preserving upstream env-declared server support and this branch's corrected resource-engine/retry contract.\n- [x] `bun run verify` passes post-sync on Bun 1.3.14 and Node 24.15.0.\n\n# Risks\n\n**Large.** This changes Google OAuth secret handling, agent authorization, connector migration, runtime tool materialization, and the execution protocol for personal Gmail/Calendar/Drive/Docs/Sheets/Slides/People/Chat/Search. The main mitigations are vault-only durable secrets, per-call binding/scope rechecks, curated exact tool allowlists, fail-closed unsupported operations, a sole-agent-only migration backfill, and explicit multi-agent rebinding.\n\nGoogle Workspace MCP remains Developer Preview. Gmail is intentionally draft-only because the official server has no send tool. Calendar is intentionally read-only because current MCP event schemas do not provide the idempotency and atomic version preconditions required by existing LifeOps write guarantees.\n\n# Background\n\n## What does this PR do?\n\n- Adds a stateless MCP v2 remote-resource engine with exact calls, pagination, SSRF validation, opaque attachment generations, and injected short-lived access-token providers.\n- Replaces personal Google REST execution with Google's official per-product MCP endpoints.\n- Uses one direct authorization-code OAuth flow. OAuth app secrets, refresh/access tokens, and PKCE verifiers are stored behind vault/secret references; raw refresh tokens are not serialized into MCP config.\n- Separates a reusable OAuth account from per-agent bindings. Bindings own selected products, allowed capabilities, default selection, status, and independent revocation.\n- Dynamically materializes only reviewed namespaced tools and removes them when a product, capability, scope, binding, or connection is removed.\n- Makes Cloud call official Google resources directly from its trusted runtime and revalidates the current binding, product, capability, tool, and scopes before bearer injection. The old Google broker/stub routes are removed.\n- Thins `plugin-google-workspace` to OAuth, vault resolution, the multi-resource capability host, stable typed adapters, and the separate service-account Google Chat connector.\n- Removes personal Google REST clients, Calendar watch/webhook infrastructure, Meet REST artifacts, Gmail Watch registry data, legacy Mockoon/REST fixtures, and old Gmail compatibility scenario contracts.\n- Migrates Gmail/Calendar scenarios to deterministic MCP fixtures and exact call ledgers. Unsupported spam/bulk/send/calendar-write behavior is asserted to fail closed.\n- Regenerates Cloud routes/SDK wrappers and the first-party plugin registry.\n\nThis PR completes the personal Google Workspace MCP-only cutover. It does not implement the broader Linear/Notion/GitHub SaaS deletion wave from the long-term portfolio plan.\n\n## What kind of change is this?\n\nFeatures, improvements, security hardening, database migration, and intentional removal of obsolete connector compatibility surfaces.\n\n# Documentation changes needed?\n\nDocumentation was updated for the direct OAuth/vault/binding model, official MCP endpoints, draft-only Gmail, read-only Calendar, removed broker/watch/mock surfaces, and the service-account Chat exception.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. `packages/shared/src/contracts/google-workspace-mcp.ts` — canonical endpoint/tool/scope policy.\n2. `plugins/plugin-mcp/src/resource-engine.ts` — stateless authenticated exact-call engine.\n3. `plugins/plugin-google-workspace/src/mcp/capability-host.ts` and `src/service.ts` — local dynamic capabilities and typed adapters.\n4. `packages/cloud/shared/src/lib/eliza/runtime/mcp-config.ts` and `lib/eliza/plugin-mcp/service.ts` — Cloud fan-out and per-call authorization.\n5. `packages/cloud/api/v1/eliza/agents/[agentId]/connectors` — binding CRUD/revocation.\n6. `packages/ui/src/components/connectors` and `packages/ui/src/cloud/instances/components/eliza-agent-connectors-section.tsx` — product selection and agent binding UX.\n\n## Detailed testing steps\n\n- `bun install` — pass.\n- `bun run verify` — pass after rebase (348/348 Turbo tasks plus repository audits).\n- `plugins/plugin-mcp`: 73 passed, 3 skipped.\n- `plugins/plugin-google-workspace`: 56 passed.\n- `packages/scenario-runner`: 385 passed.\n- `packages/shared`: 1,371 passed.\n- `plugins/plugin-calendar`: 482 passed, 4 skipped.\n- Focused connector UI: 12 passed.\n- Cloud binding/config/security/migration group: 25 passed.\n- Cloud binding revoke/OAuth callback group: 11 passed.\n- Cloud OAuth provider registry: 9 passed.\n- Cloud SDK: 79 passed, 19 live tests skipped.\n- Cloud route audit: 515/515 public wrappers, 0 missing, 0 stale, 0 outside public scope.\n- Registry: 37 passed; generated artifacts current.\n- Test corpus: 3,410 scenarios validated.\n- `bun run --cwd packages/app audit:app`: 214/215 checks passed. Affected Settings captures are all `good`; Calendar has no `broken` or `needs-work` verdict. The command exits nonzero only for unrelated existing minimalism-ratchet breaches in Browser, Plugins, and Trajectories views.\n\n# Evidence Gate\n\n<!-- evidence-head:27ca7726b4c88f2339ea15693b54c83a54f499d8 -->\n\n<!-- evidence-row:before-screenshots -->\n- [ ] Before full-page desktop/mobile connector screenshots are pending before this draft is marked ready.\n<!-- evidence-row:after-screenshots -->\n- [ ] After captures exist locally from the app audit and were manually inspected, but must still be attached inline before ready review.\n<!-- evidence-row:walkthrough-video -->\n- [ ] MP4 walkthrough of connect → select products → bind agent → revoke binding is pending live OAuth credentials.\n<!-- evidence-row:backend-logs -->\n- [ ] Live backend OAuth/MCP logs are pending a real Google test account; deterministic route and exact-call test logs are summarized above.\n<!-- evidence-row:frontend-logs -->\n- [ ] Frontend console/network recording is pending the live walkthrough.\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A for this draft run - no live Google OAuth credential or production connector account was available, so claiming a real model/tool trajectory would be fabricated.\n<!-- evidence-row:domain-artifacts -->\n- [x] Database migration assertions, binding DTOs, exact MCP config snapshots, per-call denial assertions, SDK inventory, and MCP tool-call ledgers are covered by the test commands above.\n<!-- evidence-row:ocr-review -->\n- [ ] The app audit generated OCR/manual-review artifacts locally; attach the affected connector/calendar review output before ready status.\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nN/A for this draft run: a real trajectory requires a consented Google test account. No credential was available, and no synthetic run is represented as live evidence.\n\n## Backend + frontend logs\n\nDeterministic test output proves vault resolution, OAuth callback binding, per-agent revoke, migration backfill, product/scope narrowing, exact endpoint/tool authorization, and disconnect removal. Live OAuth network and UI logs remain pending.\n\n## Screenshots (before / after) + video walkthrough\n\nLocal app-audit captures were reviewed for Settings and Calendar across desktop, mobile portrait, mobile landscape, and iPad. They are not yet uploaded. This is the primary reason the PR remains a draft.\n\n## Known gaps / failures\n\n- Google Workspace MCP is Developer Preview and no live Google test credential was available. Contract tests use reviewed official schemas and deterministic MCP fixtures, not fabricated live success.\n- `audit:app` exits nonzero on four unrelated minimalism ratchets in Browser, Plugins, and Trajectories. The affected Settings views are all `good`; Calendar has no `broken` or `needs-work` verdict.\n- The monolithic personal-assistant Vitest lane has an existing worktree resolution failure for `@elizaos/core/testing` in unrelated suites. Affected Google scope/access/scenario tests, package typecheck/build, root verification, and the cross-package scenario runner all pass.\n- Live screenshots, MP4, OCR attachment, backend logs, frontend logs, and real model trajectory must be added before changing this PR from draft to ready.\n- The wider non-Google SaaS connector portfolio migration is explicitly out of scope.\n\nAI provider/model: openai / gpt-5.6-sol\nClient / agent tooling: Codex\nContribution skill revision: elizaOS/eliza@3bd3b34f6ac97a7861a5de903c72e7e089adc620:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [codex-google-mcp]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex\",\"skill_revision\":\"elizaOS/eliza@3bd3b34f6ac97a7861a5de903c72e7e089adc620:packages/skills/skills/contribute-to-eliza\"} -->\n",
       "repository": "elizaos/eliza",
-      "createdAt": "2026-08-08T12:14:57Z",
-      "mergedAt": "2026-08-09T02:53:23Z",
-      "additions": 1549,
-      "deletions": 61
+      "createdAt": "2026-08-10T08:40:17Z",
+      "mergedAt": null,
+      "additions": 15748,
+      "deletions": 30816
+    },
+    {
+      "id": "PR_kwDOMT5cIs781-UD",
+      "title": "feat(examples): restore eliza-code — the deletion was unintentional",
+      "author": "NubsCarson",
+      "number": 18250,
+      "body": "Fixes #18234. Restores `packages/examples/code` (eliza-code — the elizaOS coding agent: the `eliza-code` TUI CLI + the `eliza-code-acp` ACP server that the orchestrator's `elizaos` agent type spawns).\n\nThe package was removed in dc03207dc61 (\"delete a bunch of stuff\") — per shaw, unintentionally, and it should live in the monorepo (an extraction to a separate repo was started and abandoned on his call). Since the deletion, every deployment of the `elizaos` coding backend has run on orphaned prebuilt dists; a routine cleanup on one host broke spawning entirely (\"Cannot find module …/plugin-shell/dist/index.js\").\n\n## What this PR does\n- Restores the package tree at its last living state (dc03207dc61^, 67 files).\n- Ports the plugin-surface consolidation it missed: `@elizaos/plugin-shell` (renamed upstream to `plugin-coding-tools`) removed from deps and from the agent's plugin list — coding-tools alone now carries the shell surface.\n- Re-adds `packages/examples/*` to the root workspace globs (removed with the package).\n\n## Verification\n- Package suite: **77/77 tests** across 23 files.\n- `bun run build` produces both bins (`dist/index.js` CLI, `dist/acp.js` ACP server); acp.js boots cleanly against freshly built workspace deps (no module errors, clean stdio-EOF exit).\n- Live acceptance: the production agent that spawns this backend on every coding task, post-deploy.\n\n# Evidence\n\n<!-- evidence-head:1413381b7890e2bf06409153468759046b7a1aa8 -->\n- Before screenshots: N/A - backend/CLI package, no app UI surface\n- After screenshots: N/A - backend/CLI package, no app UI surface\n- Walkthrough video: N/A - backend/CLI package\n- OCR review: N/A - backend/CLI package\n- Frontend console/network logs: N/A - backend/CLI package\n- Backend logs: bun test 77/77 (23 files) + acp.js boot smoke\n- Real-LLM trajectory: live spawn probe on the deployed agent post-merge\n- Domain artifacts: sub-agent spawn answer on the live agent (date task)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-10T05:30:08Z",
+      "mergedAt": "2026-08-10T05:30:17Z",
+      "additions": 10947,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDOMT5cIs78wjBd",
+      "title": "feat: add MCP-first connector control plane",
+      "author": "wtfsayo",
+      "number": 18221,
+      "body": "# Relates to\n\nCloses #18220.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts (`git fetch origin && git rebase origin/develop`).\n- [x] `bun install` and `bun run verify` were run after sync; the initial generated-subpath resolution failure and successful rerun are recorded below.\n- [ ] A reviewer can confirm the live Google Developer Preview path without reading the code; live credentialed evidence remains outstanding while this PR is draft.\n\n# Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `OpenAI/gpt-5.6-sol`\n<!-- attribution-row:client -->\n- Agent tooling: `Codex CLI 0.147.0`\n<!-- attribution-row:skill-revision -->\n- Skill path: `elizaOS/eliza@fff45485ccaa38ca648de697e45c3bb67f714832:packages/skills/skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\n# Sync with develop\n\n- [x] Rebased onto `origin/develop` at `2123e40eebf9f9087ba1cfc38ba477f136580079`; zero conflicts.\n- [x] `bun run verify` passes on the final synced source tree after building the new package subentry, as documented under Known gaps / failures.\n\n# Risks\n\nMedium-high. This establishes new authentication, connector-account binding, dynamic action, MCP transport, and Cloud broker boundaries. The canary is deliberately restricted to curated Gmail search and Calendar listing; Google write paths, Gmail send, Chat/Meet bot behavior, unsupported products, and messaging connectors remain on their established implementations. Google Workspace MCP is still Developer Preview, so schema compatibility is checked before action materialization and the typed REST fallback remains available.\n\n# Background\n\n## What does this PR do?\n\n- Adds a stateless exact-call MCP resource engine with guarded fetches, paginated discovery, generation-safe attachment handles, short-lived access-token callbacks, bounded requests, and no persisted bearer headers.\n- Extends connector accounts with agent, owner, OAuth mode, execution-target, selected-product, scope, and capability contracts; adds durable Cloud agent-connector bindings and revocation behavior.\n- Materializes only two curated Google actions when compatible tools are discovered: `GOOGLE_GMAIL_SEARCH_THREADS` and `GOOGLE_CALENDAR_LIST_EVENTS`.\n- Makes typed Calendar list reads MCP-first with an observable direct-API fallback while retaining direct APIs for writes, Gmail send, Chat bot, and Meet behavior.\n- Adds a Mode A Cloud broker that resolves the exact agent binding and private credential, mints a short-lived access token, targets fixed official Google product endpoints, and enforces product/tool allowlists.\n- Replaces the singular `/api/mcps/google` stub with per-agent, per-binding, per-product routes and preserves lean-chat/mobile gating.\n- Adds the shared official Google product endpoint catalog and coverage tests.\n\n## What kind of change is this?\n\nFeature: a production-shaped MCP-first connector control-plane slice that reduces future vendor-client ownership without deleting the stable LifeOps service seam.\n\n# Documentation changes needed?\n\nDocumentation was updated in the affected package READMEs and byte-identical `CLAUDE.md` / `AGENTS.md` guide pairs. `bun run check:agents-claude` passes.\n\n# Testing\n\n## Where should a reviewer start?\n\n1. `plugins/plugin-mcp/src/resource-engine.ts`\n2. `plugins/plugin-google-workspace/src/mcp/capability-host.ts`\n3. `packages/shared/src/contracts/google-workspace-mcp.ts`\n4. `packages/cloud/shared/src/lib/services/google-mcp-broker.ts`\n5. `packages/cloud/api/src/api/v1/eliza/agents/[agentId]/connectors/[bindingId]/mcp/[product]/route.ts`\n\n## Detailed testing steps\n\n- `bun install`\n- `bun run --cwd plugins/plugin-mcp build`\n- `bun run --cwd plugins/plugin-mcp test` — 50 passed, 3 skipped.\n- `bun run --cwd plugins/plugin-google-workspace test` — 116 passed.\n- Focused Core connector/action-catalog tests — 24 passed.\n- Focused Cloud binding, broker, OAuth, and MCP-runtime tests — 25 passed.\n- Cloud connector and per-product route tests — 4 passed.\n- PGlite migration application and binding constraints — passed.\n- Cloudflare Worker production dry-run — passed.\n- Drizzle migration check — passed.\n- `bun run verify` — 346/346 Turbo tasks passed; all repository audits passed.\n\n# Evidence Gate\n\nEvidence matches commit `fff45485ccaa38ca648de697e45c3bb67f714832`.\n<!-- evidence-head:fff45485ccaa38ca648de697e45c3bb67f714832 -->\n\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - no rendered UI surface changes.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - no rendered UI surface changes.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - no rendered UI surface changes or visual user flow.\n<!-- evidence-row:backend-logs -->\n- [ ] Live credentialed backend logs are pending because Google Workspace MCP Developer Preview credentials are unavailable in this environment; deterministic broker, route, transport, and fallback contract tests pass.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - no frontend surface or browser request path changed.\n<!-- evidence-row:llm-trajectory -->\n- [ ] A real-model trajectory through the dynamically materialized Google actions is pending provisioned Google Developer Preview credentials and is required before marking ready for review.\n<!-- evidence-row:domain-artifacts -->\n- [x] Deterministic PGlite migration tests apply migration `0195_agent_connector_bindings` and verify ownership, uniqueness, revocation, and public-projection constraints; broker tests verify exact binding/product/tool resolution.\n<!-- evidence-row:ocr-review -->\n- [x] N/A - the diff contains no rendered UI files.\n\n# Evidence Details\n\n## Real LLM-call trajectory\n\nPending while draft: the runtime has no provisioned Google Workspace MCP Developer Preview OAuth client/account. No live trajectory is claimed or fabricated.\n\n## Backend + frontend logs\n\nFrontend: N/A - no rendered client or frontend network path changed.\n\nBackend: deterministic test and verification summary:\n\n```text\nplugin-mcp                         50 passed, 3 skipped\nplugin-google-workspace           116 passed\nCore connector/action catalog      24 passed\nCloud binding/broker/OAuth/MCP      25 passed\nCloud API routes                     4 passed\nPGlite migration + constraints     PASS\nCloudflare Worker dry-run          PASS\nDrizzle migration check            PASS\nRoot verify                    346/346 tasks; audits PASS\n```\n\n## Screenshots (before / after) + video walkthrough\n\nN/A - this PR has no rendered UI surface.\n\n## Audio / voice walkthrough\n\nN/A - no voice, transcript, TTS, or STT behavior changed.\n\n## Known gaps / failures\n\n- Google Workspace MCP is Developer Preview. Live Google OAuth, protected-resource, schema, and action evidence is still required before this draft becomes ready for review.\n- The first post-sync `bun run verify` invocation failed because the newly exported `@elizaos/plugin-mcp/resource-engine` generated declaration subpath did not yet exist after `bun install`. Running `bun run --cwd plugins/plugin-mcp build` generated that entry; the immediate full `bun run verify` rerun then passed all 346 tasks and audits. The explicit build prerequisite is retained here for reproducibility.\n- Project-board attachment/status could not be updated because the authenticated contributor token lacks `read:project`; issue #18220 is assigned and publicly claimed.\n\nAI provider/model: OpenAI / gpt-5.6-sol\nClient / agent tooling: Codex CLI 0.147.0\nContribution skill revision: elizaOS/eliza@fff45485ccaa38ca648de697e45c3bb67f714832:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [codex-mcp-first-connectors]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex CLI 0.147.0\",\"skill_revision\":\"elizaOS/eliza@fff45485ccaa38ca648de697e45c3bb67f714832:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-09T23:16:09Z",
+      "mergedAt": null,
+      "additions": 5313,
+      "deletions": 147
+    },
+    {
+      "id": "PR_kwDOMT5cIs79JKwY",
+      "title": "fix(cloud): restore dedicated-agent pairing session",
+      "author": "NubsCarson",
+      "number": 18305,
+      "body": "Closes #18304.\n\n## Outcome\n\nThis restores the managed dedicated-agent **Open → pair → authenticated app** path and closes the credential-boundary holes found while tracing the original “expired link” failure.\n\n- The Hetzner router preserves the Worker-pinned public agent host instead of replacing it with the control-plane host.\n- Managed pairing terminates at the Cloud Worker, claims the one-time token atomically against the exact agent and origin, and writes only an owner-scoped browser credential.\n- Remote containers cannot re-enable the direct pairing relay; local Docker retains an explicit loopback-only compatibility mode.\n- Pre-auth managed HTML never contains the full agent bearer.\n- The dedicated-agent proxy strips Cloud cookies/credential headers, rejects authenticated non-owners, owns CORS, strips response cookies/site-clearing headers, preserves WebSocket upgrades, and removes every Cloud-shaped realtime query credential before forwarding.\n- UI restore/switch paths bind credentials to UUID agent owners and trusted bases, use an atomic base+token WebSocket repoint, never send Steward credentials to loopback, and make profile persistence failure visible instead of reporting a false successful switch.\n\n## Exact object\n\n- head: `eafcf934029264e75f55731a75c35eddf2a3f023`\n- tree: `0e787ba60278d79f129d1794263063df5940b54c`\n- base: `86c1d685270ba33ace21df5a080a22f95dc030cb` (`origin/develop`, 0 behind)\n- commits: 12\n- scope: 77 files, +5130 / -965\n\n## Verification\n\n- `bun run verify`: PASS — Turbo 348/348 plus all trailing audits; 0 focused/orphaned tests.\n- focused UI/session suites: 17 files / 231 tests PASS.\n- focused live-Worker Group A auth E2E: 47/47 PASS; the pairing cases reach their intended missing-token, missing-Origin, and invalid-token branches.\n- real Chromium pairing evidence: 2/2 PASS — production relay/storage/boot-adopter modules, visible fail-closed recovery, and zero bearer persistence on invalid ownership.\n- focused dedicated Worker proxy suite: 39/39 tests, 187 assertions PASS.\n- Cloud pairing/router/atomic-claim/remote-runtime suites: PASS, including real PGlite claim coverage.\n- package typechecks: UI, Cloud API, Cloud shared, agent, app-core, shared PASS.\n- Cloudflare Worker production dry-run bundle: PASS.\n- Biome on every changed path and `git diff --check`: PASS.\n- `bun run --cwd packages/app audit:app`: 214/215; all affected Runtime, Settings, Cloud, and Cockpit surfaces passed across mobile/desktop/iPad. The only failure is four Browser/Plugins/Trajectories minimalism-density ratchets outside this PR’s diff; no visual baseline was changed.\n\n## Staging history and release boundary\n\nThe router-only staging deployment already proved a fresh link reaches `/pair`, exposing the second owner-scoped handoff bug fixed here. Every earlier d26, e40, and e286 image is explicitly superseded and must not be used for final QA.\n\nRun [31436242422](https://github.com/elizaOS/eliza/actions/runs/31436242422) succeeded on exact head eafcf934. The real production entrypoint reached ready/responding with runtime and database healthy, 23 plugins loaded / 0 failed, deferred boot settled, 15 seconds of post-health stability, and cold ready at 10,918ms against a 25,000ms budget. Immutable demo image: `ghcr.io/elizaos/eliza-demo@sha256:d34826f09d030965bd55418d88fbfd4e8904778ad98b0bf3debd934c4f096b13` (config `sha256:b7ff9e0b01962c3c09f6fef41a36ee12a3f740310770767900c70206c0d63315`). [Canonical attestation](https://github.com/elizaOS/eliza/attestations/39917519), [demo attestation](https://github.com/elizaOS/eliza/attestations/39917538), exact OCI revision, and credential-free pulls from both canonical and demo repositories were independently verified.\n\n## Evidence checklist\n\n<!-- evidence-head:eafcf934029264e75f55731a75c35eddf2a3f023 -->\n\n<!-- evidence-row:before-screenshots -->\n- [x] ![before-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-pr18305-e286-before.jpg)\n\n<!-- evidence-row:after-screenshots -->\n- [x] ![after-screenshots](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-pr18305-e286-after.jpg)\n\n<!-- evidence-row:walkthrough-video -->\n- [x] https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-pr18305-e286-walkthrough.mp4\n\n<!-- evidence-row:backend-logs -->\n- [x] [18305-.codex-pr18305-backend-e286-v2.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-.codex-pr18305-backend-e286-v2.log)\n\n<!-- evidence-row:frontend-logs -->\n- [x] [18305-.codex-pr18305-frontend-e286-v2.log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-.codex-pr18305-frontend-e286-v2.log)\n\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - this PR changes transport, session isolation, and credential ownership only; the required real Cerebras reply is the final staging acceptance gate\n\n<!-- evidence-row:domain-artifacts -->\n- [x] [18305-.codex-pr18305-domain-e286.json](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-.codex-pr18305-domain-e286.json)\n\n<!-- evidence-row:ocr-review -->\n- [x] [18305-.codex-pr18305-ocr-e286.txt](https://github.com/elizaOS/eliza/releases/download/pr-evidence-7/18305-.codex-pr18305-ocr-e286.txt)\n\n## Known open gate\n\nNo source, focused-test, evidence, or image blocker is known. Exact-head CI/review, reviewed merge/develop deployment, and one-shot real staging acceptance remain open; this PR does not claim those happened yet.\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: yes\n<!-- attribution-row:models -->\n- Model(s) used: openai/gpt-5.6-sol\n<!-- attribution-row:client -->\n- Agent tooling: Codex Desktop\n<!-- attribution-row:skill-revision -->\n- Skill path: elizaOS/eliza@86c1d685270ba33ace21df5a080a22f95dc030cb:packages/skills/skills/contribute-to-eliza\n<!-- attribution-row:status -->\n- Provenance status: self-reported\n\nAI provider/model: openai / gpt-5.6-sol\nClient / agent tooling: Codex Desktop\nContribution skill revision: elizaOS/eliza@86c1d685270ba33ace21df5a080a22f95dc030cb:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [kepler]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex Desktop\",\"skill_revision\":\"elizaOS/eliza@86c1d685270ba33ace21df5a080a22f95dc030cb:packages/skills/skills/contribute-to-eliza\"} -->\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-08-10T17:52:43Z",
+      "mergedAt": null,
+      "additions": 5151,
+      "deletions": 980
     }
   ],
   "codeChanges": {
-    "additions": 26671,
-    "deletions": 2998,
-    "files": 278,
-    "commitCount": 296
+    "additions": 49416,
+    "deletions": 4360,
+    "files": 533,
+    "commitCount": 520
   },
   "completedItems": [
+    {
+      "title": "fix(plugin-mcp): env-declared servers, failure containment, direct tool selection, status-route key",
+      "prNumber": 18218,
+      "type": "bugfix",
+      "body": "## What\n\nFour reliability fixes in `plugin-mcp`, one of which is a live bug on develop:\n\n1. **Status route resolves a service that doesn't exist.** `routes-mcp.ts` called `state.runtime.getService(\"MCP\")`, but `McpService.serviceType` is `\"",
+      "files": [
+        "plugins/plugin-mcp/AGENTS.md",
+        "plugins/plugin-mcp/CLAUDE.md",
+        "plugins/plugin-mcp/__tests__/direct-tool-selection.test.ts",
+        "plugins/plugin-mcp/__tests__/env-server-discovery.test.ts",
+        "plugins/plugin-mcp/__tests__/routes-mcp.test.ts",
+        "plugins/plugin-mcp/__tests__/service-resilience.test.ts",
+        "plugins/plugin-mcp/src/actions/mcp.ts",
+        "plugins/plugin-mcp/src/routes-mcp.ts",
+        "plugins/plugin-mcp/src/service.ts"
+      ]
+    },
     {
       "title": "chore(agent): restore Biome formatting broken by #18207",
       "prNumber": 18216,
@@ -178,6 +195,77 @@
         "plugins/plugin-workflow/__tests__/unit/smithers-runtime.test.ts",
         "plugins/plugin-workflow/package.json",
         "plugins/plugin-workflow/src/services/smithers-runtime.ts"
+      ]
+    },
+    {
+      "title": "fix(core): URL work orders with unlisted verbs are rejected as passive links (#18108)",
+      "prNumber": 18192,
+      "type": "bugfix",
+      "body": "Closes #18108\n\n## Summary\n\n`looksLikeBareLinkShare` classified any short URL-bearing message as a passive link share unless its verb appeared in a closed 22-word English allowlist (`build`, `create`, `fix`, `deploy`, ...). Verbs like **revi",
+      "files": [
+        "packages/core/src/__tests__/message-routing-live-regression.test.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/services/message/direct-action-heuristics.test.ts",
+        "packages/core/src/services/message/direct-action-heuristics.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/spawn-link-guard.test.ts",
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/runtime/planner-loop.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "packages/core/src/types/components.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/url-work-order-routing.live.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): rotate agent keys on the caller's transaction, not a second connection",
+      "prNumber": 18191,
+      "type": "bugfix",
+      "body": "## Summary\n\nManaged agent launch returns **500 after exactly 30 seconds**. `prepareManagedLaunchEnvironment` holds a write connection for its whole agent-lifecycle ownership window, then asks the pool for a **second** connection to rotate t",
+      "files": [
+        "packages/cloud/shared/src/db/repositories/api-keys.ts",
+        "packages/cloud/shared/src/lib/services/api-keys.invalidation.test.ts",
+        "packages/cloud/shared/src/lib/services/api-keys.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox-warm-claim-key-push.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud/shared/src/lib/services/managed-eliza-config.ts",
+        "packages/cloud/shared/src/lib/services/managed-eliza-env.ts",
+        "packages/cloud/shared/src/lib/services/managed-launch-credential-rotation.pglite.test.ts"
+      ]
+    },
+    {
+      "title": "docs(ci): reconcile workflow topology and linter ownership (#18147)",
+      "prNumber": 18187,
+      "type": "docs",
+      "body": "## Summary\n\nAfter workflow consolidation, the CI docs in `.github/workflows/README.md` and `packages/app/docs/E2E_LIVE_COVERAGE.md` incorrectly described `ci.yml` as \"the only pull-request workflow\" and `live-smoke.yml` as \"the only credent",
+      "files": [
+        ".github/workflows/README.md",
+        ".github/workflows/ci.yml",
+        ".github/workflows/live-smoke.yml",
+        "packages/app/docs/E2E_LIVE_COVERAGE.md"
+      ]
+    },
+    {
+      "title": "fix(cloud): pin the staging onboarding app origin to app-staging.elizacloud.ai",
+      "prNumber": 18186,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFollow-up blocker filed from this review: #18197 (staging has no homepage bundle\nwired to `api-staging.elizacloud.ai`).\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `dev",
+      "files": [
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/shared/src/lib/services/eliza-app/onboarding-host-contract.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): group-channel addressedTo gate suppresses reply, planner, and early-ack (#18173)",
+      "prNumber": 18183,
+      "type": "bugfix",
+      "body": "Fixes #18173\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` and focused package tests/typecheck were run after sync.\n- [x] A reviewer can confirm the change works fr",
+      "files": [
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/features/advanced-capabilities/personality/services/personality-store.ts",
+        "packages/core/src/runtime/__tests__/message-handler.test.ts",
+        "packages/core/src/runtime/message-handler.ts",
+        "packages/core/src/services/message.ts",
+        "packages/core/src/__tests__/message-addressing-gate.live.test.ts"
       ]
     },
     {
@@ -287,6 +375,17 @@
       ]
     },
     {
+      "title": "fix(browser): contain tab switcher scrolling and dismissal",
+      "prNumber": 18167,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #18153.\n\n- [x] This PR targets `develop` and is rebased onto exact current `origin/develop` with zero conflicts.\n- [x] A frozen offline `bun install` and `bun run verify` passed after sync.\n- [x] A reviewer can confirm ",
+      "files": [
+        "packages/app/test/ui-smoke/browser-workspace.spec.ts",
+        "packages/ui/src/components/pages/BrowserTabSwitcher.tsx",
+        "packages/ui/src/components/pages/browser-tab-switcher.test.tsx"
+      ]
+    },
+    {
       "title": "fix(cloud): always mark managed agents as ELIZA_CLOUD_PROVISIONED",
       "prNumber": 18165,
       "type": "bugfix",
@@ -325,6 +424,26 @@
       ]
     },
     {
+      "title": "fix(browser): keep background refresh timeouts out of the foreground",
+      "prNumber": 18156,
+      "type": "bugfix",
+      "body": "Closes #18148\n\n## Summary\n\nA 2.5-second Browser workspace poll could overlap while the shared API client waited up to 10 seconds, and a rejected silent poll wrote into the foreground error alert even when a good embedded page remained avail",
+      "files": [
+        "packages/ui/src/components/pages/BrowserWorkspaceView.chrome.test.tsx",
+        "packages/ui/src/components/pages/BrowserWorkspaceView.tsx"
+      ]
+    },
+    {
+      "title": "fix(ci): order scenario-runner filtered typecheck",
+      "prNumber": 18149,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #18144.\n\n- [x] This PR targets develop and is rebased onto the latest fetched origin/develop with zero conflicts.\n- [x] An isolated exact archive completed a frozen offline install with lifecycle scripts disabled, and b",
+      "files": [
+        "packages/scripts/__tests__/scenario-runner-typecheck-graph.test.ts",
+        "turbo.json"
+      ]
+    },
+    {
       "title": "fix(ci): finish workflow-consolidation residue cleanup",
       "prNumber": 18136,
       "type": "bugfix",
@@ -334,6 +453,32 @@
         ".github/workflows/develop-pr.yml",
         "packages/cloud/scripts/bluebubbles-local-bridge.registered-e2e.test.ts",
         "scripts/check-pr-agent-attribution.test.mjs"
+      ]
+    },
+    {
+      "title": "fix(homepage): provisioning polling no longer appends duplicate onboarding replies",
+      "prNumber": 18133,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #18078\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` and focused package tests/typecheck were run after sync (full `bun run verify` not run in w",
+      "files": [
+        "packages/cloud/api/__tests__/eliza-app-onboarding-chat-platform-caller.test.ts",
+        "packages/cloud/api/eliza-app/onboarding/chat/route.ts",
+        "packages/cloud/shared/src/lib/services/eliza-app/onboarding-chat.test.ts",
+        "packages/cloud/shared/src/lib/services/eliza-app/onboarding-chat.ts",
+        "packages/homepage/package.json",
+        "packages/homepage/src/lib/hooks/use-eliza-app-provisioning-chat.ts",
+        "packages/homepage/src/lib/provisioning-poll-body.ts",
+        "packages/homepage/tests/provisioning-poll-body.test.ts",
+        "packages/homepage/tests/provisioning-poll-hook.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): give cloud-files-route tests the package's slow-host timeout budget",
+      "prNumber": 18130,
+      "type": "bugfix",
+      "body": "## What\n\n`packages/cloud/api/__tests__/cloud-files-route.test.ts` was the only heavy api suite still riding bun's **5000ms default** per-test timeout. Adopt the package's established slow-host budget — `setDefaultTimeout(90_000)` at module ",
+      "files": [
+        "packages/cloud/api/__tests__/cloud-files-route.test.ts"
       ]
     },
     {
@@ -378,6 +523,37 @@
         "packages/ui/src/components/pages/BrowserTabSwitcher.tsx",
         "packages/ui/src/components/pages/BrowserWorkspaceView.chrome.test.tsx",
         "packages/ui/src/components/pages/BrowserWorkspaceView.tsx"
+      ]
+    },
+    {
+      "title": "fix: restore production Blooio iMessage",
+      "prNumber": 18123,
+      "type": "bugfix",
+      "body": "Fixes #18113\n\n## Summary\n\n- restores Blooio as the production iMessage transport using the current hosted API and v4 webhook envelope\n- keeps legacy v2 webhook compatibility while accepting the provider's current `type`/`data` payloads\n- ma",
+      "files": [
+        "packages/cloud/api/__tests__/eliza-app-webhook-suffix.test.ts",
+        "packages/cloud/api/eliza-app/webhook/_forward.ts",
+        "packages/cloud/api/wrangler.toml",
+        "packages/cloud/services/gateway-webhook/__tests__/blooio-adapter.test.ts",
+        "packages/cloud/services/gateway-webhook/src/adapters/blooio.ts",
+        "packages/cloud/shared/src/lib/services/eliza-app/config.ts",
+        "packages/cloud/shared/src/lib/utils/blooio-api.test.ts",
+        "packages/cloud/shared/src/lib/utils/blooio-api.ts",
+        "packages/homepage/public/_headers",
+        "packages/homepage/src/lib/contact.ts",
+        "packages/homepage/tests/contact.test.ts",
+        "packages/homepage/tests/smoke.node.test.mjs",
+        "packages/homepage/vite.config.ts",
+        "packages/ui/src/components/connectors/connector-mode-registry.test.ts",
+        "packages/ui/src/components/connectors/connector-mode-registry.ts",
+        "packages/app/playwright.ui-smoke.config.ts",
+        "packages/app/scripts/lib/playwright-audit-projects.mjs",
+        "packages/app/scripts/playwright-audit-projects.test.mjs",
+        "packages/app/scripts/run-ui-playwright.mjs",
+        "packages/app/test/ui-smoke/audit-project-worker-contract.spec.ts",
+        "packages/cloud/api/webhooks/blooio/[orgId]/route.test.ts",
+        "packages/cloud/api/webhooks/blooio/[orgId]/route.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/issue-create-degrade.test.ts"
       ]
     },
     {
@@ -787,97 +963,702 @@
         "plugins/plugin-wallet/src/chains/wallet-action.ts",
         "plugins/plugin-wallet/src/security/wallet-financial-confirmation.ts"
       ]
+    },
+    {
+      "title": "fix(scheduling): named OptimizedPromptTask slots + deterministic fallback for model-free dispatch",
+      "prNumber": 18000,
+      "type": "bugfix",
+      "body": "## Summary\n\nAddresses remaining gaps from the July 23 triage of #14874.\n\nPRs #14821 and #15084 already fixed the primary defect (model-mediated dispatch rendering). This PR closes 3 of the 5 remaining gaps identified in the triage:\n\n### 1. ",
+      "files": [
+        "packages/core/src/services/optimized-prompt-resolver.test.ts",
+        "packages/core/src/services/optimized-prompt.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/runtime-wiring.ts",
+        "plugins/plugin-personal-assistant/test/scheduled-task-dispatch-render.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dispatch-render.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dispatch-render.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/index.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/runner-service.ts",
+        "packages/core/src/trajectory-utils.token-backfill.test.ts",
+        "packages/core/src/trajectory-utils.ts",
+        "packages/examples/code/src/App.ts",
+        "packages/examples/code/src/index.ts",
+        "packages/examples/code/src/lib/tui-owner.test.ts",
+        "packages/examples/code/src/lib/tui-owner.ts",
+        "plugins/plugin-personal-assistant/src/actions/document.ts",
+        "plugins/plugin-personal-assistant/src/default-packs/contract-types.ts",
+        "plugins/plugin-personal-assistant/src/default-packs/daily-rhythm.ts",
+        "plugins/plugin-personal-assistant/src/default-packs/followup-starter.ts",
+        "plugins/plugin-personal-assistant/src/default-packs/inbox-triage-starter.ts",
+        "plugins/plugin-personal-assistant/src/default-packs/morning-brief.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/approval-queue.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/checkin/checkin-prompt.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/checkin/checkin-service.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/reminders-service.in-app-nudge.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/reminders-service.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/dispatch-context.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/dispatch-context.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/runtime-wiring.owner-facing-copy.test.ts",
+        "plugins/plugin-personal-assistant/test/connector-payload-fuzz.test.ts",
+        "plugins/plugin-personal-assistant/test/scheduled-task-voicing.live.test.ts",
+        "plugins/plugin-personal-assistant/test/stubs/agent.ts",
+        "plugins/plugin-scheduling/src/coding-agent-schedules.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/dispatch-policy-enforcement.test.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/runner.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/schema.ts",
+        "plugins/plugin-scheduling/src/scheduled-task/types.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-elizacloud): retry cold-cache warming 503 for image description + fail closed instead of fabricating an error description",
+      "prNumber": 18323,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive box, 2026-08-10: every incoming image to the bot produced `Error analyzing image: ElizaOS Cloud API error: 503` (8x). Operator asked why — \"I thought we fixed image yesterday.\"\n\n## Root cause (two client bugs, neither ",
+      "files": [
+        "plugins/plugin-elizacloud/__tests__/image-description-warming.test.ts",
+        "plugins/plugin-elizacloud/src/models/image.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): list_agents/history/share reads stay planner-only, never ship raw text",
+      "prNumber": 18315,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive, 2026-08-10 — a status-y mention (\"post-deploy health check — you good on the latest build?\") was routed by the planner to the `list_agents` read op, and its planner-only guidance text shipped verbatim to Discord:\n\n> N",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/issue-read-ops-planner-only.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): stop iOS focus zoom on chat-shell text controls",
+      "prNumber": 18311,
+      "type": "bugfix",
+      "body": "Closes #18233\n\n## Problem\n\nMobile Safari automatically focus-zooms text controls whose computed font size is below 16px. The chat overlay composer, shared `Input`, and shared `Textarea` all used a 14px base size, so focusing them on iOS cou",
+      "files": [
+        "packages/ui/src/components/shell/ChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ChatOverlay.tsx",
+        "packages/ui/src/components/ui/input-textarea-focus-zoom.test.tsx",
+        "packages/ui/src/components/ui/input.tsx",
+        "packages/ui/src/components/ui/textarea.tsx"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): planner sentinel id filters (none/null/any) are absent, not literal filters",
+      "prNumber": 18306,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive, 2026-08-10 — shaw asked the channel a rhetorical \"any burning fires or admin things needed from anyone?\" The planner routed it to TASKS history and hallucinated filter args, and the bot answered shaw with:\n\n> I did no",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/task-history.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(workflow): isolate test files in fresh processes (#18301)",
+      "prNumber": 18303,
+      "type": "bugfix",
+      "body": "## Summary\n\nCloses #18301.\n\nRuns every `plugin-workflow` test file in a fresh Bun process, serially and in deterministic order, while preserving the package's 25-minute process-group deadline and one diagnostic retry. It also preserves the ",
+      "files": [
+        "packages/scripts/__tests__/run-all-tests-vacuous-green-guard.test.ts",
+        "packages/scripts/run-all-tests.mjs",
+        "plugins/plugin-workflow/__tests__/unit/test-runner.test.ts",
+        "plugins/plugin-workflow/package.json",
+        "plugins/plugin-workflow/scripts/run-isolated-tests.mjs"
+      ]
+    },
+    {
+      "title": "fix(app): repair Smoke contracts and agent registry lifecycle (#18298)",
+      "prNumber": 18299,
+      "type": "bugfix",
+      "body": "## Summary\n\nCloses #18298.\n\nThe deterministic app Smoke lane had three assertions that no longer matched the shipped UI contracts. A full cross-browser run proved those three repairs, then exposed a deeper fourth defect: a visible plugin pa",
+      "files": [
+        "packages/app/test/ui-smoke/chat-view-memory-stability.spec.ts",
+        "packages/app/test/ui-smoke/launcher-interaction.spec.ts",
+        "packages/app/test/ui-smoke/tap-target-geometry-all-views.spec.ts",
+        "packages/ui/src/agent-surface/AgentSurfaceContext.tsx",
+        "packages/ui/src/agent-surface/integration.test.tsx",
+        "packages/ui/src/agent-surface/registry.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): set completed_at on every terminal job transition (#18093)",
+      "prNumber": 18297,
+      "type": "bugfix",
+      "body": "Closes #18093.\n\n## Problem\n\nTerminal transitions to `failed` and `cancelled` did not consistently set `completed_at`. Production cohorts keyed by that field therefore omitted failures and cancellations and could report a false-green failure",
+      "files": [
+        "packages/cloud/scripts/admin/migrate-with-diagnostics.postgres.test.ts",
+        "packages/cloud/shared/src/db/job-terminal-completed-at-migration.test.ts",
+        "packages/cloud/shared/src/db/migrations/0195_job_terminal_completed_at_backfill.sql",
+        "packages/cloud/shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud/shared/src/db/repositories/__tests__/jobs-completed-at.test.ts",
+        "packages/cloud/shared/src/db/repositories/jobs.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs-delete-enqueue.test.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): match flake signatures while output streams (#18294)",
+      "prNumber": 18295,
+      "type": "bugfix",
+      "body": "## Summary\n\nCloses #18294.\n\nFixes the bounded flake-retry wrapper so a known infrastructure signature cannot be erased by a noisy teardown before the child exits.\n\nThis PR is temporarily stacked on #18299 so its long-running CI validates bo",
+      "files": [
+        "packages/scripts/__tests__/run-with-flake-retry.test.ts",
+        "packages/scripts/run-with-flake-retry.mjs"
+      ]
+    },
+    {
+      "title": "test(workflow): align orphan reconciliation with disabled notification",
+      "prNumber": 18293,
+      "type": "tests",
+      "body": "Closes #18291\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.6-sol`\n<!-- attribution-row:client ",
+      "files": [
+        "plugins/plugin-workflow/__tests__/integration/orphaned-schedule-reconciliation.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): bind release-electrobun assets to the canonical tag and release (#18272)",
+      "prNumber": 18289,
+      "type": "bugfix",
+      "body": "Closes #18272\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.6-sol`\n<!-- attribution-row:client ",
+      "files": [
+        ".github/workflows/release-electrobun.yml",
+        "packages/docs/build-and-release.md",
+        "packages/scripts/__tests__/release-electrobun-tag-binding.test.ts",
+        "packages/scripts/electrobun-release-identity.mjs"
+      ]
+    },
+    {
+      "title": "test(app): deep-link connector expectation follows the per-connector settings pages",
+      "prNumber": 18288,
+      "type": "tests",
+      "body": "## What\n\nDevelop's Tests lane is red by exactly one assertion: `deep-link-handler.test.ts` still expects the pre-56cee4c21f0 flat `subview: \"connectors\"`, but that commit's per-connector Settings detail pages deliberately made deep links ca",
+      "files": [
+        "packages/app/src/deep-link-handler.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): embedding queue skips whitespace-only text the backends terminally reject",
+      "prNumber": 18276,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive box, 2026-08-10: image-only Discord messages (whitespace-only `content.text`) produced `EmbeddingService.generate — Cannot generate embedding for empty text` error + reportError on every queue retry (24 log entries and",
+      "files": [
+        "packages/core/src/services/embedding.test.ts",
+        "packages/core/src/services/embedding.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): verify-failed completions with no live URL get the honest failure reply",
+      "prNumber": 18275,
+      "type": "bugfix",
+      "body": "## What\n\nA `task_complete` stamped with the router's verification-failure annotation and **no URL that actually probed live** delivered nothing usable — yet neither response-handler evaluator owned the turn. The completion evaluator's gate ",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/unit/sub-agent-failure-evaluator.test.ts",
+        "plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-completion.ts",
+        "plugins/plugin-agent-orchestrator/src/evaluators/sub-agent-failure.ts"
+      ]
+    },
+    {
+      "title": "fix(agent,workflow): auto-disable triggers whose workflow no longer exists",
+      "prNumber": 18274,
+      "type": "bugfix",
+      "body": "## What\n\nA workflow-kind trigger whose workflow was deleted re-fired forever: every dispatch failed with the same not-found error, each fire logging an error and pushing a high-priority \"Automation failed\" notification. Observed live: one o",
+      "files": [
+        "packages/agent/src/triggers/runtime.test.ts",
+        "packages/agent/src/triggers/runtime.ts",
+        "plugins/plugin-workflow/__tests__/unit/workflow-dispatch.test.ts",
+        "plugins/plugin-workflow/src/services/workflow-dispatch.ts"
+      ]
+    },
+    {
+      "title": "fix(core): promoted virtuals stop inheriting the parent simile array that retrieval drops as ambiguous",
+      "prNumber": 18273,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive, 2026-08-10 (post-restart battery): \"any new issues on the eliza repo?\" — the bot could not route to `manage_issues` and fell back to web search (\"search didn't return a clean list\"). Boot logs showed the whole TASKS f",
+      "files": [
+        "packages/core/src/actions/__tests__/promote-subactions.test.ts",
+        "packages/core/src/actions/promote-subactions.ts"
+      ]
+    },
+    {
+      "title": "fix(app-core): stop the account keep-alive sweep from hammering dead refresh grants",
+      "prNumber": 18271,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive box, 2026-08-10: two anthropic-subscription accounts with expired refresh grants produced `[auth] Failed to refresh anthropic-subscription token ... invalid_grant: Refresh token expired` **176+ times** — the account-po",
+      "files": [
+        "packages/app-core/src/services/account-pool.ts",
+        "packages/app-core/src/services/multi-account-refresh-failover.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): paint a branded shell before hydration and kill the login layout shift",
+      "prNumber": 18269,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRefs #18256 — delivers fix plan items **A** (pre-hydration branded shell) and **B** (reserve final card geometry). Items C–E from that issue intentionally stay open for maintainer judgment, so this PR does not auto-close it.\n\n",
+      "files": [
+        "packages/app/index.html",
+        "packages/app/test/brand-surface.test.ts",
+        "packages/ui/src/cloud/public-pages/pages/login/login-page.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/login-section-skeleton.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.loading-geometry.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.tsx"
+      ]
+    },
+    {
+      "title": "fix(examples): re-green example-code — format, shared session factory, ghost tsconfig",
+      "prNumber": 18268,
+      "type": "bugfix",
+      "body": "## What\n\nThe eliza-code restore left `@elizaos/example-code` red three ways on develop, which turns the `lint`, `Quality`, and `typecheck` lanes red for **every open PR** (first seen on #18266's run; the package is untouched by that diff):\n",
+      "files": [
+        "packages/examples/code/src/cli.ts",
+        "packages/examples/code/src/index.ts",
+        "packages/examples/code/src/lib/session.ts",
+        "packages/examples/code/tsconfig.json"
+      ]
+    },
+    {
+      "title": "fix(core): persist trajectory steps envelope-first so budget truncation never poisons the row",
+      "prNumber": 18267,
+      "type": "bugfix",
+      "body": "## The incident\n\nLive eliza-code TUI session (2026-08-10): every turn logged `TrajectoriesPlugin.endRetry — Trajectory row contains an invalid step (field: steps_json, stepIndex 0)` and `TRAJECTORY_TERMINALIZATION_FAILED`; the trajectory ro",
+      "files": [
+        "packages/core/src/features/trajectories/TrajectoriesService.test.ts",
+        "packages/core/src/features/trajectories/TrajectoriesService.ts",
+        "packages/core/src/services/trajectory-json.ts"
+      ]
+    },
+    {
+      "title": "fix(core): deliver the failure reply once stage-1 committed to respond",
+      "prNumber": 18266,
+      "type": "bugfix",
+      "body": "## What\n\n`handleMessage`'s stage-1 failure catch decides whether to send the structured failure reply using only deterministic addressing signals (`isDeterministicallyAddressedTurn`: mention, reply, DM, autonomous, delivered early ack). The",
+      "files": [
+        "packages/core/src/services/message.runtime-failure-suppression.test.ts",
+        "packages/core/src/services/message.ts"
+      ]
+    },
+    {
+      "title": "fix(core): recipientIsKnownEntity checks exact requester-recipient pair (#18107)",
+      "prNumber": 18265,
+      "type": "bugfix",
+      "body": "Closes #18107\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.6-sol`\n<!-- attribution-row:client ",
+      "files": [
+        "packages/core/src/features/advanced-capabilities/actions/message.test.ts",
+        "packages/core/src/features/advanced-capabilities/actions/message.ts"
+      ]
+    },
+    {
+      "title": "fix(eliza-code): tui gets the owner bootstrap and quit always returns the terminal",
+      "prNumber": 18255,
+      "type": "bugfix",
+      "body": "Follow-up to #18254 — two more live TUI findings (owner's hands-on session, 2026-08-10):\n\n1. **The TUI path never got the owner bootstrap.** `-i` runs `runInteractive()` in index.ts, which calls `initializeAgent()` directly — bypassing the ",
+      "files": [
+        "packages/examples/code/src/index.ts"
+      ]
+    },
+    {
+      "title": "fix(eliza-code): cli marks the session user as owner so coding tools reach the planner",
+      "prNumber": 18254,
+      "type": "bugfix",
+      "body": "The eliza-code CLI chatted fine but could never act: \"ship something\" → \"I handled the available step.\" loops (live 2026-08-10, TUI session). Instrumentation showed the ACTION_PLANNER call carrying **zero tools** while Stage-1 got its own.\n",
+      "files": [
+        "packages/examples/code/src/cli.ts"
+      ]
+    },
+    {
+      "title": "fix(homepage): imperative swipe gesture on page ref",
+      "prNumber": 18253,
+      "type": "bugfix",
+      "body": "Closes #18129.\n\n## Summary\n\nMoves the landing-page swipe recognizer from JSX props on a static root `<div>` to `@use-gesture/react`'s imperative `target` API. The page keeps honest document semantics while preserving the library's pointer c",
+      "files": [
+        "biome.json",
+        "packages/homepage/src/pages/landing.tsx",
+        "packages/homepage/tests/e2e/app-routes-flow.spec.ts"
+      ]
+    },
+    {
+      "title": "fix(build): remove react paths mappings that bun executes as runtime code",
+      "prNumber": 18252,
+      "type": "bugfix",
+      "body": "Found while bringing the restored eliza-code (#18250) up in source mode: any `--conditions eliza-source` execution whose graph crosses one of 23 packages died with\n\n> Fatal error: export as namespace React; — Unexpected as — at @types/react",
+      "files": [
+        "packages/app-core/tsconfig.build.json",
+        "packages/app-core/tsconfig.json",
+        "packages/app/tsconfig.json",
+        "packages/app/tsconfig.typecheck.json",
+        "packages/shared/tsconfig.json",
+        "plugins/plugin-blocker/tsconfig.json",
+        "plugins/plugin-contacts/tsconfig.json",
+        "plugins/plugin-documents/tsconfig.json",
+        "plugins/plugin-finances/tsconfig.json",
+        "plugins/plugin-goals/tsconfig.json",
+        "plugins/plugin-health/tsconfig.json",
+        "plugins/plugin-inbox/tsconfig.json",
+        "plugins/plugin-local-inference/tsconfig.json",
+        "plugins/plugin-messages/tsconfig.json",
+        "plugins/plugin-native-settings/tsconfig.json",
+        "plugins/plugin-notes/tsconfig.json",
+        "plugins/plugin-phone/tsconfig.json",
+        "plugins/plugin-registry/tsconfig.json",
+        "plugins/plugin-relationships/tsconfig.json",
+        "plugins/plugin-scheduling/tsconfig.json",
+        "plugins/plugin-todos/tsconfig.json",
+        "plugins/plugin-trajectory-logger/tsconfig.json",
+        "plugins/plugin-wifi/tsconfig.json"
+      ]
+    },
+    {
+      "title": "chore: restore trailing newline in package.json",
+      "prNumber": 18251,
+      "type": "other",
+      "body": "One-byte fixup: #18250's workspace-glob edit dropped the file's trailing newline.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "package.json"
+      ]
+    },
+    {
+      "title": "feat(examples): restore eliza-code — the deletion was unintentional",
+      "prNumber": 18250,
+      "type": "feature",
+      "body": "Fixes #18234. Restores `packages/examples/code` (eliza-code — the elizaOS coding agent: the `eliza-code` TUI CLI + the `eliza-code-acp` ACP server that the orchestrator's `elizaos` agent type spawns).\n\nThe package was removed in dc03207dc61",
+      "files": [
+        "package.json",
+        "packages/examples/code/.gitignore",
+        "packages/examples/code/AGENTS.md",
+        "packages/examples/code/CLAUDE.md",
+        "packages/examples/code/MODEL_PROVIDERS.md",
+        "packages/examples/code/README.md",
+        "packages/examples/code/biome.json",
+        "packages/examples/code/package.json",
+        "packages/examples/code/scripts/write-dist-tsconfig.mjs",
+        "packages/examples/code/src/App.ts",
+        "packages/examples/code/src/acp-response.test.ts",
+        "packages/examples/code/src/acp-response.ts",
+        "packages/examples/code/src/acp.ts",
+        "packages/examples/code/src/cli-version.test.ts",
+        "packages/examples/code/src/cli.test.ts",
+        "packages/examples/code/src/cli.ts",
+        "packages/examples/code/src/components/ChatPane.ts",
+        "packages/examples/code/src/components/HelpOverlay.ts",
+        "packages/examples/code/src/components/MainScreen.ts",
+        "packages/examples/code/src/components/StatusBar.ts",
+        "packages/examples/code/src/components/TaskPane.ts",
+        "packages/examples/code/src/components/chat-markdown.test.ts",
+        "packages/examples/code/src/components/chat-polish.test.ts",
+        "packages/examples/code/src/components/chat-scrollback.test.ts",
+        "packages/examples/code/src/components/narrow-terminal.test.ts",
+        "packages/examples/code/src/components/status-bar-model.test.ts",
+        "packages/examples/code/src/components/task-pane.test.ts",
+        "packages/examples/code/src/copy-command.test.ts",
+        "packages/examples/code/src/e2e/game-generation.ts",
+        "packages/examples/code/src/e2e/subagents.ts",
+        "packages/examples/code/src/env.d.ts",
+        "packages/examples/code/src/global-input.test.ts",
+        "packages/examples/code/src/index.ts",
+        "packages/examples/code/src/lib/agent-client.streaming.test.ts",
+        "packages/examples/code/src/lib/agent-client.ts",
+        "packages/examples/code/src/lib/agent.ts",
+        "packages/examples/code/src/lib/clipboard.test.ts",
+        "packages/examples/code/src/lib/clipboard.ts",
+        "packages/examples/code/src/lib/cwd.test.ts",
+        "packages/examples/code/src/lib/cwd.ts",
+        "packages/examples/code/src/lib/editor-theme.ts",
+        "packages/examples/code/src/lib/filtering-terminal.ts",
+        "packages/examples/code/src/lib/get-code-task-service.test.ts",
+        "packages/examples/code/src/lib/get-code-task-service.ts",
+        "packages/examples/code/src/lib/identity.ts",
+        "packages/examples/code/src/lib/load-env.ts",
+        "packages/examples/code/src/lib/markdown-theme.ts",
+        "packages/examples/code/src/lib/model-provider.ts",
+        "packages/examples/code/src/lib/prompts.ts",
+        "packages/examples/code/src/lib/session.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): auth-cache warming gets a deadline and an authoritative escape",
+      "prNumber": 18249,
+      "type": "bugfix",
+      "body": "Fixes #18246.\n\nLive incident: a valid agent key received `auth_cache_warming` 503s from /api/v1/chat/completions for 2.5+ minutes across 13 retries — \"retry shortly\" never became true, and the agent's image-description path surfaced it to u",
+      "files": [
+        "packages/cloud/shared/src/lib/services/inference-auth-context.test.ts",
+        "packages/cloud/shared/src/lib/services/inference-auth-context.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): read ops (list/get) do not stamp turnComplete (#18244)",
+      "prNumber": 18248,
+      "type": "bugfix",
+      "body": "Closes #18244\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.6-sol`\n<!-- attribution-row:client ",
+      "files": [
+        "plugins/plugin-agent-orchestrator/__tests__/live/issue-read-write-composition.live.test.ts",
+        "plugins/plugin-agent-orchestrator/__tests__/unit/issue-read-ops-planner-only.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(core): require the turn-scope declaration on every planner tool call",
+      "prNumber": 18247,
+      "type": "bugfix",
+      "body": "Fixes #18244.\n\nThe evaluator gate's precondition 6 (#17034) already lets the planner veto early turn termination via `eliza_turn_scope: \"more_work_pending\"` — but the arg was OPTIONAL (\"omit when unknown\"), and small planner models reliably",
+      "files": [
+        "packages/core/src/prompts/planner.ts",
+        "packages/core/src/runtime/__tests__/planner-loop.test.ts",
+        "packages/core/src/runtime/planner-loop.ts"
+      ]
+    },
+    {
+      "title": "fix(vision): make capability readiness honest and fail closed (#16341)",
+      "prNumber": 18245,
+      "type": "bugfix",
+      "body": "## Summary\n\nMakes `plugin-vision` capability and top-level availability reporting depend on completed backend work instead of configuration flags, allocated objects, or scheduled timers. Camera/screen actions now fail closed with the concre",
+      "files": [
+        "plugins/plugin-vision/src/action.capture-hardening.test.ts",
+        "plugins/plugin-vision/src/action.describe-readiness.test.ts",
+        "plugins/plugin-vision/src/action.ts",
+        "plugins/plugin-vision/src/face-recognition-ggml.ts",
+        "plugins/plugin-vision/src/face-recognition-readiness.test.ts",
+        "plugins/plugin-vision/src/ocr-service.ts",
+        "plugins/plugin-vision/src/provider.test.ts",
+        "plugins/plugin-vision/src/provider.ts",
+        "plugins/plugin-vision/src/service-capabilities.test.ts",
+        "plugins/plugin-vision/src/service.ts",
+        "plugins/plugin-vision/src/types.ts",
+        "plugins/plugin-vision/src/vision-worker-manager-readiness.test.ts",
+        "plugins/plugin-vision/src/vision-worker-manager.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): settle issue-comment confirmations so the planner does not double-message",
+      "prNumber": 18243,
+      "type": "bugfix",
+      "body": "Live find minutes after #18242: \"comment on elizaOS/eliza issue 18240: …\" produced TWO messages — the action callback (\"Added comment to issue #18240: <url>\") and the planner's paraphrase (\"done. commented on issue 18240.\") one second later",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): manage_issues similes cover the github-prefixed names stage-1 actually guesses",
+      "prNumber": 18242,
+      "type": "bugfix",
+      "body": "Live find (2026-08-10 04:23Z): \"can u add a comment to that issue u just made and tag it bug\" → Stage-1 nominated `GITHUB_ADD_COMMENT` / `GITHUB_ADD_LABEL`, which match no simile on `TASKS_MANAGE_ISSUES` (the list had `COMMENT_ISSUE`/`UPDAT",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(orchestrator): keep issue confirmations clean — label degrade stays planner-side",
+      "prNumber": 18241,
+      "type": "bugfix",
+      "body": "Follow-up to #18238. The \"(labels skipped — no permission)\" note shipped inside the user-facing confirmation — machinery in chat, exactly the class the parent PR was killing. Owner feedback: pointless noise for the reader.\n\nNow: the chat co",
+      "files": [
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(core): salvage malformed evaluator envelopes and degrade issue labels instead of failing the turn",
+      "prNumber": 18238,
+      "type": "bugfix",
+      "body": "Two live incidents from one turn (2026-08-10 03:26Z, busy group channel), both fixed:\n\n## 1. Malformed evaluator envelope shipped raw to chat\nThe evaluator model emitted its FINISH envelope with double-escaped string values (\\\\\" and \\\\n ins",
+      "files": [
+        "packages/core/src/runtime/__tests__/evaluator.test.ts",
+        "packages/core/src/runtime/evaluator.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/issue-create-degrade.test.ts",
+        "plugins/plugin-agent-orchestrator/src/actions/tasks.ts"
+      ]
+    },
+    {
+      "title": "fix(homepage): recover eliza.app from cached MIME failures",
+      "prNumber": 18237,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #18236.\n\n- [x] Targets `develop` and was created from the latest `origin/develop`.\n- [x] `bun install --frozen-lockfile --ignore-scripts` and `bun run verify` pass.\n- [x] The production artifact was exercised in a real ",
+      "files": [
+        "packages/homepage/index.html",
+        "packages/homepage/tests/smoke.node.test.mjs",
+        "packages/homepage/vite.config.ts"
+      ]
+    },
+    {
+      "title": "chore(registry): bump plugin-syndicate to 0.2.0 — three real-world data feeds",
+      "prNumber": 18232,
+      "type": "other",
+      "body": "Updates The Syndicate's registry entry from 0.1.1 to [0.2.0](https://www.npmjs.com/package/plugin-syndicate/v/0.2.0), with a corrected description.\n\n## What changed in the game\n\nThe Syndicate now runs on **three real-world data feeds**, all",
+      "files": [
+        "packages/registry/entries/third-party/plugin-syndicate.json",
+        "packages/registry/generated-registry.json"
+      ]
+    },
+    {
+      "title": "fix(cloud): make fleet upgrade concurrency configurable",
+      "prNumber": 18231,
+      "type": "bugfix",
+      "body": "## Summary\n\nThe staging warm-pool canary has repeatedly needed fleet image rollouts paused while a known-good pool image refills. `MAX_INFLIGHT_UPGRADES` was a source constant, so operators had to patch `provisioning-worker.ts` in place. Ev",
+      "files": [
+        "packages/cloud/scripts/admin/daemons/provisioning-worker.image-rollout.test.ts",
+        "packages/cloud/scripts/admin/daemons/provisioning-worker.ts",
+        "packages/cloud/shared/src/lib/config/containers-env-upgrades.test.ts",
+        "packages/cloud/shared/src/lib/config/containers-env.ts"
+      ]
+    },
+    {
+      "title": "feat(cloud): boot-time missing-envVars reporting for OAuth providers (#18205)",
+      "prNumber": 18227,
+      "type": "feature",
+      "body": "## Summary\n\nCloses #18205.\n\nMakes OAuth credential drift observable at the earliest safe Worker boundary and in `/api/health/operational`, without logging or returning credential values. Managed Google is treated as operationally required; ",
+      "files": [
+        "packages/cloud/api/health/operational/route.test.ts",
+        "packages/cloud/api/health/operational/route.ts",
+        "packages/cloud/api/src/bootstrap-app.test.ts",
+        "packages/cloud/api/src/bootstrap-app.ts",
+        "packages/cloud/shared/src/lib/services/oauth/index.ts",
+        "packages/cloud/shared/src/lib/services/oauth/provider-registry.test.ts",
+        "packages/cloud/shared/src/lib/services/oauth/provider-registry.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): default runtime chooser ON in Vite dev mode",
+      "prNumber": 18226,
+      "type": "bugfix",
+      "body": "## Summary\n\nMakes the local/cloud/remote runtime chooser the default only under the real Vite development server. Production and test bundles remain cloud-only unless explicitly enabled, the runtime `\"0\"`/`\"1\"` override remains authoritativ",
+      "files": [
+        "packages/app/src/main.tsx",
+        "packages/app/test/dev-smoke/runtime-chooser-default.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-cloud-only.spec.ts",
+        "packages/app/test/ui-smoke/onboarding-to-home.shared.ts",
+        "packages/app/test/ui-smoke/runtime-configurability.spec.ts",
+        "packages/ui/src/first-run/first-run-runtime-flag.test.ts",
+        "packages/ui/src/first-run/first-run-runtime-flag.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): fail closed on non-public GHCR images (#18219)",
+      "prNumber": 18225,
+      "type": "bugfix",
+      "body": "Closes #18219\n\n## Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `openai/gpt-5.6-sol`\n<!-- attribution-row:client ",
+      "files": [
+        ".github/workflows/build-agent-image.yml",
+        "packages/scripts/__tests__/build-agent-image-workflow.test.ts",
+        "packages/scripts/__tests__/verify-ghcr-anonymous-manifest.test.ts",
+        "packages/scripts/verify-ghcr-anonymous-manifest.mjs"
+      ]
+    },
+    {
+      "title": "fix(ui): control-plane hosts are connected-over-rest — never dial the unservable /ws",
+      "prNumber": 18224,
+      "type": "bugfix",
+      "body": "Fixes #18172.\n\nSince #17801 removed the synthetic-host WS skip, browsers on cloud control-plane hosts dial `wss://<host>/ws` — an endpoint the edge structurally cannot serve (the alias Worker routes only `/api*`/`/steward*` and strips `Conn",
+      "files": [
+        "packages/ui/src/api/client-base-websocket.test.ts",
+        "packages/ui/src/api/client-base.ts"
+      ]
+    },
+    {
+      "title": "fix(core): failed sub-agent relay turns deliver the completed result instead of the canned fallback",
+      "prNumber": 18222,
+      "type": "bugfix",
+      "body": "Fixes #18208.\n\nThree live incidents in one day: a sub-agent COMPLETED its task (a staging investigation, two PR reviews), its `task_complete` relay turn arrived carrying the finished result — and the user got \"I tried to complete that, but ",
+      "files": [
+        "packages/core/src/services/message.preserved-tool-result.test.ts",
+        "packages/core/src/services/message.ts"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "standujar",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
-      "totalScore": 728.748797388378,
-      "prScore": 152.510797388378,
-      "issueScore": 34.3,
-      "reviewScore": 541.5,
-      "commentScore": 0.43799999999999994,
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 855.2384216633104,
+      "prScore": 798.0624216633105,
+      "issueScore": 56.3,
+      "reviewScore": 0,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
-      "username": "NubsCarson",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
-      "totalScore": 505.2867464190725,
-      "prScore": 448.5487464190725,
-      "issueScore": 56.3,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "username": "standujar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16385918?u=718bdcd1585be8447bdfffb8c11ce249baa7532d&v=4",
+      "totalScore": 729.186797388378,
+      "prScore": 152.510797388378,
+      "issueScore": 34.3,
+      "reviewScore": 541.5,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
       "username": "HomunculusLabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/104694001?u=63a9d881c242421527fa8a30b5011ea4879f3375&v=4",
-      "totalScore": 309.6029928139634,
-      "prScore": 270.1649928139634,
+      "totalScore": 711.7818248904225,
+      "prScore": 624.9058248904225,
       "issueScore": 0,
-      "reviewScore": 39,
+      "reviewScore": 86,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 480.37085427718597,
+      "prScore": 337.194854277186,
+      "issueScore": 2.3,
+      "reviewScore": 140,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "wtfsayo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
+      "totalScore": 299.63917733331255,
+      "prScore": 248.60117733331256,
+      "issueScore": 8.1,
+      "reviewScore": 42.5,
       "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "0xSolace",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257989456?u=2138984e3bfc9b5f8cd3f60f134e550b4cc22520&v=4",
-      "totalScore": 214.65563744317538,
-      "prScore": 209.81563744317538,
+      "totalScore": 270.63429317135643,
+      "prScore": 256.3562931713564,
       "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 13.5,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
       "username": "felirami",
       "avatarUrl": "https://avatars.githubusercontent.com/u/6752178?u=3bca27d6eaa204dedda69aa66507ef2e05f57fed&v=4",
-      "totalScore": 173.36170534068665,
-      "prScore": 157.82370534068667,
+      "totalScore": 205.1892729846898,
+      "prScore": 189.2132729846898,
       "issueScore": 6.1,
       "reviewScore": 9,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "lalalune",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
-      "totalScore": 170.76749534202855,
-      "prScore": 129.02949534202855,
-      "issueScore": 2.3,
-      "reviewScore": 39,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
       "username": "SYMBaiEX",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192078165?u=197360d3c17d5ace2dfb325117425bcb0be3db7d&v=4",
-      "totalScore": 136.00767050521983,
-      "prScore": 127.26967050521984,
+      "totalScore": 183.27562146075167,
+      "prScore": 170.03762146075167,
       "issueScore": 8.3,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "wtfsayo",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/82053242?u=98209a1f10456f42d4d2fa71db4d5bf4a672cbc3&v=4",
-      "totalScore": 122.79101513295087,
-      "prScore": 114.25301513295088,
-      "issueScore": 8.1,
-      "reviewScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "odilitime",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16395496?u=c9bac48e632aae594a0d85aaf9e9c9c69b674d8b&v=4",
-      "totalScore": 80.59836580216285,
-      "prScore": 80.59836580216285,
+      "totalScore": 107.98774407337908,
+      "prScore": 107.78774407337909,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 81.7174528964647,
+      "prScore": 24.517452896464707,
+      "issueScore": 0,
+      "reviewScore": 57,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -893,10 +1674,50 @@
     {
       "username": "jvkassi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3010867?v=4",
-      "totalScore": 40.9957738965761,
+      "totalScore": 41.1957738965761,
       "prScore": 40.9957738965761,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sailorpepe",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/159828807?u=9298c48eb8b41b0a0b0968e987c029e307771855&v=4",
+      "totalScore": 31.233438979166444,
+      "prScore": 31.233438979166444,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "krutftw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/56069280?v=4",
+      "totalScore": 18.82863636973214,
+      "prScore": 18.48863636973214,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "alexander-schneider",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33292100?u=66ce9904aab77cbfa56ad6170ed91bae8dfcc0c8&v=4",
+      "totalScore": 18.174387269895636,
+      "prScore": 18.174387269895636,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jianqiaotan26-prog",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/231975086?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
     },
@@ -911,9 +1732,9 @@
       "summary": null
     }
   ],
-  "newPRs": 73,
-  "mergedPRs": 41,
+  "newPRs": 138,
+  "mergedPRs": 97,
   "newIssues": 51,
   "closedIssues": 84,
-  "activeContributors": 15
+  "activeContributors": 21
 }
