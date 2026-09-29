@@ -1,0 +1,1257 @@
+{
+  "interval": {
+    "intervalStart": "2026-09-27T00:00:00.000Z",
+    "intervalEnd": "2026-09-28T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-09-27 to 2026-09-28, elizaos/eliza had 35 new PRs (55 merged), 2 new issues, and 16 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABN65OtA",
+      "title": "fix(plugin-local-inference): resume download corrupts model file when origin answers 200 instead of 206",
+      "author": "agent-cortex",
+      "number": 26629,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\nThe route-level model downloader `downloadModel` in `plugins/plugin-local-inference/src/local-inference-routes.ts` resumes an interrupted download by sending a `Range: bytes=<n>-` header and then opening the staging file in append mode whenever a `.part` file exists (`flags: existingPartial > 0 ? \"a\" : \"w\"`). It never verifies the server actually honored the range (HTTP 206). If the origin ignores Range and replies HTTP 200 with the full body — common for CDN redirect targets, gated/proxy repos, or mirrors — the full file is appended onto the stale partial bytes, producing a corrupt GGUF. `record.total` is also miscomputed as `existingPartial + fullSize`. The corruption passes the only integrity check (`isGgufFile` reads just the first 4 bytes, which are still \"GGUF\" from the old partial), and there is no sha256 verification against an expected hash, so the corrupt file is renamed to final, registered as an installed model, and auto-assigned to the TEXT_SMALL/TEXT_LARGE/TEXT_EMBEDDING slots via `ensureDefaultAssignment`. The sibling canonical `services/downloader.ts` in the same package already guards this exact case (`if (startByte > 0 && response.statusCode !== 206) { startByte = 0; received = 0 }` then `flags: startByte > 0 ? \"a\" : \"w\"`); the route-level copy diverged and dropped the guard.\n\n## Reproduction\n```\nRan a local Vitest probe in plugins/plugin-local-inference (real fs + real local HTTP origin; only ELIZA_STATE_DIR and ELIZA_HF_BASE_URL redirected). Steps: (1) set ELIZA_HF_BASE_URL to a local http server that IGNORES Range and always answers `200` with the full body `GGUF`+`REAL-MODEL-BODY` (19 bytes); (2) seed a stale partial `<state>/local-inference/downloads/eliza-1-2b.part` = `GGUF`+`STALE-PARTIAL`; (3) call the exported `applyLocalInferenceManagementMutation({ op: \"start_download\", modelId: \"eliza-1-2b\" })`, which runs `startDownload` -> `downloadModel`; (4) poll for the final file `<state>/local-inference/models/eliza-1-2b.gguf`.\nObserved output: `stored length: 36 expected: 19` and `stored bytes: \"GGUFSTALE-PARTIALGGUFREAL-MODEL-BODY\"`. Expected: exactly `GGUFREAL-MODEL-BODY` (19 bytes). The corrupt file was renamed to final and written into registry.json as an installed model. Test asserted `stored.equals(FULL)` -> failed (false). Command: `npx vitest run src/__probe_resume.test.ts`.\n```\n\n## Proposed fix\nMirror the sibling downloader's guard in `downloadModel`: after receiving the response and validating 2xx, compute `let effectiveStart = existingPartial; if (existingPartial > 0 && response.statusCode !== 206) { effectiveStart = 0; record.received = 0; }`, then use `effectiveStart` for both `record.total = effectiveStart + contentLength` and `flags: effectiveStart > 0 ? \"a\" : \"w\"`. Bounded to ~6 lines in one function; no signature/API change. Test plan (>=10 lines, honest): a Vitest suite standing up two local http origins — one that honors Range (206 + remaining bytes) and one that ignores it (200 + full body) — seeding a stale `.part`, driving `applyLocalInferenceManagementMutation({op:\"start_download\"})`, and asserting the final `models/<id>.gguf` bytes exactly equal the full file in BOTH cases (correct resume for 206, clean restart for 200); plus a regression assertion that `record.total`/registry size match the true file length. The probe already written proves the failing case and converts directly into the 200-path test.\n\n## Evidence plan\nThe PR will attach: the failing-before / passing-after Vitest output for both the 200 (ignore-range) and 206 (honor-range) origins; a hexdump/length comparison of the stored `models/<id>.gguf` showing 19 bytes (correct) vs the current 36-byte `GGUFSTALE-PARTIALGGUFREAL-MODEL-BODY` corruption; and a diff showing the route-level guard now matches services/downloader.ts (statusCode !== 206 -> restart from 0).\n\n## Duplicate search\ngh search issues/prs --repo elizaOS/eliza --state all for: \"local-inference resume download\", \"local-inference partial download corrupt\", \"download Range 206 resume\", \"downloadModel append partial\", \"local-inference download\", \"resume download corrupt\", \"model download partial\" — all returned zero results. grep for an existing 206 guard in plugins/plugin-local-inference/src/local-inference-routes.ts found none (only the sibling services/downloader.ts and its test reference 206).\n\n_Filed under a standing operator authorization for the autonomous audit pipeline, after local reproduction and duplicate search._\n\nAI provider/model: anthropic / claude-opus-4-8\nClient / agent tooling: pi-coding-agent\nContribution skill revision: elizaOS/eliza@cd4fb2746e7387982986405451bf38c049747acf:packages/skills/skills/contribute-to-eliza\nAttribution status: self-reported\n— [eliza-swarm]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-opus-4-8\",\"client\":\"pi-coding-agent\",\"skill_revision\":\"elizaOS/eliza@cd4fb2746e7387982986405451bf38c049747acf:packages/skills/skills/contribute-to-eliza\"} -->\n\n## Consolidated download-integrity scope — 2026-09-14\n\nThis issue is the canonical owner for duplicate #29454 and the related Content-Range integrity requirement from #30939. Preserve both route-level and canonical downloader consumers, including the UI host copy, in the implementation review. #29456 is retained as the narrow 200-response restart candidate; it is not complete proof of the full contract. #30888 and #30940 are unsuitable implementations for the reasons recorded on those PRs.\n\nAcceptance: append only when a valid 206 Content-Range matches the exact local offset; a full 200 response restarts from byte zero. Missing, malformed or mismatched ranges must not be treated as proof that append is safe. If the returned body starts at a nonzero offset that cannot be placed, reject or refetch the complete entity before replacing the partial; never write a tail fragment at offset zero. Validate start/end/total consistency and safe integer bounds. Exercise real temporary files and an HTTP origin covering ignored Range, correct resume, wrong-offset response, missing/malformed range, cancellation and retry. Assert final bytes and preservation of recoverable state, not only status codes or file magic.\n\nUse one shared protocol decision where package dependency boundaries allow it; do not clone divergent range parsers into each downloader. Existing candidate work and reproduction history remain linked in the source issues. Closure of those leaves means consolidated tracking, not repaired downloads.\n",
+      "createdAt": "2026-08-23T21:17:28Z",
+      "closedAt": "2026-09-27T19:33:47Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABP-n43g",
+      "title": "fix: preserve Android speech cancellation and playback ownership",
+      "author": "lalalune",
+      "number": 30828,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nReview of the Android speech implementation merged by #30759 at `63323d0f77f2b48eb6221fafbcb243ab3154b21d` found that coroutine cancellation can enter provider-failure handlers, the bionic inference socket is not closed by stop/teardown, and overlapping speech requests share playback resources without waiting for prior cleanup.\n\nThe affected consumer is the Android TalkMode `speak`/`stopSpeaking` bridge. Interrupting or destroying a session during local inference can leave a blocking request alive, report a phonemization failure instead of interruption, or start fallback speech. A replacement request can also lose its resources to an older request's cleanup.\n\n## Acceptance\n\n- Preserve coroutine cancellation through phonemization and provider fallback handlers; settle the bridge result as interrupted.\n- Close both local-agent and bionic inference sockets on stop and teardown, including connection/read phases.\n- Serialize playback resource ownership so a cancelled request finishes cleanup before its replacement starts; cancelled queued calls must also settle.\n- Exercise the actual Kotlin implementation for cancellation and replacement ordering, compile the Android plugin, and run the owning package/repository checks.\n- Verify stop, immediate replacement, and teardown on the installed current Android revision, including no fallback playback after cancellation and successful subsequent speech.\n\nThe isolated implementation is in progress. No passing device evidence is claimed by this issue.\n",
+      "createdAt": "2026-09-06T19:50:10Z",
+      "closedAt": "2026-09-27T19:33:52Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABP5Z9LA",
+      "title": "fix: initialize Android Notes without forbidden hard links",
+      "author": "lalalune",
+      "number": 30725,
+      "repository": "elizaos/eliza",
+      "body": "The installed Android local agent cannot initialize the Notes service on a fresh agent-scoped store. `NotesStore.writeAtomicIfAbsent` publishes its fsynced temporary file with `fs.link`; Android denies that hard link with `EACCES`. The service reports `NOTES_STORE_WRITE_FAILED` and never becomes ready.\n\nReproduced on emulator-5580 with the current combined Android build fd755929592ee25f5268853015d3d5ee1cac450c. An independent invocation of the production NotesStore through the APK's installed Bun, using a disposable directory under the app's files directory, fails with the same nested `EACCES` / `link` cause. The disposable directory was removed; existing notes and app data were preserved.\n\nAcceptance:\n- Fresh Android Notes initialization succeeds through the installed runtime without hard-link permission.\n- Publication remains atomic and must never overwrite a document created by a concurrent initializer.\n- Existing state remains readable and mutable; malformed state fails explicitly.\n- Interrupted publication cannot expose an empty or partial valid-looking document.\n- Exercise real installed Android CRUD/restart and concurrent initialization, plus the package tests, typecheck, lint and root verify.\n\nCurrent implementation and validation:\n- Repaired production NotesStore uses an atomic nonempty-directory publication when the filesystem denies hard links; existing flat documents remain authoritative.\n- All 119 Notes package tests, typecheck, lint and guide parity pass. Four new real-filesystem tests cover restart mutations/deletion, preserving a competing initializer's notes, incomplete publication, and legacy flat state.\n- On Android emulator-5580, four separate installed-Bun processes initialized one fresh store concurrently. Five subsequent fresh processes created, edited, read, deleted, and verified the deletion. All passed without a filesystem mock. The disposable test directory was removed.\n- This device proof ran the repaired production store as a separate bundle through the installed runtime. Rebuilding the APK with the repaired Notes service and final combined repository gates remain pending; this issue is not yet closed.\n\nDownloadable evidence (uploaded assets were read back and SHA-256 verified):\n- [119 package tests](https://github.com/elizaOS/eliza/releases/download/pr-evidence-10/30725-package-tests.log)\n- [Focused publication regressions](https://github.com/elizaOS/eliza/releases/download/pr-evidence-10/30725-publication-tests.log)\n- [Android concurrent initialization and fresh-process persistence](https://github.com/elizaOS/eliza/releases/download/pr-evidence-10/30725-device-store-proof.json)\n\n\n## Packaged Android startup proof\n\nThe canonical Android build and installation passed at `a4cfe886cd8ccf84f76dfcfa89d552a805d09bbd`. Installed APK SHA-256 matched `db74601d662b980bd0ce70c1b49af99ce06dae7d83d07b3fe152b69ebf9fd75f`. The actual app published valid revision-0 Notes state through normal deferred service startup: directory mode 0700, file mode 0600, with no `NOTES_STORE_WRITE_FAILED` in the fresh log.\n\n- [Packaged-service receipt](https://github.com/elizaOS/eliza/releases/download/pr-evidence-10/30725-packaged-service-a4cfe886.json)\n- [Installed APK and native payload hashes](https://github.com/elizaOS/eliza/releases/download/pr-evidence-10/30604-installed-bytes-a4cfe886.json)\n- [Canonical Android build log](https://github.com/elizaOS/eliza/releases/download/pr-evidence-10/30604-native-build-a4cfe886.log)\n\nThese artifacts were uploaded, downloaded, and SHA-256 compared. The broader Android PR remains unmerged because its live chat smoke exposed the separate #30785 behavior failure.\n",
+      "createdAt": "2026-09-06T00:10:32Z",
+      "closedAt": "2026-09-27T19:33:50Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABREwiwQ",
+      "title": "fix(plugin-computeruse): OCR provider registry is bundled twice, so plugin-vision registrations are invisible in packaged builds",
+      "author": "hermesagent270-commits",
+      "number": 31251,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nplugin-computeruse's OCR / Set-of-Marks provider registry is bundled twice, so plugin-vision's registration never reaches the readers in packaged builds. `plugins/plugin-computeruse/build.ts:52` builds `src/mobile/ocr-provider.ts` as a standalone entrypoint (`dist/mobile/ocr-provider.js`) while `src/index.ts` also inlines the same module into `dist/index.js` (there the writer is tree-shaken and only `var registeredCoordOcrProvider = null` plus the getter survive). plugin-vision writes through `await import(\"@elizaos/plugin-computeruse/mobile/ocr-provider\")` (`plugins/plugin-vision/src/index.ts:118-141`), which resolves to the subpath bundle; the readers `computer-use-service.ts:1231` (`runOcrOrDetect`), `scene/ocr-adapter.ts:98,156` and `app-control/defaults.ts:88,114` live in `dist/index.js` and read the other module instance.\n\n## Reproduction (develop `5b183d21ff25`, built dist)\n\n```\n$ grep -c 'function registerCoordOcrProvider' dist/index.js dist/mobile/ocr-provider.js\ndist/index.js:0\ndist/mobile/ocr-provider.js:1\n```\n\nA probe importing both bundles without `--conditions`, registering through the subpath and listing through the index: `subpath listOcrProviders -> [\"probe-ocr\"]` / `index listOcrProviders -> []`.\n\n## Consequence\n\nIn packaged desktop or npm-consumed builds `ocr` and `detect_elements` always fail with \"No OCR provider is registered. Enable @elizaos/plugin-vision…\" and `scene.ocr` stays empty even with plugin-vision loaded, while vision logs \"registered coord-OCR bridge\". Every repo dev/start script passes `--conditions=eliza-source` (both imports resolve to `src/`), which masks it. `plugins/plugin-computeruse/CLAUDE.md:275` documents this registry as the extension path.\n\n## Acceptance criteria\n\n- The index bundle and the `mobile/ocr-provider` subpath share one module instance (mark the subpath external in the index build, or have the index re-export from the built subpath), and a test proves a provider registered through the published subpath is visible to `runOcrOrDetect` without `--conditions=eliza-source`.\n",
+      "createdAt": "2026-09-13T15:01:40Z",
+      "closedAt": "2026-09-27T18:41:37Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABREv8Cw",
+      "title": "fix(personal-assistant): meeting-ghost relative due dates resolve on the UTC day and can land a week off",
+      "author": "hermesagent270-commits",
+      "number": 31249,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nMeeting-ghost relative due dates are resolved on the UTC calendar day of the meeting. `parseDueDate` in `plugins/plugin-personal-assistant/src/lifeops/meeting-ghost/index.ts:355-370` does `new Date(meetingStartedAt)`, adds days with `setUTCDate`, reads the weekday with `getUTCDay()` and formats with `toISOString().slice(0,10)`; `dueDateToLedgerDueAt` (373-377) then pins `${dueDate}T17:00:00.000Z` and the calendar deadline (436) `T09:00:00.000Z`. `event-handler.ts:67` feeds every transcript through this path.\n\n## Reproduction (develop `5b183d21ff25`)\n\nProbe calling the exported `analyzeMeetingGhostTranscript` (results are offset-driven, identical under any process TZ):\n\n```\nstartedAt=2026-09-14T17:30:00-07:00 \"Alice will send the report by tomorrow\" -> dueDate=2026-09-16  (Mon 5:30pm PT; tomorrow is 09-15)\nstartedAt=2026-09-17T17:30:00-07:00 \"Bob will send the deck by Friday\"       -> dueDate=2026-09-25  (Thu 5:30pm PT; Friday is 09-18)\nstartedAt=2026-09-14T08:00:00+09:00 \"Alice will send the report by tomorrow\" -> dueDate=2026-09-14  (Mon 8am JST; tomorrow is 09-15)\nstartedAt=2026-09-14T08:00:00+09:00 \"Carol will file the taxes by Monday\"    -> dueDate=2026-09-14  (said on Monday; next Monday is 09-21)\n```\n\n## Consequence\n\nThe commitment ledger `dueAt`, the follow-up approvals and the \"Deadline:\" calendar intent carry the wrong day, a full week off in the weekday case, for any meeting whose local evening is already the next UTC day (afternoon/evening in the Americas) or whose local morning is still the previous UTC day (east of UTC).\n\n## Acceptance criteria\n\n- Relative dates are resolved on the meeting's local calendar day (the transcript's or runtime's timezone), and the ledger/calendar instants are built from that zone.\n- Tests pin the four cases above.\n",
+      "createdAt": "2026-09-13T15:00:04Z",
+      "closedAt": "2026-09-27T19:33:36Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFZZrZw",
+      "title": "Harden action admission, confidential host boundaries, and privacy controls",
+      "author": "lalalune",
+      "number": 32871,
+      "body": "## Summary\n\nThis PR implements the code findings from the compliance research review (`compliance-research-2026-09-18`) across core, agent, cloud and app/ui, re-checked against HEAD. It also removes about 2,500 lines of dead or duplicate code.\n\n### core\n- A typed modality table drives PII swap and binary/text handling. `TEXT_EMBEDDING_BATCH`, `TEXT_TO_SPEECH` and `PII_SCRUB` are no longer pseudonymized.\n- A host-only processing policy extends `ConfidentialInferenceAuthority`. It admits each attempt before the secret/PII swap, the hooks and the handler.\n  - A denial is terminal: it never fails over, the embedding queue doesn't retry it, and it isn't retryable when a model call inside an action handler raises it.\n  - The policy sees the model type the caller asked for, before any LLM-mode override.\n  - With no policy installed, behavior is unchanged.\n- `runActionsByMode` and plugin-assistant plan steps now settle through the action gate (`settleActionHandler`).\n- Removed, with zero in-repo callers: the `zod-schema.agent-runtime` subpath, `ToolPolicyService` / `getFilteredActions` / `isActionAllowed`, 17 private model wrappers in `runtime.ts`, and duplicate helpers. `canonicalJson` and `parseBooleanFromText` now each have one implementation. The shared canonical backup JSON rejects sparse array holes.\n\n### agent\n- `ELIZA_PROTECTED_PROFILE=dstack-cpu` (captured from the process env at entry) runs admission before config load, vault hydration, API listen and plugin resolution.\n- `ELIZA_TEE_*`, `ELIZA_DSTACK_*`, `ELIZA_CONFIDENTIAL_*` and `ELIZA_PROTECTED_*` are env-only. They are blocked from config and API env writes, and the state-dir `config.env` can't apply or persist them either.\n- Evidence-factory registration is refused under the profile.\n- Audit sinks are async, and a failure in a required sink now rejects. Retention never deletes audit log types. Confidential-runtime schema is v2.\n\n### cloud\n- API key create, delete, regenerate and mobile revoke write their audit event in the same transaction. A sink failure rolls the change back.\n  - An oversized client `X-Request-Id` is dropped from the event instead of failing the write.\n- PII scrub markers record their inspection scope (migration `0506`).\n- There is a single retryable provider-fallback middleware with a `ProviderFallbackPolicy` hook. A refusal throws `PROVIDER_FALLBACK_REFUSED`.\n- With `FIELD_ENCRYPTION_REQUIRED`, agent env secrets no longer fall back to plaintext. `FIELD_ENCRYPTION_REQUIRE_AAD` is documented as off until writers pass coordinates.\n- New `user_consents` table (migration `0507`) with `GET`/`POST /api/v1/me/consents` for `vision_capture`. GET also returns `effective` (the enforced policy, with `basis` and `defaultGranted`) and `capture.modelCallRecording` (the deployment's recording policy).\n  - There's a user-scoped live `POST /api/v1/me/data-export` that requires a recent login.\n- A single `getRequestIp` helper (`cf-connecting-ip` first) serves all webhooks. Expired `auth_events` are purged.\n\n### app / ui\n- There is one session-cookie parser: identical duplicate cookies are accepted, conflicting ones rejected.\n- Logout revokes every presented session credential, including conflicting duplicates, and also expires the `Domain` variant.\n- Revoking a session closes its open WebSockets (1008). Admission re-reads the session after binding, so a revoke that races the handshake can't leave a socket open.\n- The privacy panel shows the deployment's model-call recording policy (read-only) and leaves vision/screen capture to device permissions. It uses the live export endpoint.\n- Removed the dead first-run fork, update policy, `api/response` and `globals` shims.\n\n### Review feedback addressed\n- Migration collisions: renumbered to `0506_pii_scrub_markers_inspection_scope`, `0507_user_consents` and `0508_app_notification_secret_envelope_v2`. These are the filenames present in the current branch.\n- The sparse-array bug in canonical backup JSON is fixed.\n- The consents API exposes the effective policy and default, as distinct from an explicit grant.\n\n### Model-call recording, session controls and attestation\n**Recording (no consent; off in production):**\n- The cloud records billed model calls under one policy: `LLM_TRAJECTORY_CAPTURE=on|off`, otherwise off in production and on elsewhere. The `trajectory_training` consent purpose is removed.\n- Payloads never go to the public `BLOB` bucket. They use a dedicated private store when one is bound, otherwise Postgres.\n- Bodies are encrypted with row-bound org field encryption.\n- `LLM_TRAJECTORY_RETENTION_DAYS` (default 90) sets retention, enforced by a daily purge.\n- Account deletion removes payload objects by org prefix, orphans included.\n- The agent's trajectory gate defaults off under `ELIZA_PROTECTED_PROFILE`. Operators can still enable it inside the TEE.\n\n**Session and data safeguards:**\n- **Automatic logoff:** the protected profile gets a 30-minute idle logoff and a 12h absolute cap. `ELIZA_SESSION_IDLE_MINUTES` sets the idle window in any profile. The idle window slides only on real user activity (`x-eliza-last-activity` from the shared UI clients, allowed in CORS for remote agents), never on background polling or sockets.\n- **Password change:** revokes every other session and closes its sockets.\n- **Auth store:** row counts no longer assume success.\n- **Media:** under the protected profile, media is served only after authentication. Same-origin cookie auth keeps `<img>`/`<audio>` working.\n- **Field encryption:**\n  - Row-bound writes use an `enc:v2` envelope that authenticates its AAD flag.\n  - Unbound writes keep the legacy v1 bytes for old readers.\n  - `SECRETS_MASTER_KEY_PREVIOUS` plus a guarded DEK rewrap enable master-key rotation.\n  - Migration `0508` lets the billing notification guard accept v2.\n- **Audit logs:** the audit-log purge cron now actually runs (7-year retention).\n\n**Attestation implementation and emulator validation (hardware acceptance pending):**\n- **In-repo verification:** dstack v1 attestations and TDX v4/v5 quotes are parsed in-repo. The raw report_data binding, the TD debug bit, the quote's self-signature and register agreement are checked independently of the pinned external verifier.\n- **Hardware-free harness:** a fake guest-agent socket, a pinned stub verifier and an NRAS emulator drive the real admission code to success and through a rejection matrix. The matrix includes dstack simulator output.\n- **GPU attestation:** NVIDIA confidential-GPU attestation goes through NRAS, and the ES384 EAT tokens are verified locally against NVIDIA's CA. GPU claims can only come from verified evidence bound to the TDX nonce.\n- **Key release:** the agent appraises its own evidence before trusting any KMS. A dstack `GetKey` client verifies the KMS signature chain to a pinned root.\n- **Satisfiable topologies:** the state-volume, `tdx-cpu` and GPU weight topologies and the dstack cloud inference profile require only claims that dstack and NRAS evidence actually establish.\n- **Test lanes:** `test:tee:dstack` (hardware-free) and `test:tee:dstack-live`, which is opt-in for a real CVM, the dstack simulator and H100 CC GPUs.\n\nThe model-weight unseal helpers are available, but the production model loader does not yet call `prepareConfidentialModelWeights`. This PR does not establish encrypted-weight loading in the shipped inference path or regulatory compliance.\n\n**Deploy order:**\n- Apply migration `0508` before deploying the Worker. Billing notification secrets are written as `enc:v2`.\n- Roll out readers before relying on `SECRETS_MASTER_KEY_PREVIOUS`.\n\n### Follow-ups\n- **Processing policy:** before any host installs a policy, first-party actions need an `egress` declaration, including `egress: []` for the security evaluator hook. Otherwise every action is denied as `destination_undeclared`. No host installs a policy today.\n- **PII swap:** it now skips `TEXT_TO_SPEECH` and `PII_SCRUB`, so a remote TTS provider receives real names. Confirm this is intended, or scope the skip to local providers.\n- **`FIELD_ENCRYPTION_REQUIRE_AAD`:** it stays off until agent env secrets can be row-bound. They are encrypted before their row id exists.\n- **Real hardware:** running `test:tee:dstack-live` on a dstack TDX CVM (and an H100 CC GPU) needs infrastructure.\n\n## Verification (Node 24.15.0, Bun 1.4.2, merged with develop `4778fe302d5`)\n- Root `bun run verify` passes on the merged tree (284/284 turbo tasks, all audits).\n- core: full suite earlier in this PR; `trajectory-gate` passes (5).\n- cloud-shared: 56 targeted tests pass: capture policy, trajectory storage and encryption, field encryption, account-deletion payloads and adapters, fallback policy, PII scrub. The 15 app-billing/generic-billing Postgres suites pass (45 pass; the rest skip without a live Postgres).\n- cloud-api: consents/export, API-key audit transaction and PII scrub route pass (13).\n- ui: account-security, auth/activity and client tests pass (77 before the final merge; account-security 52 after it).\n- app: auth store, session idle/protected-profile/cookie, browser-session WebSocket and password-change revocation pass (52).\n- agent (real end-to-end): TDX/dstack admission, protected profile, GPU attestation, live lane (skipped without hardware), protected media, media capability, TEE env boundary and audit durability pass (10 files). `scripts/tee-full-stack-local.ts` passes.\n- `check-migration-prefix-order` passes. The router was regenerated.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-27T22:14:42Z",
+      "mergedAt": null,
+      "additions": 16105,
+      "deletions": 6153
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFZLPFg",
+      "title": "fix(core,agent,app): quality-review bug fixes",
+      "author": "lalalune",
+      "number": 32867,
+      "body": "This PR fixes the behavior bugs from the core/agent/app quality review (report §3). It includes only bugs that need **no owner decision** and **do not overlap** the unmerged `shaw/agent-framework-review-refactor-e7a9a1` branch. Each fix is its own commit with a regression test that fails on the old code and passes with the fix.\n\nDead-code deletion, consolidation, and the 28 owner decisions (D1–D28) are not in this PR. They wait for review.\n\n## Fixes (report bug numbers)\n**Security / data loss**\n- agent: capability-router persistence refuses to overwrite corrupt state instead of erasing every endpoint and trust policy (#1).\n- agent: malformed trust-policy / allowed-modules env settings now fail closed (#2).\n- agent: VFS git sends the host GitHub token only to `https://github.com`, and an empty env var counts as unset (#3).\n- agent: postgres restore and the VFS `>>` redirect propagate failures instead of swallowing them (#5, #7).\n- elizacloud: one shared `config.env` writer with the agent, which removes the lost-update race and applies the denylist and 0700 mode (#8).\n- core: cloud log-sink redaction fails closed through the single `log-redaction` walker (#9).\n- app scripts: the App Store sandbox audit and the adb install hash check now fail closed (#11, #12).\n- desktop: the main-process API bearer is scoped to the local agent origin on reset/disconnect (#37).\n- android: the SMS gateway secret is no longer written into the tracked `build.gradle`; the template reads env when Gradle runs (#38).\n- app api: first-run rollback always restores config and env (#41).\n- CLI: `db reset` uses the runtime's PGlite resolver (#42), and `config show/get` redact secrets in every output mode (#43).\n\n**Functional**\n- agent: self-API calls use `resolveSelfApiBaseUrl` instead of a hard-coded 2138 (#13).\n- agent: runtime ops settle on throw, and same-family switches get a strategy (#15, #16).\n- assistant: `TargetSourceRegistryService` is registered (#17).\n- agent: view navigate stops after an invalid body, and `X-ElizaOS-UI-Language` is honored (#18, #28).\n- electrobun: no duplicate voice turn, `resetSteward` clears the real state dir, branded builds read `${namespace}.json` (#21–#23).\n- core: streaming context is shared across bundle copies (#33); literal NUL bytes removed from `voice-gate.ts` (#34); the reasoning filter covers all 7 canonical tags (#35).\n- mobile/embed: repeated warm deep links apply (#46), and embed auth failures are logged (#47).\n- app api: a key the user types beats an env key (#49).\n- steward: a 409 tenant-exists response now stops with a typed recovery error (#50).\n- electrobun: the updater no longer owns the menu dispatcher, and event cursors page forward (#51, #52).\n- electrobun: one desktop env-flag parser (#53).\n- CLI: honest exit codes for update, doctor and auth; canonical config writes; phantom pool fields dropped (#54, #57).\n- app: the browser barrel re-exports ui's canonical `AppWindowRenderer`, and the dead fork is deleted (#56).\n- benchmarks: recall-bench and entity-voice-bench import from their plugin homes (#58).\n- agent: dead `shouldReject` branch removed from the context inspector (#59).\n\n**Build / release tooling**\n- The gateway maintainer deploys only on the explicit drift exit code 3 (#60).\n- Device leases are written atomically (#61).\n- apk extract failures propagate (#62).\n- `sleepSync` is defined (#24).\n- `clean-repo` removes homepage outputs (#26).\n- The voice catalog fails closed and the default id is `same` (#36).\n- The walkthrough, fused-lib, libllama, iOS smoke and patch-deps scripts fail closed (#63, #64, #66–#68).\n- The renderer shares the LP3/VPS flag predicates with the native build policy (#65).\n\n## Behavior changes to review\n- `resolveActivePgliteDataDir` (agent `runtime/eliza.ts`) is now exported and gives `config.database.pglite.dataDir` precedence over `PGLITE_DATA_DIR`, matching `applyDatabaseConfigToEnv`. This file is also edited on the agent-framework branch, so expect a small merge.\n- Desktop flags now honor `on`/`off`/`yes`/`no`. An unrecognized value keeps the default and logs a warning.\n- Cloud log redaction output differs slightly. Cycles now show as `[Circular]`, and a PEM block masks to `***`. It masks the same or more than before.\n- The benchmarks now import `@elizaos/plugin-assistant` and `@elizaos/plugin-relationships`. These resolve through workspace hoisting and are not yet declared in the suites' `package.json`.\n\n## Verification\n- `tsc` passes for core, agent, app (host + renderer), plugin-assistant and plugin-elizacloud.\n- Biome reports 0 errors on the 136 changed files.\n- All 55 new or changed test files pass under their package runners (vitest, bun test, node --test).\n- Each fix was also checked against the pre-fix code, where its regression test fails.\n- I have not run the full `bun run verify` locally because the machine is heavily loaded; hosted CI covers it.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-27T21:33:38Z",
+      "mergedAt": null,
+      "additions": 8926,
+      "deletions": 2580
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFYH2mQ",
+      "title": "fix(cloud-billing): dispute units, bigint defaults, mini-app removal, and Plus/Pro subscription lifecycle",
+      "author": "lalalune",
+      "number": 32854,
+      "body": "Cloud billing: dispute credit units, bigint defaults, phone-webhook route test, container catalogue pin, mini-app removal, and an end-to-end Plus/Pro subscription audit. One commit per logical change.\n\n## Fixes #31449: dispute reinstatement restores credit units\n`handleChargeDisputeFundsReinstated` computed `min(dispute.amount/100, |clawback|)`, which compares provider dollars against credit units. A $10 / 500-credit pack got 10 credits back. It now restores the matched clawback's applied credit amount. That amount is already scaled to the disputed fraction and capped at the balance, so an unrecovered shortfall is never restored. The replay key, org ownership and out-of-order retry are unchanged.\n- New `api/__tests__/stripe-dispute-reinstatement.pglite.test.ts` drives the real `processStripeEvent` and credits service on PGlite. It covers a full pack, partial consumption, a partial $3 dispute, a legacy 1:1 top-up, an empty balance, replays, early-reinstatement retry and bystander isolation. 5/5 pass; it fails on develop.\n\n## Fixes #31523: bigint defaults break `db:generate`\nSeven `.default(0n)` / `5n*1024n**3` defaults are now `sql\\`0\\`` / `sql\\`5368709120\\``, so database defaults are unchanged. New `shared/src/db/schema-snapshot-serialization.test.ts` builds the drizzle-kit snapshot and DDL over the whole schema and pins the seven defaults. It passes, and fails with develop's BigInt default.\n\n## Refs #31768: Twilio and Blooio route-level idempotency test\nThe route fix itself already landed on develop in #31775 (`processOnce`), so this PR only adds coverage. `api/__tests__/phone-webhook-idempotency.pglite.test.ts` uses a real PGlite idempotency store. Three concurrent deliveries of one message route once, and a failed delivery releases its claim so the retry routes again, for both providers. 4/4 pass on develop's routes; against the pre-#31775 routes it routed 3 times.\n\n## Refs #22957: container catalogue\nThe ghost container constants and the shutdown-email monthly figure were already removed by #32799. This ports the rest of #26383's intent: `container-warning-rate.test.ts` now pins the catalogue key set to `DAILY_RUNNING_COST` and `SHUTDOWN_WARNING_HOURS`, so an unmetered rate can't come back. The tracker's consolidated decisions remain open and need owner-picked values:\n- storage units, price and fallback (#22956)\n- API-key price, count and rate (#22958)\n- MCP buyer/creator settlement (#22961)\n- legacy packs and minimum top-up (#22963)\n- which credit sources count toward RPM tiers (#23019)\n- affiliate surcharge disclosure (#23020)\n- frozen/sleeping retention (#22967)\n- crypto/x402 refunds (#22968)\n- media rejected by storage quota (#20956)\n\n## Refs #32021: mini-app charge surface removed\nRemoved:\n- `/apps/:id/charges/**` and `/app-credits/checkout|verify` routes\n- `app-charge-{requests,settlement,callbacks}` services\n- the public app-charge page and its i18n keys\n- SDK methods and types\n- the orchestrator `apps.charges.*` broker commands\n- mock routes, scenarios and e2e charge tests\n\nThe crypto cron no longer drains app-charge callbacks. No tables or migrations are dropped.\n\n**Money safety:** Stripe `checkout.session.completed` and `payment_intent.succeeded` that carry legacy mini-app metadata (`charge_request_id`, `miniapp_app`, `app_credit_purchase`) are acked with `retired_miniapp_payment` and never fulfilled as a generic credit purchase. OxaPay confirmation throws a typed `RETIRED_MINIAPP_PAYMENT` before any write. Tests: `stripe-retired-miniapp.pglite` (4/4, including a crediting control case and replays) and `crypto-retired-miniapp.pglite` (3/3).\n\n**Kept, because non-mini-app features use it:**\n- App registration and auth.\n- App inference credit reservations used by chat completions, messages and admission recovery.\n- Earnings and monetization settings.\n- `/app-credits/balance`.\n- Payment requests and x402.\n- App-billing (per-app subscriptions and trials). Org subscription tables have foreign keys to `app_billing_scopes`, account deletion runs app-billing dispositions, plain app sign-up materializes app-billing accounts, and chat/embeddings inference calls `admitAppSubscriptionInference`.\n\n**Behaviour change to review:** sensitive-request payment links now point at the live payment-request page (`/payment/<id>` on the site URL) instead of the deleted app-charge page.\n\n## Plus/Pro subscription audit (webhooks)\n- **Terminal publish (lockout):** a subscription Stripe cancels after failed payments could never be published, because Stripe advances the period on a failed renewal. The DB stayed `active` and checkout refused to resubscribe. The terminal publish now accepts Stripe's advanced period; identity fields must still match.\n- **Dunning owner:** `invoice.payment_failed` and live past_due/unpaid now publish dunning with a 3-day grace. A paid renewal clears it, and recovery handles it too.\n- **Entitlement lapse:** the quota policy applies a 3-day grace after period end at read time. A lapsed or past-grace org gets the free tier instead of `ORGANIZATION_POLICY_UNAVAILABLE`.\n- **Routing:** events route on the live subscription status, not the payload.\n- **Events no longer thrown away:**\n  - unowned subscription events are acked as `unhandled_subscription_event`\n  - renewal/dashboard `customer.subscription.updated` is acked as `no_owned_change`\n  - permanent typed failures are acked, with code and reason logged\n- **Incidents instead of silent lapse:** out-of-band plan change, external cancel, trial/pause/pending updates, refunds/disputes on subscription invoices, and strict-validation renewal rejections.\n- **Basil payloads:** `invoice.paid` reads the subscription from the fetched invoice. An unexpected `api_version` is logged.\n- **Queue:** retries get exponential backoff and a drain no longer re-reads a message it just requeued. On dead-letter, the ingress `webhook_events` row is deleted so a Stripe resend can re-enter.\n- **Recovery:** already-published terminal subscriptions are skipped, and per-subscription degradation no longer 503s the whole cron.\n\n## Plus/Pro subscription audit (checkout, portal, status, UI, SDK)\n- **Customer Portal:** new `POST /api/v1/subscriptions/portal`.\n  - Gated to billing managers; the customer comes from the DB; the return URL is built on the server.\n  - Locked configuration: no plan switching, cancel at period end only.\n  - past_due and unpaid orgs can use it.\n- **Replays:** an APPLIED replay returns `completed` only while that subscription is live (otherwise `stale_intent`). FAILED/SUPERSEDED replays return `expired`.\n- **Different plan while a checkout is pending:** the open session is expired and the new checkout continues, unless the old session already completed.\n- **Stuck commands:** PREPARED or started-without-session commands are superseded or failed instead of blocking the org.\n- **Sweeper:** a stale-checkout sweeper runs in the Stripe queue cron. Account deletion closes open sessions.\n- **Stripe session:** 23h55m expiry, `currency: \"usd\"`, and prices with `currency_options` are rejected.\n- **Org scope:** the org checkout and command queries, and `enqueueCommand`'s conflict check, ignore app-scoped commands.\n- **Plans route:** rate limited, with a 5 s cache of typed failures.\n- **Error mapping:** non-retryable checkout reasons map to 409/403.\n- **Snapshot:** now has `subscriptionId` and a cancel/undo control.\n- **UI:**\n  - A status card shows plan, status, renew/cancel date, grace and allowance.\n  - It has cancel/undo with polling and the portal button.\n  - Subscribe is hidden for non-managers and live subscribers.\n  - The checkout key is per user, and localStorage access is guarded.\n  - The session id is dropped from the URL after confirm, and a cancel-return banner is shown.\n- **SDK:** new `startSubscriptionCheckout`, `confirmSubscriptionCheckout` and `createSubscriptionPortalSession`. The unused `SubscriptionDto` / `SubscriptionPublicState` are removed, which is a breaking export change.\n\n## Verification\nAll results below were re-run after rebasing onto develop `d0c5d08ace`. Test files were run one at a time (`bun test <file>`); mocked stripe-event files leak `mock.module` into PGlite files when they share a process. Results:\n\n| Area | File | Result |\n|---|---|---|\n| Dispute reinstatement | stripe-dispute-reinstatement.pglite | 5/5 |\n| Phone webhooks | phone-webhook-idempotency.pglite | 4/4 |\n| Mini-app removal | stripe-retired-miniapp.pglite | 4/4 |\n| Mini-app removal | crypto-retired-miniapp.pglite | 3/3 |\n| Stripe queue (existing) | stripe-event, checkout-authority, waifu | 59 pass |\n| Container catalogue | container-warning-rate | 2/2 |\n| Billing manager authz | billing-manager-mutations.pglite (portal added to the role matrix) | 37/37 before the rebase. After the rebase it hits its existing 30 s `beforeAll` timeout at host load average ~255, before any test runs |\n| Bigint defaults | schema-snapshot-serialization | 1/1 |\n| Webhooks | subscription-dunning.pglite (new) | 6/6 |\n| Webhooks | subscription-reconciliation.pglite | 20/20 |\n| Webhooks | subscription-lifecycle-finalization.pglite | 26/26 |\n| Checkout / portal | subscription-checkout-recovery.pglite (new; real Stripe SDK against a loopback server) | 12/12 |\n| Snapshot | account-billing-snapshot-subscription.pglite | 6/6 |\n| UI | `src/cloud/billing` vitest | all pass; 3 files needed `--testTimeout 30000` under host load |\n\nOther checks:\n- `bunx tsc --noEmit`: clean for cloud-api, cloud-shared, cloud-sdk, ui and app.\n- `bun run codegen` and `check:router-contract`: pass. `generate-public-routes.ts --check`: passes.\n- Biome check on all 106 changed TS files: clean.\n\nNot run: `bun run verify` (disk is tight on the shared host), the `*.postgres.integration.test.ts` suites (they need real Postgres), the cloud e2e/Playwright suites (they need a live stack), and the UI visual audit / desktop and mobile inspection.\n\n## Follow-up with #32838\n#32838 asked for a call to `subscriptionAllowanceRepository.retirePeriodInTransaction(tx, { reason: \"subscription_terminal\" })` after the entitlement rebuild in the terminal lifecycle finalizer. That function doesn't exist on develop yet: #32838 is still open and adds it. Whichever PR merges second should add the call in `subscription-lifecycle-finalization.ts` right after the entitlement rebuild.\n\n## Needs real Stripe / staging\n- Stripe Test Clocks: a failed renewal advancing the period, the dunning retry schedule, cancel after retries are exhausted, and a late `invoice.paid` inside the grace.\n- Live Basil-signed webhook payloads.\n- Portal configuration on the pinned API `2024-11-20.acacia` (whether `business_profile` is required) and portal UX.\n- The shape of the `currency_options` expand. `adaptive_pricing` is deliberately not sent.\n- Upstash queue ordering with requeue and backoff, and cron timing.\n\n## Policy questions for the owner\n1. Plus/Pro trials: not implemented (owner decision). Enabling them would need a per-plan eligibility table and a relaxed `trialing` constraint.\n2. Is 3 days right for both the renewal and dunning grace, and should past_due within grace keep paid access?\n3. Should a refund or dispute on a subscription invoice revoke that period's entitlement or allowance? Currently it only opens an incident.\n4. Should an out-of-band price swap or a dashboard/portal cancel be adopted into our records, or stay incident-only?\n5. Plan switching (Plus to Pro): currently unsupported, and Subscribe is hidden while a live subscription exists.\n6. The cancellation contract says \"billing owner, recent auth\", but the code allows owner or admin without recent auth.\n7. Cancel/undo is rejected during dunning.\n8. Paid checkout on an org fenced for deletion: refund, or manual review? Currently logged `subscription_paid_checkout_unentitled` and kept pending.\n9. The retry budget (8 attempts, about 2 h) and a DLQ replay tool.\n10. Recovery no longer scans canceled subscriptions. A corrupt projection on one is caught only by a late event.\n11. Renewal-validation rejections (discount/tax/balance/proration): keep acking with an incident, or keep the org funded while ops reviews?\n12. Latent: the live-subscription guard ignores `trialing`/`paused`. This only matters if trials are added.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-27T18:17:22Z",
+      "mergedAt": "2026-09-27T19:31:58Z",
+      "additions": 6581,
+      "deletions": 5783
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFTT4NA",
+      "title": "fix(cloud): make Plus/Pro allowance funding and resource quotas work end to end",
+      "author": "lalalune",
+      "number": 32838,
+      "body": "Fixes the Cloud Plus/Pro subscription defects found by the subscription audit, covering allowance-first funding (follow-up to #23092, closed) and entitlement-derived quotas (follow-up to #23094, closed). Webhook/checkout/portal/billing-UI work and the past_due/grace entitlement projection (A6, B2) are handled separately on `shaw/fix-cloud-billing-subscriptions` and are not touched here.\n\n## B1: paid plans could not create any resource (critical)\nPlus/Pro entitlements set every resource ceiling to `null`, and the quota policy treats `null` as unavailable, so subscribers were denied new apps, characters, containers, sandboxes and storage writes.\n- The v1 catalog now declares explicit `resourceCeilings`, validated so a paid plan is never below the Free ceilings. Until larger paid ceilings are ratified, paid ceilings equal Free (5 characters, 5 sandboxes, 1 container, 5 GiB, 25 apps).\n- Entitlement derivation reads the ceilings from the catalog. Migration `0474` republishes them onto existing paid projections so stored rows keep matching their derivation (the quota policy compares the two).\n- The public plan DTO (shared + SDK) exposes the ceilings instead of `null`.\n\n## A1: allowance-first funding for every allowance-eligible spend path\nEach path now funds subscribers allowance first, then purchased credit, through `subscriptionFundingService`; everyone else keeps the unchanged cash lane.\n- New router `lib/services/allowance-first-credits.ts` for request-scoped callers: search proxy, DexScreener proxy (now settles or releases its prepaid hold instead of refunding cash), meeting transcription, pending video holds and A2A chat/image/memory/conversation.\n- Pending video holds persist their funding identity; the video reconcile sweep settles funded holds through subscription funding.\n- Native storage PUTs and paid reads (migration `0475` adds a tenant-bound `funding_reservation_id` and rewrites the shape checks/read triggers).\n- Container daily/terminal billing (earnings first, then allowance, then credits) and container deploy debits (migration `0476`).\n- Legacy hourly agent billing and the agent operation biller (migration `0477`).\n- Money stays exact (canonical 6-decimal strings / bigint micros) and every funding key is retry-stable, so replays are idempotent.\n\n## A2: debit-boundary ratchet in CI\n`subscription-funding-debit-boundaries.test.ts` fails when production debit signals differ from the reviewed inventory, when a boundary's class disagrees with the policy, or when an allowance-eligible boundary does not route subscribers through allowance-first funding.\n\n## A3: stranded reservations\nReservations persist the caller's own deadline (TTL or window end) instead of the allowance period expiry. A sweep in the existing `sweep-credit-reservations` cron releases stale holds to their exact sources with keyed refunds. Only owners without their own reconciler are swept; Dedicated windows, native storage and pending video jobs are excluded.\n\n## A7: Dedicated stopped at every period boundary\nA time-metered window that straddles the period end funds only its in-period share from allowance and the remainder from purchased credit; the window is no longer clipped to the period.\n\n## A8: ex-subscribers on cash\nAn unfunded (canceled) subscription is cash-only for allowance-eligible work instead of a hard denial.\n\n## A9: expire job\n`expireEndedPeriods` retires ended periods (and periods of terminal subscriptions) with an append-only `expire` entry, from the same cron. Later settlements forfeit their remainder as `expired_refund`.\n\n## A10: resubscribe after a terminal lifecycle event\nGranting a new period retires an overlapping bucket left open by a terminal (canceled/incomplete_expired) predecessor instead of conflicting, and the expire job retires such buckets on the next tick. I did not add a call inside the webhook lifecycle finalizer (`subscription-billing-operations.ts`) to stay out of the webhook work in flight; it can call `subscriptionAllowanceRepository.retirePeriodInTransaction(tx, { reason: \"subscription_terminal\" })` after the entitlement rebuild if immediate retirement is wanted.\n\n## B4, B5, B6: caches and warnings\n- B4: a stale admission snapshot still fails its request closed, but the admission path now drops the isolate copy and republishes the shared projection at once, instead of ~30s of errors after every policy-generation bump.\n- B5: the org tier cache compares its stamp with the durable policy generation, so subscription changes invalidate it without a writer hook.\n- B6: the Dedicated low-funds warning counts remaining allowance.\n\n## A13: minor issues\n- Purchased-credit amounts that the numeric credit writer cannot represent exactly are rejected.\n- Request ids outside the durable key grammar are hashed into `inference-gate:sha256.<hex>` instead of failing only subscription-funded requests.\n\n## Policy questions (conservative behavior chosen)\n- **A4, concurrent split:** kept the reserve-time split. Unused purchased credit is refunded at settle, but usage is not moved onto allowance that another request released later. Money never moves between sources after reservation.\n- **A5, overage:** usage above a subscriber's reservation is still recorded as `uncollected_overage` and not charged. We never charge more than the held amount.\n- **A11, mid-period plan change:** no proration. Allowance funding fails closed until the plan change is reconciled.\n- **A12, trials:** platform trials still get no allowance; app-scope trials are unchanged.\n- **B3, over-quota after downgrade:** existing resources are kept and only new create/start is blocked, per #23094.\n- **Also decided:** stranded reservations are released (refunded) rather than charged, since there is no usage evidence. Paid ceilings equal Free until larger ceilings are ratified.\n\n## Verification\n- `bun run typecheck` in `packages/cloud/shared`: pass. `bunx tsc --noEmit` in `packages/cloud/api`: pass. `bun run typecheck` in `packages/cloud/sdk`: pass.\n- `bun run lint:check` in shared/api/sdk: no errors (existing warnings only; none in changed files).\n- `bun test` in `packages/cloud/shared`:\n  - `subscription-allowance-lifecycle.pglite.test.ts` (new): 8 pass\n  - `subscription-funding-transaction.pglite.test.ts`: 32 pass, 19 skip (Postgres/SSH-only)\n  - `subscription-funding-debit-boundaries.test.ts` (new): 4 pass\n  - `subscription-allowance-visibility.pglite.test.ts`: 2 pass\n  - `subscription-entitlements-derivation.test.ts`: 5 pass; `subscription-entitlements.pglite.test.ts` and `account-billing-snapshot-subscription.pglite.test.ts`: pass\n  - `org-storage-subscription-funding.pglite.test.ts` (new) + `org-storage-mutations` + `org-storage-reads`: 38 pass; `org-storage-read-operations-migration.test.ts`: 4 pass\n  - `container-billing-subscription-funding.pglite.test.ts` (new): 10 pass; `container-billing-idempotency.test.ts`: 20 pass; `compute-billing-recovery.pglite.test.ts`: 60 pass\n  - `agent-billing-allowance-first.pglite.test.ts` (new): 6 pass; `provisioning-jobs-scheduled-backup-sentinel.test.ts`: 57 pass\n  - `__tests__/meeting-billing.test.ts`: 6 pass\n- `bun test __tests__/container-warning-rate.test.ts` in `packages/cloud/api`: 1 pass\n- Root `bun run verify` and full builds were not run because of limited disk space.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-27T00:49:23Z",
+      "mergedAt": "2026-09-27T19:32:13Z",
+      "additions": 5103,
+      "deletions": 349
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFX9_ZQ",
+      "title": "fix(cloud): safe restore gating, exact cleanup, unpaid stop-in-place, automatic billing resume, chargeback hold and Shared fallback",
+      "author": "lalalune",
+      "number": 32850,
+      "body": "Cloud agent lifecycle: safe restore gating, exact failed-provision cleanup, unpaid stop-in-place, automatic billing resume, lost-chargeback hold, and the Dedicated-to-Shared fallback authority.\n\nOne commit per issue. Stripe credit math and pricing files are untouched, which keeps this out of `shaw/fix-cloud-billing-subscriptions`. **Migration numbers:** this PR adds `0478`, `0479` and `0480`, after `0474` on develop. That leaves `0475`–`0477` for #32838; whichever lands second must re-sequence the journal `idx`/`when`.\n\n## #29678: stale provision cleanup can kill a same-name successor\n\nFixes #29678\n\n- **Deploy:** the provisioning-worker deploy now rewrites the preserved `/opt/eliza/cloud/.env.local` to exactly one repository-owned `ORPHAN_RECONCILER_ENABLED=0`. It verifies the value before restart and again in the health gate.\n- **Cleanup:** failed post-adoption provision cleanup no longer calls `stopForReplacement(handle.sandboxId)` by the reusable container name.\n  - It re-fences the adopted candidate with its exact node, immutable container ID, replacement attempt and VPN identity (`fenceAdoptedProvisionForCleanup`).\n  - It then retires the candidate through the existing durable replacement-cleanup authority, which releases the node slot exactly once.\n  - Incomplete Docker identity fails closed as a retryable cleanup failure.\n  - Name-based teardown remains only for non-Docker providers.\n- **Remaining:** the orphan classifier's read-authority mismatch, where it treated a live `running` row as orphaned, still needs its own staging investigation with the reconciler disabled.\n\n## #30697: preserve agent state and gate readiness until backup recovery succeeds\n\nFixes #30697\n\n- **Fail on any known-backup failure:** every lookup, reconstruction or application failure for a known backup now fails the provision. Nothing prunes the chain; `degradeUnrecoverableSnapshot` and `pruneBackups(agentId, 0)` are gone.\n  - Transient failures keep their cause so the job retries.\n  - Failures that cannot heal become `SNAPSHOT_RESTORE_REQUIRES_FRESH_BOOT_CONSENT`. These are crypto errors, 401/403, 404/410, a custom image without the restore endpoint, null reconstruction, and size refusal.\n- **Readiness gate:** every provision stays `provisioning` (non-routable) until the restore tail commits readiness through a generation-fenced CAS. Billing re-entry happens only after the restore is applied.\n- **Background reconciler:** the stuck-provisioning reconciler no longer flips a healthy row to `running` while the agent has a backup that was never proven applied.\n- **Unchanged paths:** first creation without a backup and explicit `forceFreshBoot` consent still work and keep retained backups.\n- **Behaviour change:** waking a custom image that lacks the restore endpoint now reports a recovery failure. Before, it skipped the restore silently. The owner can explicitly consent with `forceFreshBoot`.\n\n## #20726 (partial; consolidates #30746): durable backup/restore lifecycle\n\nRefs #20726. This is an umbrella issue and must stay open.\n\n**Unfunded/legacy stop path (#30746).** A bound billing suspension whose current backup cannot be captured used to refuse the stop, so unpaid compute kept running. It now stops the exact observed runtime **in place**:\n\n- The restart policy is disabled and the container is stopped by its immutable ID. It is never removed.\n- `agent_sandboxes.retained_runtime` (migration 0478) records the exact runtime and its private ingress. While it is set:\n  - node deprovisioning counts the row;\n  - the orphan reaper sees a live placement;\n  - provision, restore and sleep refuse to replace the runtime.\n- `executeResume` restarts that same container in place after billing settles, publishes ingress only after readiness, and clears the marker.\n- A missing or replaced runtime is a visible failure, never a fresh boot.\n\n**#30820 (manifest-v3 restore candidates) was not ported.**\n- Its Agent-side substrate was deleted from `develop` in `dce4782e17` (\"updates\", 2026-09-23). That is roughly 14k lines: the `agent-backup-restore-v3-candidate-{fs,records,file-set,...}` and `agent-backup-v2-capture` modules.\n- Its only behavioural test (`agent-backup-restore-v3-materialization.pglite.test.ts`) imports those modules.\n- The cloud-side join/seal hunks apply with a trivial import-path fix, but they would land as dormant code with no materializer and no runnable test. I left them out.\n- The intent (never route before a verified restore, never silently boot empty) is delivered on the production restore path by the #30697 commit.\n- **Owner decision needed:** whether the v3 Agent materializer is coming back.\n\n**Still needs live staging or further work for #20726:**\n- A staging drill on a real Docker node for the retained stop. It must cover:\n  - `docker update --restart=no`, then stop, then inspect;\n  - mounts and secrets retained;\n  - node deprovisioning blocked;\n  - exact restart.\n- Physical provider evidence for the #29678 exact cleanup. The same-name successor survives, driven through the real Docker identity resolver over SSH.\n- The #20732 explicit restore (materialize, commit generation, boot/attest, route CAS) and the v3 decision above.\n- #24594 node-loss failover, #24601 incremental chains / multipart publication, #24407 fair admission, #31270 heartbeat-vs-backup, #31325 restore memory budget, #31334/#31355 drain before cutover.\n- A staging backup, wipe, restore, boot and remembered-fact drill with measured RPO/RTO (artifacts A–E).\n\n## #30702: automatically resume billing-suspended agents when funding returns\n\nFixes #30702\n\nThe provisioning worker reconciles one cursor page per cycle, using the existing stop intents and provisioning jobs. No new scheduler is added.\n\n- **Discovery** selects provider-confirmed `billing_request` stops that meet all of:\n  - the intent is still the agent's newest intent;\n  - the agent is still `stopped`, not deleting, not replacement-fenced and unowned;\n  - no exclusive lifecycle job was created after the stop;\n  - the organization admits paid work.\n- **Admission** re-reads funding through the canonical credit gate (cash plus eligible subscription allowance). It re-verifies the stop authority under the agent lifecycle lock in the enqueue transaction. Repeated scans and concurrent refills therefore reuse one `agent_resume` job.\n- **Execution** rechecks authority and funding before any effect. A later user stop, a deletion or lapsed funding completes the job as an explicit `skipped` instead of resuming.\n- **Crash repair:** a crash between a credit commit and the enqueue is repaired by the next page.\n- **Resume paths:** retained runtimes restart in place; removed containers re-provision through the fail-closed restore from #30697.\n- **Remaining:** live verification of the final database, runtime and provider state before production rollout.\n\n## #25146 (server-side mechanism): reversible Dedicated-to-Shared fallback\n\nRefs #25146\n\n- **Most conservative withdrawal policy.** Dedicated access is withdrawn only when both hold:\n  - the runtime is stopped by a provider-confirmed billing stop that is still its latest lifecycle decision;\n  - the organization is **unfunded now**.\n\n  Transient, unknown, user-initiated and funded states keep Dedicated authority with the existing honest unavailability.\n- **Durable authority:** `personal_dedicated_fallbacks` (migration 0480) holds one active interval per account. Each interval has a monotonic generation, the withdrawing stop intent, and a new scoped Shared journal (`fallback:<uuid>`). A later withdrawal opens a new generation and never reopens an older interval.\n- **Memory boundary:** Shared answers in the scoped journal and never in the canonical Dedicated/pre-upgrade room. Responses carry a typed `accountState`: access, reason, `dedicatedMemory: \"unavailable\"`, generation, and the billing recovery path. It contains no payment details.\n- **Recovery:** once Dedicated runs again, both consumers close the interval before routing returns.\n- **One decision for both consumers:** personal message delivery and the personal-shared messages route use the same authority decision. Group turns are unchanged.\n- **Remaining (product decisions or live evidence):**\n  - importing the Shared interval into Dedicated on recovery;\n  - a model-facing account provider;\n  - signed, expiring recovery links;\n  - notice dedupe;\n  - isolating Shared long-term memory beyond conversation history;\n  - a policy for trial, grace, dunning and cancel-at-period-end;\n  - live Stripe sandbox and connector certification with desktop/mobile evidence.\n\n## #22930 (clearly-correct slice only): payment reversal entitlement\n\nRefs #22930. The owner decision is still required, so this does not close the issue.\n\n**Implemented:**\n- A dispute that closes **lost** (`charge.dispute.closed`, `status: \"lost\"`) records a durable, idempotent `organization_payment_reversal_holds` row (migration 0479). The row is attributed through the organization credit grant that the charge funded.\n- While a hold is active:\n  - the canonical agent credit gate denies new paid admission (create, provision, resume, wake, upgrade) regardless of balance;\n  - automatic resume (#30702) skips the organization.\n- A hold ends only through an explicit, audited release (`releasePaymentReversalHold`, with actor and reason required).\n- Won disputes, open disputes, refunds and charges without a credit grant never create a hold.\n- The existing clawback on `funds_withdrawn` is untouched.\n\n**Open decision points for the owner (Decision A/B/C and the eight fields):**\n1. Should refunds, partial refunds or `funds_withdrawn` (before a dispute is decided) also hold, or only a lost dispute (current behaviour)?\n2. Is the unrecovered clawback shortfall (`unrecovered_clawback_usd`) authoritative debt, written off, or a separate state?\n3. Which gates beyond agent admission should a hold block: inference, storage, domains, API keys, apps, containers?\n4. What happens to already-running billable resources during a hold (continue, suspend, stop), with what exact timing, and who pays? Nothing is stopped today.\n5. Which capabilities stay available during a hold (sign-in, billing history, export, deletion)?\n6. Restoration: automatic after repayment or a won re-dispute, or a reviewed release (current behaviour)? Who may release?\n7. UI states, notifications, receipts and support/audit requirements (#22966).\n8. Interaction with subscription dunning states.\n9. Creator payouts (#23022) are moot, since mini-app/creator payouts were removed.\n\n## Verification\n\nAll commands were run from the owning package directories on this branch.\n\n- `bun test src/lib/services/__tests__/provision-recovery.pglite.test.ts` (new, real `ElizaSandboxService` over PGlite): 11 pass\n- `bun test src/lib/services/__tests__/retained-unpaid-stop.pglite.test.ts` (new): 3 pass\n- `bun test src/lib/services/__tests__/billing-suspension-resume.pglite.test.ts` (new; covers automatic resume, the reversal hold and the fallback authority): 5 pass\n- Existing suites touched by these changes:\n  - `suspend-backup-durability.pglite`: 6 pass\n  - `eliza-sandbox/power.test.ts`: 30 pass (custom-image wake expectation updated to the fail-closed contract)\n  - `docker-node-workloads.retained.pglite`: 5 pass\n  - `docker-node-workload-reconciliation.pglite`: 6 pass\n  - `subscription-funding-transaction.pglite`: 32 pass\n  - `subscription-allowance-visibility.pglite`: 2 pass\n  - `account-billing-snapshot-primary.pglite`: 2 pass\n  - `provisioning-jobs-scheduled-backup-sentinel.test.ts`: 57 pass\n- `packages/cloud/api`:\n  - `bun test __tests__/stripe-event.test.ts`: 45 pass (2 new cases)\n  - `__tests__/dedicated-agent-proxy.test.ts`: 75 pass\n- `packages/cloud/scripts/admin/daemons`: `bun test provisioning-worker-env-reconcile.test.ts`: 14 pass (1 new case; runs the workflow block verbatim against a seeded stale host file)\n- Typecheck:\n  - `tsc --noEmit` in `packages/cloud/shared`: clean\n  - `tsc --noEmit` in `packages/cloud/api`: clean\n  - `provisioning-worker.ts` checked with the shared config: only the error at line 2241 (`PrePullImagesSummary | null`), which is also on `develop` and not touched here\n- Lint and migrations:\n  - Biome on every changed file: clean\n  - `drizzle-kit check`: clean\n  - `check-migration-prefix-order`: clean\n- After rebasing onto develop `d0c5d08ace`: shared `tsc` clean; `drizzle-kit check` and the migration-order check clean; the three migration-touching PGlite suites re-run green.\n- Not run: root `bun run verify` and full-repo builds, because the coordinator asked to avoid them while disk space is tight.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-27T17:46:51Z",
+      "mergedAt": "2026-09-27T18:18:22Z",
+      "additions": 3598,
+      "deletions": 209
+    }
+  ],
+  "codeChanges": {
+    "additions": 33989,
+    "deletions": 4865,
+    "files": 506,
+    "commitCount": 278
+  },
+  "completedItems": [
+    {
+      "title": "fix(plugin-inbox): derive unsubscribe scan chronology by timestamp, not Gmail arrival order",
+      "prNumber": 27820,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #27807\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` was run aft",
+      "files": [
+        "plugins/plugin-inbox/src/inbox/unsubscribe-service.ts",
+        "plugins/plugin-inbox/test/unsubscribe-scan-order.probe.test.ts",
+        "plugins/plugin-inbox/test/unsubscribe-service.test.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-todos): reject invalid status on todo create and update instead of silent fallback",
+      "prNumber": 28210,
+      "type": "bugfix",
+      "body": "<!-- Fill every visible section. Keep every evidence row visible; use N/A with a concrete reason when a row does not apply. -->\n\n# Relates to\n\nRelates to #28209\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n",
+      "files": [
+        "plugins/plugin-todos/src/actions/todo.test.ts",
+        "plugins/plugin-todos/src/actions/todo.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): normalize phoneless legacy phone_verified NULL projections",
+      "prNumber": 29608,
+      "type": "bugfix",
+      "body": "Fixes #28646\n\n## Problem\n\nLegacy email-only accounts can disagree on phone verification: `users.phone_verified=false` while `user_identities.phone_verified=NULL` when both phone numbers are absent. Migration 0051 projected NULL in that case",
+      "files": [
+        "packages/cloud/shared/src/db/migrations/0343_normalize_legacy_null_phone_verified.sql",
+        "packages/cloud/shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud/shared/src/db/repositories/__tests__/users-converge-phone-telegram-personal-account.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/users-legacy-phone-verified-projection.test.ts",
+        "packages/cloud/shared/src/db/repositories/user-identity-projection.test.ts",
+        "packages/cloud/shared/src/db/repositories/user-identity-projection.ts",
+        "packages/cloud/shared/src/db/repositories/users.ts",
+        "packages/cloud/shared/src/db/schemas/user-identities.ts",
+        "packages/cloud/shared/src/db/schemas/users.ts",
+        "packages/cloud/shared/src/lib/services/inference-auth-lifecycle.test.ts",
+        "packages/cloud/shared/src/lib/services/users.ts",
+        "packages/cloud/shared/src/db/legacy-phone-verified-migration.pglite.test.ts",
+        "packages/cloud/shared/src/db/migrations/0474_normalize_legacy_null_phone_verified.sql"
+      ]
+    },
+    {
+      "title": "fix(ui): keep managed Cloud routes behind pending private registration",
+      "prNumber": 29602,
+      "type": "bugfix",
+      "body": "## Summary\n- Individually registered managed Cloud routes (`group: \"cloud\"` / `\"admin\"`) now honor the same pending/error/retry/ready barrier as the `/cloud/*` wildcard bootstrap.\n- Publishing a domain route during private registration no l",
+      "files": [
+        "packages/ui/src/cloud/shell/CloudRouterShell.private-registration.test.tsx",
+        "packages/ui/src/cloud/shell/CloudRouterShell.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): unwrap a revocation the disposal error displaced",
+      "prNumber": 30299,
+      "type": "bugfix",
+      "body": "Follow-up to #30264 (merged as `bc84c05273`). I reviewed that PR at head `8ceb43c0a2` and raised this as a non-blocking note; it merged without it. The blocking finding from that review — an `./engine` mock leaking from `birdeye-handler.err",
+      "files": [
+        "packages/cloud/api/src/lib/generative-route-auth.test.ts",
+        "packages/cloud/api/src/lib/generative-route-auth.ts",
+        "packages/cloud/api/src/lib/generative-route-auth.suppressed-revocation.test.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): page the memories feed from the raw server tail under a multi-type filter",
+      "prNumber": 30295,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #30294 — the Memories feed cannot page past a server page that holds none of the selected types.\n\n# Contribution provenance\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `",
+      "files": [
+        "packages/ui/src/components/pages/MemoryViewerView.feed-cursor.test.tsx",
+        "packages/ui/src/components/pages/MemoryViewerView.tsx",
+        "packages/ui/src/components/pages/MemoryViewerView.interface.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(core): match reasoning preambles with the shared tag vocabulary in the model-JSON parser",
+      "prNumber": 30538,
+      "type": "bugfix",
+      "body": "## The defect\n\n`stripModelWrappers` in `packages/core/src/actions/json-model-output.ts` recognised a private-reasoning preamble like this:\n\n```ts\nconst thinkEnd = candidate.indexOf(\"</think>\");\nif (candidate.startsWith(\"<think>\") && thinkEn",
+      "files": [
+        "packages/core/src/actions/json-model-output.test.ts",
+        "packages/core/src/actions/json-model-output.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): refuse an ambiguous restore-coordinator flag instead of reading it as off",
+      "prNumber": 30506,
+      "type": "bugfix",
+      "body": "# What\n\n`agent-backup-restore-coordinator-runtime.ts` opens with a promise:\n\n> Reading configuration while disabled is itself a hazard… a dependent flag set without its parent is an **error rather than a no-op**.\n\nBoth flags were then teste",
+      "files": [
+        "packages/cloud/shared/src/lib/services/agent-backup-restore-coordinator-runtime.test.ts",
+        "packages/cloud/shared/src/lib/services/agent-backup-restore-coordinator-runtime.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): replace key-derived English catalog stubs with the call-site text",
+      "prNumber": 30637,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #30636 — the English UI renders 37 translation key names (\"Unsaved Changes Title\", \"Mode Line\", \"Conversation Count\") because `en.json` catalogued them as their own key.\n\n# Contribution provenance\n\n<!-- contribution-att",
+      "files": [
+        "packages/ui/src/i18n/en-catalog-stubs.test.ts",
+        "packages/ui/src/i18n/locales/en.json"
+      ]
+    },
+    {
+      "title": "fix(core): keep own __proto__ entries in sanitized trajectory JSON",
+      "prNumber": 30599,
+      "type": "bugfix",
+      "body": "# Relates to\n\nNo linked issue. Found during a read-only audit of `develop` and reproduced locally before any change.\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is reba",
+      "files": [
+        "packages/core/src/services/trajectory-json.test.ts",
+        "packages/core/src/services/trajectory-json.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): remove affiliate settlement balance readback",
+      "prNumber": 30914,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #30865\n\nDefinition of Done: full standard in [`CONTRIBUTING.md`](../CONTRIBUTING.md).\n\n- [x] This PR targets `develop` and is rebased onto the latest `origin/develop` with zero conflicts.\n- [x] `bun install` was run aft",
+      "files": [
+        "packages/cloud/shared/src/lib/services/__tests__/affiliate-payout-outbox.test.ts",
+        "packages/cloud/shared/src/lib/services/credits.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/credits-reconcile.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): keep streaming chunks well-formed UTF-16 across surrogate pairs (#30904)",
+      "prNumber": 30919,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRelates to #30904 — fixes the JSON-escaped and literal-split paths in the constrained `ResponseSkeletonStreamExtractor` (`processActiveString` → `appendVisibleAndEmit`) that the issue reproduces. Kept as `Relates to` rather th",
+      "files": [
+        "packages/core/src/utils/__tests__/streaming-field-events.test.ts",
+        "packages/core/src/utils/streaming.ts",
+        "packages/core/src/utils/streaming.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core): classify redirect budget and loop violations as SSRF policy blocks (#29931)",
+      "prNumber": 30933,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #29931.\n\n- [x] Targets `develop`; branched from `origin/develop` at `357084b3092` with zero conflicts.\n- [x] `bun install --frozen-lockfile` is current for this base; `RUN_TURBO_CONCURRENCY=4 bun run verify` passed at h",
+      "files": [
+        "packages/core/src/integrations/managed-provider/http-client.test.ts",
+        "packages/core/src/network/fetch-guard.test.ts",
+        "packages/core/src/network/fetch-guard.ts",
+        "packages/core/src/network/pinned-fetch.integration.test.ts"
+      ]
+    },
+    {
+      "title": "fix(health): compute \"today\" and the trend window on the local calendar day (#31248)",
+      "prNumber": 31264,
+      "type": "bugfix",
+      "body": "Closes #31248\n\n## What\n\n- `plugins/plugin-health/src/actions/health.ts` and `screen-time.ts`: the runners take a required `resolveTimeZone(runtime)` adapter and build the \"today\" key with the existing `getZonedDateParts`/`getLocalDateKey` h",
+      "files": [
+        "plugins/plugin-health/src/actions/health.local-day.test.ts",
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/health.ts",
+        "plugins/plugin-health/src/actions/screen-time.local-day.test.ts",
+        "plugins/plugin-health/src/actions/screen-time.test.ts",
+        "plugins/plugin-health/src/actions/screen-time.ts",
+        "plugins/plugin-health/src/health-bridge/health-bridge.local-day.test.ts",
+        "plugins/plugin-health/src/health-bridge/health-bridge.ts",
+        "plugins/plugin-personal-assistant/src/actions/health.ts",
+        "plugins/plugin-personal-assistant/src/actions/screen-time.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/health-service.status.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/health-service.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/service-mixin-health.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/service.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): roll back trade mode and answer 500 when the config write fails (#31239)",
+      "prNumber": 31259,
+      "type": "bugfix",
+      "body": "Closes #31239\n\n## What\n\n`PUT /api/permissions/trade-mode` in `packages/agent/src/api/permissions-routes-extra.ts` now captures the previous `features` object and `tradePermissionMode` before writing. If `ctx.saveElizaConfig` throws, the han",
+      "files": [
+        "packages/agent/src/api/permissions-routes-extra.mode-persistence.test.ts",
+        "packages/agent/src/api/permissions-routes-extra.test.ts",
+        "packages/agent/src/api/permissions-routes-extra.ts",
+        "packages/agent/src/runtime/tool-call-cache/redact.test.ts",
+        "packages/agent/src/runtime/tool-call-cache/redact.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): reject Alchemy/Ankr JSON-RPC error envelopes as chain failures (#31238)",
+      "prNumber": 31255,
+      "type": "bugfix",
+      "body": "Closes #31238\n\n## What\n\n`packages/agent/src/api/wallet-evm-balance.ts` gains one helper, `requireJsonRpcResult`, that rejects any keyed-provider body whose parsed envelope carries an `error` member (JSON-RPC object, or the bare string Alche",
+      "files": [
+        "packages/agent/src/api/wallet-evm-balance.test.ts",
+        "packages/agent/src/api/wallet-evm-balance.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-health): resolve Fitbit wall times in the profile zone",
+      "prNumber": 31968,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #31958 — Fitbit returns offset-less wall-clock strings for sleep start/end, stage times and weight logs; `Date.parse` read them in the HOST zone, so the stored instant depended on where the agent ran and the episode was ",
+      "files": [
+        "plugins/plugin-health/src/health-bridge/health-connectors.ts",
+        "plugins/plugin-health/test/fitbit-connector.contract.test.ts",
+        "plugins/plugin-health/test/fitbit-connector.local-wall-time.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): claim Twilio and Blooio webhook messages before processing them (#31768)",
+      "prNumber": 31775,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #31768 — the Twilio and Blooio inbound webhooks used check-then-mark idempotency (`isAlreadyProcessed` → inference + outbound send + usage row → `markAsProcessed`), so a redelivery of the same message that overlapped the",
+      "files": [
+        "packages/cloud/api/webhooks/blooio/[orgId]/route.logging.test.ts",
+        "packages/cloud/api/webhooks/blooio/[orgId]/route.test.ts",
+        "packages/cloud/api/webhooks/blooio/[orgId]/route.ts",
+        "packages/cloud/api/webhooks/twilio/[orgId]/route.logging.test.ts",
+        "packages/cloud/api/webhooks/twilio/[orgId]/route.ts",
+        "packages/cloud/shared/src/lib/utils/idempotency.process-once.pglite.test.ts",
+        "packages/cloud/shared/src/lib/utils/idempotency.ts"
+      ]
+    },
+    {
+      "title": "fix(network): screen the RFC 8215 local-use NAT64 prefix like the well-known one",
+      "prNumber": 31774,
+      "type": "bugfix",
+      "body": "# Relates to\n\nHardening of the outbound address classifier found during a 2026-09-19 review pass of the SSRF guards (reported privately through the repository's security advisory flow; no public issue).\n\nDefinition of Done: full standard in",
+      "files": [
+        "packages/cloud/shared/src/lib/security/outbound-url.test.ts",
+        "packages/cloud/shared/src/lib/security/outbound-url.ts",
+        "packages/core/src/network/ssrf.test.ts",
+        "packages/core/src/network/ssrf.ts"
+      ]
+    },
+    {
+      "title": "fix(elizacloud): preserve unavailable gateway token usage",
+      "prNumber": 32868,
+      "type": "bugfix",
+      "body": "Partial fix for #31017. A gateway response containing only `prompt_tokens`, only `completion_tokens`, or only `total_tokens` currently fabricates missing counts as zero. That makes incomplete telemetry look suitable for token-based cost est",
+      "files": [
+        "plugins/plugin-elizacloud/__tests__/text-streaming.test.ts",
+        "plugins/plugin-elizacloud/src/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(desktop): gate ready on remote runtime, mic capture follows macOS grant, honest browser/wallet states",
+      "prNumber": 32862,
+      "type": "bugfix",
+      "body": "Three desktop/UI issues, one commit each. Each builds on the partial work merged in #32852 (#30744, #30676) and #29598 (#29597).\n\n## #30744: packaged startup shows the ready UI before embedded first-run completes\n\nRefs #30744 (code part; pa",
+      "files": [
+        "packages/app/platforms/electrobun/native/macos/window-effects.mm",
+        "packages/app/platforms/electrobun/src/api-base.ts",
+        "packages/app/platforms/electrobun/src/index.ts",
+        "packages/app/platforms/electrobun/src/native/mac-window-effects.ts",
+        "packages/app/platforms/electrobun/src/rpc-handlers.ts",
+        "packages/ui/src/components/pages/BrowserWorkspaceView.chrome.test.tsx",
+        "packages/ui/src/components/pages/BrowserWorkspaceView.tsx",
+        "packages/ui/src/state/startup-embedded-first-run.test.tsx",
+        "packages/ui/src/state/startup-phase-runtime.ts",
+        "plugins/plugin-wallet/src/ui/components/InventoryAppView.gui.test.tsx",
+        "plugins/plugin-wallet/src/ui/components/InventoryAppView.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud): private messaging egress identity and no-response replies; Dedicated backup-catalog TLS",
+      "prNumber": 32861,
+      "type": "bugfix",
+      "body": "## #29919: 1:1 messaging egress through the identity that received the message\n\nRefs #29919 (tracker; live provider certification remains open)\n\n**Identity trace.** Telegram inbound to outbound is already bound on develop:\n- The Worker edge",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/cloud/api/__tests__/personal-telegram-edge-egress.test.ts",
+        "packages/cloud/api/eliza-app/webhook/_telegram-edge.ts",
+        "packages/cloud/api/internal/eliza-app/personal-shared/messages/route.ts",
+        "packages/cloud/scripts/admin/daemons/backup-catalog-worker.pglite.test.ts",
+        "packages/cloud/scripts/admin/daemons/backup-catalog-worker.ts",
+        "packages/cloud/scripts/admin/daemons/provisioning-worker-env-reconcile.test.ts",
+        "packages/cloud/services/_common/src/personal-shared-failure.ts",
+        "packages/cloud/services/_common/src/telegram-connector.ts",
+        "packages/cloud/services/gateway-webhook/__tests__/personal-private-egress.test.ts",
+        "packages/cloud/services/gateway-webhook/src/adapters/blooio.ts",
+        "packages/cloud/services/gateway-webhook/src/adapters/telegram.ts",
+        "packages/cloud/services/gateway-webhook/src/webhook-handler.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/account-deletion-backup-authority-cycle.pglite.test.ts",
+        "packages/cloud/shared/src/lib/services/agent-backup-catalog-worker-composition.ts",
+        "packages/cloud/shared/src/lib/services/agent-backup-catalog-worker-enabled-composition.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/shared-rest-adapter.ts",
+        "packages/core/src/services/embedding.activation-retry.pglite.test.ts"
+      ]
+    },
+    {
+      "title": "fix(core,ui): report invalid optional action params; actionable backup size-limit UI",
+      "prNumber": 32857,
+      "type": "bugfix",
+      "body": "## #32849: validateActionParams drops invalid optional parameters\n\nFixes #32849\n\nWhen an optional parameter was supplied with a value that failed its schema, `validateActionParams` removed the value, or replaced it with `schema.default`, an",
+      "files": [
+        "packages/core/src/actions.ts",
+        "packages/core/src/actions.validate-params.test.ts",
+        "packages/ui/src/components/settings/AdvancedSection.test.tsx",
+        "packages/ui/src/components/settings/AdvancedSection.tsx"
+      ]
+    },
+    {
+      "title": "feat(cloud): reversible entitlement-driven Dedicated-to-Shared fallback with pay action",
+      "prNumber": 32856,
+      "type": "feature",
+      "body": "## Fixes #25146: reversible, entitlement-driven Dedicated-to-Shared recovery\n\nBuilds on the fallback interval that already landed on develop (`personal_dedicated_fallbacks`, migration 0480, which only handled credit-funded billing stops). T",
+      "files": [
+        "packages/cloud/api/__tests__/shared-runtime-cutover-reminder.miniflare.test.ts",
+        "packages/cloud/api/internal/eliza-app/personal-shared/messages/route.ts",
+        "packages/cloud/api/src/shared-runtime-conversation.ts",
+        "packages/cloud/scripts/admin/daemons/provisioning-worker.ts",
+        "packages/cloud/shared/src/db/migrations/0490_personal_dedicated_fallback_entitlement.sql",
+        "packages/cloud/shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud/shared/src/db/repositories/agent-billing-resume.ts",
+        "packages/cloud/shared/src/db/schemas/personal-dedicated-fallbacks.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/billing-suspension-resume.pglite.test.ts",
+        "packages/cloud/shared/src/lib/services/personal-dedicated-fallback-reconcile.ts",
+        "packages/cloud/shared/src/lib/services/personal-dedicated-fallback.ts",
+        "packages/cloud/shared/src/lib/services/personal-message-delivery.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/conversation-coordinator.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/personal-fallback-account-state.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/shared-rest-adapter.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/shared-runtime-chat.ts"
+      ]
+    },
+    {
+      "title": "test(ui): export registerPlugin from the Android cloud-auth Capacitor mock",
+      "prNumber": 32855,
+      "type": "tests",
+      "body": "Fixes the red develop run https://github.com/elizaOS/eliza/actions/runs/36341621928 (`canonical / Tests (client)`): `No \"registerPlugin\" export is defined on the \"@capacitor/core\" mock`.\n\n#32834 added `import { Capacitor, registerPlugin } f",
+      "files": [
+        "packages/ui/src/state/useCloudState.android-cloud-auth.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(cloud-billing): dispute units, bigint defaults, mini-app removal, and Plus/Pro subscription lifecycle",
+      "prNumber": 32854,
+      "type": "bugfix",
+      "body": "Cloud billing: dispute credit units, bigint defaults, phone-webhook route test, container catalogue pin, mini-app removal, and an end-to-end Plus/Pro subscription audit. One commit per logical change.\n\n## Fixes #31449: dispute reinstatement",
+      "files": [
+        "packages/app/src/services/sensitive-requests/cloud-link-adapter.ts",
+        "packages/app/src/services/sensitive-requests/public-link-adapter.ts",
+        "packages/app/src/web-entry-policy.test.ts",
+        "packages/app/src/web-entry-policy.ts",
+        "packages/app/test/ui-smoke/cloud-surfaces-aesthetic-audit.spec.ts",
+        "packages/app/test/ui-smoke/helpers/cloud-audit-fixtures.ts",
+        "packages/cloud/api/__tests__/billing-manager-mutations.pglite.test.ts",
+        "packages/cloud/api/__tests__/container-warning-rate.test.ts",
+        "packages/cloud/api/__tests__/crypto-retired-miniapp.pglite.test.ts",
+        "packages/cloud/api/__tests__/phone-webhook-idempotency.pglite.test.ts",
+        "packages/cloud/api/__tests__/stripe-dispute-reinstatement.pglite.test.ts",
+        "packages/cloud/api/__tests__/stripe-event-checkout-authority.test.ts",
+        "packages/cloud/api/__tests__/stripe-event-waifu.test.ts",
+        "packages/cloud/api/__tests__/stripe-event.test.ts",
+        "packages/cloud/api/__tests__/stripe-retired-miniapp.pglite.test.ts",
+        "packages/cloud/api/cron/cleanup-expired-crypto-payments/route.ts",
+        "packages/cloud/api/cron/process-pending-crypto-payments/route.ts",
+        "packages/cloud/api/cron/process-stripe-queue/route.ts",
+        "packages/cloud/api/src/_router.generated.ts",
+        "packages/cloud/api/src/middleware/auth.ts",
+        "packages/cloud/api/src/queue/stripe-event.ts",
+        "packages/cloud/api/test/e2e/group-i-apps-lifecycle.test.ts",
+        "packages/cloud/api/test/e2e/group-l-app-monetization.test.ts",
+        "packages/cloud/api/test/e2e/group-n-review-gate.test.ts",
+        "packages/cloud/api/v1/app-credits/checkout/route.ts",
+        "packages/cloud/api/v1/app-credits/verify/route.ts",
+        "packages/cloud/api/v1/apps/[id]/charges/[chargeId]/checkout/route.ts",
+        "packages/cloud/api/v1/apps/[id]/charges/[chargeId]/route.ts",
+        "packages/cloud/api/v1/apps/[id]/charges/route.ts",
+        "packages/cloud/api/v1/payment-requests/route.ts",
+        "packages/cloud/api/v1/stripe/checkout/route.ts",
+        "packages/cloud/api/v1/subscriptions/checkout/_boundary.ts",
+        "packages/cloud/api/v1/subscriptions/plans/route.ts",
+        "packages/cloud/api/v1/subscriptions/portal/route.ts",
+        "packages/cloud/e2e/tests/skill-api-contract.spec.ts",
+        "packages/cloud/sdk/src/account-billing-snapshot.ts",
+        "packages/cloud/sdk/src/client.ts",
+        "packages/cloud/sdk/src/public-routes/client.generated.ts",
+        "packages/cloud/sdk/src/public-routes/descriptors.generated.ts",
+        "packages/cloud/sdk/src/public-routes/types.generated.ts",
+        "packages/cloud/sdk/src/types.cloud-api.ts",
+        "packages/cloud/sdk/src/types.ts",
+        "packages/cloud/shared/src/db/repositories/account-billing-snapshot-subscription.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/app-earnings.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-billing-operations.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-checkout-recovery.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-dunning-finalization.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-dunning.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-entitlements.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-lifecycle-finalization.pglite.test.ts"
+      ]
+    },
+    {
+      "title": "fix(android): bionic output limits, musl loader/JNI staging, Notes publish, TalkMode cancel, reconnect cancel",
+      "prNumber": 32853,
+      "type": "bugfix",
+      "body": "Android native runtime fixes: bionic output limits, musl loader staging, JNI staging, Notes on Android, TalkMode cancellation, cloud reconnect cancellation, and pairing contract tests. One commit per issue.\n\nDisk on the build host was criti",
+      "files": [
+        "packages/app/platforms/android/app/build.gradle",
+        "packages/app/scripts/mobile/android/gradle-patches.ts",
+        "packages/app/scripts/run-mobile-build-android-app-actions.test.ts",
+        "packages/ui/src/state/useAppLifecycleEvents.test.tsx",
+        "packages/ui/src/state/usePairingState.test.tsx",
+        "packages/ui/src/state/usePairingState.ts",
+        "plugins/plugin-elizacloud/__tests__/reconnect-stop-cancels-inflight.test.ts",
+        "plugins/plugin-elizacloud/src/cloud/bridge-client.ts",
+        "plugins/plugin-elizacloud/src/cloud/reconnect.ts",
+        "plugins/plugin-native-talkmode/android/src/main/java/ai/eliza/plugins/talkmode/TalkModePlugin.kt",
+        "plugins/plugin-notes/src/__tests__/backend.test.ts",
+        "plugins/plugin-notes/src/store.ts"
+      ]
+    },
+    {
+      "title": "fix: desktop, local-inference, subscription-provider and i18n fixes",
+      "prNumber": 32852,
+      "type": "bugfix",
+      "body": "Desktop, local-inference, subscription-provider and UI fixes. One commit per issue.\n\n## #32814 — ChatGPT/Codex subscription offered as a chat backend\nFixes #32814\n\nThe codex-cli text handler is gone. I kept the Codex subscription as a codin",
+      "files": [
+        "packages/agent/src/api/model-config-routes.ts",
+        "packages/agent/src/api/provider-switch-config.ts",
+        "packages/agent/src/api/provider-switch-routes.ts",
+        "packages/agent/src/api/runtime-switch-routes.ts",
+        "packages/agent/src/config/config.ts",
+        "packages/agent/test/provider-route-http.test.ts",
+        "packages/app/platforms/electrobun/src/native/credentials.ts",
+        "packages/app/scripts/__tests__/check-i18n.test.ts",
+        "packages/app/scripts/check-i18n.ts",
+        "packages/app/src/first-run/first-run-config.ts",
+        "packages/app/test/ui-smoke/cloud-surfaces-aesthetic-audit.spec.ts",
+        "packages/app/test/ui-smoke/model-download-deferral.spec.ts",
+        "packages/auth/src/auth/credentials.ts",
+        "packages/auth/src/auth/types.ts",
+        "packages/core/src/contracts/first-run-options.ts",
+        "packages/core/src/contracts/local-inference.ts",
+        "packages/core/src/index.ts",
+        "packages/scripts/release-cohort.json",
+        "packages/ui/src/components/accounts/AccountCommandTable.tsx",
+        "packages/ui/src/components/accounts/AccountManagementPanel.test.tsx",
+        "packages/ui/src/components/local-inference/FirstRunOffer.test.tsx",
+        "packages/ui/src/components/local-inference/FirstRunOffer.tsx",
+        "packages/ui/src/components/local-inference/LocalInferencePanel.test.tsx",
+        "packages/ui/src/components/local-inference/ModelCard.tsx",
+        "packages/ui/src/components/local-inference/ModelHubView.tsx",
+        "packages/ui/src/components/pages/config-page-sections.tsx",
+        "packages/ui/src/components/settings/ProviderPanels.test.tsx",
+        "packages/ui/src/components/settings/ProviderSwitcher.active-summary.test.tsx",
+        "packages/ui/src/components/settings/ProviderSwitcher.tsx",
+        "packages/ui/src/components/settings/SubscriptionStatus.tsx",
+        "packages/ui/src/components/settings/useProviderBootstrap.ts",
+        "packages/ui/src/components/shell/ComputerUseApprovalOverlay.tsx",
+        "packages/ui/src/components/shell/__tests__/useShellController.test.tsx",
+        "packages/ui/src/components/shell/useShellController.ts",
+        "packages/ui/src/first-run/auto-download-recommended.ts",
+        "packages/ui/src/first-run/first-run-config.ts",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/i18n/locales/es.json",
+        "packages/ui/src/i18n/locales/ja.json",
+        "packages/ui/src/i18n/locales/ko.json",
+        "packages/ui/src/i18n/locales/pt.json",
+        "packages/ui/src/i18n/locales/tl.json",
+        "packages/ui/src/i18n/locales/vi.json",
+        "packages/ui/src/i18n/locales/zh-CN.json",
+        "packages/ui/src/services/local-inference/catalog-policy.ts",
+        "packages/ui/src/state/startup-embedded-first-run.test.tsx",
+        "packages/ui/src/state/startup-phase-poll.ts",
+        "packages/ui/src/state/startup-phase-restore.ts",
+        "packages/ui/src/voice/local-asr-capture.ts",
+        "plugins/plugin-local-inference/src/local-inference-routes.encoding.test.ts"
+      ]
+    },
+    {
+      "title": "style(plugin-health): fix biome lint on develop",
+      "prNumber": 32851,
+      "type": "bugfix",
+      "body": "Develop's Source checks fail `plugins/plugin-health` lint (`useImportType` and import sorting), which turns every open PR's checks red. This PR is the output of `biome check --write`: type-only import and export syntax only, with no runtime",
+      "files": [
+        "plugins/plugin-health/src/contracts/circadian.ts",
+        "plugins/plugin-health/src/contracts/lifeops.ts",
+        "plugins/plugin-health/src/sleep/awake-probability.ts",
+        "plugins/plugin-health/src/sleep/circadian-rules.ts",
+        "plugins/plugin-health/src/sleep/sleep-cycle-dispatch.ts",
+        "plugins/plugin-health/src/sleep/sleep-regularity.ts",
+        "plugins/plugin-health/src/sleep/sleep-wake-events.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): safe restore gating, exact cleanup, unpaid stop-in-place, automatic billing resume, chargeback hold and Shared fallback",
+      "prNumber": 32850,
+      "type": "bugfix",
+      "body": "Cloud agent lifecycle: safe restore gating, exact failed-provision cleanup, unpaid stop-in-place, automatic billing resume, lost-chargeback hold, and the Dedicated-to-Shared fallback authority.\n\nOne commit per issue. Stripe credit math and ",
+      "files": [
+        ".github/workflows/deploy-eliza-provisioning-worker.yml",
+        "packages/cloud/api/__tests__/stripe-event.test.ts",
+        "packages/cloud/api/internal/eliza-app/personal-shared/messages/route.ts",
+        "packages/cloud/api/src/queue/stripe-event.ts",
+        "packages/cloud/scripts/admin/daemons/provisioning-worker-env-reconcile.test.ts",
+        "packages/cloud/scripts/admin/daemons/provisioning-worker.ts",
+        "packages/cloud/shared/src/db/migrations/0478_agent_sandbox_retained_runtime.sql",
+        "packages/cloud/shared/src/db/migrations/0479_organization_payment_reversal_holds.sql",
+        "packages/cloud/shared/src/db/migrations/0480_personal_dedicated_fallbacks.sql",
+        "packages/cloud/shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud/shared/src/db/repositories/account-billing-snapshot-test-fixture.ts",
+        "packages/cloud/shared/src/db/repositories/agent-billing-resume.ts",
+        "packages/cloud/shared/src/db/repositories/payment-reversal-holds.ts",
+        "packages/cloud/shared/src/db/schemas/agent-sandboxes.ts",
+        "packages/cloud/shared/src/db/schemas/index.ts",
+        "packages/cloud/shared/src/db/schemas/organization-payment-reversal-holds.ts",
+        "packages/cloud/shared/src/db/schemas/personal-dedicated-fallbacks.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/billing-suspension-resume.pglite.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/orphan-reaper-exact-adoption.postgres.integration.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/provision-recovery.pglite.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/retained-unpaid-stop.pglite.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/tier-upgrade-pglite-schema.ts",
+        "packages/cloud/shared/src/lib/services/agent-billing-gate.ts",
+        "packages/cloud/shared/src/lib/services/docker-node-workloads.retained.pglite.test.ts",
+        "packages/cloud/shared/src/lib/services/docker-node-workloads.ts",
+        "packages/cloud/shared/src/lib/services/docker-runtime-observation.ts",
+        "packages/cloud/shared/src/lib/services/docker-sandbox-provider.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox/backup/restore-contract.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox/lifecycle/power-contracts.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox/lifecycle/power.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox/lifecycle/provision.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox/lifecycle/replacement-cleanup.ts",
+        "packages/cloud/shared/src/lib/services/eliza-sandbox/power.test.ts",
+        "packages/cloud/shared/src/lib/services/personal-dedicated-fallback.ts",
+        "packages/cloud/shared/src/lib/services/personal-message-delivery.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs.ts",
+        "packages/cloud/shared/src/lib/services/sandbox-provider-types.ts"
+      ]
+    },
+    {
+      "title": "test: align stale expectations with merged redirect, TODO clear and verification-message changes",
+      "prNumber": 32847,
+      "type": "tests",
+      "body": "# Relates to\r\n\r\n`develop` at `eb157cac47` (merge of #32840) fails `canonical / Plugin Tests (3/4)`, `canonical / Plugin Tests (4/4)` and `canonical / Zero-Key scenario runner` because tests still pin behavior that three merged changes delib",
+      "files": [
+        "packages/testing/scenario-runner/test/scenarios/deterministic-todos-actions.scenario.ts",
+        "plugins/plugin-agent-orchestrator/src/__tests__/parent-agent-broker-coding-conformance.test.ts",
+        "plugins/plugin-maps/src/managed-provider/http-client.test.ts",
+        "plugins/plugin-maps/test/provider-contract.test.ts"
+      ]
+    },
+    {
+      "title": "fix(app): identify Android musl loader by ELF identity, not file size",
+      "prNumber": 32846,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #32511 — \"Android restaging overwrites the real musl loader when wrapper exceeds size heuristic\".\n\n# Change\n\n`stageSeccompShimForAbi` (`packages/app/scripts/lib/stage-android-agent.ts`) decides whether the staged `<ldNam",
+      "files": [
+        "packages/app/scripts/lib/stage-android-agent.ts",
+        "packages/app/scripts/stage-android-agent.test.ts"
+      ]
+    },
+    {
+      "title": "feat(notes): select latest records and provide validated local time displays",
+      "prNumber": 32845,
+      "type": "feature",
+      "body": "A most-recent-note request currently sends all matching notes to the model to compare timestamps, then leaves UTC-to-local conversion to free-form prose. Select the requested recency basis in code and expose validated local display text bes",
+      "files": [
+        "packages/agent/test/notes-selected-display-delivery.test.ts",
+        "plugins/plugin-notes/src/action.test.ts",
+        "plugins/plugin-notes/src/action.ts",
+        "plugins/plugin-notes/src/plugin.ts"
+      ]
+    },
+    {
+      "title": "refactor(navigation): use one exclusive routing disposition",
+      "prNumber": 32844,
+      "type": "refactor",
+      "body": "Navigation used two booleans with the same direct-routing condition alongside a disposition. The model could produce contradictory combinations, requiring repair. Replace them with one exclusive `direct` or `planning` decision while retaini",
+      "files": [
+        "packages/agent/src/runtime/view-navigation.ts",
+        "packages/agent/test/view-navigation-delivery.test.ts",
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "plugins/plugin-assistant/src/prompts/response-policy.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-generation.routing-repair.test.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-generation.ts",
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/health.ts",
+        "plugins/plugin-health/src/actions/screen-time.ts",
+        "plugins/plugin-health/src/health-bridge/health-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(plugin-native-inference): drop bridge-only 256-token cap on uncapped chat turns",
+      "prNumber": 32843,
+      "type": "bugfix",
+      "body": "Fixes #32412\n\n## Problem\n\n`plugins/plugin-native-inference/src/mobile-device-bridge-bootstrap.ts` built the bionic-host TEXT wire request as `maxTokens: lane.maxTokens ?? 256` (line 1834). When a chat turn set **no** output limit, the bridg",
+      "files": [
+        "plugins/plugin-native-inference/src/mobile-device-bridge-bootstrap.output-cap.test.ts",
+        "plugins/plugin-native-inference/src/mobile-device-bridge-bootstrap.ts",
+        "plugins/plugin-native-inference/src/shared/native-model-request.ts"
+      ]
+    },
+    {
+      "title": "fix(calendar): show complete event ranges and local snapshot time",
+      "prNumber": 32842,
+      "type": "bugfix",
+      "body": "Calendar evidence has two presentation gaps: timed events spanning midnight omit their end date, and the next-event snapshot exposes its reference instant only as UTC beside a requested local timezone.\n\nInclude the end date for ranges cross",
+      "files": [
+        "packages/core/src/contracts/calendar.ts",
+        "plugins/plugin-calendar/src/internal/format.ts",
+        "plugins/plugin-calendar/src/internal/next-event-time-reference.test.ts",
+        "plugins/plugin-calendar/src/service/CalendarService.ts",
+        "plugins/plugin-calendar/src/service/next-event-coverage.test.ts",
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/health.ts",
+        "plugins/plugin-health/src/actions/screen-time.ts",
+        "plugins/plugin-health/src/health-bridge/health-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(health): normalize imports and test formatting",
+      "prNumber": 32841,
+      "type": "bugfix",
+      "body": "Full repository verification on current develop fails Health lint because recent changes introduced duplicate imports and one unformatted test callback. Consolidate the imports and apply the formatter's layout; runtime behavior is unchanged",
+      "files": [
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/health.ts",
+        "plugins/plugin-health/src/actions/screen-time.ts",
+        "plugins/plugin-health/src/health-bridge/health-bridge.ts"
+      ]
+    },
+    {
+      "title": "fix(agents): preserve Qwen reasoning and pending coding scope",
+      "prNumber": 32840,
+      "type": "bugfix",
+      "body": "Native Cerebras Qwen coding trajectories lost private reasoning between tool calls. A fresh official run also showed that a progress reply consumed the planner's completion-verification allowance, and an indeterminate workspace observation ",
+      "files": [
+        "packages/core/src/runtime/trajectory-recorder.ts",
+        "packages/core/src/types/model.ts",
+        "plugins/plugin-assistant/src/runtime/planner-coding-pending-terminal.test.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop.ts",
+        "plugins/plugin-assistant/src/runtime/planner-reasoning-replay.test.ts",
+        "plugins/plugin-openai/__tests__/cerebras-reasoning-replay.wire.test.ts",
+        "plugins/plugin-openai/models/text.ts",
+        "plugins/plugin-openai/providers/openai.ts",
+        "plugins/plugin-openai/utils/cerebras-reasoning.ts"
+      ]
+    },
+    {
+      "title": "fix(core): withdraw a failed embedding activation instead of caching it",
+      "prNumber": 32839,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFollow-through on #31379, which made the embedding service activate late on\n`MODEL_REGISTERED`. Its shared-initialization design stays as is. The failure\nhalf of the problem is already fixed on develop: `dispatcher.ts` now cat",
+      "files": [
+        "packages/core/src/services/embedding.activation-retry.pglite.test.ts",
+        "packages/core/src/services/embedding.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): make Plus/Pro allowance funding and resource quotas work end to end",
+      "prNumber": 32838,
+      "type": "bugfix",
+      "body": "Fixes the Cloud Plus/Pro subscription defects found by the subscription audit, covering allowance-first funding (follow-up to #23092, closed) and entitlement-derived quotas (follow-up to #23094, closed). Webhook/checkout/portal/billing-UI w",
+      "files": [
+        "packages/app/test/ui-smoke/helpers/cloud-audit-fixtures.ts",
+        "packages/cloud/api/__tests__/container-warning-rate.test.ts",
+        "packages/cloud/api/cron/container-billing/route.ts",
+        "packages/cloud/api/cron/sweep-credit-reservations/route.ts",
+        "packages/cloud/sdk/src/types.cloud-api.ts",
+        "packages/cloud/shared/src/db/migrations/0481_paid_plan_resource_ceilings.sql",
+        "packages/cloud/shared/src/db/migrations/0482_org_storage_subscription_funding.sql",
+        "packages/cloud/shared/src/db/migrations/0483_container_billing_funding_reservations.sql",
+        "packages/cloud/shared/src/db/migrations/0484_agent_billing_funding_reservations.sql",
+        "packages/cloud/shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud/shared/src/db/repositories/__tests__/agent-billing-allowance-first.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/compute-billing-recovery.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/container-billing-concurrent-replay.integration.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/container-billing-subscription-funding.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/org-storage-mutations.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/org-storage-reads.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/__tests__/org-storage-subscription-funding.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/agent-billing.ts",
+        "packages/cloud/shared/src/db/repositories/container-billing.ts",
+        "packages/cloud/shared/src/db/repositories/containers.ts",
+        "packages/cloud/shared/src/db/repositories/org-storage-mutations.ts",
+        "packages/cloud/shared/src/db/repositories/org-storage-reads.ts",
+        "packages/cloud/shared/src/db/repositories/organization-policy-generation.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-allowance-eligibility.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-allowance-visibility.pglite.test.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-allowance.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-entitlements-derivation.test.ts",
+        "packages/cloud/shared/src/db/repositories/subscription-entitlements.ts",
+        "packages/cloud/shared/src/db/schemas/compute-billing.ts",
+        "packages/cloud/shared/src/db/schemas/containers.ts",
+        "packages/cloud/shared/src/db/schemas/org-storage-mutations.ts",
+        "packages/cloud/shared/src/db/schemas/org-storage-reads.ts",
+        "packages/cloud/shared/src/lib/api/a2a/skills.ts",
+        "packages/cloud/shared/src/lib/providers/video/types.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/container-billing-idempotency.test.ts",
+        "packages/cloud/shared/src/lib/services/__tests__/meeting-billing.test.ts",
+        "packages/cloud/shared/src/lib/services/agent-compute-billing.ts",
+        "packages/cloud/shared/src/lib/services/agent-compute-funding.ts",
+        "packages/cloud/shared/src/lib/services/ai-billing.ts",
+        "packages/cloud/shared/src/lib/services/allowance-first-credits.ts",
+        "packages/cloud/shared/src/lib/services/container-stop-job-service.ts",
+        "packages/cloud/shared/src/lib/services/inference-admission-snapshot.ts",
+        "packages/cloud/shared/src/lib/services/meeting-billing.ts",
+        "packages/cloud/shared/src/lib/services/org-rate-limits.ts",
+        "packages/cloud/shared/src/lib/services/organization-inference-admission.ts",
+        "packages/cloud/shared/src/lib/services/pending-video-settlement.ts",
+        "packages/cloud/shared/src/lib/services/provisioning-jobs-scheduled-backup-sentinel.test.ts",
+        "packages/cloud/shared/src/lib/services/proxy/dexscreener-handler.ts",
+        "packages/cloud/shared/src/lib/services/proxy/engine.ts",
+        "packages/cloud/shared/src/lib/services/subscription-allowance-lifecycle.pglite.test.ts"
+      ]
+    },
+    {
+      "title": "fix(assistant): inbox send consent, Run now fire, Notes agent-surface, local-day health/meeting dates, context dedupe",
+      "prNumber": 32837,
+      "type": "bugfix",
+      "body": "Assistant-flow fixes across inbox, scheduling UI, notes, health, meeting-ghost, and the assistant prompt. There is one commit per issue.\n\n## Fixes #25284: INBOX reply/approve now require turn-bound consent\n- Before, the planner could send a",
+      "files": [
+        "plugins/plugin-assistant/src/features/messaging/triage/actions/send-consent.persistence.test.ts",
+        "plugins/plugin-assistant/src/features/messaging/triage/index.ts",
+        "plugins/plugin-assistant/src/features/messaging/triage/send-consent.ts",
+        "plugins/plugin-assistant/src/index.ts",
+        "plugins/plugin-assistant/src/runtime/__tests__/routing-hints-dedupe.test.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop.ts",
+        "plugins/plugin-assistant/src/services/message/prompts.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-input.ts",
+        "plugins/plugin-inbox/src/actions/inbox.ts",
+        "plugins/plugin-inbox/src/routes/inbox-routes.ts",
+        "plugins/plugin-inbox/test/inbox-action.test.ts",
+        "plugins/plugin-inbox/test/inbox-routes.test.ts",
+        "plugins/plugin-notes/src/surface.test.ts",
+        "plugins/plugin-notes/src/surface.ts",
+        "plugins/plugin-personal-assistant/scripts/measure-assistant-turn-context.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/meeting-ghost/consumer.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/meeting-ghost/index.ts",
+        "plugins/plugin-personal-assistant/src/providers/lifeops.ts",
+        "plugins/plugin-personal-assistant/test/meeting-ghost.integration.test.ts",
+        "plugins/plugin-personal-assistant/test/meeting-ghost.local-due-dates.test.ts",
+        "plugins/plugin-personal-assistant/test/meeting-ghost.test.ts"
+      ]
+    },
+    {
+      "title": "fix(agent,core,plugin-sql): export secrets opt-in, atomic media, WS backpressure, audience renewal and backlog fixes",
+      "prNumber": 32836,
+      "type": "bugfix",
+      "body": "Backlog fixes across `packages/agent`, `packages/core`, `plugins/plugin-sql` (plus the two `plugin-assistant` seams the audience renewal needs). One commit per issue.\n\n## #32016: agent export secrets (Fixes #32016)\nThe maintainer closed #32",
+      "files": [
+        "packages/agent/src/api/agent-transfer-routes.ts",
+        "packages/agent/src/api/event-hub.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/providers/recent-conversations.ts",
+        "packages/agent/src/services/agent-backup.ts",
+        "packages/agent/src/services/agent-export.ts",
+        "packages/agent/src/services/js-runtime-bridge.ts",
+        "packages/agent/test/agent-transfer-secrets.test.ts",
+        "packages/agent/test/backup-capture-http.test.ts",
+        "packages/agent/test/event-hub-backpressure.test.ts",
+        "packages/agent/test/js-runtime-bridge-shared-refs.test.ts",
+        "packages/agent/test/recent-conversations-complete-context.test.ts",
+        "packages/core/src/contracts/agent-routes.ts",
+        "packages/core/src/errors.identity.test.ts",
+        "packages/core/src/errors.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/runtime/execute-planned-tool-call.ts",
+        "packages/core/src/runtime/json-output.diagnostics.test.ts",
+        "packages/core/src/security/trusted-delivery-audience.renewal.test.ts",
+        "packages/core/src/security/trusted-delivery-audience.ts",
+        "packages/ui/src/api/client-cloud.ts",
+        "plugins/plugin-assistant/src/services/message/action-surface.ts",
+        "plugins/plugin-assistant/src/services/message/turn-lifetime.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): sign-in, model readiness, X callback, warming and Cloud UI fixes",
+      "prNumber": 32834,
+      "type": "bugfix",
+      "body": "Cloud sign-in and session, the agent health surface, the X connector callback, and Cloud UI fixes. There is one commit per issue. Partial issues use `Refs`, and their remaining work is listed below.\n\n## #31531: mobile pricing page scroll\nFi",
+      "files": [
+        "packages/agent/src/api/health-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/app/platforms/ios/App/App.xcodeproj/project.pbxproj",
+        "packages/app/platforms/ios/App/App/ElizaBridgeViewController.swift",
+        "packages/app/platforms/ios/App/App/ElizaCloudAuthSessionPlugin.swift",
+        "packages/app/test/ui-smoke/bootstrap-accessibility.spec.ts",
+        "packages/app/test/ui-smoke/cloud-surfaces-aesthetic-audit.spec.ts",
+        "packages/cloud/api/v1/cron/shared-agent-keepwarm/route.ts",
+        "packages/cloud/api/v1/eliza/agents/[agentId]/api/conversations/route.ts",
+        "packages/cloud/api/v1/twitter/callback/route.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history-merge.integration.test.ts",
+        "packages/cloud/shared/src/db/repositories/shared-runtime-history.ts",
+        "packages/cloud/shared/src/lib/services/inference-auth-context.ts",
+        "packages/cloud/shared/src/lib/services/oauth/connection-adapters/twitter-adapter.ts",
+        "packages/cloud/shared/src/lib/services/oauth/x-identity.ts",
+        "packages/cloud/shared/src/lib/services/shared-runtime/prewarm-shared-agent.ts",
+        "packages/cloud/shared/src/lib/services/twitter-automation/index.ts",
+        "packages/ui/src/android-cloud/android-cloud-client.ts",
+        "packages/ui/src/api/client-types-core.ts",
+        "packages/ui/src/cloud/billing/PricingPage.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.oauth-launch.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.tsx",
+        "packages/ui/src/components/pages/ChatView.tsx",
+        "packages/ui/src/components/setup/BootstrapStep.tsx",
+        "packages/ui/src/components/ui/input.tsx",
+        "packages/ui/src/i18n/locales/en.json",
+        "packages/ui/src/ios-cloud/ios-cloud-auth.test.ts",
+        "packages/ui/src/ios-cloud/ios-cloud-auth.ts",
+        "packages/ui/src/state/parsers.ts",
+        "packages/ui/src/state/useCloudState.ts",
+        "plugins/plugin-elizacloud/__tests__/cloud-model-readiness.test.ts",
+        "plugins/plugin-elizacloud/src/services/cloud-model-readiness.ts",
+        "plugins/plugin-elizacloud/src/services/cloud-model-registry.ts"
+      ]
+    },
+    {
+      "title": "fix: connector media, Discord disconnect, typed web-search failures, MCP paging, wallet sizing/RPC, wake word",
+      "prNumber": 32833,
+      "type": "bugfix",
+      "body": "Fixes and ports across the connector, search, MCP and wallet plugins. One commit per issue.\n\n## #32027: outbound `data:` and media-store attachments (Discord, Telegram, Slack)\nFixes #32027. Ported from closed #32032 (credit @hermesagent270-",
+      "files": [
+        "packages/agent/src/runtime/actions/web-search.ts",
+        "packages/cloud/shared/src/lib/eliza/plugin-mcp/actions/mcp.ts",
+        "packages/cloud/shared/src/lib/eliza/plugin-mcp/search/bm25-index.test.ts",
+        "packages/cloud/shared/src/lib/eliza/plugin-mcp/search/bm25-index.ts",
+        "packages/cloud/shared/src/lib/eliza/plugin-web-search/src/services/keyless-search.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/media/outbound.test.ts",
+        "packages/core/src/media/outbound.ts",
+        "plugins/plugin-coding-tools/src/actions/web-search.test.ts",
+        "plugins/plugin-coding-tools/src/actions/web-search.ts",
+        "plugins/plugin-discord/__tests__/attachments.test.ts",
+        "plugins/plugin-discord/__tests__/connector-account-disconnect.test.ts",
+        "plugins/plugin-discord/__tests__/connector-account-readiness.test.ts",
+        "plugins/plugin-discord/__tests__/outbound-attachment.test.ts",
+        "plugins/plugin-discord/account-client-pool.ts",
+        "plugins/plugin-discord/actions/messageConnector.outbound-media.test.ts",
+        "plugins/plugin-discord/attachments.ts",
+        "plugins/plugin-discord/connector-account-policy.ts",
+        "plugins/plugin-discord/connector-account-provider.ts",
+        "plugins/plugin-discord/service.ts",
+        "plugins/plugin-discord/utils.ts",
+        "plugins/plugin-native-swabble/src/web.test.ts",
+        "plugins/plugin-native-swabble/src/web.ts",
+        "plugins/plugin-slack/src/outbound-attachments.test.ts",
+        "plugins/plugin-slack/src/service.ts",
+        "plugins/plugin-telegram/__tests__/core-test-mock.ts",
+        "plugins/plugin-telegram/src/messageManager.outbound-media.test.ts",
+        "plugins/plugin-telegram/src/messageManager.test.ts",
+        "plugins/plugin-telegram/src/messageManager.ts",
+        "plugins/plugin-web-search/src/browser-web-search.ts",
+        "plugins/plugin-web-search/src/edge.ts",
+        "plugins/plugin-web-search/src/index.ts",
+        "plugins/plugin-web-search/src/keyless-web-search.test.ts",
+        "plugins/plugin-web-search/src/keyless-web-search.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): run scheduled items through the canonical fire API",
+      "prNumber": 32831,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #31891\n\n## Summary\n\nThe scheduled-item editor labels its primary control **Run now** for manual starters but calls the `acknowledge` lifecycle verb. Acknowledging only changes state — the canonical runner never dispatche",
+      "files": [
+        "packages/ui/src/components/pages/ScheduledTaskEditor.test.tsx",
+        "packages/ui/src/components/pages/ScheduledTaskEditor.tsx"
+      ]
+    },
+    {
+      "title": "fix(core): preserve shared non-cyclic references in diagnostic serializers",
+      "prNumber": 32830,
+      "type": "bugfix",
+      "body": "# Relates to\n\nCloses #31004 — original scope: shared-reference handling across diagnostic serializers and redactors.\n\n# Change\n\n`stringifyForDiagnostics` (`packages/core/src/runtime/json-output.ts`),\n`serializeTtsDebugDetail` (`packages/ui/",
+      "files": [
+        "packages/core/src/runtime/json-output.test.ts",
+        "packages/core/src/runtime/json-output.ts",
+        "packages/ui/src/utils/tts-debug.test.ts",
+        "packages/ui/src/utils/tts-debug.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/redact-sensitive-data.ts",
+        "plugins/plugin-personal-assistant/test/lifeops-redact-sensitive-data.test.ts"
+      ]
+    },
+    {
+      "title": "feat(assistant): add opt-in evaluator-only model selection",
+      "prNumber": 32829,
+      "type": "feature",
+      "body": "# Relates to\n\nCompletion evaluation currently shares the response-handler model slot, so changing its model also changes unrelated stages. This adds an optional evaluator-only selection without changing default stage models.\n\n# Change\n\n`ELI",
+      "files": [
+        "packages/core/src/runtime/__tests__/model-override-budget.test.ts",
+        "packages/core/src/runtime/__tests__/use-model-provider-fallback.test.ts",
+        "packages/core/src/runtime/model-dispatch/dispatcher.ts",
+        "packages/core/src/runtime/planner-types.ts",
+        "plugins/plugin-assistant/README.md",
+        "plugins/plugin-assistant/src/runtime/__tests__/evaluator-model-override.test.ts",
+        "plugins/plugin-assistant/src/runtime/evaluator.ts",
+        "plugins/plugin-assistant/src/services/message/evaluator-model-pipeline.test.ts",
+        "plugins/plugin-assistant/src/services/message/pipeline.ts",
+        "plugins/plugin-health/src/actions/health.test.ts",
+        "plugins/plugin-health/src/actions/health.ts",
+        "plugins/plugin-health/src/actions/screen-time.ts",
+        "plugins/plugin-health/src/health-bridge/health-bridge.ts",
+        "plugins/plugin-openai/__tests__/qwen-response-schema.wire.test.ts"
+      ]
+    },
+    {
+      "title": "fix(navigation): preserve view intent and ground confirmations",
+      "prNumber": 32826,
+      "type": "bugfix",
+      "body": "View navigation used inconsistent Home labels and lacked fresh request-scoped screen identity, while some completed-navigation replies were not adequately grounded. Keep view intent separate from domain work, expose authorized known destina",
+      "files": [
+        "packages/agent/src/api/builtin-views.ts",
+        "packages/agent/src/runtime/view-navigation.ts",
+        "packages/agent/test/view-navigation-delivery.test.ts",
+        "packages/app/platforms/electrobun/src/application-menu.ts",
+        "packages/app/src/api/dev-route-catalog.ts",
+        "packages/app/src/runtime/desktop/tray-menu.ts",
+        "packages/core/src/runtime/response-handler-field-evaluator.ts",
+        "packages/core/src/runtime/response-handler-field-registry.ts",
+        "packages/ui/src/navigation/index.ts",
+        "plugins/plugin-assistant/src/services/message/egress-policy.navigation.test.ts",
+        "plugins/plugin-assistant/src/services/message/egress-policy.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-decision.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-input.ts"
+      ]
+    },
+    {
+      "title": "fix(assistant): preserve restoration and settled-reply contracts",
+      "prNumber": 32825,
+      "type": "bugfix",
+      "body": "The evaluator could request context restoration while recommending queued work, and reply-only synthesis could mark already-settled navigation unfinished. Make restoration an explicit mutually exclusive decision, preserve legacy restoration",
+      "files": [
+        "packages/core/src/runtime/__tests__/completion-context.test.ts",
+        "plugins/plugin-assistant/src/prompts/evaluator.ts",
+        "plugins/plugin-assistant/src/prompts/planner.ts",
+        "plugins/plugin-assistant/src/runtime/__tests__/evaluator-queue-schema.test.ts",
+        "plugins/plugin-assistant/src/runtime/__tests__/evaluator-restoration-recording.test.ts",
+        "plugins/plugin-assistant/src/runtime/__tests__/planner-optimized-prompt-service.test.ts",
+        "plugins/plugin-assistant/src/runtime/evaluator.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop-settled-reply.test.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop.ts"
+      ]
+    },
+    {
+      "title": "fix(assistant): expose bounded tools for pending domain work",
+      "prNumber": 32824,
+      "type": "bugfix",
+      "body": "A response handler can identify pending domain work without supplying enough initial tool hints, forcing an avoidable discovery round. Use the registered domain/alias matcher to supplement that initial surface from positive pending intents,",
+      "files": [
+        "plugins/plugin-assistant/src/prompts/planner.ts",
+        "plugins/plugin-assistant/src/services/message/action-surface.ts",
+        "plugins/plugin-assistant/src/services/message/contextual-discovery.test.ts",
+        "plugins/plugin-assistant/src/services/message/pipeline.ts",
+        "plugins/plugin-assistant/src/services/message/tool-discovery.ts"
+      ]
+    },
+    {
+      "title": "fix(calendar): retain next-event read time and display timezone",
+      "prNumber": 32822,
+      "type": "bugfix",
+      "body": "A next-event result lacked the read's reference instant and requested display timezone, so downstream formatting could not reliably distinguish local calendar days. Retain those facts with the read and use them for the existing next-event p",
+      "files": [
+        "packages/core/src/contracts/calendar.ts",
+        "plugins/plugin-calendar/src/internal/format.ts",
+        "plugins/plugin-calendar/src/internal/next-event-time-reference.test.ts",
+        "plugins/plugin-calendar/src/service/CalendarService.ts",
+        "plugins/plugin-calendar/src/service/next-event-coverage.test.ts"
+      ]
+    },
+    {
+      "title": "fix(build): order elizacloud declarations before orchestrator typecheck",
+      "prNumber": 32819,
+      "type": "bugfix",
+      "body": "The orchestrator UI typecheck consumes elizacloud declarations but its Turbo dependencies did not require the declaration producer to finish first. Add the missing build edge so a cold parallel check cannot race that output.\n\nThis is the si",
+      "files": [
+        "turbo.json"
+      ]
+    },
+    {
+      "title": "fix(notes): keep routing guidance scoped and revision rules consistent",
+      "prNumber": 32818,
+      "type": "bugfix",
+      "body": "Notes read tools inherited a long family-wide routing recipe, including PATCH advice that contradicted its required snapshot revision. Keep only shared Notes routing rules in that hint; operation details remain in existing tool schemas. Cla",
+      "files": [
+        "packages/app/test/ui-smoke/helpers.ts",
+        "plugins/plugin-notes/src/action.test.ts",
+        "plugins/plugin-notes/src/action.ts"
+      ]
+    },
+    {
+      "title": "fix(benchmarks): prepare Git identity and clarify coding verification",
+      "prNumber": 32815,
+      "type": "bugfix",
+      "body": "Real native DeepSWE trajectories exposed missing runtime prerequisites and incorrect coding-tool feedback. Task checkouts lacked Git identity, ripgrep was missing after the production install disabled lifecycle scripts, and EDIT rejected va",
+      "files": [
+        "packages/benchmarks/harnesses/eliza/build_pier_runtime.py",
+        "packages/benchmarks/harnesses/eliza/eliza_adapter/pier_agent.py",
+        "packages/benchmarks/harnesses/eliza/tests/test_pier_agent.py",
+        "plugins/plugin-assistant/src/runtime/planner-long-trajectory.test.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop.ts",
+        "plugins/plugin-coding-tools/src/actions/bash.ts",
+        "plugins/plugin-coding-tools/src/actions/edit.test.ts",
+        "plugins/plugin-coding-tools/src/actions/edit.ts",
+        "plugins/plugin-coding-tools/src/actions/read.test.ts",
+        "plugins/plugin-coding-tools/src/actions/read.ts",
+        "plugins/plugin-coding-tools/src/lib/verification.test.ts",
+        "plugins/plugin-coding-tools/src/lib/verification.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): write media files atomically and rewrite a truncated stored file",
+      "prNumber": 31973,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes #31952 — content-addressed media files were written straight to their final name and skipped whenever the name existed, so an interrupted write left a truncated file that every later persist of the same bytes reused and ",
+      "files": [
+        "packages/agent/src/api/media-store.test.ts",
+        "packages/agent/src/api/media-store.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 452.59010387544157,
+      "prScore": 416.55210387544156,
+      "issueScore": 4.1,
+      "reviewScore": 31.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "mtcow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/171548037?v=4",
+      "totalScore": 270.17735392556403,
+      "prScore": 82.73935392556407,
+      "issueScore": 0,
+      "reviewScore": 187,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 193.79708442229946,
+      "prScore": 193.79708442229946,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 185,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 185,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "attentionhead",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30051356?v=4",
+      "totalScore": 142,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 142,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "fadhelcarlos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/123362393?v=4",
+      "totalScore": 136.99442454752824,
+      "prScore": 44.994424547528226,
+      "issueScore": 0,
+      "reviewScore": 92,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lww0134-ctrl",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/314679453?v=4",
+      "totalScore": 84.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 84.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "baianomarceloeduardo-jpg",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/226764542?u=3551a4afb2bc077d1d82d6bd27fbdcae9b212c6c&v=4",
+      "totalScore": 44.707529312706065,
+      "prScore": 40.36752931270606,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "kenjohnscreates",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144142574?u=c390be2e863f5d8704e0d596e116ddebb1629dd6&v=4",
+      "totalScore": 40.33753807970132,
+      "prScore": 40.33753807970132,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hermesagent270-commits",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/283605144?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 35,
+  "mergedPRs": 55,
+  "newIssues": 2,
+  "closedIssues": 39,
+  "activeContributors": 16
+}
