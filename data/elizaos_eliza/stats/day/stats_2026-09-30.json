@@ -1,0 +1,322 @@
+{
+  "interval": {
+    "intervalStart": "2026-09-30T00:00:00.000Z",
+    "intervalEnd": "2026-10-01T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-09-30 to 2026-10-01, elizaos/eliza had 29 new PRs (2 merged), 4 new issues, and 15 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABUGLlvw",
+      "title": "ci(cloud-stability): deterministic-keyless lane red on develop since grounded reminder delivery stopped consuming the dispatch fixtures",
+      "author": "hermesagent270-commits",
+      "number": 32959,
+      "repository": "elizaos/eliza",
+      "body": "## Summary\n\nThe `Validate develop` workflow is red at the current tip `4573712ebf` because the `cloud / agent-stability / deterministic-keyless` lane fails on every attempt, and `Complete manifest` fails with it (\"Require one current green row per surface\").\n\nRun: https://github.com/elizaOS/eliza/actions/runs/36636159978 (2026-09-29T21:52Z). The previous run at `2a464d8413` (https://github.com/elizaOS/eliza/actions/runs/36628914261) was green; the two runs in between were cancelled by later pushes, so this is the first observed run after the reminder-delivery change landed.\n\n## Failure\n\nThe step summary only prints `{\"status\":\"failed\",\"firstAttemptPassed\":false,\"passedAttempts\":0}`. The uploaded `cloud-stability-keyless-1` artifact carries the reason in each attempt's `scenario.stdout.log` (identical for attempts 01-03):\n\n```text\n| cloud-stability-agent | failed | 1470ms | deterministic model fixtures were not consumed:\n[{\"name\":\"cloud-reminder-dispatch-body\",\"consumed\":0,\"min\":1,\"max\":1,\"required\":true},\n {\"name\":\"cloud-reminder-dispatch-title\",\"consumed\":0,\"min\":1,\"max\":1,\"required\":true}] |\n```\n\nThe reminder itself was created and dispatched: the scenario's `assertCloudReadback` guard was never reached because the fixture-consumption check fails first, and the `scenario-report.json` shows `OWNER_REMINDERS_CREATE` with `cadence.kind: \"once\"`, `metadata.ownerSurface: \"OWNER_REMINDERS\"`, one `in_app` plan step.\n\n## Cause\n\n`packages/cloud/e2e/scenarios/cloud-stability-agent.scenario.ts` declares two required `TEXT_SMALL` fixtures for the dispatch path:\n\n- `cloud-reminder-dispatch-body` (matches `Current reminder:\\n- title: Review the synthetic Cloud inbox`, cardinality 1)\n- `cloud-reminder-dispatch-title` (matches `Message body:\\nTime to review the synthetic Cloud inbox.`, cardinality 1)\n\nSince `51bd56787c` (fix(reminders): deliver grounded one-shot content without prose rewriting, via #32931 merged as `6d13e67446`), `RemindersService` no longer calls the model for exactly this reminder shape. In `plugins/plugin-personal-assistant/src/lifeops/domains/reminders-service.ts` the `exactReminder` branch (owner occurrence, `in_app`, lifecycle `plan`, `cadence.kind === \"once\"`, `metadata.ownerSurface === \"OWNER_REMINDERS\"`, no `bodyOverride`) builds the body with `buildReminderBody` (`Reminder: <title>\\nDue: <local time>`) and issues a `ReminderPresentation` whose title is the literal `Reminder`; `renderReminderBody` and `renderOwnerNotificationTitle` are only reached on the non-exact path. The scenario's reminder satisfies every `exactReminder` condition, so neither `TEXT_SMALL` call happens and the two required fixtures stay at `consumed: 0`.\n\nThe readback assertion itself still holds with the grounded body (`notification.body.includes(\"synthetic Cloud inbox\")` matches `Reminder: Review the synthetic Cloud inbox`).\n\n## Fix\n\nRemove the two dead fixtures from the deterministic scenario (they encode the pre-`51bd56787c` prose-rewriting contract), leaving the readback assertion to pin the grounded dispatch. Only the deterministic lane is affected; `stability:real` uses the same scenario without fixtures.\n\nI am opening a PR for this.\n",
+      "createdAt": "2026-09-30T08:37:33Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUDG7kw",
+      "title": "gateway-webhook cutover hold: a turn settled while another replica held the lease is redelivered once that lease lapses",
+      "author": "nothingxnowhere",
+      "number": 32947,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`drainCutoverHolds` (`packages/cloud/services/gateway-webhook/src/cutover-hold.ts`) fences record removal to the current lease owner: the Lua step at `:255-258` refuses to delete the hold record when a *different* token owns the lease. That fence is correct while the other owner is alive. It leaves a gap when the other owner dies:\n\n1. Drainer A acquires the lease and starts redelivering a held Blooio or Twilio turn.\n2. A's renewal fails for a whole lease period, the lease lapses, and replica B acquires it (`set nx`). B then dies before draining.\n3. A's turn completes. The dedup ledger is written `delivered`, but A's `removeHeldRecord()` returns 0 because B's token owns the lease, so the record and its index entry stay.\n4. B's lease lapses. The next drainer acquires the lease, finds a live record, and calls `redeliver` without looking at the ledger. The Cloud turn runs again and the provider receives a second send.\n\nThis is the \"P2\" probe from the review of #32909 and the case #32944 left out of scope. #32944 fixed the sibling case where the lease lapsed with *no* new owner; this one needs the drainer to notice that the ledger has already left `held`.\n\n**To Reproduce**\n\nThe real `handleWebhook` and `drainCutoverHolds` against the local `Bun.serve` Cloud stub and in-memory Redis used by `__tests__/cutover-hold.test.ts` (Bun 1.3.14, Node 24.15.0, `--conditions=eliza-source`). A signed Blooio webhook is held during a `503 personal_cutover_in_progress`. Cloud is then attested, and while the attested turn runs the lease key is overwritten with another replica's token. After the first drain the lease is deleted (the other replica died and its lease lapsed) and a second drain runs.\n\nOn `190d8a3304` (#32944's head) the second drain redelivers:\n\n```\n$ bun test --conditions=eliza-source __tests__/cutover-hold.test.ts -t \"another replica owned the lease\"\n534 |     expect(second).toEqual({\nerror: expect(received).toEqual(expected)\n-   \"delivered\": 0,\n+   \"delivered\": 1,\n(fail) connector ingress during Shared→Dedicated cutover > a hold settled while another replica owned the lease is not redelivered once that lease lapses\n 0 pass\n 1 fail\n```\n\nGateway log for the message (timestamps and trace ids omitted): the turn completes twice and the provider egress runs twice.\n\n```\n{\"level\":\"warn\",\"message\":\"Personal connector turn held for Dedicated cutover\",\"platform\":\"blooio\",\"messageId\":\"msg_cutover_8\",\"holdCode\":\"personal_cutover_in_progress\"}\n{\"level\":\"info\",\"message\":\"Personal Eliza connector message completed\",\"platform\":\"blooio\",\"messageId\":\"msg_cutover_8\",\"cloudAttempts\":1,\"egressMs\":2,\"totalMs\":3}\n{\"level\":\"info\",\"message\":\"Held personal connector turn delivered after cutover\",\"platform\":\"blooio\",\"messageId\":\"msg_cutover_8\",\"attempts\":1}\n{\"level\":\"info\",\"message\":\"Personal Eliza connector message completed\",\"platform\":\"blooio\",\"messageId\":\"msg_cutover_8\",\"cloudAttempts\":1,\"egressMs\":1,\"totalMs\":4}\n```\n\n**Expected behavior**\n\nA drainer that acquires the lease over a record whose dedup ledger is no longer `held` does not redeliver. It removes the record under the same owner fence and moves on. The turn above runs once and the provider receives one send.\n\n**Screenshots / recording of the wrong behavior (required for anything visible)**\n\nN/A - server-side gateway queue behaviour with no rendered surface; the test transcript and gateway log above are the proof.\n\n**Evidence / reproduction proof**\n\n- [x] MP4 recording or JPG screenshots of the broken behavior: N/A - no visible surface; see the transcript.\n- [x] Backend logs and frontend console/network logs when relevant: gateway log above; N/A for frontend (no UI).\n- [x] Real-LLM trajectory when the bug involves agent/action/prompt/model behavior: N/A - no model call; the Cloud route is a local stub.\n- [x] Domain artifacts when relevant: the drain statistics and the `delivered` ledger with a surviving record, in the transcript.\n\n**Additional context**\n\nThe remaining unguarded window is two live drainers running the same turn concurrently, which happens only if renewal fails and a second replica acquires the lease while the first turn is still in flight. Lease renewal (`renewLeaseWhileRedelivering`) exists to prevent that, and the ledger check below cannot see it because the ledger stays `held` until a turn settles.\n\n**Contribution provenance**\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `anthropic/claude-fable-5-1`\n<!-- attribution-row:client -->\n- Agent tooling: `Claude Code`\n<!-- attribution-row:skill-revision -->\n- Skill path: `elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\nAI provider/model: anthropic / claude-fable-5-1\nClient / agent tooling: Claude Code\nContribution skill revision: elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\nAttribution status: self-reported\n— [nxn-claude-code]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-fable-5-1\",\"client\":\"Claude Code\",\"skill_revision\":\"elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-09-30T03:26:55Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUDD0CA",
+      "title": "crypto checkout: an amount that is not whole cents is reported as AMOUNT_TOO_LARGE (\"Amount too large\")",
+      "author": "nothingxnowhere",
+      "number": 32945,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`POST /api/crypto/payments` tells the caller that `10.005` is too large. The service picks the amount error code by searching the validator's message, and since #32915 the validator has a third rejection that the search does not know about.\n\n- `validatePaymentAmount` (`packages/cloud/shared/src/lib/config/crypto.ts:232-254`) rejects in three places. `:236-238` rejects an amount that is not finite or has more than two decimal places, with \"Amount must be a finite USD amount in whole cents\". This check came in with #32915 (`1313e200a8`). `:239-244` rejects an amount below the $5 minimum, and `:246-251` one above the $1,000 maximum. The result is `{ valid: boolean; error?: string }`, with no machine-readable reason.\n- `CryptoPaymentsService.createPayment` (`packages/cloud/shared/src/lib/services/crypto-payments.ts:316-320`) sets `AMOUNT_TOO_SMALL` when the message contains \"at least\" and `AMOUNT_TOO_LARGE` otherwise. The whole-cents message has no \"at least\", so `10.005`, `NaN` and `Infinity` all become `AMOUNT_TOO_LARGE`. The code union (`:31-43`) has no code for an invalid amount.\n- The route's schema (`packages/cloud/api/crypto/payments/route.ts:29-34`) accepts any number of decimal places (`/^(?:\\d+|\\d+\\.\\d+)$/` or a finite number between 1 and 10,000). So `10.005` reaches the service, and the route maps `AMOUNT_TOO_LARGE` to 400 `{\"error\":\"Amount too large\"}` (`:95`). `NaN` and `Infinity` cannot arrive in JSON; they reach the service only from direct callers.\n- Consumers: the route is the only code that maps `CryptoPaymentError` codes (`:88-106`; any unmapped code falls through to a 500 at `:102-105`). The billing UI (`packages/ui/src/cloud/billing/components/billing-tab.tsx:429`) and the `plugin-elizacloud` billing proxy (`plugins/plugin-elizacloud/src/routes/cloud-billing-routes.ts:730-742`) show or pass through the `error` text without switching on codes. The other validator caller, `direct-wallet-payments.ts:1468-1469`, throws the message as a plain `Error`, and its route returns it as a 400 (`packages/cloud/api/crypto/direct-payments/route.ts:80-84`), so that path does not misclassify.\n\nThe repository error policy asks for typed errors and warns against branching on prose. This classification is an example: adding the third rejection message changed the error code without anyone touching the classifier.\n\n**To Reproduce**\n\nI mounted the real `packages/cloud/api/crypto/payments/route.ts` and called the real `cryptoPaymentsService.createPayment` from `packages/cloud/api` on `origin/develop` `4573712ebf`. Only session auth and the rate limiter were stubbed. `OXAPAY_MERCHANT_API_KEY` was set to a local placeholder so that `isOxaPayConfigured()` passes. `oxaPayService.createInvoice` was spied to throw, and it was never called.\n\n<details><summary>Probe (scratch file <code>packages/cloud/api/__tests__/zz-amount-probe.test.ts</code>, not committed)</summary>\n\n```ts\nprocess.env.DATABASE_URL = \"pglite://memory\";\nprocess.env.TEST_DATABASE_URL = \"pglite://memory\";\nprocess.env.NODE_ENV = \"test\";\nprocess.env.OXAPAY_MERCHANT_API_KEY = \"local-probe-placeholder\";\n\nconst organizationId = randomUUID();\nmock.module(\"@/lib/auth/workers-hono-auth\", () => ({\n  requireUserWithOrg: async () => ({ id: randomUUID(), organization_id: organizationId }),\n  requireUserOrApiKeyWithOrg: async () => ({ id: randomUUID(), organization_id: organizationId }),\n}));\nmock.module(\"@/lib/middleware/rate-limit-hono-cloudflare\", () => ({\n  moneyRateLimit: () => async (_c: unknown, next: () => Promise<void>) => next(),\n  rateLimit: () => async (_c: unknown, next: () => Promise<void>) => next(),\n  RateLimitPresets: { STRICT: {}, STANDARD: {} },\n}));\nconst { default: route } = await import(\"../crypto/payments/route\");\nconst { cryptoPaymentsService } = await import(\"@/lib/services/crypto-payments\");\nconst { oxaPayService } = await import(\"@/lib/services/oxapay\");\nconst invoice = spyOn(oxaPayService, \"createInvoice\").mockImplementation(async () => {\n  throw new Error(\"probe: no OxaPay invoice expected\");\n});\n\ntest(\"probe\", async () => {\n  for (const amount of [\"10.005\", 10.005, \"4.99\", \"1000.01\"]) {\n    const res = await route.request(\"/\", {\n      method: \"POST\",\n      headers: { \"content-type\": \"application/json\" },\n      body: JSON.stringify({ amount }),\n    });\n    console.log(\"ROUTE\", JSON.stringify({ amount, status: res.status, body: await res.json() }));\n  }\n  for (const amount of [\"10.005\", Number.NaN, Number.POSITIVE_INFINITY, \"4.99\", \"1000.01\"]) {\n    const outcome = await cryptoPaymentsService.createPayment({ organizationId, amount }).then(\n      () => ({ resolved: true }),\n      (error: { code?: string; message?: string }) => ({ code: error.code, message: error.message }),\n    );\n    console.log(\"SERVICE\", JSON.stringify({ amount: String(amount), ...outcome }));\n  }\n  console.log(\"OXAPAY_INVOICE_CALLS\", invoice.mock.calls.length);\n  expect(invoice).not.toHaveBeenCalled();\n});\n```\n\n</details>\n\nFrom `packages/cloud/api` (Bun 1.3.14, Node 24.15.0):\n\n```\n$ bun test --conditions=eliza-source __tests__/zz-amount-probe.test.ts --timeout 60000\nROUTE {\"amount\":\"10.005\",\"status\":400,\"body\":{\"error\":\"Amount too large\"}}\nROUTE {\"amount\":10.005,\"status\":400,\"body\":{\"error\":\"Amount too large\"}}\nROUTE {\"amount\":\"4.99\",\"status\":400,\"body\":{\"error\":\"Amount too small\"}}\nROUTE {\"amount\":\"1000.01\",\"status\":400,\"body\":{\"error\":\"Amount too large\"}}\nSERVICE {\"amount\":\"10.005\",\"code\":\"AMOUNT_TOO_LARGE\",\"message\":\"Amount must be a finite USD amount in whole cents\"}\nSERVICE {\"amount\":\"NaN\",\"code\":\"AMOUNT_TOO_LARGE\",\"message\":\"Amount must be a finite USD amount in whole cents\"}\nSERVICE {\"amount\":\"Infinity\",\"code\":\"AMOUNT_TOO_LARGE\",\"message\":\"Amount must be a finite USD amount in whole cents\"}\nSERVICE {\"amount\":\"4.99\",\"code\":\"AMOUNT_TOO_SMALL\",\"message\":\"Amount must be at least $5\"}\nSERVICE {\"amount\":\"1000.01\",\"code\":\"AMOUNT_TOO_LARGE\",\"message\":\"Amount must not exceed $1000\"}\nOXAPAY_INVOICE_CALLS 0\n 1 pass\n 0 fail\n```\n\n<details><summary>Route log for the <code>10.005</code> request (paths shortened)</summary>\n\n```\n[Crypto Payments API] Create payment error: 315 |\n316 |     if (!validation.valid) {\n317 |       const errorCode = validation.error?.includes(\"at least\")\n318 |         ? \"AMOUNT_TOO_SMALL\"\n319 |         : \"AMOUNT_TOO_LARGE\";\n320 |       throw new CryptoPaymentError(errorCode, validation.error || \"Invalid amount\");\nCryptoPaymentError: Amount must be a finite USD amount in whole cents\n      at createPayment (packages/cloud/shared/src/lib/services/crypto-payments.ts:320:17)\n```\n\n</details>\n\nA $10.005 request, which is below the $1,000 maximum, is answered \"Amount too large\". The error's own message says the actual problem is whole cents.\n\n**Expected behavior**\n\n- The validator returns a typed reason alongside its message, and the service maps that reason to a code without reading the message.\n- An amount that is not a finite whole-cent value gets its own code, for example `AMOUNT_INVALID`. The route answers 400 with a message that says what is wrong.\n- Below-minimum and above-maximum amounts keep `AMOUNT_TOO_SMALL` and `AMOUNT_TOO_LARGE`, with their current messages and 400 responses.\n\n**Screenshots / recording of the wrong behavior (required for anything visible)**\n\nN/A - API error classification with no rendered surface of its own. The UI only shows the route's `error` text in a toast. The route and service transcript above is the proof.\n\n**Evidence / reproduction proof**\n\n- [x] MP4 recording or JPG screenshots of the broken behavior: N/A - no visible surface of its own; see the route and service transcript.\n- [x] Backend logs and frontend console/network logs when relevant: route log above; N/A for frontend (the UI does not branch on the code).\n- [x] Real-LLM trajectory when the bug involves agent/action/prompt/model behavior: N/A - no model, prompt or action is involved.\n- [x] Domain artifacts when relevant: the HTTP status and body for each amount, and the `CryptoPaymentError` code and message from the real service, both in the transcript above.\n\n**Additional context**\n\n- The route's schema bounds (`route.ts:33-34`, $1 to $10,000) are looser than the service's limits ($5 to $1,000, `ORGANIZATION_CREDIT_CHECKOUT_LIMITS`). The service enforces the real bounds, so this report does not change them.\n- Because JSON cannot carry `NaN` or `Infinity`, the HTTP-reachable case is an amount with more than two decimal places. The same misclassification applies to any direct caller of `createPayment`.\n\n**Contribution provenance**\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `anthropic/claude-opus-5-5`\n<!-- attribution-row:client -->\n- Agent tooling: `Claude Code`\n<!-- attribution-row:skill-revision -->\n- Skill path: `elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\nAI provider/model: anthropic / claude-opus-5-5\nClient / agent tooling: Claude Code\nContribution skill revision: elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\nAttribution status: self-reported\n— [nxn-claude-code]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-opus-5-5\",\"client\":\"Claude Code\",\"skill_revision\":\"elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-09-30T03:20:41Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUC1UUw",
+      "title": "gateway-webhook cutover hold: non-retryable Cloud refusals are replayed for the hold budget, and a delivered hold is replayed after its lease lapses",
+      "author": "nothingxnowhere",
+      "number": 32943,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nTwo replay defects remain in the durable connector hold after #32909 (head `bc812ab321`). Both are in `packages/cloud/services/gateway-webhook`, and both only affect Blooio and Twilio turns that the gateway has already acknowledged to the provider.\n\n1. **A non-retryable Cloud refusal is retried for the whole hold budget.** `redeliverHeldWebhook` re-holds every `PersonalSharedPreEgressError` (`src/webhook-handler.ts:949-956`). That includes failures that Cloud itself classified as `retryable: false`: a 4xx, or `X-Eliza-Retryable: false`, as read by `readPersonalSharedFailureMetadata` (`packages/cloud/services/_common/src/personal-shared-failure.ts:100-102`, `:127-132`). The refused turn is sent to Cloud again on every drain for `CUTOVER_HOLD_MAX_MS` (one hour). It is then logged as `Held personal connector turn exceeded the cutover budget`, with the stale `holdCode: personal_cutover_in_progress` and the operator action \"inspect the Dedicated target's attestation\". A first-delivery failure of the same kind is settled at once by `settleBackgroundDeliveryFailure`.\n2. **A delivered hold is replayed after its lease lapses.** `drainCutoverHolds` removes a settled record only while the lease still holds this drainer's token (`src/cutover-hold.ts:250`). Suppose renewal fails for a whole lease period and no other replica takes the lease. The turn is delivered and the ledger says `delivered`, but the record and its index entry stay. The next drain runs the Cloud turn and the provider send a second time.\n\n**To Reproduce**\n\nI ran the real handler and drainer (`handleWebhook`, `drainCutoverHolds`, `redeliverHeldWebhook`, `releaseExpiredHeldWebhook`) against a local `Bun.serve` stub of the Cloud personal-shared route and the in-memory Redis adapter (`MOCK_REDIS=1`, ioredis-mock). Only the Blooio provider API is substituted. The probe drives the same setup that `__tests__/cutover-hold.test.ts` uses. A signed Blooio webhook arrives while Cloud answers `503 personal_cutover_in_progress`, so the turn is held and the ledger is `held`. Then:\n\n- P2b: Cloud is attested. While the attested turn runs, the lease key is deleted (it expired with no new owner). The probe runs one drain, then a second drain.\n- P3: Cloud starts answering `400 {\"code\":\"invalid_request\"}` (`retryable: false`). The probe runs one drain at `now + 60s`, then a drain after the hold budget (`now + CUTOVER_HOLD_MAX_MS + 120s`).\n\n<details><summary>Probe P2b and P3 (added to <code>__tests__/</code> of a checkout at <code>bc812ab321</code>)</summary>\n\n`startCloud`, `holdOne`, `drainHandlers` and `providerSends` are the same helpers as in `__tests__/cutover-hold.test.ts`. `holdOne` sends one signed Blooio webhook and waits for the `held` ledger. The Cloud stub's `permanentStatus` returns that status with `{\"success\":false,\"code\":\"invalid_request\"}`.\n\n```ts\ntest(\"P2b a delivered outcome whose lease simply expired (no replacement) is replayed\", async () => {\n  const cloud = startCloud();\n  const redis = await holdOne(cloud, \"msg_probe_p2b\");\n  const dedupKey = \"webhook:blooio:msg_probe_p2b\";\n  const leaseKey = `webhook:cutover-hold-lease:${dedupKey}`;\n  const heldTurns = cloud.turns.length;\n  cloud.state.attested = true;\n  cloud.state.onAttestedTurn = async () => {\n    await redis.del(leaseKey);\n  };\n  const first = await drainCutoverHolds(redis, drainHandlers(cloud.origin, redis), { now: Date.now() + 60_000 });\n  const ledgerAfterFirst = await redis.get(dedupKey);\n  cloud.state.onAttestedTurn = undefined;\n  const second = await drainCutoverHolds(redis, drainHandlers(cloud.origin, redis), { now: Date.now() + 120_000 });\n  console.log(\"P2b\", JSON.stringify({ first, ledgerAfterFirst, second, turns: cloud.turns.length - heldTurns, sends: providerSends.length }));\n}, 60_000);\n\ntest(\"P3 a permanent non-hold Cloud 400 is retried until the hour budget, then released\", async () => {\n  const cloud = startCloud();\n  const redis = await holdOne(cloud, \"msg_probe_p3\");\n  const dedupKey = \"webhook:blooio:msg_probe_p3\";\n  cloud.state.permanentStatus = 400;\n  const retry = await drainCutoverHolds(redis, drainHandlers(cloud.origin, redis), { now: Date.now() + 60_000 });\n  const ledgerAfterRetry = await redis.get(dedupKey);\n  const expired = await drainCutoverHolds(redis, drainHandlers(cloud.origin, redis), { now: Date.now() + CUTOVER_HOLD_MAX_MS + 120_000 });\n  const ledgerAfterExpiry = await redis.get(dedupKey);\n  console.log(\"P3\", JSON.stringify({ retry, ledgerAfterRetry, expired, ledgerAfterExpiry, sends: providerSends.length }));\n}, 60_000);\n```\n\n</details>\n\nFrom `packages/cloud/services/gateway-webhook` (Bun 1.3.14, Node 24.15.0):\n\n```\n$ bun test --conditions=eliza-source __tests__/zz-review-probe.test.ts\nP2b {\"first\":{\"delivered\":0,\"rescheduled\":0,\"released\":0,\"expired\":0},\"ledgerAfterFirst\":\"delivered\",\"second\":{\"delivered\":1,\"rescheduled\":0,\"released\":0,\"expired\":0},\"turns\":2,\"sends\":2}\nP3 {\"retry\":{\"delivered\":0,\"rescheduled\":1,\"released\":0,\"expired\":0},\"ledgerAfterRetry\":\"held\",\"expired\":{\"delivered\":0,\"rescheduled\":0,\"released\":0,\"expired\":1},\"ledgerAfterExpiry\":null,\"sends\":0}\n 4 pass\n 0 fail\nRan 4 tests across 1 file. [9.48s]\n```\n\n<details><summary>Gateway logs for the two probes (abridged to the lines that matter)</summary>\n\n```\n{\"level\":\"info\",\"message\":\"Held personal connector turn delivered after cutover\",\"platform\":\"blooio\",\"messageId\":\"msg_probe_p2b\",\"heldForMs\":7,\"attempts\":1}\n{\"level\":\"info\",\"message\":\"Held personal connector turn delivered after cutover\",\"platform\":\"blooio\",\"messageId\":\"msg_probe_p2b\",\"heldForMs\":11,\"attempts\":1}\n{\"level\":\"warn\",\"message\":\"Personal Shared Cloud attempt failed\",\"platform\":\"blooio\",\"messageId\":\"msg_probe_p3\",\"attempt\":1,\"status\":400,\"retryable\":false}\n{\"level\":\"error\",\"message\":\"Held personal connector turn exceeded the cutover budget\",\"platform\":\"blooio\",\"messageId\":\"msg_probe_p3\",\"holdCode\":\"personal_cutover_in_progress\",\"operatorAction\":\"inspect the Dedicated target's attestation; the turn was never executed\"}\n{\"level\":\"error\",\"message\":\"Background message processing failed\",\"error\":\"cutover hold expired\",\"platform\":\"blooio\",\"messageId\":\"msg_probe_p3\"}\n```\n\n</details>\n\nP2b reports the same turn as delivered twice, with two Cloud turns and two provider sends. The first drain reports `delivered: 0`, although the ledger already reads `delivered`. P3 reschedules the refused turn instead of releasing it, and settles it only through the expiry path.\n\n**Expected behavior**\n\n- A redelivery that Cloud refuses with a non-retryable classification is settled at once, the same way the first background delivery settles it. `settleBackgroundDeliveryFailure` logs the failure at error level. Because no provider egress happened, it also reopens the dedup key. The drain reports `released: 1`, and later drains do nothing. Cutover holds and failures without a non-retryable classification (transport errors, 5xx) stay held, as #32909 intends.\n- A redelivery whose outcome is settled removes its record unless another replica now owns the lease. A lease that simply lapsed does not keep the record. P2b should give one Cloud turn and one provider send, with the first drain reporting `delivered: 1`.\n\n**Screenshots / recording of the wrong behavior (required for anything visible)**\n\nN/A - server-side gateway queue behaviour with no rendered surface; the probe transcript and gateway logs above are the proof.\n\n**Evidence / reproduction proof**\n\n- [x] MP4 recording or JPG screenshots of the broken behavior: N/A - no visible surface; see the probe transcript.\n- [x] Backend logs and frontend console/network logs when relevant: gateway logs above; N/A for frontend (no UI).\n- [x] Real-LLM trajectory when the bug involves agent/action/prompt/model behavior: N/A - no model call; the Cloud route is a local stub.\n- [x] Domain artifacts when relevant: the Redis ledger values and drain statistics in the probe transcript.\n\n**Additional context**\n\n- The #32909 review notes that the Telegram private no-reply failure (`src/webhook-handler.ts:1703-1705`, `retryable: false`) reaches this path. It does not in practice. Telegram webhooks return inside the Telegram branch (`src/webhook-handler.ts:630-713`) before the hold code (`:773-778`), so only Blooio and Twilio turns are ever held. The reachable cases are Blooio and Twilio turns that Cloud refuses with a 4xx or `X-Eliza-Retryable: false` after a hold.\n- A related case is not covered here. A different replica takes the lease mid-turn and then dies without draining (probe P2 in the #32909 review). The first drainer then correctly declines to remove the record, and it is replayed once that replica's lease lapses. Guarding against it would mean checking the dedup ledger before redelivery. It needs a lease stolen by a live owner, which lease renewal is designed to prevent.\n\n**Contribution provenance**\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `anthropic/claude-opus-5-5`\n<!-- attribution-row:client -->\n- Agent tooling: `Claude Code`\n<!-- attribution-row:skill-revision -->\n- Skill path: `elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\nAI provider/model: anthropic / claude-opus-5-5\nClient / agent tooling: Claude Code\nContribution skill revision: elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\nAttribution status: self-reported\n— [nxn-claude-code]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-opus-5-5\",\"client\":\"Claude Code\",\"skill_revision\":\"elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-09-30T02:51:05Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFmzBTA",
+      "title": "fix(phone): preserve paired turns and recover revoked sessions",
+      "author": "NubsCarson",
+      "number": 32922,
+      "body": "Paired phones could lose a submitted turn when the stream disconnected, reuse an obsolete same-host pairing attempt, or clear a valid credential when Android replayed the connection deep link.\n\nThis change preserves accepted turns across transport disconnects, maintains paired-session authority through completion, persists terminal generation outcomes for reconnect, and binds pairing retries to the server and entered code. Credential persistence can retry without consuming the one-time code again; same-target deep-link replay preserves the paired session. Unpaired disconnected requests retain their cancellation behavior.\n\nValidation at integrated head `d172d7226a8e9b5b63f6eff7cc8a89a2ea8a7f12`: seven UI suites passed 194 tests, integrated agent pairing/readiness/failure-persistence suites passed 13 tests, and changed-file Biome passed. Full `bun run verify` passed 284/284 tasks and all final audits. The renderer build and full app capture passed 218/218 browser tests; all 24 manually flagged images plus desktop/mobile chat were inspected without a visual regression. Packaged OCR verified 208 views, zero broken, with four native-camera exemptions. Current-head hosted run 36630602979 passed all four checks; an additional Source checks rerun in 36628735628 is still running. The earlier renderer timeout is retained as a failed attempt, recovered by the completed renderer build and capture. These are source and browser-fixture results; this revised branch has not been installed on a physical phone.\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-29T01:07:56Z",
+      "mergedAt": "2026-09-30T14:13:02Z",
+      "additions": 1631,
+      "deletions": 72
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABF2SdlQ",
+      "title": "Bind prompt automations to the authenticated local owner",
+      "author": "NubsCarson",
+      "number": 32958,
+      "body": "Saved prompt automations could disappear from the feed because their creator label was compared with the owner identity. New triggers now store the trusted local owner; listing and controls use that binding rather than client-supplied provenance. Ownerless legacy records remain available only through the canonical local-owner boundary.\n\nPresented USER credentials cannot become OWNER through loopback trust, and distinct registered OWNER principals are refused by the local-only Node surface. Direct plugin dispatch preserves the trusted access context. Runtime-owned heartbeat rows remain visible and read-only; ordinary prompt editing remains available. Editing a saved prompt now preserves its activation and wake policy; creation keeps the existing enabled/inject-now defaults. Previously a title-only edit could silently reactivate a paused prompt.\n\nValidation: full repository verification passes on the develop-based branch; real Node listener and PGlite persistence tests pass (7 cases), and the adapted feed suite passes (17 cases). Broader focused owner/route and bridge checks passed on the combined candidate. Tests cover foreign reads/mutations, spoofed ownership, system controls and canonical-owner creation without model execution. The focused editor suite also passes five tests, and the real database schedule suite passes six, including pause, rename without an activation field, and re-enable. Live QA on the combined preview retained disabled state, timezone, cron, wake policy and zero runs after a title edit; that preview uses a newer combined UI with the verified ownership API, so the focused branch tests establish the standalone change.\n\nThis branch includes the timezone correction from #32956, which its persistence test requires. The reminder layout and workflow execution changes remain in their separate review branches.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-30T07:37:27Z",
+      "mergedAt": null,
+      "additions": 1093,
+      "deletions": 52
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABF05Ejw",
+      "title": "Fix parked workflow cancellation and preserve execution receipts",
+      "author": "NubsCarson",
+      "number": 32950,
+      "body": "Cancelling an approval- or signal-gated workflow could leave it waiting after its worker exited. Restarting a waiting run also replaced displayed event history and reused sequence numbers. In addition, successful HTTP202 control responses entered the client’s agent-resume loop, replaying the POST and eventually showing a misleading startup warning.\n\nThis uses Smithers’ durable subtree cancellation, preserves retained parent events and continues their sequence numbers, and consumes Cancel/Approval/Signal execution receipts without replay. Received terminal output, errors and continuation IDs survive a late abort. Cancelled runs now retain a neutral `cancelled` summary status; failures remain `error`. The existing Run behavior stays unchanged.\n\nValidation: the focused branch on develop passes 135 workflow tests across 17 isolated files, 38 UI/client/editor tests, and full repository verification. Independent review passed for the cancellation repair and incremental client/status changes. The combined candidate passed verification and app build; live QA cancelled the original paused execution, retained history through restart, then completed a second gated run with one Run POST and one Cancel POST, no false warning, no model call, and the correct All-list label. The recorded cancellation HTTP response was 397ms; this is not a general latency guarantee.\n\nApproval and Signal live interactions and model-bearing workflow execution were not part of that live run. If a native terminal result commits before its receipt is emitted, the operation fails explicitly with `WORKFLOW_TERMINAL_RESULT_UNAVAILABLE` and does not rerun the workflow. Native data stays intact. Previously overwritten display entries are retained in the existing archive/native store and are not silently reconstructed. External consumers with exhaustive execution-summary handling should accept the additive `cancelled` value.\n\nCost: cancellation uses one short control child and durable store operations, with no new model call or polling service. Sequence lookup scans retained history. The client correction prevents accepted control POSTs from being replayed.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-30T04:52:46Z",
+      "mergedAt": null,
+      "additions": 658,
+      "deletions": 25
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFxMTDg",
+      "title": "Reuse request-bound planner context for task extraction",
+      "author": "NubsCarson",
+      "number": 32938,
+      "body": "Task creation extractors could reload full conversation history even after the planner had already reviewed and selected the relevant originals. Reuse that selection only through a process-local binding to the exact request, actor, state, original sources and projection. Current provider constraints and receipts remain intact; absent, forged or changed bindings use the existing full-context path.\n\nThe extractor can request complete original context before proposing an effect. Restoration stays within the existing two-call budget, and mixed restoration/plan output or unresolved output fails without creating a task. Explicit source selection takes precedence over automatic background-history projection.\n\nCost: adds local hashing and rendering, and can avoid the redundant history read on a valid managed path. Restoration can still require the second extraction call. Live token and latency savings are unmeasured; no model defaults or source history storage change.\n\nValidation: 63 focused tests passed (core binding 5, extractor projection 11, existing extractor 27, background history 20). Core build and core/assistant/personal-assistant typechecks passed; six-file Biome and diff checks passed. The personal-assistant check required rebuilding existing cloud-sdk declarations to match this base's source exports. No source workaround or unrelated patch was added. Full branch CI and live acceptance remain pending.\n\nOffline CPU cost: a reconstructed context fixture measured roughly 32–71 ms median combined binding and rendering across its selection cases (20 measured iterations per case after 3 warmups). This is local fixture overhead, not live request latency or measured user-facing savings; reconstructed selections are not evidence of the historic planner's actual selection.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-29T20:15:58Z",
+      "mergedAt": "2026-09-30T14:54:05Z",
+      "additions": 616,
+      "deletions": 24
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABF05qLw",
+      "title": "fix(cloud): keep retired agent inference markup off on publish and billing",
+      "author": "fadhelcarlos",
+      "number": 32951,
+      "body": "# Relates to\n\n#32907 (retire creator payouts, owner decision #22957 / #22961) merged with the agent publish path still able to turn creator inference markup back on. That was the first blocking point of [this review](https://github.com/elizaOS/eliza/pull/32907#pullrequestreview-5345258500), and it is unchanged on develop `4573712ebf`:\n\n- Migration 0500 set `monetization_enabled = false` on every agent, and `agentMonetizationService.updateSettings` refuses to set it back (`agent-monetization.ts:408`).\n- `POST /api/v1/agents/:agentId/publish` still accepts `enableMonetization` and `markupPercentage` up to 1000 (`publish/route.ts:25-26`). `userCharactersRepository.publish` writes both straight to `user_characters` (`characters.ts:752-753`).\n- The early `is_public` return means an owner only has to `DELETE` (unpublish) and then `POST` `{ enableMonetization: true, markupPercentage: 1000 }` to re-enable it.\n- A2A (`a2a/route.ts:433-437`, `:531-538`) and MCP (`mcp/route.ts:482-485`, `:589-596`) reserve and settle `base + markup` whenever the stored flag is set. The creator step then calls `recordCreatorEarnings`, which throws `CreatorMonetizationRetiredError` for any positive amount (`agent-monetization.ts:235`). That happens inside a settlement task whose `.catch` only logs \"Deferred settlement failed\".\n\n**Result:** the calling org pays up to 11× the inference cost, the surcharge accrues to nobody, and the retirement statement in migration 0500 no longer holds.\n\n# Change\n\n**Fence the write** (the only writer that could set the flag):\n\n- `publish/route.ts` throws `CreatorMonetizationRetiredError(\"agent_inference_markup\")` (410 `creator_monetization_retired`) when the request asks for the markup: `enableMonetization` set, or a positive `markupPercentage`.\n  - The check reads the raw request before validation, so shapes that fail `PublishSchema` (`markupPercentage: 5000`, `\"250\"`, `enableMonetization: \"true\"`) are refused too, instead of being published with defaults.\n  - Any other invalid body is a typed 400 instead of a silent publish with defaults.\n- `agentMonetizationService.updateSettings` also refuses a positive `markupPercentage`, so the owner's settings can no longer store a markup that is never charged.\n  - The check runs before any write and before the already-public early return.\n  - The response reports `monetizationEnabled: false, markupPercentage: 0`.\n- `userCharactersRepository.publish()` drops its two monetization options and always writes `monetization_enabled: false` and `inference_markup_percentage: \"0\"`, so no future caller can re-enable it.\n\n**Backstop billing,** for rows re-enabled before this fence:\n\n- A2A `chat` and MCP `chat` reserve and settle the base inference cost only, whatever the stored flag says.\n- The unreachable creator-earnings branch is removed, along with the now-unused `calculateCreditMarkup` and `agentMonetizationService` imports.\n- The response `cost` reports `markup: 0`.\n\n**Advertise what is billed:**\n\n- The A2A agent card no longer adds `markupPercentage` to skill pricing, and `getAgentInfo` reports `monetizationEnabled: false, markupPercentage: \"0\"`.\n- The MCP card reports standard inference pricing, and `get_info` reports `monetization: false, markup: \"0\"`.\n- Discovery lists every agent as `{ type: \"credits\", description: \"Standard inference costs\" }`, the same wording as the MCP card.\n  - Develop labelled non-monetized agents \"Free to use\" even though their chat bills the caller's credits at the base inference cost, and it advertised \"N% markup\" for monetized ones.\n- The public character view reports `monetizationEnabled: false`.\n\nOwner-facing views of the stored setting (`GET /api/v1/agents/:id/monetization`, credits summary) are unchanged. `DELETE` (unpublish) already writes the flag off, and `updateSettings` refuses to turn it on or store a positive markup.\n\n# Testing\n\n- [x] Targets `develop` and has no conflicts with the latest `origin/develop` (`4573712ebf`).\n- [ ] Ran `bun install` and `bun run verify` after syncing; record blockers below.\n- [ ] Updated relevant documentation.\n\nThis used Ubuntu 24.04 (WSL2), Bun 1.4.2 and `bun install --frozen-lockfile` on develop `4573712ebf`.\n\n**New route tests** in `packages/cloud/api/__tests__/agent-inference-markup-retired.test.ts`. They drive the real publish, A2A and MCP routes and the real `failureResponse` / `CreatorMonetizationRetiredError`. Auth, the character lookup, pricing, the model stream and org admission are substituted, and admission records what was reserved and settled.\n\n- Publishing with `enableMonetization: true` answers 410 `creator_monetization_retired` and writes nothing. It does the same for an already-public agent, which develop answered 200.\n- Publishing with only `markupPercentage: 250` also answers the typed 410 and writes nothing. So do `markupPercentage: 5000`, `markupPercentage: \"250\"` and `enableMonetization: \"true\"`, which fail schema validation.\n- Any other invalid body (`a2aEnabled: \"yes\"`) answers 400 and writes nothing.\n- An ordinary publish passes no monetization option to the repository and reports markup off.\n- A2A `chat` and MCP `chat` on a row that still stores `monetization_enabled = true, inference_markup_percentage = 1000`:\n  - They reserve `{ baseTotalCost: 0.01, platformMarkup: 0, totalCost: 0.01 }` and settle the base cost `0.02`.\n  - **On develop they reserve `platformMarkup: 0.1, totalCost: 0.11`.**\n- The A2A card, MCP card, `getAgentInfo` and `get_info` advertise no markup for that row. On develop the A2A card lists `markupPercentage: 1000` on both skills.\n- `GET /api/v1/discovery?types=agent` lists that row as `credits` / \"Standard inference costs\". On develop it reads \"1000.00% markup on inference costs\".\n\n**Service tests** in `creator-monetization-retirement.pglite.test.ts` (real PGlite, same file as the 0500 tests):\n\n- `publish()` on an unpublished row that stores a 250% markup leaves it public with the markup off.\n- `updateSettings` with `markupPercentage: 250` throws `CreatorMonetizationRetiredError` and stores nothing. A zero markup is still accepted.\n\n| Run | Result |\n| --- | --- |\n| New route tests, this head | 12 pass, 0 fail |\n| New route tests, develop `4573712ebf` source | **0 pass**, all fail |\n| Validation-bypass cases, previous head `10a400da22` publish route | 4 fail (200 publish with defaults) |\n| `creator-monetization-retirement.pglite.test.ts`, this head | 7 pass, 0 fail |\n| Settings test, develop `agent-monetization.ts` | fails (the markup is stored) |\n| Repository test, develop `characters.ts` | fails: develop `publish()` requires the monetization options, and without them it writes `\"undefined\"` into the numeric column |\n| `packages/cloud/api` typecheck (`tsc --noEmit`, router contract, `wrangler deploy --dry-run`) | pass |\n| `packages/cloud/shared` `tsc --noEmit` | pass |\n| `biome check` on the changed files | clean |\n\n# Evidence Gate\n\n<!-- evidence-head:d2634dd85dfd81eaf17566a12ce54a91ea386d46 -->\n\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - Cloud API and billing change; no rendered UI surface.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - Cloud API and billing change; no rendered UI surface.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - no UI flow; the publish, A2A, MCP and discovery request paths are exercised by the route tests above.\n<!-- evidence-row:backend-logs -->\n- [x] Backend logs: develop reproduction and test outputs in Evidence Details.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - no frontend code path.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no agent/action/provider/prompt/model behavior changes; only what the caller is billed.\n<!-- evidence-row:domain-artifacts -->\n- [x] Domain artifacts: reserved and settled credit amounts, the 410 body and the stored `user_characters` row are asserted in the tests (see Evidence Details).\n<!-- evidence-row:ocr-review -->\n- [x] N/A - no rendered visual surface.\n\n# Evidence Details\n\n<details><summary>develop 4573712ebf source, new route tests</summary>\n\n```\n(fail) publishing with enableMonetization is refused with the typed 410 and writes nothing\nExpected: 410\nReceived: 200\n(fail) the refusal also answers an already-public agent instead of reporting success\nExpected: 410\nReceived: 200\n(fail) a requested markup is refused too, instead of being silently dropped\n(fail) an ordinary publish writes no monetization option and reports markup off\n(fail) A2A chat on a stored monetized row reserves and settles the base cost only\n  {\n    \"baseTotalCost\": 0.01,\n-   \"platformMarkup\": 0,\n-   \"totalCost\": 0.01,\n+   \"platformMarkup\": 0.1,\n+   \"totalCost\": 0.11,\n  }\n(fail) MCP chat on a stored monetized row reserves and settles the base cost only\n  (same reservation: platformMarkup 0.1, totalCost 0.11)\n(fail) agent cards and info calls advertise no creator markup for a stored monetized row\nReceived: \"...\\\"pricing\\\":{\\\"type\\\":\\\"token-based\\\",\\\"inputCostPer1k\\\":0.005,\\\"outputCostPer1k\\\":0.015,\\\"markupPercentage\\\":1000}...\"\n(fail) discovery lists a stored monetized agent at the standard metered price it is billed\n+   \"description\": \"1000.00% markup on inference costs\",\n 0 pass\n 8 fail\n```\n</details>\n\n<details><summary>This head</summary>\n\n```\n$ bun test __tests__/agent-inference-markup-retired.test.ts        (packages/cloud/api)\n(pass) publishing with enableMonetization is refused with the typed 410 and writes nothing\n(pass) the refusal also answers an already-public agent instead of reporting success\n(pass) a requested markup is refused too, instead of being silently dropped\n(pass) an out-of-range markup that fails validation is still refused, not published with defaults\n(pass) a string markup that fails validation is still refused, not published with defaults\n(pass) a string enable flag that fails validation is still refused, not published with defaults\n(pass) any other invalid publish body is a typed 400, not a publish with defaults\n(pass) an ordinary publish writes no monetization option and reports markup off\n(pass) A2A chat on a stored monetized row reserves and settles the base cost only\n(pass) MCP chat on a stored monetized row reserves and settles the base cost only\n(pass) agent cards and info calls advertise no creator markup for a stored monetized row\n(pass) discovery lists a stored monetized agent at the standard metered price it is billed\n 12 pass\n 0 fail\n\n$ bun test src/lib/services/__tests__/creator-monetization-retirement.pglite.test.ts   (packages/cloud/shared)\n(pass) unpaid balances are frozen into a read-only statement and the ledger is untouched\n(pass) earnings-funded hosting and creator markups are switched off\n(pass) a paid MCP call records usage but accrues no creator earnings or creator credit\n(pass) a frozen creator balance cannot be paid out; affiliate earnings since retirement can\n(pass) paid MCP listings become free and new prices are refused\n(pass) publishing an agent never re-enables a retired creator markup\n(pass) monetization settings refuse a positive markup instead of storing an uncharged price\n 7 pass\n 0 fail\n\n$ tsc --noEmit (packages/cloud/shared)                  exit 0\n$ tsc --noEmit (packages/cloud/api)                     exit 0\n$ bun run check:router-contract                          {\"mountedRoutes\":765,...} exit 0\n$ bun run check:worker-bundle                            Total Upload: 28050.86 KiB  --dry-run: exiting now. exit 0\n$ biome check <changed files>                            No fixes applied.\n```\n</details>\n\n## Known gaps / failures\n\n- `bun run verify` was not run in full on this host.\n- Rows already re-enabled through the old publish path keep `monetization_enabled = true` in storage. After this change nothing bills, advertises or accrues from that flag, and the owner's own settings view still shows it. The one-off cleanup would be migration 0500's `UPDATE user_characters SET monetization_enabled = false`. It is left out to avoid racing the migration numbering.\n\n## Deployment\n\nNone. No migration or configuration change.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01BWPf5y2qEBF3iGWBReSGrE\n\nAI provider/model: anthropic / claude-opus-5-5\nClient / agent tooling: claude-code\nContribution skill revision: N/A - ordinary GitHub contribution without optional run evidence\nAttribution status: self-reported\n— [contributor]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-opus-5-5\",\"client\":\"claude-code\",\"skill_revision\":\"N/A - ordinary GitHub contribution without optional run evidence\"} -->\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-30T04:53:54Z",
+      "mergedAt": null,
+      "additions": 545,
+      "deletions": 127
+    }
+  ],
+  "codeChanges": {
+    "additions": 2247,
+    "deletions": 96,
+    "files": 30,
+    "commitCount": 52
+  },
+  "completedItems": [
+    {
+      "title": "Reuse request-bound planner context for task extraction",
+      "prNumber": 32938,
+      "type": "other",
+      "body": "Task creation extractors could reload full conversation history even after the planner had already reviewed and selected the relevant originals. Reuse that selection only through a process-local binding to the exact request, actor, state, o",
+      "files": [
+        "packages/core/src/actions/task-extraction-context.test.ts",
+        "packages/core/src/actions/task-extraction-context.ts",
+        "packages/core/src/index.ts",
+        "plugins/plugin-assistant/src/services/message/planned-tool.ts",
+        "plugins/plugin-personal-assistant/src/actions/lib/extract-task-plan.ts",
+        "plugins/plugin-personal-assistant/src/actions/lib/task-extraction-projection.test.ts"
+      ]
+    },
+    {
+      "title": "fix(phone): preserve paired turns and recover revoked sessions",
+      "prNumber": 32922,
+      "type": "bugfix",
+      "body": "Paired phones could lose a submitted turn when the stream disconnected, reuse an obsolete same-host pairing attempt, or clear a valid credential when Android replayed the connection deep link.\n\nThis change preserves accepted turns across tr",
+      "files": [
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/server-helpers-auth.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/host-bridge.ts",
+        "packages/agent/test/machine-session-revocation-ws.test.ts",
+        "packages/agent/test/paired-stream-failure-persistence.test.ts",
+        "packages/app/src/api/auth/sessions.ts",
+        "packages/app/src/first-run/remote-deep-link-connection.test.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/src/remote-deep-link-connection.ts",
+        "packages/app/src/runtime/install-agent-host-bridge.ts",
+        "packages/ui/src/api/client-base.ts",
+        "packages/ui/src/api/client-session-revocation.test.ts",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/ChatComposerContext.hooks.ts",
+        "packages/ui/src/state/ChatComposerContext.test.tsx",
+        "packages/ui/src/state/active-server-credential.revoked.test.ts",
+        "packages/ui/src/state/active-server-credential.ts",
+        "packages/ui/src/state/pending-chat-turns.ts",
+        "packages/ui/src/state/useChatSend.overlay-ownership.test.tsx",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/src/state/usePairingState.test.tsx",
+        "packages/ui/src/state/usePairingState.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "fadhelcarlos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/123362393?v=4",
+      "totalScore": 196.52287300380127,
+      "prScore": 129.18287300380126,
+      "issueScore": 0,
+      "reviewScore": 67,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 166.9229435925874,
+      "prScore": 166.9229435925874,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mtcow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/171548037?v=4",
+      "totalScore": 150,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 150,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nothingxnowhere",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/140473048?v=4",
+      "totalScore": 129.14298567588324,
+      "prScore": 102.14298567588324,
+      "issueScore": 6,
+      "reviewScore": 21,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 102,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 102,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lww0134-ctrl",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/314679453?v=4",
+      "totalScore": 77,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 77,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "attentionhead",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30051356?v=4",
+      "totalScore": 40.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 33.57066584156456,
+      "prScore": 33.57066584156456,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alfirus",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3857321?u=5400f47f326bb2ce72cbd602401c1b9ae93f757d&v=4",
+      "totalScore": 19.174790545596743,
+      "prScore": 19.174790545596743,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xalydev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/325197450?u=25b6ca85c3a6c0c737ba831072c5f93d9642560c&v=4",
+      "totalScore": 18.465088552011935,
+      "prScore": 18.465088552011935,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hhbb958",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/336115325?v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumix5",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13509617?u=f941296a9207a99ba0ac42ef7b02b0eb0b046cd0&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "deepanshu-yd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/93039894?u=f6d0ec31b900f1a2be26fa670fab567b238a7169&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hermesagent270-commits",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/283605144?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 29,
+  "mergedPRs": 2,
+  "newIssues": 4,
+  "closedIssues": 0,
+  "activeContributors": 15
+}
