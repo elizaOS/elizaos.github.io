@@ -1,0 +1,1273 @@
+{
+  "interval": {
+    "intervalStart": "2026-10-03T00:00:00.000Z",
+    "intervalEnd": "2026-10-04T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "elizaos/eliza",
+  "overview": "From 2026-10-03 to 2026-10-04, elizaos/eliza had 112 new PRs (48 merged), 23 new issues, and 17 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABUubNlw",
+      "title": "fix(cloud): keep failed affiliate session claims retryable",
+      "author": "hermesagent270-commits",
+      "number": 33126,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`POST /api/my-agents/claim-affiliate-characters` marks a supplied anonymous\nsession converted and inactive before attempting any of the session-backed\ncharacter ownership transfers.\n\nThe route later ignores converted sessions (`!session.converted_at`). If\n`charactersService.claimAffiliateCharacter` returns a failure or throws, the\nresponse reports the failed claim but the session token has already been\nconsumed. A retry can no longer rediscover session-only characters, so a\ntemporary ownership-transfer failure becomes permanent.\n\nThis is distinct from #33070 / #33121, which validate the route's request body;\nthe defect here is the ordering of two successful domain operations after a\nvalid request.\n\n**Executed reproduction**\n\nI mounted the real Hono route from current `develop`\n(`811c3fac48df3c3e4e8e7414ef78e544fa7dac08`) with deterministic repository and\nservice boundaries:\n\n- valid authenticated user and organization;\n- valid, unconverted anonymous session;\n- one character owned by the anonymous session user and discoverable only by\n  the session token;\n- `claimAffiliateCharacter` returns\n  `{ success: false, message: \"temporary database failure\" }`;\n- a shared event ledger records conversion and claim calls.\n\n```text\nbun test packages/cloud/api/__tests__/claim-affiliate-session-conversion.test.ts\n\n1 pass, 0 fail, 4 assertions\nevents: [\"session-converted\", \"claim-failed\"]\nresponse: HTTP 200, claimed: [], failed: [character]\n```\n\nThe passing reproduction asserts the current broken behavior. The conversion\nservice deactivates the session and sets `converted_at`; a later request skips\nthe session before it can retry the failed character.\n\n**Expected behavior / acceptance**\n\n- Session-backed ownership transfers run before the session is marked\n  converted.\n- A returned or thrown claim failure leaves the session unconverted and\n  retryable.\n- Multiple session-backed characters may partially succeed; the session stays\n  retryable until every session-backed character in that attempt succeeds.\n  Already-transferred characters are naturally absent from the anonymous\n  owner's next `listByUser` result.\n- Once all session-backed claims succeed, `markConverted` runs exactly once and\n  only after the claim calls.\n- Failures on unrelated room-discovered characters do not prevent conversion\n  when every character associated with the supplied session succeeded.\n- The existing page-safe response contract from #13769 remains intact.\n- Regression tests exercise the real route and assert response payloads plus\n  claim/conversion ordering and ledgers.\n\n**Evidence / reproduction proof**\n\n- Screenshots / recording: N/A — server-only API ordering with no rendered UI.\n- Backend logs: N/A — the exact route response and ordered service ledger are\n  recorded above.\n- Frontend console/network logs: N/A — no frontend behavior changes.\n- Real-LLM trajectory: N/A — no agent planner or model behavior is involved.\n- Domain artifacts: no live rows were mutated; deterministic service ledgers\n  prove the invalid ordering.\n\n**Duplicate and overlap search**\n\nOpen and closed issues, open pull requests, route history, and in-repository\ntests were searched for affiliate-claim conversion ordering and retryability.\nNo existing issue or PR covers this failure. The route's existing end-to-end\ncoverage proves successful ownership transfer but does not inject a claim\nfailure. #33070 / #33121 touches request decoding in the same route and should\nland first so this ordering fix can rebase without mixing concerns.\n\nAI provider/model: openai / gpt-5.6-sol\nClient / agent tooling: Codex\nContribution skill revision: N/A - ordinary GitHub contribution without optional run evidence\nAttribution status: self-reported\n— [contributor]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex\",\"skill_revision\":\"N/A - ordinary GitHub contribution without optional run evidence\"} -->\n",
+      "createdAt": "2026-10-03T02:27:23Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUzNB7g",
+      "title": "Steer token-address queries return unrelated wallet vaults",
+      "author": "hermesagent270-commits",
+      "number": 33208,
+      "repository": "elizaos/eliza",
+      "body": "## Problem\n\nThe shipped `STEER_LIQUIDITY` wallet provider can report unrelated Steer vaults for a token-address query.\n\n`SteerLiquidityService.getTokenLiquidityStats()` treats any vault with a `poolAddress` as a token match, even when neither `token0` nor `token1` equals the requested address. If an address has no direct matches, the same method then falls back to every vault on the selected chain. The provider renders those vaults under `FOUND ... VAULTS` for the requested token, producing materially incorrect wallet analytics.\n\n## Reproduction\n\nInvoke the production service method with a deterministic Steer SDK boundary containing:\n\n- one vault whose `token0` equals `0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`\n- one unrelated vault with different `token0`/`token1`\n- a `poolAddress` on both vaults, matching the real SDK shape\n\nCurrent result:\n\n```json\n{\n  \"known\": [\n    \"0x1111111111111111111111111111111111111111\",\n    \"0x2222222222222222222222222222222222222222\"\n  ],\n  \"unknown\": [\n    \"0x1111111111111111111111111111111111111111\",\n    \"0x2222222222222222222222222222222222222222\"\n  ]\n}\n```\n\nThe known address should return only the first vault. The unknown address should return no vaults.\n\n## Acceptance criteria\n\n- Token-address searches include only vaults whose `token0` or `token1` address equals the requested address, case-insensitively.\n- A `poolAddress` alone never proves token membership.\n- An explicit token-address query with no matches returns an empty result instead of falling back to all chain vaults.\n- Symbol/general overview behavior remains unchanged.\n- Regression coverage exercises the public service path for both a matching and an unknown address.\n",
+      "createdAt": "2026-10-03T15:09:58Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUzMNoQ",
+      "title": "KNOWLEDGE_GRAPH set_relationship adds a duplicate edge on every restatement",
+      "author": "hermesagent270-commits",
+      "number": 33207,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`KNOWLEDGE_GRAPH set_relationship` (`plugins/plugin-relationships/src/actions/entity.ts`) calls `RelationshipStore.upsert` without a `relationshipId`, and the store creates a new id whenever one is missing. Restating a relationship (\"Pat is my manager\" twice) therefore adds a second active edge instead of updating the first, and the relationships API and viewer show duplicates.\n\n**Expected**\n\nRestating an edge updates the existing active `(from, to, type)` edge.\n\nFix: #33206\n\nAI provider/model: anthropic / claude-opus-5-5. Client: Claude Code.\n",
+      "createdAt": "2026-10-03T15:08:18Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUzAuNg",
+      "title": "elizaOS Cloud buffered text requests ignore the runtime cancellation signal",
+      "author": "hermesagent270-commits",
+      "number": 33204,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nelizaOS Cloud's buffered text requests (`generateNativeChatCompletion` → `/chat/completions`, and `/responses`, in `plugins/plugin-elizacloud/src/models/text.ts`) don't pass `GenerateTextParams.signal` to `requestRaw`, and the warming-503 backoff sleeps without it. A stopped turn's buffered request runs to the client timeout, plus the warming ladder, while holding the shared native-chat concurrency permit. The streaming and embeddings paths already forward the signal.\n\n**Expected**\n\nCancelling a turn aborts its buffered Cloud request and ends any warming backoff.\n\nFix: #33203\n\nAI provider/model: anthropic / claude-opus-5-5. Client: Claude Code.\n",
+      "createdAt": "2026-10-03T14:44:26Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUy--Mg",
+      "title": "Anthropic text requests ignore the runtime cancellation signal",
+      "author": "hermesagent270-commits",
+      "number": 33202,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nThe Anthropic text handler (`plugins/plugin-anthropic/models/text.ts`) never passes `GenerateTextParams.signal` to the AI SDK request, so stopping a chat turn does not cancel the Anthropic request. It keeps generating, and is billed, up to `maxOutputTokens`. `executeWithRetry` also treats `AbortError` as retryable, so a cancelled request would be re-sent three more times.\n\nOpenAI and the elizaOS Cloud stream path forward the signal.\n\n**Expected**\n\nA cancelled turn aborts the Anthropic request once and does not retry it.\n\nFix: #33201\n\nAI provider/model: anthropic / claude-opus-5-5. Client: Claude Code.\n",
+      "createdAt": "2026-10-03T14:40:51Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs8AAAABFPK6lA",
+      "title": "Promote develop to staging",
+      "author": "lalalune",
+      "number": 32809,
+      "body": "Promote `develop` to `staging`. The current candidate is `0805aecdc2356b2d06d475917dbc08e7bfcadd00`. Develop Full has passed; promotion PR validation and agent-image reconciliation are still running. Keep this PR unmerged until the remaining exact-head checks finish and it receives a fresh independent approval.\n\nThe develop CI repairs address the missing billing translation, Calendar planner fixture shape, paid-plan billing snapshot expectations, cloud cache/mock setup, and a duplicate Capacitor mock export. The final duplicate-key correction landed in `0805aecdc235`; #32869 was closed because that same fix had landed independently. These corrections restore the intended checks without removing tests or weakening failure gates.\n\nCurrent-head validation:\n\n- Local install and `bun run verify`: success on this exact commit, 287/287 Turbo tasks and repository audits; tracked working tree clean.\n\n- Develop Full: https://github.com/elizaOS/eliza/actions/runs/36355095266 — success, including All Tests Passed, Complete manifest, and the reconciliation handoff. The downloaded expected/observed/results manifests were inspected and passed the repository's `verifyCompleteManifest` verifier locally; all four surface rows name this exact commit.\n- Promotion PR validation: https://github.com/elizaOS/eliza/actions/runs/36355102117 — in progress.\n- Agent image: https://github.com/elizaOS/eliza/actions/runs/36356566902 — in progress for this exact commit.\n- Durable reconciliation: https://github.com/elizaOS/eliza/actions/runs/36356503224 — in progress.\n\nSupporting repair evidence: full manual CI passed on `15936604af7ede350f9a7d63733ddd9b4d6e2329` at https://github.com/elizaOS/eliza/actions/runs/36353637542. That head also passed local `bun run verify` (287/287 Turbo tasks plus repository audits) and all six Android cloud-auth regression tests. The recorded evidence is https://github.com/elizaOS/eliza/pull/32869#issuecomment-5860334250. These repair-head results do not replace the current-head runs above.\n\nThe prior full run at `42236ac49869e8ddec373969cc22a8bda2e41c09` passed every test job but failed Quality on `lint/suspicious/noDuplicateObjectKeys`: https://github.com/elizaOS/eliza/actions/runs/36351770799. The duplicate was hidden behind Biome's diagnostic limit; the existing `audit-design.ts` warning was not the failure.\n\nPrior integration work in #32816 reconciled staging ancestry and fixed ambiguous memory deletion; #32828 preserved benchmark corpus and patch bytes during whitespace admission. Their earlier passing results do not qualify the current promotion head.\n\nFinal acceptance: inspect the live PR head and terminal hosted checks immediately before merge, require the independent approval enforced by the staging ruleset, and validate the resulting staging commit afterward. This PR prepares staging promotion only; it does not authorize merging staging into main.\n\nOutstanding updater blocker: the training Dependabot run https://github.com/elizaOS/eliza/actions/runs/36278709464 remains failed because the requested dependency upgrade conflicts with the supported training-backend dependency range. Resolution was reproduced against the current training manifest. No constraint override or disabled check has been introduced; this remains unresolved separately from the passing Develop Full run.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-09-26T10:14:25Z",
+      "mergedAt": "2026-10-03T23:05:41Z",
+      "additions": 3053643,
+      "deletions": 2975977
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGPK-qw",
+      "title": "feat: compose resident sessions, recoverable workers and approved device actions",
+      "author": "lalalune",
+      "number": 33026,
+      "body": "Mobile resident hosts need authenticated sessions, durable workflow workers that survive a parent restart without repeating uncertain effects, and reviewed device actions. This change composes direct route dispatch, owner sessions, shared compiler/dependency artifact production, canonical workflow reconciliation, approved Workflows navigation and Android Clock handoffs.\n\nWorkers reserve a durable generation before importing approved source. POSIX uses private sockets; Windows uses protected named pipes, SID-bound native handles and immutable source publication. Windows workers load trusted built-in PowerShell modules and detach from the parent while retaining RPC pipes. Android recovery authenticates surviving workers and rechecks detached-agent liveness before admitting a new generation. Unproven ownership and interrupted effects remain unknown.\n\nClock proposals require the enrolled clock.handoff.v1 capability, explicit device review and canonical claim/receipt handling. Set operations bind hour/minute to the current phone timezone. Strict typed receipts distinguish opened, unavailable, denied, failed and unknown; opened establishes only the Clock handoff, never alarm creation or ringing. Date, recurrence and DST-fold selection are outside this handoff contract.\n\nValidation:\n\n- Current head 28ee31f8fc69cb3610aa92e6ae2601c496419d03: owning HTTP/PGlite approval, claim, receipt and replay lifecycle passes; assistant typecheck and package lint pass. Full bun run verify passes in 758.3 seconds with all 29,825 source files unchanged.\n- Clock coverage includes all five capability tokens, malformed/duplicate capability rejection, current-message timezone propagation, strict outcome binding, preapproval rejection and no duplicate claim. The product's complete patched runtime also passes the actual HTTP/PGlite lifecycle with before/after source guards; an earlier timeout is retained separately.\n- [Normal-hook Windows/platform acceptance](https://github.com/elizaOS/eliza/actions/runs/37041735574) passed at prior 1129a6: normal installation, both core jobs, native primitives, two backend survivor cases, all 12 helper-startup cases and all 6 Smithers cases. This is evidence for that exact prior source, not a fresh hosted pass at 28ee31.\n- [Android resident qualification](https://github.com/AlphaCompute/alphaphone/actions/runs/37045552334) passed its build/archive stage at product 475be7, then native setup failed on unavailable SDK package tools before emulator startup. No native tests ran. The package-list fix is staged in the [product qualification PR](https://github.com/AlphaCompute/alphaphone/pull/1) work.\n\nKeep this PR draft until fresh Android crash/survivor flows and reviewed Clock execution pass. APK builds, emulator flows, full AOSP boot, live integrations and physical-device/user acceptance remain separate gates.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T06:44:21Z",
+      "mergedAt": "2026-10-03T22:49:22Z",
+      "additions": 7233,
+      "deletions": 415
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGXR9Cg",
+      "title": "Fix native reminder plans, controls and review evidence",
+      "author": "NubsCarson",
+      "number": 33096,
+      "body": "Reminder creation and owner replies could omit timing or destination, lose the originating occurrence, repeat legacy review, or move the displayed completion time after the action. Notification taps could also open cached chat without their source message. This keeps creation, resolution, delivery and viewing on the existing pipelines with explicit source and outcome checks.\n\nChanges:\n- Validate native timing/destination plans while retaining safe extraction fallback and archive-only cancellation.\n- Bind eligible owner controls to the stored occurrence/source and registered executor. Reject malformed or unavailable controls without discovery loops; preserve unknown evidence for retry.\n- Consume legacy reply evidence once, retain authored payloads, and display the actual completion payload time.\n- Deliver plain reminder text through existing notifications. Hide historical reminder-only panels without rewriting history or generic choices; retain Calendar-specific acknowledgment semantics.\n- Publish conversation/message targets after source persistence. Retain navigation until the actual source is applied or authoritatively rejected; transient failure, profile drift and queue eviction keep retry authority.\n- Mark the canonical notification read only after guarded successful source navigation. Existing optimistic unread state, authority-scoped rollback and history remain intact; this does not complete or remove a reminder.\n\nValidation: focused PGlite control/review tests, actual URI/navigation-queue/selection tests, real-store rollback tests and affected typechecks passed. The final combined candidate passed 275 focused tests and renderer/package/signer audits. Physical QA verified two powered-on screen-off reminders once each, an older individual alert opening its exact message and returning to Home, and a final OS tap setting its canonical read timestamp with unread count22→21. Prior messages, definitions, notifications, pairing and preferences were preserved. Initial failed cases remain retained.\n\nAndroid native push transport is tracked separately in #33106. The accepted device scope is powered-on background/screen-off delivery; full shutdown, audible interruption, automatic dossier activation and universal latency/reliability are not claimed. GitHub checks report the current source result independently of the local and device evidence.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T22:15:13Z",
+      "mergedAt": "2026-10-03T23:14:58Z",
+      "additions": 5137,
+      "deletions": 312
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGXbC8Q",
+      "title": "Enable configured Android reminder push delivery",
+      "author": "NubsCarson",
+      "number": 33106,
+      "body": "Android reminders could skip Firebase resources, lose delivery priority, re-alert on read updates or miss the event bus during startup. A connected Android renderer could also create a second OS alert alongside FCM. This fixes the configured push path and gives confirmed Android push delivery ownership of the OS alert while preserving the durable in-app notification.\n\nGoogle Services is loaded for present configuration and malformed configuration fails visibly. Reminder/high/urgent priority reaches FCM; read updates do not re-alert. The sender waits for the registered event bus before subscribing. Native registration retries through the existing app-resume event after permission is granted.\n\nToken registration now reports whether the current host has an attached, configured transport. The Android renderer waits for registration to settle and suppresses its local OS projection only when the current authenticated authority confirms push delivery. Unavailable transport retains the local fallback; authority changes fence stale registration and delivery. Incoming notifications still enter the canonical in-app center.\n\nThe native foreground-service caption starts with unknown connection status. Settings hides the optional per-app permission inventory only for its unsupported404 response; genuine permission/error handling remains available.\n\nValidation: combined source606c passed full repository verification,17 owning UI notification tests,11 real boot cases and the persisted backend transport acceptance. All seven files in this update exactly match that verified source. Earlier Gradle/configuration checks and physical app-absent FCM delivery are retained. The final606c QA APK passed build/artifact audit and upgraded with the same signer; all10 shared preference files remained byte-exact. In one bounded physical background run, a naturally due reminder produced exactly one canonical notification and one FCM-tagged Android OS alert, with no local OS alert. This observation does not independently prove WebSocket consumption by the UI; red/green renderer tests cover FCM-owned arrival handling. Fully powered-off durable recovery and final personal QA remain separate. This PR stays draft; no universal push reliability or production rollout acceptance is claimed.\n\n\n### Negotiated Android reminder data delivery\nAndroid devices advertise the native reminder-data receiver only when the app-owned Firebase handler is present. Reminder pushes then use non-collapsible data messages with a canonical notification ID; older clients retain notification-plus-data behavior. The receiver respects permission/channel settings and retains safe source selectors for cold taps. SafePush registration now happens before Capacitor exports the initial renderer method list, so negotiation works on the actual app.\n\nValidation: native16, backend2, UI20, lifecycle23 and Android policy67 tests passed, plus four owning typechecks. The signed QA app physically negotiated the capability, produced one canonical Android alert and one inbox record, and returned to the expected plain reminder on a warm tap. Existing preferences and history were preserved. Two-reminder powered-off queue recovery and the cold tap to the older source remain pending; these are not claimed as passed. Separate conversation/message source binding is in draft33096.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T22:36:06Z",
+      "mergedAt": "2026-10-03T23:14:58Z",
+      "additions": 2046,
+      "deletions": 169
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGfYJUw",
+      "title": "feat(native): share host custody, runtime and update primitives",
+      "author": "lalalune",
+      "number": 33242,
+      "body": "# Relates to\n\nIndependent Android products currently carry copies of native credential custody, runtime extraction and updater state machines. This makes it difficult to keep a product thin without importing Eliza's UI.\n\n# Change\n\nExport eleven native-only Java mechanisms from the existing native-agent and native-secure-store plugins. Hosts supply storage identity, inventory format, browser trust and product policy. No Capacitor secret API, UI, package identity, permission declaration or automatic installer is added. Existing browser metadata and journal formats are preserved.\n\nAlso recover committed backup-only credential state through AtomicFile instead of reporting a missing credential after a crash. Add portable JVM process-death/lifecycle tests and Android synthetic custody tests. The Senior Care consumer now uses these exact shared implementation bytes through a hash-checked additive patch, retaining its existing aliases/AAD and thin adapters.\n\n# Testing\n\n- Upstream portable JVM suite: 366 assertions across extraction/deadlines/journal/probation/clock/job registry, including 18 process-death boundaries; passed at this head with JDK 21.\n- Biome check: changed JS/TS/JSON files pass.\n- Consumer `npm run verify`: 360 tests, typecheck and web build passed.\n- Consumer `npm run android:build`: standalone/launcher debug and unsigned release, instrumentation APKs, lint and APK inspection passed.\n- Consumer updater compilation passed using its pinned Go 1.26.8 toolchain.\n- Actual synthetic ARM64 emulator custody/compatibility suite passed both consumer variants with SELinux enforcing. HOME was preserved and test installs removed. This is not real-browser autofill, production key enrollment, AOSP boot or physical-device acceptance.\n\n- [x] Targets `develop`; additive patch applies to base `38bc4147fb57c294cefe0d724d614f55eee7b8cb`.\n- [ ] Full upstream install/typecheck/root verification: unavailable in the sparse checkout; see gaps.\n- [x] Updated relevant documentation.\n\n# Evidence Gate\n\n<!-- evidence-head:053309a01a9479469b55cef53d318c8c1a97eeca -->\n<!-- evidence-row:before-screenshots -->\n- [x] N/A - no rendered UI changes; native APIs only.\n<!-- evidence-row:after-screenshots -->\n- [x] N/A - no rendered UI changes; native APIs only.\n<!-- evidence-row:walkthrough-video -->\n- [x] N/A - no user-flow changes; native mechanisms are exercised by tests.\n<!-- evidence-row:backend-logs -->\n- [x] Actual JVM and Android instrumentation transcripts are included below.\n<!-- evidence-row:frontend-logs -->\n- [x] N/A - no renderer code or renderer request contract changes.\n<!-- evidence-row:llm-trajectory -->\n- [x] N/A - no model, prompt, provider or agent action changes.\n<!-- evidence-row:domain-artifacts -->\n- [x] Synthetic native qualification record with measured APK/test hashes is included below.\n<!-- evidence-row:ocr-review -->\n- [x] N/A - no rendered visual surface changed.\n\n# Evidence Details\n\nThe shared production Java sources in the consumer patch match this commit byte-for-byte. The consumer harness exercises real Keystore encrypted persistence, legacy encoder/decoder compatibility, backup-only recovery, origin mismatch rejection and one-shot cancellation. It uses only synthetic credentials.\n\n<details><summary>Actual upstream JVM test output</summary>\n\n```text\nRuntimeBundleStore: 45 assertions passed, including 6 real process-death boundaries\nRuntimeRequestDeadline: 13 assertions passed\nUpdateJournal: 185 assertions passed; 9 real process-death boundaries\nProbationWindow: 57 assertions passed; 3 real process-death boundaries\nQualifiedClockAnchor: 40 assertions passed\nJobRunRegistry: 26 assertions passed\n```\n</details>\n\n<details><summary>Actual consumer native instrumentation and artifact identity</summary>\n\n```text\nstandalone.log\nINSTRUMENTATION_STATUS: class=ai.elizaresearch.seniorcare.NativePrimitivesInstrumentedTest\nINSTRUMENTATION_STATUS: current=1\nINSTRUMENTATION_STATUS: id=AndroidJUnitRunner\nINSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS: stream=\nai.elizaresearch.seniorcare.NativePrimitivesInstrumentedTest:\nINSTRUMENTATION_STATUS: test=extractedMechanismsPreserveConsumerContract\nINSTRUMENTATION_STATUS_CODE: 1\nINSTRUMENTATION_STATUS: class=ai.elizaresearch.seniorcare.NativePrimitivesInstrumentedTest\nINSTRUMENTATION_STATUS: current=1\nINSTRUMENTATION_STATUS: id=AndroidJUnitRunner\nINSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS: stream=.\nINSTRUMENTATION_STATUS: test=extractedMechanismsPreserveConsumerContract\nINSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\n\nTime: 0.277\n\nOK (1 test)\n\n\nINSTRUMENTATION_CODE: -1\n\n```\n```text\nlauncher.log\nINSTRUMENTATION_STATUS: class=ai.elizaresearch.seniorcare.NativePrimitivesInstrumentedTest\nINSTRUMENTATION_STATUS: current=1\nINSTRUMENTATION_STATUS: id=AndroidJUnitRunner\nINSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS: stream=\nai.elizaresearch.seniorcare.NativePrimitivesInstrumentedTest:\nINSTRUMENTATION_STATUS: test=extractedMechanismsPreserveConsumerContract\nINSTRUMENTATION_STATUS_CODE: 1\nINSTRUMENTATION_STATUS: class=ai.elizaresearch.seniorcare.NativePrimitivesInstrumentedTest\nINSTRUMENTATION_STATUS: current=1\nINSTRUMENTATION_STATUS: id=AndroidJUnitRunner\nINSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS: stream=.\nINSTRUMENTATION_STATUS: test=extractedMechanismsPreserveConsumerContract\nINSTRUMENTATION_STATUS_CODE: 0\nINSTRUMENTATION_RESULT: stream=\n\nTime: 0.339\n\nOK (1 test)\n\n\nINSTRUMENTATION_CODE: -1\n\n```\n```json\n{\n  \"serial\": \"emulator-5570\",\n  \"selinux\": \"Enforcing\",\n  \"evidence\": \"Synthetic extracted native primitives, legacy ciphertext compatibility and independent host configuration; no live credentials, browser fill or device/user acceptance\",\n  \"variants\": [\n    {\n      \"variant\": \"standalone\",\n      \"freshInstall\": true,\n      \"appSha256\": \"e213e916d8572dd3a7af49b56f70ff2d94113a6f0006541d06f254c7f92fce9f\",\n      \"testSha256\": \"f507b83ca90feaadf9cfabb533becd21c9d07f5823b9057e6423eb91cba81c65\",\n      \"passed\": true\n    },\n    {\n      \"variant\": \"launcher\",\n      \"freshInstall\": true,\n      \"appSha256\": \"a6ded16c11f0ec8f90694f2f5d39500f2a6af39fbcd0cea8db1928e412e708b6\",\n      \"testSha256\": \"badec2706cd03c3b382c7ac73a0cbf46778804954b39371ada8d9cbd103608bb\",\n      \"passed\": true\n    }\n  ],\n  \"verifiedAt\": \"2026-10-03T23:16:02.078Z\",\n  \"homeUnchanged\": true,\n  \"cleaned\": true,\n  \"cleanupErrors\": []\n}\n```\n</details>\n\n## Known gaps / failures\n\nDraft pending upstream review and hosted qualification. Local upstream `typecheck` stopped because `tsc` is not installed. `bun run verify` stopped at the first unavailable `packages/scripts` file in the sparse checkout. Full monorepo installation was not attempted on the disk-constrained host. These are not claimed as passing checks. The newly added upstream Android test class has not been run through the upstream app harness; the separate consumer suite is the passing native evidence.\n\nNative file primitives require API 26+ and browser structure parsing requires API 28+. Hosts must restrict unauthenticated vault mode to synthetic tests. The original Eliza application identity helper can adopt the exported primitive in a follow-up; this PR does not claim all hosts have migrated.\n\n## Deployment\n\nConsumer keeps its verified explicit patch and existing source pin until review and compatibility qualification. Preserve existing storage alias/AAD/filenames and journal/inventory wire formats during adoption. No release was signed or deployed.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-03T23:23:05Z",
+      "mergedAt": "2026-10-03T23:28:11Z",
+      "additions": 1895,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 34487,
+    "deletions": 4587,
+    "files": 474,
+    "commitCount": 284
+  },
+  "completedItems": [
+    {
+      "title": "Promote develop to staging",
+      "prNumber": 32809,
+      "type": "other",
+      "body": "Promote `develop` to `staging`. The current candidate is `0805aecdc2356b2d06d475917dbc08e7bfcadd00`. Develop Full has passed; promotion PR validation and agent-image reconciliation are still running. Keep this PR unmerged until the remainin",
+      "files": [
+        ".dockerignore",
+        ".env.example",
+        ".env.test.example",
+        ".gitattributes",
+        ".github/CODEOWNERS",
+        ".github/FLEET.md",
+        ".github/ISSUE_TEMPLATE/agent_work_item.md",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/epic.md",
+        ".github/ISSUE_TEMPLATE/feature_request.md",
+        ".github/actionlint.yaml",
+        ".github/actions/cloud-setup-test-env/action.yml",
+        ".github/actions/setup-bun-workspace/action.yml",
+        ".github/certification/README.md",
+        ".github/ci-bun-version.json",
+        ".github/ci-windows-command-inventory.json",
+        ".github/dependabot.yml",
+        ".github/develop-effects.json",
+        ".github/develop-surface-graph.json",
+        ".github/main-effects.json",
+        ".github/pull_request_template.md",
+        ".github/release.yml",
+        ".github/rulesets/promotion-branches.json",
+        ".github/rulesets/required-branches.json",
+        ".github/scripts/install-gitleaks.sh",
+        ".github/slop-project.json",
+        ".github/staging-effects.json",
+        ".github/workflow-templates/plugin-npm-deploy.yml",
+        ".github/workflows/README.md",
+        ".github/workflows/account-deletion-staging-canary.yml",
+        ".github/workflows/activate-personal-shared-telegram-edge.yml",
+        ".github/workflows/android-arm64-local-e2e.yml",
+        ".github/workflows/android-build.yml",
+        ".github/workflows/app-live-e2e.yml",
+        ".github/workflows/arm-headscale-control-plane.yml",
+        ".github/workflows/benchmarks.yml",
+        ".github/workflows/browser-bridge-windows-security.yml",
+        ".github/workflows/build-agent-image.yml",
+        ".github/workflows/build-debian-package.yml",
+        ".github/workflows/build-linux-mkosi.yml",
+        ".github/workflows/certification-hosted.yml",
+        ".github/workflows/certification-image.yml",
+        ".github/workflows/certification-vast.yml",
+        ".github/workflows/chat-shell-gestures.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/classify-paths.yml",
+        ".github/workflows/claude.yml",
+        ".github/workflows/cloud-cf-deploy.yml",
+        ".github/workflows/cloud-cf-release.yml",
+        ".github/workflows/cloud-deploy-backend.yml",
+        ".github/workflows/cloud-gateway-discord.yml"
+      ]
+    },
+    {
+      "title": "Repair workflow regression fixtures and speech startup ownership",
+      "prNumber": 33243,
+      "type": "bugfix",
+      "body": "The phone-generation HTTP fixture omitted the workflow owner and view profile columns now used by device enrollment. Match the current schema so the test reaches generation and explicit save. The late-abort receipt test now waits for the ac",
+      "files": [
+        "packages/app/src/api/server.ts",
+        "plugins/plugin-workflow/__tests__/fixtures/smithers-worker-lifecycle-fixture.mjs",
+        "plugins/plugin-workflow/__tests__/integration/phone-generation-http.test.ts",
+        "plugins/plugin-workflow/__tests__/unit/smithers-worker-lifecycle.test.ts"
+      ]
+    },
+    {
+      "title": "feat(native): share host custody, runtime and update primitives",
+      "prNumber": 33242,
+      "type": "feature",
+      "body": "# Relates to\n\nIndependent Android products currently carry copies of native credential custody, runtime extraction and updater state machines. This makes it difficult to keep a product thin without importing Eliza's UI.\n\n# Change\n\nExport el",
+      "files": [
+        "plugins/plugin-native-agent/README.md",
+        "plugins/plugin-native-agent/android/src/main/java/ai/eliza/plugins/agent/runtime/RuntimeBundleStore.java",
+        "plugins/plugin-native-agent/android/src/main/java/ai/eliza/plugins/agent/runtime/RuntimeInstallationIdentity.java",
+        "plugins/plugin-native-agent/android/src/main/java/ai/eliza/plugins/agent/runtime/RuntimeRequestDeadline.java",
+        "plugins/plugin-native-agent/android/src/main/java/ai/eliza/plugins/agent/updater/JobRunRegistry.java",
+        "plugins/plugin-native-agent/android/src/main/java/ai/eliza/plugins/agent/updater/QualifiedClockAnchor.java",
+        "plugins/plugin-native-agent/android/src/main/java/ai/eliza/plugins/agent/updater/UpdateJournal.java",
+        "plugins/plugin-native-agent/package.json",
+        "plugins/plugin-native-agent/scripts/test-native-host.mjs",
+        "plugins/plugin-native-agent/src/native-host-primitives.test.ts",
+        "plugins/plugin-native-agent/test/native-host/JobRunRegistryTest.java",
+        "plugins/plugin-native-agent/test/native-host/ProbationWindowTest.java",
+        "plugins/plugin-native-agent/test/native-host/QualifiedClockAnchorTest.java",
+        "plugins/plugin-native-agent/test/native-host/RuntimeBundleStore.java",
+        "plugins/plugin-native-agent/test/native-host/RuntimeBundleStoreTest.java",
+        "plugins/plugin-native-agent/test/native-host/RuntimeRequestDeadlineTest.java",
+        "plugins/plugin-native-agent/test/native-host/UpdateJournalTest.java",
+        "plugins/plugin-native-secure-store/README.md",
+        "plugins/plugin-native-secure-store/android/src/androidTest/java/ai/eliza/plugins/securestore/NativeCustodyInstrumentedTest.java",
+        "plugins/plugin-native-secure-store/android/src/main/java/ai/eliza/plugins/securestore/nativeonly/PasswordAutofillPolicy.java",
+        "plugins/plugin-native-secure-store/android/src/main/java/ai/eliza/plugins/securestore/nativeonly/PasswordAutofillRequest.java",
+        "plugins/plugin-native-secure-store/android/src/main/java/ai/eliza/plugins/securestore/nativeonly/PasswordAutofillSessions.java",
+        "plugins/plugin-native-secure-store/android/src/main/java/ai/eliza/plugins/securestore/nativeonly/PasswordVaultStore.java",
+        "plugins/plugin-native-secure-store/android/src/main/java/ai/eliza/plugins/securestore/nativeonly/RuntimeCredentialStore.java"
+      ]
+    },
+    {
+      "title": "test(workflow): align phone generation fixture with device schema",
+      "prNumber": 33239,
+      "type": "bugfix",
+      "body": "The combined workflow suite fails during real device enrollment because the phone-generation HTTP fixture predates the nullable workflow_owner_id and view_profile columns. Add those columns to the fixture so the test exercises the current d",
+      "files": [
+        "plugins/plugin-workflow/__tests__/integration/phone-generation-http.test.ts"
+      ]
+    },
+    {
+      "title": "Warm host-scoped speech during agent startup",
+      "prNumber": 33238,
+      "type": "other",
+      "body": "Migrate the final AlphaPhone Kokoro startup patch into the current upstream host lifecycle. Configured Bun hosts warm their own speech worker and sanitizer when the server starts or its runtime changes. Requests share initialization, failed",
+      "files": [
+        "packages/app/src/api/server.ts",
+        "packages/app/src/api/standalone-kokoro-routes.ts"
+      ]
+    },
+    {
+      "title": "ci: recognize synthetic swap fixture at squash merge",
+      "prNumber": 33237,
+      "type": "bugfix",
+      "body": "The develop-to-staging commit-range scan reports an explicitly synthetic swap-user-reply test credential under its squash-merge SHA. The same fixture bytes are already reviewed and exempted at their original commit. Add only the exact commi",
+      "files": [
+        ".gitleaksignore"
+      ]
+    },
+    {
+      "title": "Finish AlphaPhone runtime type and host speech integration",
+      "prNumber": 33236,
+      "type": "other",
+      "body": "The patch migration exposed strict TypeScript errors in the mobile workspace resolver. Type its inputs and narrow caught errors while preserving the current source-boundary checks. Also migrate the newly opened AlphaPhone host Whisper backe",
+      "files": [
+        ".gitleaksignore",
+        "packages/agent/scripts/mobile-workspace-entry.ts",
+        "packages/app/src/api/standalone-whisper-routes.ts"
+      ]
+    },
+    {
+      "title": "test(reminders): locate permission controls by resource ID",
+      "prNumber": 33234,
+      "type": "tests",
+      "body": "The bridge fixture matched `Don't allow`, but the installed Android PermissionController uses a curly apostrophe in `Don’t allow`. Match the verified system permission button resource IDs instead, retaining package, visibility and clickabil",
+      "files": [
+        "plugins/plugin-native-reminders/test/android-consumer/src/androidTest/java/example/reminders/fixture/ReminderBridgeFlowTest.java"
+      ]
+    },
+    {
+      "title": "test(osworld): prevent bundled authentication overrides",
+      "prNumber": 33233,
+      "type": "tests",
+      "body": "The OSWorld vLLM connector used to replace the configured API key with bundled Basic authentication. The runtime fix is already merged in #33224; this follow-up exercises the actual module with mocked SDK boundaries to prevent recurrence.\n\n",
+      "files": [
+        ".github/workflows/pr-static-smoke.yml",
+        "packages/benchmarks/suites/OSWorld/README.md",
+        "packages/benchmarks/suites/OSWorld/tests/test_vllm_auth.py"
+      ]
+    },
+    {
+      "title": "feat(os): own downstream Chromium patches and Android builds",
+      "prNumber": 33232,
+      "type": "feature",
+      "body": "Senior Care currently reconstructs shared platform sources and Chromium build tooling with downstream patches. Move the remaining shared changes into Eliza so consumers can build directly from a reviewed source pin.\n\n- Integrate the pinned ",
+      "files": [
+        "packages/agent/README.md",
+        "packages/agent/src/runtime/mobile-dns.ts",
+        "packages/agent/test/fixtures/mobile-network-core.ts",
+        "packages/agent/test/fixtures/mobile-network-dns-child.ts",
+        "packages/agent/test/mobile-network-dns.test.ts",
+        "packages/os/browser/README.md",
+        "packages/os/browser/scripts/chromium-autofill.test.mjs",
+        "packages/os/browser/scripts/chromium-component.mjs",
+        "packages/os/browser/scripts/chromium-component.test.mjs",
+        "packages/os/browser/scripts/chromium/autofill-full-origin.mjs",
+        "packages/os/browser/scripts/chromium/autofill/LICENSE.chromium",
+        "packages/os/browser/scripts/chromium/autofill/README.md",
+        "packages/os/browser/scripts/chromium/autofill/autofill-full-origin.patch",
+        "packages/os/browser/scripts/chromium/autofill/upstream.json",
+        "packages/os/browser/scripts/chromium/fixtures/components/android_autofill/browser/form_data_android_bridge_impl.cc",
+        "packages/os/browser/scripts/chromium/fixtures/components/android_autofill/browser/java/src/org/chromium/components/autofill/FormData.java",
+        "packages/os/browser/scripts/chromium/upstream.json",
+        "packages/os/scripts/__tests__/chromium-build.node.test.ts",
+        "packages/os/scripts/distro-android/build-chromium-browser.ts",
+        "packages/os/scripts/distro-android/owned-browser-provenance.ts",
+        "packages/os/scripts/distro-android/prepare-chromium-browser.ts",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserHelperEntry.kt"
+      ]
+    },
+    {
+      "title": "feat(assistant): preserve reviewed reminder timing and creation",
+      "prNumber": 33231,
+      "type": "feature",
+      "body": "## Problem and change\n\nPhone reminders need to preserve explicit due time, alert lead, recurrence and no-alert intent through review and receipts. Add versioned timing capability and reviewed creation contracts, enforce their advertised cap",
+      "files": [
+        "packages/agent/src/api/device-action-routes.ts",
+        "plugins/plugin-assistant/src/services/device-actions/action.ts",
+        "plugins/plugin-assistant/src/services/device-actions/contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/effect-receipts.ts",
+        "plugins/plugin-assistant/src/services/device-actions/reminder-contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/reminder-create-contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/service.ts",
+        "plugins/plugin-assistant/src/services/message/context-assembly.ts",
+        "plugins/plugin-assistant/test/device-actions.e2e.test.ts"
+      ]
+    },
+    {
+      "title": "Integrate latest runtime and retire AlphaPhone patch overlays",
+      "prNumber": 33230,
+      "type": "tests",
+      "body": "AlphaPhone currently carries 77 patch files and builds its renderer, resident agent and native runtime from different baselines. This integration promotes current develop (8d1ed8df4716), the newer resident-process work (28ee31f8fc69), and a",
+      "files": [
+        ".gitleaksignore",
+        "packages/agent/test/lean-chat-workflows.test.ts",
+        "packages/agent/test/mobile-workflows.test.ts",
+        "packages/agent/test/mobile-workspace-exports.test.ts",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/WorkflowSurvivorInventory.java",
+        "packages/app/scripts/aosp/seccomp-shim/preserve-sigsys.h",
+        "packages/app/scripts/aosp/seccomp-shim/sigsys-handler-arm64.c",
+        "packages/app/scripts/aosp/seccomp-shim/sigsys-handler-riscv64.c",
+        "packages/app/scripts/aosp/seccomp-shim/sigsys-handler.c",
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/core/src/__tests__/swap-contact-reference.test.ts",
+        "packages/core/src/__tests__/swap-control-objects.test.ts",
+        "packages/core/src/__tests__/swap-encoded-credentials.test.ts",
+        "packages/core/src/__tests__/swap-quoted-credentials.test.ts",
+        "packages/core/src/__tests__/swap-short-credentials.test.ts",
+        "packages/core/src/__tests__/swap-uri-credentials.test.ts",
+        "packages/core/src/runtime/model-dispatch/dispatcher.ts",
+        "packages/core/src/security/incoming-message-security.ts",
+        "packages/core/src/security/secret-swap.ts",
+        "plugins/plugin-assistant/test/device-actions.e2e.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-dispatch.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-enrollment.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-migration-review.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-receipt-review.test.ts",
+        "plugins/plugin-assistant/vitest.device-actions.config.ts",
+        "plugins/plugin-workflow/__tests__/fixtures/smithers-worker-lifecycle-fixture.mjs",
+        "plugins/plugin-workflow/__tests__/hosted-route-registration.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/routes-e2e.test.ts",
+        "plugins/plugin-workflow/__tests__/phone-workflow-generation-route.test.ts",
+        "plugins/plugin-workflow/__tests__/phone-workflow-generation.test.ts",
+        "plugins/plugin-workflow/__tests__/unit/smithers-worker-lifecycle.test.ts",
+        "plugins/plugin-workflow/__tests__/unit/workflow-routes.test.ts",
+        "plugins/plugin-workflow/__tests__/unit/workflow-status.test.ts",
+        "plugins/plugin-workflow/src/lib/automations-builder.ts",
+        "plugins/plugin-workflow/src/routes/workflow-routes.ts",
+        "plugins/plugin-workflow/src/services/embedded-workflow-service.ts",
+        "plugins/plugin-workflow/src/services/smithers-runtime.ts",
+        "plugins/plugin-workflow/src/services/workflow-service.ts",
+        "plugins/plugin-workflow/src/services/workflow-source-check.ts",
+        "plugins/plugin-workflow/src/services/workflow-status.ts",
+        "plugins/plugin-workflow/src/services/workflow-worker-termination.ts",
+        "plugins/plugin-workflow/src/types/index.ts"
+      ]
+    },
+    {
+      "title": "feat(app): host authenticated standalone Kokoro speech",
+      "prNumber": 33229,
+      "type": "feature",
+      "body": "## Problem and change\n\nExplicit standalone local hosts need authenticated native speech without enabling the full local-inference runtime. Add owner-session-only Kokoro readiness and WAV routes, restricted to local/local-only modes, with ve",
+      "files": [
+        "packages/agent/src/api/runtime-mode/route-mode-matrix.ts",
+        "packages/app/README.md",
+        "packages/app/package.json",
+        "packages/app/scripts/qualify-standalone-kokoro.ts",
+        "packages/app/src/api/route-auth-policy.ts",
+        "packages/app/src/api/server.ts",
+        "packages/app/src/api/standalone-kokoro-routes.ts",
+        "packages/app/src/api/standalone-kokoro-service.ts",
+        "plugins/plugin-local-inference/src/host-tts-worker.ts"
+      ]
+    },
+    {
+      "title": "feat(assistant): publish reviewed Clock handoff coordinator",
+      "prNumber": 33228,
+      "type": "feature",
+      "body": "## Problem and change\n\nMobile hosts duplicate the reviewed Clock handoff coordinator. Publish `@elizaos/plugin-assistant/device-clock-review` with source and built exports. It validates the operation and journal identity, checks the current",
+      "files": [
+        "plugins/plugin-assistant/README.md",
+        "plugins/plugin-assistant/build.ts",
+        "plugins/plugin-assistant/package.json",
+        "plugins/plugin-assistant/src/services/device-actions/action.ts",
+        "plugins/plugin-assistant/src/services/device-actions/clock-contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/clock-review-executor.ts",
+        "plugins/plugin-assistant/test/clock-review-export.integration.test.ts",
+        "plugins/plugin-assistant/test/device-actions.e2e.test.ts",
+        "plugins/plugin-assistant/vitest.clock-review.config.ts"
+      ]
+    },
+    {
+      "title": "feat(devices): bind workflow owners and authenticated enabled views",
+      "prNumber": 33227,
+      "type": "feature",
+      "body": "## Problem and change\nPhone enrollment can use an authenticated subject different from the runtime's canonical workflow owner. Bind local OWNER enrollments to the trusted runtime owner while retaining the original authenticated subject for ",
+      "files": [
+        "bun.lock",
+        "packages/agent/src/api/device-action-routes.ts",
+        "packages/agent/src/api/workflow-device-owner.ts",
+        "packages/app/src/api/server-cors.ts",
+        "plugins/plugin-assistant/README.md",
+        "plugins/plugin-assistant/package.json",
+        "plugins/plugin-assistant/src/index.ts",
+        "plugins/plugin-assistant/src/services/device-actions/contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/service.ts",
+        "plugins/plugin-assistant/src/services/device-actions/view-profile.ts",
+        "plugins/plugin-assistant/src/services/message/context-assembly.ts",
+        "plugins/plugin-assistant/test/device-actions.e2e.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-dispatch.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-enrollment.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-migration-review.test.ts",
+        "plugins/plugin-assistant/test/workflow-owner-receipt-review.test.ts",
+        "plugins/plugin-assistant/vitest.device-actions.config.ts",
+        "plugins/plugin-sql/src/schema/clientDevices.ts",
+        "plugins/plugin-workflow/__tests__/integration/device-bridge-e2e.test.ts"
+      ]
+    },
+    {
+      "title": "fix(android): preserve workflow workers during resident shutdown",
+      "prNumber": 33226,
+      "type": "bugfix",
+      "body": "## Problem and change\n\nDetached resident shutdown and launcher startup currently signal every process matching the shared Bun/bundle path, which can terminate admitted workflow workers. Replace broad path-based signals with resident argumen",
+      "files": [
+        "packages/app/platforms/android/README.md",
+        "packages/app/platforms/android/app/src/androidTest/java/ai/elizaos/app/ResidentStopOwnershipInstrumentedTest.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/WorkflowSurvivorInventory.java",
+        "packages/app/scripts/lib/stage-android-agent.ts",
+        "packages/app/scripts/stage-android-agent.test.ts"
+      ]
+    },
+    {
+      "title": "merge: reconcile production history without changing development source",
+      "prNumber": 33225,
+      "type": "other",
+      "body": "## Reconcile production history before promotion\n\n`main` retains production backport commits that were independently incorporated and then extended on `develop`. A later develop-to-staging-to-main merge therefore reports 35 conflicts despit",
+      "files": []
+    },
+    {
+      "title": "fix(security): triage promotion history and remove bundled vLLM auth",
+      "prNumber": 33224,
+      "type": "bugfix",
+      "body": "## Problem and change\n\nRestoring the required secret scan exposed historical matches in the large develop-to-staging promotion. This change records reviewed non-secret matches as exact commit/path/rule/line fingerprints, with per-file ratio",
+      "files": [
+        ".github/develop-surface-graph.json",
+        ".gitleaksignore",
+        "packages/benchmarks/suites/OSWorld/README.md",
+        "packages/benchmarks/suites/OSWorld/mm_agents/os_symphony/core/engine.py"
+      ]
+    },
+    {
+      "title": "feat(agent): opt in to phone workflows in lean and Android hosts",
+      "prNumber": 33223,
+      "type": "feature",
+      "body": "# Relates to\n\nStacked on #33026 at `28ee31f8fc69cb3610aa92e6ae2601c496419d03` (base branch `codex/android-workflow-process-host`). Do not merge independently of that process-host/compiler dependency; retarget to `develop` after it lands.\n\nM",
+      "files": [
+        "packages/agent/README.md",
+        "packages/agent/scripts/build-mobile-bundle.ts",
+        "packages/agent/scripts/mobile-workspace-entry.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-collector.ts",
+        "packages/agent/test/mobile-workspace-bundle.test.ts"
+      ]
+    },
+    {
+      "title": "fix(workflow): publish Android source without hard links",
+      "prNumber": 33222,
+      "type": "bugfix",
+      "body": "## Dependency\n\nStacked on #33026 at `28ee31f8fc69cb3610aa92e6ae2601c496419d03` (`codex/android-workflow-process-host`). Keep draft until that parent is qualified and merged; retarget to develop afterward. This PR only extends its immutable ",
+      "files": [
+        "plugins/plugin-workflow/README.md",
+        "plugins/plugin-workflow/__tests__/integration/android-source-dispatch.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/android-source-publication.test.ts",
+        "plugins/plugin-workflow/src/services/smithers-runtime.ts",
+        "plugins/plugin-workflow/src/services/workflow-source-publication.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): restore required secret scanning before promotion",
+      "prNumber": 33221,
+      "type": "bugfix",
+      "body": "## Problem\nThe pending develop-to-staging promotion removes staging's commit-level secret scanner and public security-reporting policy. The remaining prompt-content check does not provide equivalent coverage, and the required CI aggregate d",
+      "files": [
+        ".github/develop-surface-graph.json",
+        ".github/workflows/ci.yml",
+        ".github/workflows/gitleaks.yml",
+        ".github/workflows/pr-static-smoke.yml",
+        ".gitleaks.toml",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "packages/scripts/github/install-gitleaks.sh"
+      ]
+    },
+    {
+      "title": "feat(workflow): generate reviewable typed phone drafts",
+      "prNumber": 33220,
+      "type": "feature",
+      "body": "# Relates to\n\nMoves the typed phone-workflow generation capability out of Alpha's downstream patch into the reusable workflow plugin. Builds on the route registration already merged in #33104.\n\n# Change\n\nAdd `POST /api/workflow/phone/genera",
+      "files": [
+        "plugins/plugin-workflow/README.md",
+        "plugins/plugin-workflow/__tests__/integration/phone-generation-http.test.ts",
+        "plugins/plugin-workflow/src/plugin-routes.ts",
+        "plugins/plugin-workflow/src/routes/workflow-routes.ts",
+        "plugins/plugin-workflow/src/services/phone-workflow-generation.ts",
+        "plugins/plugin-workflow/src/services/workflow-service.ts"
+      ]
+    },
+    {
+      "title": "fix(android): expose cancellable authenticated local streams",
+      "prNumber": 33218,
+      "type": "bugfix",
+      "body": "## Problem and change\n\nAndroid native stream callers cannot cancel a socket while it is connecting or reading, and a socket EOF currently looks like successful completion. Add a cancellable native stream handle, preserve the existing two-ar",
+      "files": [
+        "packages/app/platforms/android/README.md",
+        "packages/app/platforms/android/app/src/androidTest/java/ai/elizaos/app/ResidentStreamTransportInstrumentedTest.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java"
+      ]
+    },
+    {
+      "title": "feat(native-reminders): extract host-configured Android engine candidate",
+      "prNumber": 33217,
+      "type": "feature",
+      "body": "## Problem and change\n\nAndroid reminder storage, inexact scheduling, notification actions and opaque tap routing currently live in the Alpha Phone product. This draft extracts them into a host-configured Android library under plugin-native-",
+      "files": [
+        "bun.lock",
+        "plugins/plugin-native-reminders/README.md",
+        "plugins/plugin-native-reminders/android/README.md",
+        "plugins/plugin-native-reminders/android/build.gradle",
+        "plugins/plugin-native-reminders/android/src/main/AndroidManifest.xml",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderConfiguration.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderEngine.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderEnvelope.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderPlugin.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderReceiver.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderStore.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/ReminderTaps.java",
+        "plugins/plugin-native-reminders/android/src/main/java/ai/eliza/plugins/reminders/SecureStringStore.java",
+        "plugins/plugin-native-reminders/package.json",
+        "plugins/plugin-native-reminders/src/android-definitions.ts",
+        "plugins/plugin-native-reminders/src/android.ts",
+        "plugins/plugin-native-reminders/test/android-consumer/.gitignore",
+        "plugins/plugin-native-reminders/test/android-consumer/README.md",
+        "plugins/plugin-native-reminders/test/android-consumer/build.gradle",
+        "plugins/plugin-native-reminders/test/android-consumer/gradle.properties",
+        "plugins/plugin-native-reminders/test/android-consumer/settings.gradle",
+        "plugins/plugin-native-reminders/test/android-consumer/src/androidTest/java/example/reminders/fixture/ReminderBridgeFlowTest.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/androidTest/java/example/reminders/fixture/ReminderEngineFlowTest.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/AndroidManifest.xml",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/assets/public/index.html",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/java/example/reminders/fixture/BridgeActivity.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/java/example/reminders/fixture/BridgeReceiver.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/java/example/reminders/fixture/BridgeReminder.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/java/example/reminders/fixture/FixtureActivity.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/java/example/reminders/fixture/FixtureHost.java",
+        "plugins/plugin-native-reminders/test/android-consumer/src/main/java/example/reminders/fixture/FixtureReceiver.java",
+        "plugins/plugin-native-reminders/test/packed-consumer/check.mjs",
+        "plugins/plugin-native-reminders/test/packed-consumer/consumer.ts",
+        "plugins/plugin-native-reminders/test/packed-consumer/runtime.mjs"
+      ]
+    },
+    {
+      "title": "fix(android): read secure-store frames on API 29",
+      "prNumber": 33216,
+      "type": "bugfix",
+      "body": "The Android agent secure-store broker used InputStream.readNBytes for frame headers and payloads, which is unavailable on the API 29 baseline. Replace those reads with a bounded Java 8-compatible reader that preserves clean EOF versus trunc",
+      "files": [
+        "packages/app/platforms/android/README.md",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/AgentSecureStore.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/SecureStoreFrameInput.java",
+        "packages/app/platforms/android/app/src/test/java/ai/elizaos/app/SecureStoreFrameInputTest.java"
+      ]
+    },
+    {
+      "title": "fix(cloud): preserve OAuth completion and support local credential disconnect",
+      "prNumber": 33215,
+      "type": "bugfix",
+      "body": "## Behavior\n\nOAuth callbacks own session completion even after their URL fragment has been consumed. Passive recovery cannot race them with a previously stored identity, and React effect replay cannot consume the same callback twice. The pe",
+      "files": [
+        "packages/cloud/api/__tests__/api-key-audit-transaction.integration.test.ts",
+        "packages/cloud/api/src/middleware/auth.ts",
+        "packages/cloud/api/v1/api-keys/current/route.ts",
+        "packages/cloud/shared/src/db/repositories/api-keys.ts",
+        "packages/cloud/shared/src/lib/services/api-keys.ts",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.callback-state.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.tsx"
+      ]
+    },
+    {
+      "title": "feat(calendar): add host-configured Android provider adapter",
+      "prNumber": 33214,
+      "type": "feature",
+      "body": "# Relates to\n\nMove the Alpha Phone CalendarProvider implementation into the upstream native-calendar package so embedding Android products consume one shared implementation.\n\n# Change\n\nAdds a host-configured Android library and explicit typ",
+      "files": [
+        "plugins/plugin-native-calendar/README.md",
+        "plugins/plugin-native-calendar/android/README.md",
+        "plugins/plugin-native-calendar/android/build.gradle",
+        "plugins/plugin-native-calendar/android/src/main/AndroidManifest.xml",
+        "plugins/plugin-native-calendar/android/src/main/java/ai/eliza/plugins/calendar/CalendarConfiguration.java",
+        "plugins/plugin-native-calendar/android/src/main/java/ai/eliza/plugins/calendar/CalendarCreationStore.java",
+        "plugins/plugin-native-calendar/android/src/main/java/ai/eliza/plugins/calendar/CalendarEventGuard.java",
+        "plugins/plugin-native-calendar/android/src/main/java/ai/eliza/plugins/calendar/CalendarPlugin.java",
+        "plugins/plugin-native-calendar/package.json",
+        "plugins/plugin-native-calendar/src/android-definitions.ts",
+        "plugins/plugin-native-calendar/src/android.ts",
+        "plugins/plugin-native-calendar/test/android-consumer/.gitignore",
+        "plugins/plugin-native-calendar/test/android-consumer/README.md",
+        "plugins/plugin-native-calendar/test/android-consumer/build.gradle",
+        "plugins/plugin-native-calendar/test/android-consumer/gradle.properties",
+        "plugins/plugin-native-calendar/test/android-consumer/settings.gradle",
+        "plugins/plugin-native-calendar/test/android-consumer/src/androidTest/java/example/calendar/ConsumerBridgeFlowTest.java",
+        "plugins/plugin-native-calendar/test/android-consumer/src/androidTest/java/example/calendar/ConsumerCreationRecoveryTest.java",
+        "plugins/plugin-native-calendar/test/android-consumer/src/main/AndroidManifest.xml",
+        "plugins/plugin-native-calendar/test/android-consumer/src/main/assets/public/index.html",
+        "plugins/plugin-native-calendar/test/android-consumer/src/main/java/example/calendar/ConsumerActivity.java",
+        "plugins/plugin-native-calendar/test/android-consumer/src/main/java/example/calendar/ConsumerCalendar.java"
+      ]
+    },
+    {
+      "title": "fix(core): preserve cancellation and safe replies through egress swaps",
+      "prNumber": 33213,
+      "type": "bugfix",
+      "body": "Enabling secret or PII substitution must preserve the native AbortSignal passed to model providers. This change retains genuine undecorated cancellation controls, keeps forged/control-shaped data inside the redaction walk, and allows the tw",
+      "files": [
+        "packages/core/README.md",
+        "packages/core/src/__tests__/swap-browser-polyfill.test.ts",
+        "packages/core/src/__tests__/swap-control-objects.test.ts",
+        "packages/core/src/__tests__/swap-credential-assignment.test.ts",
+        "packages/core/src/__tests__/swap-user-reply.test.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/security/guarded-stream.ts",
+        "packages/core/src/security/log-redaction.ts",
+        "packages/core/src/security/pii-pseudonymizer.ts",
+        "packages/core/src/security/runtime-abort-signal.ts",
+        "packages/core/src/security/secret-swap.ts",
+        "plugins/plugin-assistant/src/services/message/reply-policy-restoration.test.ts",
+        "plugins/plugin-assistant/src/services/message/reply-policy.ts"
+      ]
+    },
+    {
+      "title": "fix(app): support embedding host secure-store socket",
+      "prNumber": 33212,
+      "type": "bugfix",
+      "body": "# Relates to\n\nEmbedding Android apps can run their app-UID-only Keystore broker under their own socket name. The host client currently always selects the Eliza app socket unless every caller passes an explicit path.\n\n# Change\n\nRead `ELIZA_A",
+      "files": [
+        "packages/app/README.md",
+        "packages/app/src/security/secure-store-android.test.ts",
+        "packages/app/src/security/secure-store-android.ts"
+      ]
+    },
+    {
+      "title": "feat(android): add revocable helper return windows",
+      "prNumber": 33186,
+      "type": "feature",
+      "body": "# Relates to\n\nAndroid consumers need a visible way back after collapsing their helper pane, with recovery when overlay permission is denied or revoked.\n\n# Change\n\nAdds an opt-in, permission-bound native return button and full-screen present",
+      "files": [
+        "plugins/plugin-native-browser-surface/README.md",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserDockController.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserHelperEntry.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserSurfacePlugin.kt",
+        "plugins/plugin-native-browser-surface/src/definitions.ts",
+        "plugins/plugin-native-browser-surface/src/web.test.ts",
+        "plugins/plugin-native-browser-surface/src/web.ts"
+      ]
+    },
+    {
+      "title": "fix(os): preserve and resize trusted native browser docks",
+      "prNumber": 33185,
+      "type": "bugfix",
+      "body": "# Change\n\nThe dock host could navigate into a browser without embedding opt-in, and presenting an already embedded browser could select its launcher tab. This adds installed certificate preflight for all four Chromium route components and p",
+      "files": [
+        "plugins/plugin-native-browser-surface/README.md",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserDockController.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserEmbeddingTrust.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserSurfacePlugin.kt",
+        "plugins/plugin-native-browser-surface/android/src/test/java/ai/eliza/plugins/browsersurface/BrowserEmbeddingTrustTest.kt",
+        "plugins/plugin-native-browser-surface/src/definitions.ts",
+        "plugins/plugin-native-browser-surface/src/web.test.ts",
+        "plugins/plugin-native-browser-surface/src/web.ts"
+      ]
+    },
+    {
+      "title": "feat(os): add signer-bound native Android browser docking",
+      "prNumber": 33183,
+      "type": "feature",
+      "body": "# Relates to\n\nLaunching the owned browser replaces the helper Activity instead of giving the website and helper separate native bounds.\n\n# Change\n\nAdd Android-only `openDockedBrowser` and `getBrowserDockState` to the shared browser plugin. ",
+      "files": [
+        "packages/os/browser/README.md",
+        "packages/os/browser/scripts/chromium-component.mjs",
+        "packages/os/browser/scripts/chromium-component.test.mjs",
+        "plugins/plugin-native-browser-surface/README.md",
+        "plugins/plugin-native-browser-surface/android/build.gradle",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserDockController.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserSurfacePlugin.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/ChromiumBrowserLauncher.kt",
+        "plugins/plugin-native-browser-surface/android/src/test/java/ai/eliza/plugins/browsersurface/BrowserDockGeometryTest.kt",
+        "plugins/plugin-native-browser-surface/src/definitions.ts",
+        "plugins/plugin-native-browser-surface/src/web.test.ts",
+        "plugins/plugin-native-browser-surface/src/web.ts"
+      ]
+    },
+    {
+      "title": "feat(os): opt in to signer-bound Chromium activity embedding",
+      "prNumber": 33167,
+      "type": "feature",
+      "body": "# Relates to\n\nNative browser/helper docking needs separate browser and host activity bounds. The owned Chromium build currently has no cross-app embedding opt-in.\n\n# Change\n\nAdd an explicit Android-only --embed-host option to the pinned Chr",
+      "files": [
+        "packages/os/browser/README.md",
+        "packages/os/browser/scripts/chromium-component.mjs",
+        "packages/os/browser/scripts/chromium-component.test.mjs",
+        "packages/os/browser/scripts/chromium/fixtures/chrome/android/java/AndroidManifest.xml",
+        "packages/os/browser/scripts/chromium/upstream.json"
+      ]
+    },
+    {
+      "title": "feat(android): present the pinned browser before visible task actions",
+      "prNumber": 33161,
+      "type": "feature",
+      "body": "# Relates to\n\nA product choice can leave Chromium behind the host activity while native task admission requires a visibly painted action cue. Consumer comparison runs reached saved-method selection only after presenting Chromium; changing t",
+      "files": [
+        "plugins/plugin-native-browser-surface/README.md",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/BrowserSurfacePlugin.kt",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/ChromiumBrowserLauncher.kt",
+        "plugins/plugin-native-browser-surface/src/definitions.ts",
+        "plugins/plugin-native-browser-surface/src/web.test.ts",
+        "plugins/plugin-native-browser-surface/src/web.ts"
+      ]
+    },
+    {
+      "title": "fix(tasks): fence each explicit reconciliation attempt",
+      "prNumber": 33156,
+      "type": "bugfix",
+      "body": "# Relates to\n\nChromium rejects reusing a task binding epoch. A first readback after a live unknown result, or another explicit readback after ambiguity or lost binding acknowledgement, could reuse an already consumed epoch and fail permanen",
+      "files": [
+        "packages/agent/README.md",
+        "packages/agent/src/services/interactive-task-runtime.ts",
+        "packages/agent/test/fixtures/interactive-task-child.ts",
+        "packages/agent/test/interactive-task-restart.test.ts"
+      ]
+    },
+    {
+      "title": "refactor(android): share verified Chromium service binding",
+      "prNumber": 33153,
+      "type": "refactor",
+      "body": "# Relates to\n\nIndependent Android hosts need the same verified Chromium connection that Eliza uses to keep browser work reachable while their foreground service runs. The implementation previously lived inside the Eliza app package, so Seni",
+      "files": [
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "plugins/plugin-native-browser-surface/README.md",
+        "plugins/plugin-native-browser-surface/android/src/main/java/ai/eliza/plugins/browsersurface/ChromiumBrowserConnection.java"
+      ]
+    },
+    {
+      "title": "feat(tasks): reconcile uncertain effects through trusted readback",
+      "prNumber": 33150,
+      "type": "feature",
+      "body": "# Relates to\n\nA host restart can leave a dispatched operation uncertain. Hosts need trusted readback to resolve its result without executing it again or automatically resuming the task.\n\n# Change\n\nAdd runtime reconciliation with owner, auth",
+      "files": [
+        "packages/agent/README.md",
+        "packages/agent/src/services/interactive-task-runtime.ts",
+        "packages/agent/test/fixtures/interactive-task-child.ts",
+        "packages/agent/test/interactive-task-restart.test.ts",
+        "packages/core/src/messaging/interactive-task.test.ts",
+        "packages/core/src/messaging/interactive-task.ts",
+        "plugins/plugin-browser/README.md",
+        "plugins/plugin-browser/src/task-actuator.test.ts",
+        "plugins/plugin-browser/src/task-actuator.ts"
+      ]
+    },
+    {
+      "title": "fix(personal-assistant): ground owner briefs and preserve scheduled copy",
+      "prNumber": 33114,
+      "type": "bugfix",
+      "body": "Morning briefs could change correct dates and record counts while summarizing, treat unavailable sources as empty, or rewrite already-composed text before delivery. Their notifications also lacked the saved-message selectors needed to open ",
+      "files": [
+        "packages/agent/src/services/client-chat-sender.ts",
+        "packages/agent/test/scheduled-routine-no-conversation-delivery.test.ts",
+        "plugins/plugin-calendar/src/index.ts",
+        "plugins/plugin-personal-assistant/src/actions/brief.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/briefing/direct-routing.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/briefing/direct-routing.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/checkin/checkin-availability.pglite.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/checkin/checkin-prompt.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/checkin/checkin-service.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/checkin/types.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/runtime-wiring.owner-facing-copy.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/scheduled-task/runtime-wiring.ts",
+        "plugins/plugin-personal-assistant/src/providers/lifeops.ts",
+        "plugins/plugin-personal-assistant/src/types/briefing.ts",
+        "plugins/plugin-personal-assistant/test/brief-action.test.ts",
+        "plugins/plugin-personal-assistant/test/brief-optimized-prompt.test.ts"
+      ]
+    },
+    {
+      "title": "Enable configured Android reminder push delivery",
+      "prNumber": 33106,
+      "type": "other",
+      "body": "Android reminders could skip Firebase resources, lose delivery priority, re-alert on read updates or miss the event bus during startup. A connected Android renderer could also create a second OS alert alongside FCM. This fixes the configure",
+      "files": [
+        "packages/agent/src/api/push-token-routes.ts",
+        "packages/agent/src/services/push/fcm-provider.ts",
+        "packages/agent/src/services/push/notification-push-service.ts",
+        "packages/agent/src/services/push/push-token-registry.ts",
+        "packages/agent/src/services/push/push-types.ts",
+        "packages/agent/test/notification-push-transport.test.ts",
+        "packages/agent/test/push-token-persistence.test.ts",
+        "packages/app/platforms/android/app/build.gradle",
+        "packages/app/platforms/android/app/src/main/AndroidManifest.xml",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/ElizaReminderMessagingService.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/GatewayConnectionService.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/MainActivity.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/SafePushNotificationsPlugin.java",
+        "packages/app/platforms/android/build.gradle",
+        "packages/app/scripts/android-native-plugins-gradle/build.gradle",
+        "packages/app/scripts/android-native-plugins-gradle/native-reminder-push-tests/build.gradle",
+        "packages/app/scripts/android-native-plugins-gradle/native-reminder-push-tests/src/main/AndroidManifest.xml",
+        "packages/app/scripts/android-native-plugins-gradle/native-reminder-push-tests/src/main/assets/capacitor.plugins.json",
+        "packages/app/scripts/android-native-plugins-gradle/native-reminder-push-tests/src/main/res/values/strings.xml",
+        "packages/app/scripts/android-native-plugins-gradle/native-reminder-push-tests/src/test/java/ai/elizaos/app/ElizaReminderMessagingServiceTest.java",
+        "packages/app/scripts/android-native-plugins-gradle/native-reminder-push-tests/src/test/java/ai/elizaos/app/PushPluginHeaderTest.java",
+        "packages/app/scripts/android-native-plugins-gradle/settings.gradle",
+        "packages/app/scripts/android-periodic-wake-reconciliation.test.ts",
+        "packages/app/scripts/mobile/android/cloud-policy.ts",
+        "packages/app/scripts/mobile/android/templates/main-activity.ts",
+        "packages/app/scripts/run-mobile-build-android-cloud-strip.test.ts",
+        "packages/app/scripts/run-mobile-build-android-lp3-color-policy.test.ts",
+        "packages/app/src/__tests__/mobile-lifecycle.test.ts",
+        "packages/ui/src/api/client-notifications.ts",
+        "packages/ui/src/bridge/native-plugins.ts",
+        "packages/ui/src/components/settings/AppPermissionsSection.test.tsx",
+        "packages/ui/src/components/settings/AppPermissionsSection.tsx",
+        "packages/ui/src/components/settings/PermissionsCombinedSection.tsx",
+        "packages/ui/src/components/shell/notifications-boot.test.tsx",
+        "packages/ui/src/components/shell/notifications-boot.tsx",
+        "packages/ui/src/components/shell/shell-controller-sync/__tests__/useOsIntentRouting.test.tsx",
+        "packages/ui/src/state/notifications/android-push-delivery.test.ts",
+        "packages/ui/src/state/notifications/notification-store.ts",
+        "packages/ui/src/state/notifications/push-registration.ts"
+      ]
+    },
+    {
+      "title": "fix(workflow): register the hosted digest routes /status advertises",
+      "prNumber": 33104,
+      "type": "bugfix",
+      "body": "# Relates to\n\n#33002 (durable approved workflows and device actions with managed Cloud) added hosted digests, but none of their routes can be reached through the agent's HTTP dispatcher. This was the blocking point of [this review](https://",
+      "files": [
+        "plugins/plugin-workflow/__tests__/integration/routes-e2e.test.ts",
+        "plugins/plugin-workflow/src/plugin-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(os): make eliza_common.mk parse under make so the SELinux policy test runs",
+      "prNumber": 33101,
+      "type": "bugfix",
+      "body": "# Relates to\n\n**OS verification is red on develop.** The `canonical / OS verification / verify` job fails on develop `811c3fac48` ([run 37065822486](https://github.com/elizaOS/eliza/actions/runs/37065822486)) in `test:release`:\n\n```\n✖ SELin",
+      "files": [
+        "packages/os/android/vendor/eliza/eliza_common.mk",
+        "packages/os/scripts/distro-android/validate.ts"
+      ]
+    },
+    {
+      "title": "Remove redundant receipt data and maintenance-task prompt context",
+      "prNumber": 33100,
+      "type": "other",
+      "body": "Historical receipts repeated property names and identical values, volatile context interrupted stable history prefixes, and internal maintenance queues appeared as user work. Reuse the typed receipt encoder across extraction/planning/evalua",
+      "files": [
+        "packages/agent/src/providers/tasks.ts",
+        "packages/agent/test/automations-owner-principal-http.test.ts",
+        "packages/core/src/actions/task-extraction-context.test.ts",
+        "packages/core/src/actions/task-extraction-context.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/runtime/historical-receipt-wire.test.ts",
+        "packages/core/src/runtime/historical-receipt-wire.ts",
+        "plugins/plugin-assistant/src/features/advanced-capabilities/experience/evaluators/experience-items.test.ts",
+        "plugins/plugin-assistant/src/features/advanced-capabilities/experience/evaluators/experience-items.ts",
+        "plugins/plugin-assistant/src/runtime/evaluator.ts",
+        "plugins/plugin-assistant/src/runtime/planner-action-context.test.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop-settled-reply.test.ts",
+        "plugins/plugin-assistant/src/runtime/planner-loop.ts",
+        "plugins/plugin-assistant/src/services/message/historical-receipt-wire.test.ts",
+        "plugins/plugin-assistant/src/services/message/historical-receipt-wire.ts",
+        "plugins/plugin-assistant/src/services/message/history-wire.test.ts",
+        "plugins/plugin-assistant/src/services/message/history-wire.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-input.ts"
+      ]
+    },
+    {
+      "title": "Retain registered routes for unresolved tool plans",
+      "prNumber": 33099,
+      "type": "other",
+      "body": "A turn that requires tool work can reach planning without a usable model action hint. Seed only the route resolved from the existing registered operation contract, retaining admission checks and no-action boundaries for quoted, fenced and w",
+      "files": [
+        "plugins/plugin-assistant/src/features/advanced-planning/prompts.ts",
+        "plugins/plugin-assistant/src/prompts/planner.ts",
+        "plugins/plugin-assistant/src/runtime/__tests__/planner-optimized-prompt-service.test.ts",
+        "plugins/plugin-assistant/src/services/message.side-effect-claim.test.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-evaluators.ts"
+      ]
+    },
+    {
+      "title": "Stop dotenv discovery at the checkout boundary",
+      "prNumber": 33098,
+      "type": "other",
+      "body": "A source checkout should load its own environment file instead of continuing into another checkout or parent directory. Stop upward discovery at either a Git directory or worktree Git file while retaining existing in-checkout lookup.\n\nValid",
+      "files": [
+        "plugins/plugin-sql/src/__tests__/integration/utils.real.test.ts",
+        "plugins/plugin-sql/src/utils.ts"
+      ]
+    },
+    {
+      "title": "Snooze reminders from the current eligible time",
+      "prNumber": 33097,
+      "type": "other",
+      "body": "Snoozing a reminder must use the current eligible occurrence and current time, including future reminders, without changing unrelated occurrences or history. Correct the existing snooze path and cover it with real PGlite persistence scenari",
+      "files": [
+        "plugins/plugin-personal-assistant/src/lifeops/domains/definitions-service.snooze-eligibility.pglite.integration.test.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/definitions-service.ts"
+      ]
+    },
+    {
+      "title": "Fix native reminder plans, controls and review evidence",
+      "prNumber": 33096,
+      "type": "bugfix",
+      "body": "Reminder creation and owner replies could omit timing or destination, lose the originating occurrence, repeat legacy review, or move the displayed completion time after the action. Notification taps could also open cached chat without their",
+      "files": [
+        "packages/agent/src/api/server-autonomy-helpers.ts",
+        "packages/agent/src/api/server-helpers-swarm.ts",
+        "packages/agent/src/runtime/agent-event-service.ts",
+        "packages/agent/src/services/push/notification-push-service.ts",
+        "packages/agent/test/saved-reminder-presentation.test.ts",
+        "packages/app/src/__tests__/deep-link-routing.test.ts",
+        "packages/app/src/__tests__/native-notification-source-routing.test.ts",
+        "packages/app/src/deep-link-routing.ts",
+        "packages/app/src/main.tsx",
+        "packages/app/src/mobile-lifecycle.ts",
+        "packages/core/package.json",
+        "packages/core/src/runtime/direct-action-routing.ts",
+        "packages/core/src/runtime/response-handler-evaluators.ts",
+        "packages/ui/src/App.tsx",
+        "packages/ui/src/bridge/native-notifications.ts",
+        "packages/ui/src/components/chat/InlineWidgetText.test.tsx",
+        "packages/ui/src/components/chat/InlineWidgetText.tsx",
+        "packages/ui/src/components/chat/MessageContent.interactions.test.tsx",
+        "packages/ui/src/components/chat/MessageContent.tsx",
+        "packages/ui/src/components/chat/widgets/inline-builtins.tsx",
+        "packages/ui/src/components/chat/widgets/inline-registry.tsx",
+        "packages/ui/src/components/chat/widgets/use-inline-widget-context.ts",
+        "packages/ui/src/components/shell/ChatOverlay.test.tsx",
+        "packages/ui/src/components/shell/ChatOverlay.tsx",
+        "packages/ui/src/components/shell/ChatSurface.tsx",
+        "packages/ui/src/components/shell/NotificationsHomeCenter.tsx",
+        "packages/ui/src/components/shell/chat-overlay-transcript.tsx",
+        "packages/ui/src/events/index.ts",
+        "packages/ui/src/state/AppContext.tsx",
+        "packages/ui/src/state/notifications/navigate-deep-link.test.ts",
+        "packages/ui/src/state/notifications/navigate-deep-link.ts",
+        "packages/ui/src/state/notifications/notification-store.ts",
+        "packages/ui/src/state/notifications/push-registration.ts",
+        "packages/ui/src/state/types.ts",
+        "packages/ui/src/state/useChatCallbacks.select-race.test.tsx",
+        "packages/ui/src/state/useChatCallbacks.ts",
+        "packages/ui/src/state/useChatSend.test.tsx",
+        "packages/ui/src/state/useChatSend.ts",
+        "packages/ui/src/state/useDataLoaders.ts",
+        "plugins/plugin-assistant/src/services/message/stage1-evaluators.ts",
+        "plugins/plugin-personal-assistant/src/actions/lib/__snapshots__/task-create-plan-projection.test.ts.snap",
+        "plugins/plugin-personal-assistant/src/actions/lib/extract-task-plan.ts",
+        "plugins/plugin-personal-assistant/src/actions/lib/task-create-plan-parameter.ts",
+        "plugins/plugin-personal-assistant/src/actions/lib/task-create-plan-projection.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/life-reminder-datetime.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/life.cancel-reminder.pglite.integration.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/life.ts",
+        "plugins/plugin-personal-assistant/src/actions/owner-surfaces.reminder-context.test.ts",
+        "plugins/plugin-personal-assistant/src/actions/owner-surfaces.ts",
+        "plugins/plugin-personal-assistant/src/lifeops/domains/reminders-service.in-app-nudge.test.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): support independently registered native app auth clients",
+      "prNumber": 33087,
+      "type": "bugfix",
+      "body": "Independent native apps currently cannot use Cloud's PKCE credential lifecycle because registration is hard-coded to the Eliza app. Add a server-owned registry so Senior Care and other approved clients resolve their own app UUID and exact H",
+      "files": [
+        "packages/cloud/api/README.md",
+        "packages/cloud/api/__tests__/mobile-client-registration.test.ts",
+        "packages/cloud/api/v1/app-auth/connect/route.ts",
+        "packages/cloud/api/v1/app-auth/mobile/_registration.ts",
+        "packages/cloud/api/v1/app-auth/mobile/ack/route.ts",
+        "packages/cloud/api/v1/app-auth/mobile/config/route.ts",
+        "packages/cloud/api/v1/app-auth/mobile/token/route.ts",
+        "packages/cloud/shared/src/lib/services/mobile-app-auth.ts",
+        "packages/cloud/shared/src/lib/services/mobile-client-registry.test.ts",
+        "packages/cloud/shared/src/lib/services/mobile-client-registry.ts",
+        "packages/cloud/shared/src/types/cloud-worker-env.ts"
+      ]
+    },
+    {
+      "title": "feat: compose resident sessions, recoverable workers and approved device actions",
+      "prNumber": 33026,
+      "type": "feature",
+      "body": "Mobile resident hosts need authenticated sessions, durable workflow workers that survive a parent restart without repeating uncertain effects, and reviewed device actions. This change composes direct route dispatch, owner sessions, shared c",
+      "files": [
+        ".gitattributes",
+        ".github/workflows/windows-helper-probe.yml",
+        "packages/agent/src/api/device-action-routes.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/host-bridge.ts",
+        "packages/app/package.json",
+        "packages/app/platforms/android/app/build.gradle",
+        "packages/app/platforms/android/app/src/androidTest/java/ai/elizaos/app/WorkflowSurvivorPeerInstrumentedTest.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/ElizaAgentService.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/IpcStartupRecovery.java",
+        "packages/app/platforms/android/app/src/main/java/ai/elizaos/app/WorkflowSurvivorInventory.java",
+        "packages/app/platforms/android/app/src/test/java/ai/elizaos/app/WorkflowSurvivorInventoryTest.java",
+        "packages/app/scripts/android-periodic-wake-reconciliation.test.ts",
+        "packages/app/src/mobile-agent-entry.ts",
+        "packages/app/src/mobile-remote-target.ts",
+        "packages/app/src/runtime/install-mobile-auth-host-bridge.ts",
+        "packages/app/src/runtime/install-mobile-workflow-process-host.ts",
+        "packages/app/src/runtime/mobile-auth-composition.integration.test.ts",
+        "packages/app/src/runtime/mobile-workflow-process-host.integration.test.ts",
+        "packages/app/src/security/mobile-direct-dispatch.test.ts",
+        "packages/app/src/security/mobile-remote-target.test.ts",
+        "packages/scripts/__tests__/mobile-workflow-discovery.test.ts",
+        "packages/scripts/lib/script-metadata.ts",
+        "packages/scripts/plugins/plugin-workflow/build-workflow-artifact.integration.test.ts",
+        "packages/scripts/plugins/plugin-workflow/build-workflow-artifact.ts",
+        "packages/scripts/plugins/plugin-workflow/build-workflow-compiler.mjs",
+        "plugins/plugin-assistant/src/services/device-actions/action.ts",
+        "plugins/plugin-assistant/src/services/device-actions/clock-contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/contract.ts",
+        "plugins/plugin-assistant/src/services/device-actions/effect-receipts.ts",
+        "plugins/plugin-assistant/src/services/device-actions/service.ts",
+        "plugins/plugin-assistant/test/device-actions.e2e.test.ts",
+        "plugins/plugin-native-inference/__tests__/android-private-ipc.test.ts",
+        "plugins/plugin-native-inference/__tests__/android-shutdown.test.ts",
+        "plugins/plugin-native-inference/src/android/bridge.ts",
+        "plugins/plugin-native-inference/src/android/dispatch.ts",
+        "plugins/plugin-native-inference/src/android/private-dispatch.ts",
+        "plugins/plugin-native-inference/src/android/private-ipc.ts",
+        "plugins/plugin-native-inference/src/android/shutdown.ts",
+        "plugins/plugin-workflow/README.md",
+        "plugins/plugin-workflow/__tests__/fixtures/workflow-survivor-parent.ts",
+        "plugins/plugin-workflow/__tests__/integration/dependency-link.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/process-host-compiler.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/process-host-controls.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/smithers-runner.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/workflow-native-owner.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/workflow-process-host.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/workflow-socket-root.test.ts",
+        "plugins/plugin-workflow/__tests__/integration/workflow-worker-survivor.test.ts",
+        "plugins/plugin-workflow/__tests__/unit/windows-helper-diagnostics.test.ts"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "Prabhat1308",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/94048855?u=762860ff680d73e13339cb77d4c747457cf7b924&v=4",
+      "totalScore": 562.6926261711238,
+      "prScore": 82.35262617112386,
+      "issueScore": 0,
+      "reviewScore": 480,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "fadhelcarlos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/123362393?v=4",
+      "totalScore": 536,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 536,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 498,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 498,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mtcow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/171548037?v=4",
+      "totalScore": 446,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 446,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "attentionhead",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30051356?v=4",
+      "totalScore": 327,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 327,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumix5",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13509617?u=f941296a9207a99ba0ac42ef7b02b0eb0b046cd0&v=4",
+      "totalScore": 274.8391119206368,
+      "prScore": 265.4011119206368,
+      "issueScore": 4,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "hermesagent270-commits",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/283605144?v=4",
+      "totalScore": 267.7536670686367,
+      "prScore": 210.71566706863666,
+      "issueScore": 40.1,
+      "reviewScore": 16.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 249.6619320710848,
+      "prScore": 249.46193207108482,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xChron",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/159992132?v=4",
+      "totalScore": 179.2006551645581,
+      "prScore": 179.2006551645581,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "MLuber-bot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/317066007?v=4",
+      "totalScore": 120,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 120,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wddygybw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/336149796?v=4",
+      "totalScore": 61.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 61.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 54.7517738965761,
+      "prScore": 54.7517738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hhbb958",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/336115325?v=4",
+      "totalScore": 52,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 52,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OutstandingRetard",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/202385977?v=4",
+      "totalScore": 36.769021044733265,
+      "prScore": 23.569021044733258,
+      "issueScore": 2,
+      "reviewScore": 11,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nothingxnowhere",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/140473048?v=4",
+      "totalScore": 26.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 26,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mashingaan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/187997237?v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "greatcodeeer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3224374?u=d56a9778976761a0b0deb565a680273c102919cf&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 112,
+  "mergedPRs": 48,
+  "newIssues": 23,
+  "closedIssues": 0,
+  "activeContributors": 17
+}

@@ -5,20 +5,1017 @@
     "intervalType": "day"
   },
   "repository": "elizaos/eliza",
-  "overview": "From 2026-10-02 to 2026-10-03, elizaos/eliza had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-10-02 to 2026-10-03, elizaos/eliza had 93 new PRs (52 merged), 12 new issues, and 19 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMT5cIs8AAAABUtcGkg",
+      "title": "Orchestrator rewrites GitLab subgroup repository URLs to the parent group",
+      "author": "hermesagent270-commits",
+      "number": 33109,
+      "repository": "elizaos/eliza",
+      "body": "## Defect\n\n`normalizeRepositoryInput` in `plugins/plugin-agent-orchestrator/src/services/repo-input.ts` keeps only two path segments, so `https://gitlab.com/group/subgroup/project` becomes `https://gitlab.com/group/subgroup.git`, which can never be a repository (GitLab namespaces cannot hold a project and a subgroup with the same path). The TASKS action's text extractor also captures only two segments. Every coding task for a GitLab subgroup project therefore fails to clone.\n\nReproduced on develop `811c3fac48`: `https://gitlab.com/gitlab-org/charts/gitlab` normalizes to `https://gitlab.com/gitlab-org/charts.git`, and `git ls-remote` on that URL fails, while `…/charts/gitlab.git` lists branches.\n\n## Acceptance\n\n- GitLab URLs keep the full namespace path up to the `/-/` page separator (and legacy page routes).\n- GitHub and Bitbucket keep `owner/repo`; existing forms normalize as before.\n- Output still passes `assertSafeGitRemote`.\n\nFix: #33108\n",
+      "createdAt": "2026-10-02T23:44:09Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUogUog",
+      "title": "fix(cloud): reject malformed Google disconnect bodies before bulk removal",
+      "author": "hermesagent270-commits",
+      "number": 33073,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`POST /api/v1/eliza/google/disconnect` silently converts malformed JSON to an\nempty object. The route then applies its defaults (`side: \"owner\"`,\n`connectionId: null`) and calls `disconnectManagedGoogleConnection`, where a\nnull connection id means **disconnect every managed Google connection on that\nside**.\n\nA truncated or otherwise unreadable request body can therefore become a\nsuccessful bulk disconnect instead of a rejected request.\n\n**To reproduce**\n\nAgainst current `develop` (`27dec7b0c38eb6f38b397758b08be67680bf8d64`):\n\n1. Authenticate as a user with one or more managed owner-side Google\n   connections.\n2. Send `POST /api/v1/eliza/google/disconnect` with\n   `Content-Type: application/json` and the truncated body `{`.\n3. Observe HTTP 200 `{ \"ok\": true }` and a bulk disconnect call.\n\nA deterministic real-Hono-route harness used the production parser, zod\nschema, routing, defaults, response, and mutation ordering, with auth and the\nGoogle connector replaced by call-ledger boundaries:\n\n```text\nrequest body: {\nHTTP status: 200\ndisconnectManagedGoogleConnection calls: 1\narguments:\n  organizationId: org-1\n  userId: user-1\n  side: owner\n  connectionId: null\n\nfocused reproduction: 1 passed, 0 failed, 2 assertions\n```\n\nThe temporary reproduction file was removed afterward and the contribution\nworktree is clean.\n\n**Expected behavior**\n\n- Malformed or unreadable non-empty JSON returns HTTP 400 before the connector\n  service is called.\n- Syntactically valid but schema-invalid JSON continues to return HTTP 400.\n- If the existing API contract intentionally supports a bodyless request or a\n  valid `{}` as “disconnect all owner-side connections,” that behavior remains\n  explicit and unchanged; it must not be conflated with parse failure.\n\n**Evidence / reproduction proof**\n\n- Screenshots / recording: N/A — server-only API behavior with no rendered UI.\n- Backend logs: N/A — the exact route response and connector call ledger above\n  capture the mutation boundary directly.\n- Frontend console/network logs: N/A — no frontend behavior changes.\n- Real-LLM trajectory: N/A — no model, prompt, provider, or planner behavior.\n- Domain artifact: the connector call ledger proves that malformed input reaches\n  the bulk-disconnect operation with `connectionId: null`; a live Google account\n  was deliberately not mutated for reproduction.\n\n**Duplicate and overlap search**\n\nRepository code, open pull-request file lists, and open/closed issues were\nsearched for `google disconnect malformed JSON`, `bulk Google disconnect invalid\nbody`, and `disconnectManagedGoogleConnection malformed`. No existing issue or\nopen PR covers this route.\n\nAI provider/model: openai / gpt-5.6-sol\nClient / agent tooling: Codex\nContribution skill revision: N/A - ordinary GitHub contribution without optional run evidence\nAttribution status: self-reported\n— [contributor]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex\",\"skill_revision\":\"N/A - ordinary GitHub contribution without optional run evidence\"} -->\n",
+      "createdAt": "2026-10-02T15:30:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUocKRQ",
+      "title": "fix(cloud): reject malformed JSON before optional-body mutations",
+      "author": "hermesagent270-commits",
+      "number": 33070,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\nSeveral authenticated mutation routes intentionally allow an absent or empty\nJSON body, but implement that contract with `request.json().catch(() => ({}))`.\nThat collapses three different inputs into the same value:\n\n1. a deliberately omitted body;\n2. a valid `{}` body;\n3. malformed or unreadable non-empty JSON.\n\nBecause each affected schema accepts `{}`, a truncated request still performs\nthe mutation and returns success. The initial audit found this on agent\nsuspension; a follow-up sweep confirmed the same boundary defect on deployment,\ncampaign sharing/duplication, cancellation, and internal gateway shutdown.\n\nConfirmed affected routes on current `develop`\n(`27dec7b0c38eb6f38b397758b08be67680bf8d64`):\n\n- `POST /api/v1/agents/:agentId/suspend`\n- `POST /api/compat/agents/:id/suspend`\n- `POST /api/v1/apps/:id/deploy`\n- `POST /api/v1/advertising/campaigns/:id/duplicate`\n- `POST /api/v1/advertising/campaigns/:id/report/share`\n- `POST /api/v1/approval-requests/:id/cancel`\n- `POST /api/v1/ballots/:id/cancel`\n- `POST /api/v1/oauth-intents/:id/cancel`\n- `POST /api/v1/payment-requests/:id/cancel`\n- `POST /api/internal/discord/gateway/shutdown`\n\nThe Google connector's especially destructive default (`connectionId: null`\nmeans disconnect all connections on a side) is tracked separately in #33073.\nThe already-open Docker-node drain fix is #33050 / #33051.\n\n**Executed reproduction**\n\nTemporary deterministic Hono-route harnesses exercised the production request\nparsing, routing, schemas/defaults, response construction, and ordering relative\nto each mutation. Auth, persistence lookup, and mutation services were replaced\nwith deterministic call ledgers.\n\n```text\n/api/v1/agents/:agentId/suspend\nmalformed JSON:      HTTP 202, enqueueAgentSuspendOnce calls: 1\nschema-invalid JSON: HTTP 202, enqueueAgentSuspendOnce calls: 1\n\n/api/compat/agents/:id/suspend\nmalformed JSON:      HTTP 202, enqueueAgentSuspendOnce calls: 1\nschema-invalid JSON: HTTP 202, enqueueAgentSuspendOnce calls: 1\n\n/api/v1/apps/:id/deploy\nmalformed JSON:      HTTP 202, createDeployment calls: 1\n\n/api/v1/advertising/campaigns/:id/duplicate\nmalformed JSON:      HTTP 201, duplicateCampaign calls: 1\n\n/api/v1/payment-requests/:id/cancel\nmalformed JSON:      HTTP 200, payment cancel calls: 1\n\nfocused reproduction total: 7 passed, 0 failed, 14 assertions\n```\n\nThe four remaining listed routes have the same statically verified control\nflow: parse failure becomes `{}`, the local schema accepts `{}`, then the route\ninvokes its mutation service. They were not counted as executed evidence.\n\nAll temporary reproduction files were removed afterward and the contribution\nworktree is clean.\n\n**Expected behavior / acceptance**\n\nFor every retained affected route:\n\n- A genuinely absent, empty, or whitespace-only body keeps the route's existing\n  documented optional-body behavior.\n- A valid `{}` body keeps the same behavior.\n- Malformed or unreadable non-empty JSON returns a structured HTTP 400 before\n  the mutation service is invoked.\n- Syntactically valid but schema-invalid JSON returns HTTP 400; in particular,\n  the two suspend routes must stop replacing invalid `reason` values with the\n  default reason.\n- Regression tests assert both the response and an empty mutation call ledger\n  for malformed input, plus the intended bodyless behavior for each route.\n- Any shared parser/helper must preserve route-specific envelopes and must not\n  turn this into an unproved API-wide mechanical sweep.\n\nThis can be delivered in acceptance-ready slices if maintainers prefer, but the\nissue records the confirmed family so fixes are consolidated rather than\nrediscovered route by route.\n\n**Evidence / reproduction proof**\n\n- Screenshots / recording: N/A — server-only API behavior with no rendered UI.\n- Backend logs: N/A — exact route responses and mutation call ledgers are\n  recorded above.\n- Frontend console/network logs: N/A — no frontend behavior changes.\n- Real-LLM trajectory: N/A — no agent planner or model behavior is under test.\n- Domain artifacts: no live resources were mutated; the route-level service\n  call ledgers prove that invalid requests cross each mutation boundary.\n\n**Duplicate and overlap search**\n\nRepository code, open pull-request file lists, and open/closed issues were\nsearched for malformed/invalid JSON with each mutation name. No existing issue\nor open PR covers these routes. #33051 is deliberately limited to the\nDocker-node drain route and already has exact-head approvals, so it should not\nbe expanded after review.\n\nAI provider/model: openai / gpt-5.6-sol\nClient / agent tooling: Codex\nContribution skill revision: N/A - ordinary GitHub contribution without optional run evidence\nAttribution status: self-reported\n— [contributor]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"openai\",\"model\":\"gpt-5.6-sol\",\"client\":\"Codex\",\"skill_revision\":\"N/A - ordinary GitHub contribution without optional run evidence\"} -->\n",
+      "createdAt": "2026-10-02T15:24:46Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUoWsMQ",
+      "title": "crypto refunds: a malformed or reused refund key is reported as CRYPTO_REFUND_INVALID_AMOUNT",
+      "author": "nothingxnowhere",
+      "number": 33065,
+      "repository": "elizaos/eliza",
+      "body": "**Describe the bug**\n\n`cryptoPaymentRefundsService.refundAsCloudCredits` reports two refund-key problems with the code reserved for an unusable amount.\n\n- `packages/cloud/shared/src/lib/services/crypto-payment-refunds.ts:123-125`: a refund key that fails the `^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$` pattern throws `CryptoRefundError(\"CRYPTO_REFUND_INVALID_AMOUNT\", \"Refund key is invalid\")`.\n- `:193-197`: a refund key that was already used for a different amount throws `CryptoRefundError(\"CRYPTO_REFUND_INVALID_AMOUNT\", \"Refund key was already used for a different amount\")`.\n- `:126-131` is the actual amount check, which throws the same code with \"Refund amount must be a positive USD amount with at most six decimals\".\n\nThe code union (`:37-44`) has no member for a key problem. The messages are right; the typed reason is wrong, which is the same shape as #32945 (a whole-cents amount reported as `AMOUNT_TOO_LARGE`). The repository error policy asks for an actionable `code`; an operator who branches on `CRYPTO_REFUND_INVALID_AMOUNT` and corrects the amount is chasing the wrong field for both key cases.\n\nConsumers: `git grep CRYPTO_REFUND_INVALID_AMOUNT` across `packages/` and `plugins/` finds only the service and its test. The operator script (`packages/cloud/scripts/admin/refund-crypto-payment.ts`) prints the thrown error, so it shows the code verbatim.\n\n**To Reproduce**\n\nOn `origin/develop` `27dec7b0c3`, Bun 1.3.14, against a PGlite database migrated with `bun run db:cloud:migrate` and holding no rows. A probe calls the real service with three keys (the third is well-formed, so it reaches the payment lookup):\n\n```\n$ DATABASE_URL=pglite://<dir> bun --conditions=eliza-source <probe>.ts\n{\"refundKey\":\"k\",\"code\":\"CRYPTO_REFUND_INVALID_AMOUNT\",\"message\":\"Refund key is invalid\"}\n{\"refundKey\":\"bad key with spaces\",\"code\":\"CRYPTO_REFUND_INVALID_AMOUNT\",\"message\":\"Refund key is invalid\"}\n{\"refundKey\":\"support-ticket-0001\",\"code\":\"CRYPTO_REFUND_PAYMENT_NOT_FOUND\",\"message\":\"Crypto payment not found\"}\n```\n\nThe reuse case needs a settled payment; the service test's PGlite fixture reproduces it (refund once with key `support-ticket-3` for 2 USD, then again with the same key for 3 USD) and gets `CRYPTO_REFUND_INVALID_AMOUNT` from `:193-197`.\n\n**Expected behavior**\n\n- A malformed refund key gets its own code, for example `CRYPTO_REFUND_INVALID_KEY`, with the current message.\n- A refund key reused with a different amount gets its own code, for example `CRYPTO_REFUND_KEY_AMOUNT_MISMATCH`, with the current message and the `paymentId` context.\n- `CRYPTO_REFUND_INVALID_AMOUNT` stays for the amount check only. No message, ordering or ledger behaviour changes.\n\n**Screenshots / recording of the wrong behavior (required for anything visible)**\n\nN/A - a service error code with no rendered surface; the probe transcript above is the proof.\n\n**Evidence / reproduction proof**\n\n- [x] MP4 recording or JPG screenshots of the broken behavior: N/A - no visible surface; see the transcript.\n- [x] Backend logs and frontend console/network logs when relevant: the service's thrown code and message are in the transcript. N/A for frontend.\n- [x] Real-LLM trajectory when the bug involves agent/action/prompt/model behavior: N/A - no model, prompt or action is involved.\n- [x] Domain artifacts when relevant: the code and message pairs above, from the real service on a migrated PGlite database.\n\n**Additional context**\n\n- The operator script that surfaces these codes cannot currently start on `develop` (#33054); the probe called the service directly through the `@elizaos/cloud-shared` export.\n\n**Contribution provenance**\n\n<!-- contribution-attribution:v1 -->\n<!-- attribution-row:ai-assistance -->\n- AI assistance: `yes`\n<!-- attribution-row:models -->\n- Model(s) used: `anthropic/claude-fable-5-1`\n<!-- attribution-row:client -->\n- Agent tooling: `Claude Code`\n<!-- attribution-row:skill-revision -->\n- Skill path: `elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza`\n<!-- attribution-row:status -->\n- Provenance status: `self-reported`\n\nAI provider/model: anthropic / claude-fable-5-1\nClient / agent tooling: Claude Code\nContribution skill revision: elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\nAttribution status: self-reported\n— [nxn-claude-code]\n<!-- eliza-computer-attribution:v1 {\"provider\":\"anthropic\",\"model\":\"claude-fable-5-1\",\"client\":\"Claude Code\",\"skill_revision\":\"elizaOS/army@46fa4776ba6bd0df2e7236c95a3c77e69cd1db99:skills/contribute-to-eliza\"} -->\n",
+      "createdAt": "2026-10-02T15:17:29Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOMT5cIs8AAAABUoQdlA",
+      "title": "LOGS delete and RUNTIME reload_config report success on unacknowledged responses",
+      "author": "hermesagent270-commits",
+      "number": 33062,
+      "repository": "elizaos/eliza",
+      "body": "## Defect\n\nTwo agent actions report success on a 2xx response that does not carry the route's acknowledgement (the defect 6beb04b5c1 fixed for PLUGIN configure):\n\n- LOGS `delete` (`packages/agent/src/actions/logs.ts`): `resp.json().catch(() => ({}))` and a defaulted `cleared` make a proxy page, `{}`, or `{\"cleared\":\"lots\"}` report \"Cleared 0 log entries.\" with `success: true`.\n- RUNTIME `reload_config` (`packages/agent/src/actions/runtime.ts`): `{}` or `{\"reloaded\":false}` reports \"No hot-reloadable fields changed.\" with `success: true`.\n\nReproduced on develop `27dec7b0c3` with the real handlers and a stubbed fetch.\n\n## Acceptance\n\n- Each op fails with its `*_FAILED` code unless the body matches its route: `{ cleared: <non-negative integer> }` and `{ reloaded: true, applied: string[], requiresRestart: string[] }`.\n- Genuine acknowledgements behave as before.\n\nFix: #33060\n",
+      "createdAt": "2026-10-02T15:09:36Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGJq6gg",
+      "title": "Add durable approved workflows and device actions with managed Cloud identity",
+      "author": "lalalune",
+      "number": 33002,
+      "body": "Agent clients need durable, owner-bound workflows and reviewed device operations that survive interruptions, reconnects and process restarts. This change adds generic runtime contracts and persistence for those flows, including managed Cloud Google delegation, hosted results and selected Maps reads.\n\n- Durable workflow authoring, validation, approval receipts, lifecycle changes and hosted delivery retain explicit approval and owner boundaries. Generic approval presentation is authoritative; legacy metadata remains a compatibility reader with downgrade rejection.\n- Device actions bind proposals, approval, claim and immutable receipts to authenticated owner, agent and device enrollment. Selected Maps reads require negotiated capability and matching target identity; replay retrieves the bounded historical result without a new device read.\n- Managed Cloud owner configuration and Google delegation provide identity and Gmail/Calendar access boundaries with server-side credentials and scope checks.\n- Action discovery retains umbrella actions when a resource-specific alias matches, preserving role and context eligibility.\n- Workflow mutation replies carry canonical receipts from the actual committed definition. Cancellation provenance is captured under the row lock, with per-service workflow control serialization. Submission, cancellation requests and pending device approvals cannot serve as proof that the requested operation completed. Pending workflow widgets retain their callback delivery.\n\nValidation at prior head 252152eaa0352fd26f4824371e967bbf4e828bfd:\n\n- Focused workflow SQL/worker/settlement/evaluator/parser checks: 7 tests and 243 assertions passed; workflow typecheck and lint passed.\n- Device HTTP/PGlite lifecycle and evaluator checks passed, including refusal of false completion claims for pending approval, unknown outcomes and selected reads; assistant and agent typechecks passed.\n- Independent source review found no remaining blocker in the receipt correction. Cancellation serialization is per service instance; it is not a cross-process SQLite guarantee.\n- Full frozen installation, all284 standard root tasks and audits, emitted host build, twelve compiler cases, packaged Reminder flow and import guard passed with unchanged source. The original aggregate run failed on an unexplained cancellation HTTP reset. Separate unchanged-source workflow recovery passed31/31 files and167 tests; that original failure remains recorded.\n- The separately enabled historical compiler-upgrade E2E passed24 assertions with historical source and current dependencies.\n- Actual Cerebras qwen-3.8-27b chat completed with seven model calls, created one inactive unscheduled workflow, then a manually reviewed source was explicitly approved and executed once to return56. Removal preserved canonical approval/execution/lifecycle receipts, confirmed by fresh readback. This is local synthetic workflow acceptance.\n\nHosted CI36908850398 completed successfully at exact head252152eaa0352fd26f4824371e967bbf4e828bfd, including source/build checks, billing replay and PostgreSQL.\n\nNative paired Maps flows, Cloud login/Gmail revocation and physical-device acceptance remain pending. This draft does not establish complete MVP or deployment acceptance.\n\nCurrent head ab8f9a7110ae adds one bounded correction for model-authored invalid source quotes before any response field or action effects. The exact source validator remains unchanged; a repeated invalid reply fails closed. Actual HTTP/auth/PGlite/planner tests pass four cases, including one pending Maps proposal with rejected draft facts absent from storage. Sixteen owning pipeline cases, production and test-inclusive typechecks and formatting checks pass. Full exact-head qualification and live provider/native acceptance are pending.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-01T18:19:15Z",
+      "mergedAt": "2026-10-02T05:54:22Z",
+      "additions": 18603,
+      "deletions": 426
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGPK-qw",
+      "title": "feat: compose resident sessions, recoverable workers and approved device actions",
+      "author": "lalalune",
+      "number": 33026,
+      "body": "Mobile resident hosts need authenticated sessions, durable workflow workers that survive a parent restart without repeating uncertain effects, and reviewed device actions. This change composes direct route dispatch, owner sessions, shared compiler/dependency artifact production, canonical workflow reconciliation, approved Workflows navigation and Android Clock handoffs.\n\nWorkers reserve a durable generation before importing approved source. POSIX uses private sockets; Windows uses protected named pipes, SID-bound native handles and immutable source publication. Windows workers load trusted built-in PowerShell modules and detach from the parent while retaining RPC pipes. Android recovery authenticates surviving workers and rechecks detached-agent liveness before admitting a new generation. Unproven ownership and interrupted effects remain unknown.\n\nClock proposals require the enrolled clock.handoff.v1 capability, explicit device review and canonical claim/receipt handling. Set operations bind hour/minute to the current phone timezone. Strict typed receipts distinguish opened, unavailable, denied, failed and unknown; opened establishes only the Clock handoff, never alarm creation or ringing. Date, recurrence and DST-fold selection are outside this handoff contract.\n\nValidation:\n\n- Current head 28ee31f8fc69cb3610aa92e6ae2601c496419d03: owning HTTP/PGlite approval, claim, receipt and replay lifecycle passes; assistant typecheck and package lint pass. Full bun run verify passes in 758.3 seconds with all 29,825 source files unchanged.\n- Clock coverage includes all five capability tokens, malformed/duplicate capability rejection, current-message timezone propagation, strict outcome binding, preapproval rejection and no duplicate claim. The product's complete patched runtime also passes the actual HTTP/PGlite lifecycle with before/after source guards; an earlier timeout is retained separately.\n- [Normal-hook Windows/platform acceptance](https://github.com/elizaOS/eliza/actions/runs/37041735574) passed at prior 1129a6: normal installation, both core jobs, native primitives, two backend survivor cases, all 12 helper-startup cases and all 6 Smithers cases. This is evidence for that exact prior source, not a fresh hosted pass at 28ee31.\n- [Android resident qualification](https://github.com/AlphaCompute/alphaphone/actions/runs/37045552334) passed its build/archive stage at product 475be7, then native setup failed on unavailable SDK package tools before emulator startup. No native tests ran. The package-list fix is staged in the [product qualification PR](https://github.com/AlphaCompute/alphaphone/pull/1) work.\n\nKeep this PR draft until fresh Android crash/survivor flows and reviewed Clock execution pass. APK builds, emulator flows, full AOSP boot, live integrations and physical-device/user acceptance remain separate gates.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T06:44:21Z",
+      "mergedAt": "2026-10-03T22:49:22Z",
+      "additions": 7233,
+      "deletions": 415
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGXR9Cg",
+      "title": "Fix native reminder plans, controls and review evidence",
+      "author": "NubsCarson",
+      "number": 33096,
+      "body": "Reminder creation and owner replies could omit timing or destination, lose the originating occurrence, repeat legacy review, or move the displayed completion time after the action. Notification taps could also open cached chat without their source message. This keeps creation, resolution, delivery and viewing on the existing pipelines with explicit source and outcome checks.\n\nChanges:\n- Validate native timing/destination plans while retaining safe extraction fallback and archive-only cancellation.\n- Bind eligible owner controls to the stored occurrence/source and registered executor. Reject malformed or unavailable controls without discovery loops; preserve unknown evidence for retry.\n- Consume legacy reply evidence once, retain authored payloads, and display the actual completion payload time.\n- Deliver plain reminder text through existing notifications. Hide historical reminder-only panels without rewriting history or generic choices; retain Calendar-specific acknowledgment semantics.\n- Publish conversation/message targets after source persistence. Retain navigation until the actual source is applied or authoritatively rejected; transient failure, profile drift and queue eviction keep retry authority.\n- Mark the canonical notification read only after guarded successful source navigation. Existing optimistic unread state, authority-scoped rollback and history remain intact; this does not complete or remove a reminder.\n\nValidation: focused PGlite control/review tests, actual URI/navigation-queue/selection tests, real-store rollback tests and affected typechecks passed. The final combined candidate passed 275 focused tests and renderer/package/signer audits. Physical QA verified two powered-on screen-off reminders once each, an older individual alert opening its exact message and returning to Home, and a final OS tap setting its canonical read timestamp with unread count22→21. Prior messages, definitions, notifications, pairing and preferences were preserved. Initial failed cases remain retained.\n\nAndroid native push transport is tracked separately in #33106. The accepted device scope is powered-on background/screen-off delivery; full shutdown, audible interruption, automatic dossier activation and universal latency/reliability are not claimed. GitHub checks report the current source result independently of the local and device evidence.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T22:15:13Z",
+      "mergedAt": "2026-10-03T23:14:58Z",
+      "additions": 5137,
+      "deletions": 312
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGTpNDQ",
+      "title": "feat(os): AOSP builder, release-key ceremony and device qualification tooling",
+      "author": "lalalune",
+      "number": 33069,
+      "body": "# Relates to\n\nThree generic pieces of OS release tooling lived only in a downstream product (extracted from the senior-care product's explicit patch overlay, eliza-research/senior-care): AOSP builder host provisioning, an offline release-key ceremony, and read-only Android device qualification. None of them is product-specific, so they belong next to the existing `packages/os` lock files, `release-trust.json`, `release-key-policy.ts` and `hardware-targets.json`. The product keeps its own key manifest and requirements file and will consume these after its next repin.\n\n# Change\n\n- **`packages/os/android/builder/`**: dry-run-by-default (`--apply` to act) GCE `c3d-highcpu-90` SPOT builder and Intel nested-virtualization Cuttlefish host scripts, a portable Ubuntu 24.04 cloud-init (signature-verified `repo`, data disk that is never reformatted, shell mirror of `assertBuilderCapacity` from `scripts/aosp/build-grizzly-bundle.ts`: 32 physical cores, 128 GiB RAM, 1500 GB total, 600 GiB free) and `bootstrap/sync-aosp.sh`. The sync script reads `android/aosp.lock.json` by default (relative to itself), checks the remote tag object/commit before fetching, the `.repo/manifests` commit before sync, and every locked project and `requiredSourceFiles` after; it supports `--mirror` and `--reference`. While porting, fixed a field shift for lock projects without `tagObject` (the Pixel 11 Pro profile), and added `EXTRA_LABELS` instead of a hard-coded product label. `make bootstrap` (`bootstrap-aosp.ts`) remains the canonical checkout; the README says how the two relate.\n- **`packages/os/android/signing/` + `scripts/aosp/{generate,decrypt}-release-keys.ts`**: generic key manifest (releasekey, platform, shared, media, networkstack, sdk_sandbox, bluetooth, nfc, apex, apex_payload, avb, plus Ed25519 `release_manifest`, `contract_release`, `contract_qualification`). Ed25519 fingerprints use exactly the SPKI base64/SHA-256 encodings that `release-key-policy.ts` pins, plus the PEM `release-trust.json` accepts. `--manifest` lets products add their own app keys; manifests are validated (safe names, RSA-4096/8192). Private keys are scrypt/AES-256 PKCS#8 at rest. Both tools refuse to write inside the eliza checkout or any other Git working tree. Runbook in `android/signing/README.md` (generic, no product names).\n- **`scripts/android/device-qualify.ts` + `device-qualify-lib.ts`**: read-only adb (fixed allowlist) / fastboot (`getvar` only) qualification against `--requirements FILE`, defaulting to the new `android/device-requirements/treble-gsi.json` (Treble, vendor API, kernel floor, ABI, dynamic partitions, SELinux, A/B preferred, unlockable/avb_custom_key). Product thresholds (RAM, cameras, radios) stay in product files. Records go to `test-results/os-device-qualification/`; emulator captures are labelled `emulator-observation`. Requirements files are validated (unknown checks rejected). Documented as complementary to the `hardware-targets.json` admission gate.\n\nRisk: additive only; no existing script, lock or trust file changes behaviour. No cloud resource, key or device is touched by tests.\n\n# Testing\n\n- `node --test scripts/__tests__/aosp-builder-infra.node.test.ts scripts/__tests__/release-key-ceremony.node.test.ts scripts/__tests__/device-qualify.node.test.ts` (from `packages/os`, Node 24.15.0, macOS arm64, shellcheck 0.11 and PyYAML present): **34/34 pass**. Covers `bash -n` + shellcheck of all scripts including cloud-init-embedded ones, dry runs with fake `gcloud`/`repo` first on `PATH` proving nothing is invoked, sync dry runs for every profile in `aosp.lock.json` (workspace and mirror), avbtool known-answer vectors (2048: `8a1378f7…a3cb`, 4096: `3672bd6c…f0de`, verified against AOSP `avbtool.py extract_public_key`), a full test-key ceremony + decrypt round trip, `loadReleaseKeyPolicy` acceptance of generated Ed25519 fingerprints, output-location refusals, and a CLI run with a fake adb that asserts only allowlisted commands are sent.\n- `/opt/homebrew/bin/shellcheck -x --severity=style` on all builder scripts: clean.\n- Biome 2.5.14 `check` on all changed TS/JSON files: clean.\n- `node scripts/verify-os-repository-layout.ts`: pass.\n- `node --test scripts/__tests__/*.node.test.ts` (whole `test:release` node lane): 488 tests, 472 pass, 13 fail, 3 skipped. The same 13 fail on pristine `develop` 27dec7b0c3 on this host (install-lock, release-safety, AVD timeout, legacy ISO, packaged writer, RISC-V tests; macOS host tooling). `bun test scripts/__tests__/*.bun.test.ts`: 8 pass / 17 fail, identical on pristine develop.\n- Root audits run individually: `audit-scripts`, `audit-test-lane-membership`, `audit-focused-skipped-tests`, `audit-tee-secret-leak`, `check-generated-system-files`: all pass.\n\n- [x] Targets `develop` and has no conflicts with the latest `origin/develop` (based on 27dec7b0c3).\n- [ ] Ran `bun install` and `bun run verify` after syncing; `bun install` ran, full `bun run verify` not run (see Known gaps).\n- [x] Updated relevant documentation (`android/README.md`, `android/builder/README.md`, `android/signing/README.md`).\n\n# Evidence Gate\n\n<!-- evidence-head:79cb10d02d92440bf2bb4b421726be908150b531 -->\n<!-- evidence-row:before-screenshots -->\n- [ ] N/A - release tooling scripts only; no UI surface\n<!-- evidence-row:after-screenshots -->\n- [ ] N/A - release tooling scripts only; no UI surface\n<!-- evidence-row:walkthrough-video -->\n- [ ] N/A - no user flow; CLI tooling verified by tests\n<!-- evidence-row:backend-logs -->\n- [ ] N/A - no server code path; test transcript summarized in Evidence Details\n<!-- evidence-row:frontend-logs -->\n- [ ] N/A - no frontend changes\n<!-- evidence-row:llm-trajectory -->\n- [ ] N/A - no agent, action, provider, prompt or model changes\n<!-- evidence-row:domain-artifacts -->\n- [ ] N/A - generated keys and records are test fixtures created and deleted inside the tests; no persistent artifact\n<!-- evidence-row:ocr-review -->\n- [ ] N/A - no rendered visual surface\n\n# Evidence Details\n\n<details><summary>New tests (packages/os)</summary>\n\n```\nnode --test scripts/__tests__/aosp-builder-infra.node.test.ts \\\n  scripts/__tests__/release-key-ceremony.node.test.ts \\\n  scripts/__tests__/device-qualify.node.test.ts\nℹ tests 34\nℹ pass 34\nℹ fail 0\nℹ skipped 0\n```\n</details>\n\nEvidence levels are kept separate: these are unit tests and dry runs. They are not a VM/server creation, an AOSP sync or build, a Cuttlefish or GSI boot, signing of a real `target_files.zip`, HSM operation, or a physical-device qualification.\n\n## Known gaps / failures\n\n- Full root `bun run verify` (monorepo-wide turbo typecheck/lint) was not run because of time; the `packages/os` scripts are not part of any tsconfig typecheck, and the touched files are Biome-clean.\n- Pre-existing failures on this macOS host, identical on pristine develop: 13 node release tests and 17 bun release tests listed above.\n- No GCE/Hetzner resource was created; `gcloud` flags were checked only against `--help`. Cloud-init not booted; nsjail AppArmor profile untested. `sync-aosp.sh --apply` not run.\n- The device qualifier has only been exercised with a captured Android 15 emulator fixture and a fake adb; no physical device run in this PR.\n- shellcheck/PyYAML-dependent tests skip (not fail) when those tools are absent in CI.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T15:23:59Z",
+      "mergedAt": "2026-10-02T21:16:14Z",
+      "additions": 4132,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOMT5cIs8AAAABGXbC8Q",
+      "title": "Enable configured Android reminder push delivery",
+      "author": "NubsCarson",
+      "number": 33106,
+      "body": "Android reminders could skip Firebase resources, lose delivery priority, re-alert on read updates or miss the event bus during startup. A connected Android renderer could also create a second OS alert alongside FCM. This fixes the configured push path and gives confirmed Android push delivery ownership of the OS alert while preserving the durable in-app notification.\n\nGoogle Services is loaded for present configuration and malformed configuration fails visibly. Reminder/high/urgent priority reaches FCM; read updates do not re-alert. The sender waits for the registered event bus before subscribing. Native registration retries through the existing app-resume event after permission is granted.\n\nToken registration now reports whether the current host has an attached, configured transport. The Android renderer waits for registration to settle and suppresses its local OS projection only when the current authenticated authority confirms push delivery. Unavailable transport retains the local fallback; authority changes fence stale registration and delivery. Incoming notifications still enter the canonical in-app center.\n\nThe native foreground-service caption starts with unknown connection status. Settings hides the optional per-app permission inventory only for its unsupported404 response; genuine permission/error handling remains available.\n\nValidation: combined source606c passed full repository verification,17 owning UI notification tests,11 real boot cases and the persisted backend transport acceptance. All seven files in this update exactly match that verified source. Earlier Gradle/configuration checks and physical app-absent FCM delivery are retained. The final606c QA APK passed build/artifact audit and upgraded with the same signer; all10 shared preference files remained byte-exact. In one bounded physical background run, a naturally due reminder produced exactly one canonical notification and one FCM-tagged Android OS alert, with no local OS alert. This observation does not independently prove WebSocket consumption by the UI; red/green renderer tests cover FCM-owned arrival handling. Fully powered-off durable recovery and final personal QA remain separate. This PR stays draft; no universal push reliability or production rollout acceptance is claimed.\n\n\n### Negotiated Android reminder data delivery\nAndroid devices advertise the native reminder-data receiver only when the app-owned Firebase handler is present. Reminder pushes then use non-collapsible data messages with a canonical notification ID; older clients retain notification-plus-data behavior. The receiver respects permission/channel settings and retains safe source selectors for cold taps. SafePush registration now happens before Capacitor exports the initial renderer method list, so negotiation works on the actual app.\n\nValidation: native16, backend2, UI20, lifecycle23 and Android policy67 tests passed, plus four owning typechecks. The signed QA app physically negotiated the capability, produced one canonical Android alert and one inbox record, and returned to the expected plain reminder on a warm tap. Existing preferences and history were preserved. Two-reminder powered-off queue recovery and the cold tap to the older source remain pending; these are not claimed as passed. Separate conversation/message source binding is in draft33096.\n",
+      "repository": "elizaos/eliza",
+      "createdAt": "2026-10-02T22:36:06Z",
+      "mergedAt": "2026-10-03T23:14:58Z",
+      "additions": 2046,
+      "deletions": 169
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 15896,
+    "deletions": 770,
+    "files": 242,
+    "commitCount": 254
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "completedItems": [
+    {
+      "title": "fix(android): stabilize dialer readiness and onboarding confirmation",
+      "prNumber": 32942,
+      "type": "bugfix",
+      "body": "# Relates to\n\n[Android Device E2E 36620120391](https://github.com/elizaOS/eliza/actions/runs/36620120391) stopped in `PhoneDialerInstrumentedTest.kt:74`: `UiAutomation.waitForIdle(500, 5000)` timed out while the dialer kept emitting accessi",
+      "files": [
+        "packages/app/test/android/onboarding-to-home.android.spec.ts",
+        "plugins/plugin-native-phone/android/src/androidTest/java/ai/eliza/plugins/phone/PhoneDialerInstrumentedTest.kt",
+        ".github/workflows/device-e2e.yml",
+        "packages/app/scripts/lib/android-e2e-evidence-policy.test.ts",
+        "packages/app/scripts/lib/android-e2e-evidence-policy.ts",
+        "plugins/plugin-native-canvas/android/src/androidTest/java/ai/eliza/plugins/canvas/CanvasLifecycleInstrumentedTest.kt",
+        "packages/app/scripts/lib/android-capture.test.ts",
+        "packages/app/scripts/lib/android-capture.ts",
+        "packages/app/test/android/native-system-intents.android.spec.ts",
+        "plugins/plugin-native-system/android/src/androidTest/java/ai/eliza/plugins/system/SystemFlashlightInstrumentedTest.kt"
+      ]
+    },
+    {
+      "title": "fix(openai): restore provider-null omitted optionals on strict native tools",
+      "prNumber": 33004,
+      "type": "bugfix",
+      "body": "<!-- Fill every visible section. Keep every evidence row visible; use N/A with a concrete reason when a row does not apply. -->\n\n# Relates to\n\nRestores the failing gate on current `develop` (no issue filed): `canonical / Plugin Tests (3/4)`",
+      "files": [
+        "plugins/plugin-openai/__tests__/native-tool-null-optionals.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump the uv group across 2 directories with 2 updates",
+      "prNumber": 33003,
+      "type": "other",
+      "body": "Bumps the uv group with 1 update in the /packages/benchmarks/suites/OSWorld directory: [pypdf](https://github.com/py-pdf/pypdf).\nBumps the uv group with 1 update in the /packages/training directory: [virtualenv](https://github.com/pypa/virt",
+      "files": [
+        "packages/benchmarks/suites/OSWorld/uv.lock",
+        "packages/training/uv.lock"
+      ]
+    },
+    {
+      "title": "Add durable approved workflows and device actions with managed Cloud identity",
+      "prNumber": 33002,
+      "type": "other",
+      "body": "Agent clients need durable, owner-bound workflows and reviewed device operations that survive interruptions, reconnects and process restarts. This change adds generic runtime contracts and persistence for those flows, including managed Clou",
+      "files": [
+        ".github/workflows/ci.yml",
+        "bun.lock",
+        "packages/agent/src/api/approval-routes.ts",
+        "packages/agent/src/api/conversation-routes.ts",
+        "packages/agent/src/api/device-action-routes.ts",
+        "packages/agent/src/api/runtime-mode/route-mode-matrix.ts",
+        "packages/agent/src/api/server-helpers-auth.ts",
+        "packages/agent/src/api/server.ts",
+        "packages/agent/src/runtime/host-bridge.ts",
+        "packages/agent/src/triggers/runtime.ts",
+        "packages/agent/test/system-error-notice.test.ts",
+        "packages/app/src/api/auth-bootstrap-routes.ts",
+        "packages/app/src/api/cloud-google-delegation-routes.ts",
+        "packages/app/src/api/cloud-runtime-owner.ts",
+        "packages/app/src/api/route-auth-policy.ts",
+        "packages/app/src/api/server.ts",
+        "packages/app/src/api/standalone-whisper-routes.ts",
+        "packages/app/src/runtime/install-agent-host-bridge.ts",
+        "packages/app/test/source-repair-http.e2e.test.ts",
+        "packages/app/test/source-repair-http.vitest.config.ts",
+        "packages/cloud/api/__tests__/dedicated-agent-proxy.test.ts",
+        "packages/cloud/api/src/_router.generated.ts",
+        "packages/cloud/api/src/dedicated-agent-proxy.ts",
+        "packages/cloud/api/v1/eliza/google/connect/initiate/route.ts",
+        "packages/cloud/api/v1/eliza/google/gmail/inbox-v1/route.ts",
+        "packages/cloud/shared/src/db/migrations/0509_managed_gmail_operation_receipts.sql",
+        "packages/cloud/shared/src/db/migrations/meta/_journal.json",
+        "packages/cloud/shared/src/lib/auth/cloud-runtime-proof.ts",
+        "packages/cloud/shared/src/lib/oidc/clients.ts",
+        "packages/cloud/shared/src/lib/services/agent-env-crypto.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/gmail.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/inbox-managed.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/inbox-operation-routes.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/inbox-provider.http.integration.test.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/inbox-provider.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/inbox-receipts.ts",
+        "packages/cloud/shared/src/lib/services/agent-google-connector/shared.ts",
+        "packages/cloud/shared/src/lib/services/managed-cloud-owner-config.integration.test.ts",
+        "packages/cloud/shared/src/lib/services/managed-cloud-owner-config.ts",
+        "packages/cloud/shared/src/lib/services/managed-eliza-config.ts",
+        "packages/cloud/shared/src/lib/services/reserved-env-keys.ts",
+        "packages/core/package.json",
+        "packages/core/src/contracts/cloud-runtime-request.ts",
+        "packages/scripts/plugins/plugin-workflow/run-isolated-tests.test.ts",
+        "packages/scripts/plugins/plugin-workflow/run-isolated-tests.ts",
+        "plugins/plugin-assistant/package.json",
+        "plugins/plugin-assistant/src/features/basic-capabilities/index.ts",
+        "plugins/plugin-assistant/src/index.ts",
+        "plugins/plugin-assistant/src/services/approval/store.ts",
+        "plugins/plugin-assistant/src/services/approval/types.ts",
+        "packages/core/src/__tests__/message-runtime-stage1.test.ts",
+        "packages/testing/scenario-runner/test/scenarios/deterministic-workflow-actions-routes.scenario.ts"
+      ]
+    },
+    {
+      "title": "fix(core): admit strict-wire null as omitted optional tool arguments",
+      "prNumber": 33001,
+      "type": "bugfix",
+      "body": "# Relates to\n\nDevelop's `canonical / Plugin Tests (3/4)` lane has been red since #32991 landed: at head `3f38e54495ba5518f84bcf9cc1e84e0dc3d60bbf`, `canonical / All Tests Passed` fails with `tests_plugins finished with failure`, and the fai",
+      "files": [
+        "packages/core/src/actions/nullable-schema.integration.test.ts",
+        "packages/core/src/actions/validate-tool-args.ts"
+      ]
+    },
+    {
+      "title": "fix(openai): drop strict-wire omitted-optional nulls before action validation",
+      "prNumber": 33000,
+      "type": "bugfix",
+      "body": "# Relates to\n\nDevelop merge gate is red on the current head (3f38e54495ba5518f84bcf9cc1e84e0dc3d60bbf, \"Develop Full\" run 36867449005):\n\n- `canonical / Plugin Tests (3/4)` fails: `plugins/plugin-personal-assistant/test/work-thread-native-sc",
+      "files": [
+        "plugins/plugin-openai/__tests__/strict-optional-null-restoration.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts"
+      ]
+    },
+    {
+      "title": "fix(assistant): keep labeled evaluator thoughts internal",
+      "prNumber": 32999,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFormatted `Thought:` text in a labeled evaluator verdict was promoted to `messageToUser` when an explicit reply was absent. This could replace a terminal planner answer with internal commentary; it was encountered while valida",
+      "files": [
+        "plugins/plugin-assistant/src/runtime/evaluator-visibility.test.ts",
+        "plugins/plugin-assistant/src/runtime/evaluator.ts"
+      ]
+    },
+    {
+      "title": "fix(testing): allow bounded scenario sandbox teardown",
+      "prNumber": 32998,
+      "type": "bugfix",
+      "body": "Cloud stability timeouts send SIGTERM to the trusted attempt harness, but `terminate()` immediately follows with SIGKILL. This can interrupt the nested sandbox UID/firewall/ACL cleanup. Run 36865848851 retained a first-attempt timeout and s",
+      "files": [
+        "packages/cloud/e2e/scenarios/cloud-stability-agent.scenario.ts",
+        "packages/cloud/scripts/e2e/stability-attempt.ts",
+        "packages/testing/scenario-runner/src/stability-subprocess-adapter.test.ts",
+        "packages/testing/scenario-runner/src/stability-subprocess-adapter.ts",
+        "packages/cloud/e2e/package.json",
+        "packages/cloud/e2e/src/stability/attempt-cleanup.test.ts",
+        "packages/cloud/e2e/src/stability/attempt-cleanup.ts"
+      ]
+    },
+    {
+      "title": "test(ui): settle browser and async fixture contracts",
+      "prNumber": 32997,
+      "type": "bugfix",
+      "body": "Voice fixtures must exercise browser Blob downloads and await asynchronous capture cleanup without destroying the DOM early. This change controls the object URL boundary, compares the complete exported report bytes, awaits email login actio",
+      "files": [
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.email-login.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.talkmode-listeners.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.tts-playback.test.tsx"
+      ]
+    },
+    {
+      "title": "test(app,ui): verify report artifacts and settle async fixtures",
+      "prNumber": 32994,
+      "type": "bugfix",
+      "body": "The merged client fixture repair #32995 makes the tests run, but its object-URL stub cannot prove that the downloaded report is readable and its account fixture replaces the privacy panel. Exercise those boundaries directly: pair native Blo",
+      "files": [
+        "packages/app/src/services/alpha-dstack-deployment.test.ts",
+        "packages/ui/src/cloud/account-security/components/account-page-client.test.tsx",
+        "packages/ui/src/cloud/public-pages/pages/login/steward-login-section.email-login.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.talkmode-listeners.test.tsx",
+        "packages/ui/src/hooks/useVoiceChat.tts-playback.test.tsx",
+        "packages/ui/src/cloud/monetization/affiliates/AffiliatesPageClient.test.tsx",
+        "plugins/plugin-personal-assistant/src/actions/work-thread.ts",
+        "plugins/plugin-personal-assistant/test/work-thread-native-schema.test.ts"
+      ]
+    },
+    {
+      "title": "fix(browser): keep guidance visible beside fields above the IME",
+      "prNumber": 33095,
+      "type": "bugfix",
+      "body": "## Change\nLandscape Android keyboards can leave enough room beside a target but too little above or below it for a two-line guidance label. Clamp both candidate coordinates to the visual viewport, then retain the existing target-exclusion a",
+      "files": [
+        "packages/os/browser/README.md",
+        "packages/os/browser/scripts/build.mjs",
+        "packages/os/browser/scripts/test-page-guidance.mjs",
+        "packages/os/browser/src/page-guidance.mjs"
+      ]
+    },
+    {
+      "title": "fix(os): package the complete browser worker module graph",
+      "prNumber": 33094,
+      "type": "bugfix",
+      "body": "The installed Android component fails service-worker registration because `command-handler.mjs` imports `manual-activity.mjs`, which neither extension staging nor the embedded resource inventory includes. Include that module, share the stag",
+      "files": [
+        "packages/os/browser/scripts/build.mjs",
+        "packages/os/browser/scripts/chromium-component.mjs",
+        "packages/os/browser/scripts/chromium-component.test.mjs",
+        "packages/os/browser/scripts/chromium/fixtures/chrome/browser/extensions/api/messaging/BUILD.gn",
+        "packages/os/browser/scripts/chromium/upstream.json",
+        "packages/os/browser/scripts/validate-extension-modules.mjs",
+        "packages/os/browser/scripts/validate-extension-modules.test.mjs",
+        "packages/os/scripts/__tests__/owned-browser-staging.node.test.ts"
+      ]
+    },
+    {
+      "title": "feat(os): Android 15, 16 and 17 generic system images",
+      "prNumber": 33077,
+      "type": "feature",
+      "body": "# Relates to\n\nThe Android vendor tree targets Android 15 (Pixel 9a, `android-15.0.0_r31`) and Android 17 (Cuttlefish, Pixel 11 Pro). It has no image for third-party Treble devices, such as MediaTek tablets that ship Android 13–16 vendor par",
+      "files": [
+        "packages/os/android/README.md",
+        "packages/os/android/aosp.lock.json",
+        "packages/os/android/hardware-targets.json",
+        "packages/os/android/vendor/eliza/AndroidProducts.mk",
+        "packages/os/android/vendor/eliza/eliza_common.mk",
+        "packages/os/android/vendor/eliza/products/eliza_gsi_arm64.mk",
+        "packages/os/android/vendor/eliza/products/eliza_gsi_x86_64.mk",
+        "packages/os/android/vendor/eliza/sepolicy/README.md",
+        "packages/os/android/vendor/eliza/sepolicy/api37/README.md",
+        "packages/os/android/vendor/eliza/sepolicy/api37/eliza_agent_app36.te",
+        "packages/os/android/vendor/eliza/sepolicy/eliza_agent.te",
+        "packages/os/android/vendor/eliza/sepolicy/system_ext/README.md",
+        "packages/os/android/vendor/eliza/sepolicy/system_ext/eliza_agent.te",
+        "packages/os/android/vendor/eliza/sepolicy/system_ext_api37/README.md",
+        "packages/os/android/vendor/eliza/sepolicy/system_ext_api37/eliza_agent_app36.te",
+        "packages/os/scripts/__tests__/android-gsi-versions.node.test.ts"
+      ]
+    },
+    {
+      "title": "feat(ui): explain unavailable task choices instead of disabling them",
+      "prNumber": 33075,
+      "type": "feature",
+      "body": "# Relates to\n\nExtracted from the senior-care product's explicit patch overlay (eliza-research/senior-care, `patches/eliza/task-choice-accessibility.patch`), which it currently applies on top of `packages/ui/src/components/interactive-task/T",
+      "files": [
+        "packages/ui/README.md",
+        "packages/ui/src/components/interactive-task/TaskChoice.stories.tsx",
+        "packages/ui/src/components/interactive-task/TaskChoice.test.tsx",
+        "packages/ui/src/components/interactive-task/TaskChoice.tsx"
+      ]
+    },
+    {
+      "title": "fix(agent): expose enumerable React exports from mobile stubs",
+      "prNumber": 33072,
+      "type": "bugfix",
+      "body": "# Relates to\n\niOS mobile bundles (`build-mobile-bundle.ts --target=ios|ios-jsc`) alias `react`/`react-dom` to the Proxy-backed CommonJS stubs in `packages/agent/scripts/mobile-stubs/`. Bun lowers `import * as React from \"react\"` with `__toE",
+      "files": [
+        "packages/agent/scripts/mobile-stubs/react-dom.ts",
+        "packages/agent/scripts/mobile-stubs/react.ts",
+        "packages/agent/test/fixtures/mobile-react-stub-bundle-child.ts",
+        "packages/agent/test/mobile-react-stub-namespace.test.ts"
+      ]
+    },
+    {
+      "title": "feat(os): AOSP builder, release-key ceremony and device qualification tooling",
+      "prNumber": 33069,
+      "type": "feature",
+      "body": "# Relates to\n\nThree generic pieces of OS release tooling lived only in a downstream product (extracted from the senior-care product's explicit patch overlay, eliza-research/senior-care): AOSP builder host provisioning, an offline release-ke",
+      "files": [
+        "packages/os/android/README.md",
+        "packages/os/android/builder/README.md",
+        "packages/os/android/builder/bootstrap/cloud-init.yaml",
+        "packages/os/android/builder/bootstrap/cuttlefish-host-startup.sh",
+        "packages/os/android/builder/bootstrap/sync-aosp.sh",
+        "packages/os/android/builder/gce/builder.sh",
+        "packages/os/android/builder/gce/cuttlefish-host.sh",
+        "packages/os/android/builder/gce/lib.sh",
+        "packages/os/android/device-requirements/treble-gsi.json",
+        "packages/os/android/signing/README.md",
+        "packages/os/android/signing/key-manifest.json",
+        "packages/os/scripts/__tests__/aosp-builder-infra.node.test.ts",
+        "packages/os/scripts/__tests__/device-qualify.node.test.ts",
+        "packages/os/scripts/__tests__/fixtures/avb-known-answer-vectors.json",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/audioPolicy.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/cameras.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/dfData.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/getenforce.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/getprop.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/mediaCodecs.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/meminfo.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/uname.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/wifiDump.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/wlanCountryProc.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/wmDensity.txt",
+        "packages/os/scripts/__tests__/fixtures/device-qualify/android15-emulator/wmSize.txt",
+        "packages/os/scripts/__tests__/release-key-ceremony.node.test.ts",
+        "packages/os/scripts/android/device-qualify-lib.ts",
+        "packages/os/scripts/android/device-qualify.ts",
+        "packages/os/scripts/aosp/decrypt-release-keys.ts",
+        "packages/os/scripts/aosp/generate-release-keys.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): reject retired policies in injected and restored characters",
+      "prNumber": 33044,
+      "type": "bugfix",
+      "body": "Character JSON and restored characters could carry retired `settings.toolProfile` or `settings.tools` restrictions into the runtime even though the tool-policy service has been removed. The previous config guard covered `tools` policies but",
+      "files": [
+        "packages/agent/src/config/retired-tool-policy.ts",
+        "packages/agent/src/runtime/build-character-config.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/sandbox-character.ts",
+        "packages/agent/test/retired-tool-policy-config.test.ts"
+      ]
+    },
+    {
+      "title": "fix(desktop): consolidate strict renderer Host validation before dispatch",
+      "prNumber": 33043,
+      "type": "bugfix",
+      "body": "This renderer Host fix overlapped #33042. Preserve both contributions while routing every static and API request through one boundary: the shared Host classifier now requires a nonempty 127.0.0.1 or localhost authority at the actual IPv4 li",
+      "files": [
+        "packages/app/platforms/electrobun/src/index.ts",
+        "packages/app/platforms/electrobun/src/native/file-watcher.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-api-proxy.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-api-proxy.ts",
+        "packages/app/platforms/electrobun/src/renderer-request-boundary.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-request-boundary.ts",
+        "packages/app/platforms/electrobun/src/renderer-static.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-static.ts"
+      ]
+    },
+    {
+      "title": "fix(desktop): reject untrusted renderer hosts before HTML and API dispatch",
+      "prNumber": 33042,
+      "type": "bugfix",
+      "body": "The loopback renderer accepted attacker-controlled Host headers before serving bearer-token HTML or forwarding API requests. A DNS-rebound request could therefore reach privileged local content. Require the actual renderer port and a matchi",
+      "files": [
+        "packages/app/platforms/electrobun/src/index.ts",
+        "packages/app/platforms/electrobun/src/native/file-watcher.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-request-boundary.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-request-boundary.ts",
+        "packages/app/platforms/electrobun/src/renderer-static.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-static.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): reject retired tool restrictions before boot",
+      "prNumber": 33041,
+      "type": "bugfix",
+      "body": "Configured tool restrictions were accepted and advertised even though the runtime tool-policy implementation has been retired. Reject these settings at schema validation, disk load/save, and explicit runtime overrides before boot or environ",
+      "files": [
+        "packages/agent/src/config/config.ts",
+        "packages/agent/src/config/retired-tool-policy.ts",
+        "packages/agent/src/config/schema.ts",
+        "packages/agent/src/config/zod-schema.agent-runtime.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/test/retired-tool-policy-config.test.ts"
+      ]
+    },
+    {
+      "title": "fix(desktop): stop serving wildcard CORS from the renderer static server",
+      "prNumber": 33040,
+      "type": "bugfix",
+      "body": "# Relates to\n\nFixes https://github.com/elizaOS/eliza/issues/33034 — the desktop renderer\nstatic server answered every static response with\n`Access-Control-Allow-Origin: *`, so any website could cross-origin fetch the\ntoken-bearing index HTM",
+      "files": [
+        "packages/app/platforms/electrobun/src/index.ts",
+        "packages/app/platforms/electrobun/src/renderer-static.test.ts",
+        "packages/app/platforms/electrobun/src/renderer-static.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): bind stored agent environment envelopes to their organization",
+      "prNumber": 33039,
+      "type": "bugfix",
+      "body": "A managed-agent environment PATCH could replay an encrypted value from another organization. The storage helper returned already-encrypted values unchanged, while materialization resolved their key IDs globally. Possession of a foreign ciph",
+      "files": [
+        "packages/cloud/shared/src/lib/services/agent-env-crypto.ts",
+        "packages/cloud/shared/src/lib/services/field-encryption.test.ts",
+        "packages/cloud/shared/src/lib/services/field-encryption.ts",
+        "packages/cloud/shared/src/lib/services/managed-cloud-owner-config.integration.test.ts"
+      ]
+    },
+    {
+      "title": "fix(desktop): prevent Steward reset deletion through symlink escapes",
+      "prNumber": 33038,
+      "type": "bugfix",
+      "body": "A Steward data path could pass the lexical state-directory guard while a symlinked ancestor redirected recursive deletion outside the allowed roots. Reset now also checks resolved filesystem containment and repeats validation after stopping",
+      "files": [
+        "packages/app/platforms/electrobun/src/native/steward-reset.test.ts",
+        "packages/app/platforms/electrobun/src/native/steward.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): bind partial PII inspections to declared inputs",
+      "prNumber": 33037,
+      "type": "bugfix",
+      "body": "A declared-candidate PII job with no candidates could mark content done, causing a later job for the same content and ruleset to skip newly declared candidates. Partial inspection markers now include a hash of the exact candidates and conte",
+      "files": [
+        "packages/cloud/shared/src/db/schemas/pii-scrub-markers.ts",
+        "packages/cloud/shared/src/lib/services/pii-scrub-jobs.test.ts",
+        "packages/cloud/shared/src/lib/services/pii-scrub-jobs.ts"
+      ]
+    },
+    {
+      "title": "fix(wallet): reject invalid Solana cluster instead of silently broadcasting to mainnet",
+      "prNumber": 33035,
+      "type": "bugfix",
+      "body": "Invalid dApp network values could disappear in the browser bridge, causing the wallet API to use its mainnet default. Substring matching also treated labels such as `not-mainnet` and lookalike RPC hosts as supported networks. The preload co",
+      "files": [
+        "packages/ui/src/components/pages/BrowserWorkspaceView.solana-cluster.test.tsx",
+        "packages/ui/src/components/pages/BrowserWorkspaceView.tsx",
+        "packages/ui/src/components/pages/browser-workspace-wallet.ts",
+        "packages/ui/src/utils/browser-solana-preload.test.ts",
+        "packages/ui/src/utils/browser-tabs-renderer-registry.ts",
+        "plugins/plugin-wallet/src/api/browser-solana-cluster.test.ts",
+        "plugins/plugin-wallet/src/api/wallet-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): require confirmed plugin mutation acknowledgements",
+      "prNumber": 33033,
+      "type": "bugfix",
+      "body": "Plugin configuration saves, toggles, and disconnects could report success after an HTTP 200 containing HTML, an empty object, or an error object. These operations now require a positive boolean acknowledgement and reject contradictory negat",
+      "files": [
+        "packages/agent/src/actions/plugin-configure.test.ts",
+        "packages/agent/src/actions/plugin-mutation-ack.test.ts",
+        "packages/agent/src/actions/plugin.ts"
+      ]
+    },
+    {
+      "title": "test(ui): wait for mobile browser menu readiness",
+      "prNumber": 33032,
+      "type": "tests",
+      "body": "The mobile browser-action test can query its menu while the workspace response is still rendering. Develop Full run 36975543259 failed this test with only the loading state present, despite the API call having started.\n\nWait for the accessi",
+      "files": [
+        "packages/ui/src/components/pages/BrowserWorkspaceView.chrome.test.tsx"
+      ]
+    },
+    {
+      "title": "fix(wallet): reject invalid network in config-update parser instead of silent ignore",
+      "prNumber": 33031,
+      "type": "bugfix",
+      "body": "# Relates to\n\nOperator-requested iteration: next useful wallet hardening after #33020 (agent\n`resolveWalletNetworkMode` honest-invalid) and #33027 (core\n`buildWalletRpcUpdateRequest` honest-invalid, open). Those left the HTTP\nboundary permi",
+      "files": [
+        "plugins/plugin-wallet/src/api/wallet-config-network.test.ts",
+        "plugins/plugin-wallet/src/api/wallet-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): require explicit remote-intake acceptance for bug reports",
+      "prNumber": 33030,
+      "type": "bugfix",
+      "body": "# Relates to\n\nOperator-requested queue-cleared audit (iteration 6): no `mission-ready` issue covers this path, so this is a self-directed bug fix on a shipped product path under the queue-cleared audit order (bugs tier), reproduced locally ",
+      "files": [
+        "packages/agent/src/api/bug-report-routes.test.ts",
+        "packages/agent/src/api/bug-report-routes.ts"
+      ]
+    },
+    {
+      "title": "fix(core): resolve provider latency harness from repository source",
+      "prNumber": 33029,
+      "type": "bugfix",
+      "body": "The repository-only provider latency CLI imports @elizaos/testing through an undeclared package link. In a frozen install without a hoisted testing link, both existing process tests fail before argument validation or runtime initialization ",
+      "files": [
+        "packages/core/scripts/provider-latency-report.ts"
+      ]
+    },
+    {
+      "title": "fix(ui): restore declared desktop app window routes",
+      "prNumber": 33028,
+      "type": "bugfix",
+      "body": "Desktop menu and deep-link windows still use declared `/apps/skills`, `/apps/logs`, and other internal-tool paths. Removing the former app-window renderer left its UI replacement resolving only overlays, so these windows render App not foun",
+      "files": [
+        "packages/ui/src/components/apps/AppWindowRenderer.catalog.test.tsx",
+        "packages/ui/src/components/apps/AppWindowRenderer.internal-tools.test.tsx",
+        "packages/ui/src/components/apps/AppWindowRenderer.route-resolution.ts",
+        "packages/ui/src/components/apps/AppWindowRenderer.routes.tsx",
+        "packages/ui/src/components/apps/AppWindowRenderer.tsx"
+      ]
+    },
+    {
+      "title": "fix(core): reject invalid wallet network in update-request builder instead of routing to mainnet",
+      "prNumber": 33027,
+      "type": "bugfix",
+      "body": "## Problem\n\n`buildWalletRpcUpdateRequest` in `packages/core/src/contracts/wallet.ts` resolved the update-request network with a two-way ternary:\n\n```ts\nselectedNetwork ?? (walletConfig?.walletNetwork === \"testnet\" ? \"testnet\" : \"mainnet\")\n`",
+      "files": [
+        "packages/core/src/contracts/wallet-network.test.ts",
+        "packages/core/src/contracts/wallet.ts",
+        "packages/ui/src/components/pages/ConfigPageView.tsx",
+        "packages/ui/src/components/pages/ConfigPageView.wallet-save.test.tsx",
+        "packages/ui/src/i18n/locales/en.json"
+      ]
+    },
+    {
+      "title": "ci: add opt-in exact-source Windows workflow acceptance",
+      "prNumber": 33025,
+      "type": "other",
+      "body": "Adds a disabled-by-default Windows workflow acceptance job to Core Platform Tests. Maintainers can dispatch the trusted develop workflow with an exact source SHA and `run_windows_workflow=true` to qualify native worker survival, immutable s",
+      "files": [
+        ".github/workflows/platform-smoke.yml"
+      ]
+    },
+    {
+      "title": "test(cloud): declare baseline workflow bridge in stability policy",
+      "prNumber": 33024,
+      "type": "tests",
+      "body": "The keyless Cloud stability scenario rejects runtime initialization after the assistant added its baseline `workflow_device_bridge` service. The current develop run fails before any scenario turn with `synthetic runtime denied undeclared se",
+      "files": [
+        "packages/cloud/e2e/scenarios/cloud-stability-agent.scenario.ts"
+      ]
+    },
+    {
+      "title": "fix(agent,core,plugin-sql): authorize destructive migrations on one exact-true contract",
+      "prNumber": 33023,
+      "type": "bugfix",
+      "body": "## Problem\n\n`ELIZA_ALLOW_DESTRUCTIVE_MIGRATIONS` was parsed with two different contracts:\n\n- The migration runners that actually arm destructive schema changes — `packages/core/src/runtime.ts`, `packages/core/src/provisioning.ts`, `packages",
+      "files": [
+        "packages/agent/src/runtime/boot-pipeline.ts",
+        "packages/agent/src/runtime/eliza.ts",
+        "packages/agent/src/runtime/plugin-lifecycle.ts",
+        "packages/agent/src/runtime/restore-generation.boot.test.ts",
+        "packages/agent/src/services/agent-backup-restore-v3-runtime-generation.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/provisioning.ts",
+        "packages/core/src/runtime.ts",
+        "packages/core/src/utils/env.ts",
+        "plugins/plugin-sql/src/runtime-migrator/runtime-migrator.ts"
+      ]
+    },
+    {
+      "title": "fix(cloud): consume active API key identity once during rotation",
+      "prNumber": 33022,
+      "type": "bugfix",
+      "body": "Two concurrent rotation requests can read the same active API key and each insert a replacement because the database transaction ignores whether it deleted the original row. A deactivation after the initial read can also be undone by mintin",
+      "files": [
+        "packages/cloud/api/__tests__/api-key-audit-transaction.integration.test.ts",
+        "packages/cloud/shared/src/db/repositories/api-keys.ts"
+      ]
+    },
+    {
+      "title": "fix(app): preserve private Steward credential checkpoints atomically",
+      "prNumber": 33021,
+      "type": "bugfix",
+      "body": "When Steward saves the agent checkpoint or token, a failed direct overwrite can truncate the only local copy of the registered tenant key and prevent setup recovery. Writing an existing permissive file also leaves its old permissions unchan",
+      "files": [
+        "packages/app/src/services/steward-sidecar/wallet-setup.test.ts",
+        "packages/app/src/services/steward-sidecar/wallet-setup.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): reject invalid wallet network values instead of routing to mainnet",
+      "prNumber": 33020,
+      "type": "bugfix",
+      "body": "Reviewer qualification at `f78959ab733ed893c4602a190c2a3ecdce713d32`: reviewed both changed files and the BSC/Solana/readiness callers. The 9 owning tests passed, frozen dependency installation passed with lifecycle scripts explicitly skipp",
+      "files": [
+        "packages/agent/src/api/wallet-rpc.test.ts",
+        "packages/agent/src/api/wallet-rpc.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): name the failing ancestor in runtime state trust errors",
+      "prNumber": 33019,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRepairs the operator dead-end on the standalone host's state-directory trust\nboundary. Reproduced on `develop` (`81fdac8a82`, run in a clean worktree): with\n`ELIZA_STATE_DIR` under a group-writable ancestor, boot aborts with\n\n",
+      "files": [
+        "packages/agent/src/runtime/runtime-installation-id.ts"
+      ]
+    },
+    {
+      "title": "fix(agent): return honest unavailable registry config instead of fabricated mainnet",
+      "prNumber": 33018,
+      "type": "bugfix",
+      "body": "# Relates to\n\n`GET /api/registry/config` fabricates a mainnet identity when no registry backend exists. `getRegistryServiceIfAvailable()` in `packages/agent/src/api/agent-status-routes.ts` always returns `null` (the external ERC-8004 plugin",
+      "files": [
+        "packages/agent/src/api/agent-status-routes.ts",
+        "packages/ui/src/api/client-types-cloud.ts"
+      ]
+    },
+    {
+      "title": "fix(ci): keep stability evidence ledgers parent-owned",
+      "prNumber": 33017,
+      "type": "bugfix",
+      "body": "# Relates to\n\nRepairs the evidence-loss mode recorded in the `cloud / agent-stability / deterministic-keyless` failure on develop ([job 110656869424](https://github.com/elizaOS/eliza/actions/runs/36947981894/job/110656869424)): attempt 01 w",
+      "files": [
+        "packages/cloud/scripts/e2e/stability-attempt.ts",
+        "packages/testing/scenario-runner/src/runtime-factory.evidence-write.test.ts",
+        "packages/testing/scenario-runner/src/runtime-factory.ts"
+      ]
+    },
+    {
+      "title": "fix(openai): restore optional strict tool arguments before validation",
+      "prNumber": 33016,
+      "type": "bugfix",
+      "body": "Strict native tools require every wire property. Encode absent non-nullable optional values as a nullable wire branch and restore those placeholders to omitted keys before canonical action validation. Required values and explicitly declared",
+      "files": [
+        "plugins/plugin-openai/__tests__/qwen-response-schema.wire.test.ts",
+        "plugins/plugin-openai/__tests__/record-args-observability.shape.test.ts",
+        "plugins/plugin-openai/models/text.ts",
+        "plugins/plugin-personal-assistant/test/work-thread-native-schema.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): bump viem from 2.55.17 to 2.56.9",
+      "prNumber": 33015,
+      "type": "other",
+      "body": "Bumps [viem](https://github.com/wevm/viem) from 2.55.17 to 2.56.9.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/wevm/viem/releases\">viem's releases</a>.</em></p>\n<blockquote>\n<h2>viem@2.56.9</h2",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/auth/package.json",
+        "packages/cloud/api/package.json",
+        "packages/cloud/shared/package.json",
+        "packages/ui/package.json",
+        "plugins/plugin-elizacloud/package.json",
+        "plugins/plugin-wallet/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump music-metadata from 11.16.0 to 11.16.1",
+      "prNumber": 33014,
+      "type": "other",
+      "body": "Bumps [music-metadata](https://github.com/Borewit/music-metadata) from 11.16.0 to 11.16.1.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/Borewit/music-metadata/releases\">music-metadata's releases",
+      "files": [
+        "bun.lock",
+        "packages/cloud/api/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.220 to 0.3.284",
+      "prNumber": 33013,
+      "type": "other",
+      "body": "Bumps [@anthropic-ai/claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-typescript) from 0.3.220 to 0.3.284.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-agent-sd",
+      "files": [
+        "bun.lock",
+        "packages/benchmarks/suites/claude-subscription-gateway/package.json",
+        "packages/benchmarks/suites/claude-subscription-gateway/src/claude-completion.ts",
+        "packages/benchmarks/suites/claude-subscription-gateway/src/cli.ts",
+        "packages/benchmarks/suites/claude-subscription-gateway/src/types.ts",
+        "packages/benchmarks/suites/claude-subscription-gateway/tests/replay-server.test.ts"
+      ]
+    },
+    {
+      "title": "chore(deps): update Google SDK to compatible 3.0.130",
+      "prNumber": 33012,
+      "type": "other",
+      "body": "Google SDK 4 returns v4 model interfaces, which the repository's AI SDK 6 rejects with AI_UnsupportedModelVersionError before dispatch. Update Google SDK from 3.0.127 to the latest compatible patch, 3.0.130, while preserving the existing AI",
+      "files": [
+        "bun.lock",
+        "packages/agent/package.json",
+        "plugins/plugin-assistant/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump actions/configure-pages from 5.0.0 to 6.0.0",
+      "prNumber": 33011,
+      "type": "other",
+      "body": "Bumps [actions/configure-pages](https://github.com/actions/configure-pages) from 5.0.0 to 6.0.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/actions/configure-pages/releases\">actions/configure-",
+      "files": [
+        ".github/workflows/publish-apt-repo.yml"
+      ]
+    },
+    {
+      "title": "chore(deps-dev): bump the dev-dependencies group with 2 updates",
+      "prNumber": 33010,
+      "type": "other",
+      "body": "Bumps the dev-dependencies group with 2 updates: [turbo](https://github.com/vercel/turborepo) and [@typescript-eslint/parser](https://github.com/typescript-eslint/typescript-eslint/tree/HEAD/packages/parser).\n\nUpdates `turbo` from 2.11.4 to",
+      "files": [
+        "bun.lock",
+        "package.json",
+        "packages/cloud/services/operator/package.json",
+        "packages/os/package.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump ruby/setup-ruby from 1.325.0 to 1.327.0",
+      "prNumber": 33009,
+      "type": "other",
+      "body": "Bumps [ruby/setup-ruby](https://github.com/ruby/setup-ruby) from 1.325.0 to 1.327.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/ruby/setup-ruby/releases\">ruby/setup-ruby's releases</a>.</em></",
+      "files": [
+        ".github/workflows/store-mobile-publish.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump anthropics/claude-code-action from 1.0.231 to 1.0.237",
+      "prNumber": 33008,
+      "type": "other",
+      "body": "Bumps [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) from 1.0.231 to 1.0.237.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/anthropics/claude-code-action/releas",
+      "files": [
+        ".github/workflows/claude.yml",
+        ".github/workflows/weekly-maintenance.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): bump actions/deploy-pages from 4.0.5 to 5.0.1",
+      "prNumber": 33007,
+      "type": "other",
+      "body": "Bumps [actions/deploy-pages](https://github.com/actions/deploy-pages) from 4.0.5 to 5.0.1.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/actions/deploy-pages/releases\">actions/deploy-pages's rele",
+      "files": [
+        ".github/workflows/publish-apt-repo.yml"
+      ]
+    },
+    {
+      "title": "chore(deps): ignore standalone Effect updates",
+      "prNumber": 33006,
+      "type": "other",
+      "body": "Smithers pins and owns the Effect runtime. PR #32967 repaired the runtime boundary without upgrading that family to an incompatible Effect release. Ignore standalone Effect updates in the Bun Dependabot configuration; coordinated Smithers u",
+      "files": [
+        ".github/dependabot.yml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "fadhelcarlos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/123362393?v=4",
+      "totalScore": 567.5456413401778,
+      "prScore": 168.20564134017775,
+      "issueScore": 0,
+      "reviewScore": 399,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "lalalune",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18633264?u=e2e906c3712c2506ebfa98df01c2cfdc50050b30&v=4",
+      "totalScore": 490.07430564787865,
+      "prScore": 490.07430564787865,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mtcow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/171548037?v=4",
+      "totalScore": 461,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 461,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ss251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32437884?u=6d30f4348b224c13c51c13dc2b7b136f3cdbe62b&v=4",
+      "totalScore": 436,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 436,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumix5",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13509617?u=f941296a9207a99ba0ac42ef7b02b0eb0b046cd0&v=4",
+      "totalScore": 428.07486494378276,
+      "prScore": 427.87486494378277,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Prabhat1308",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/94048855?u=762860ff680d73e13339cb77d4c747457cf7b924&v=4",
+      "totalScore": 361.9476020198555,
+      "prScore": 219.50960201985552,
+      "issueScore": 0,
+      "reviewScore": 142,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "attentionhead",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30051356?v=4",
+      "totalScore": 313,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 313,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "NubsCarson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192162056?u=d2be9082dbee60fcbad21d32bf6e662ab1af3674&v=4",
+      "totalScore": 271.6666602831114,
+      "prScore": 271.2286602831114,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "lww0134-ctrl",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/314679453?v=4",
+      "totalScore": 189,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 189,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hermesagent270-commits",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/283605144?v=4",
+      "totalScore": 154.97127740513488,
+      "prScore": 116.33327740513491,
+      "issueScore": 14.2,
+      "reviewScore": 24,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "greatcodeeer",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3224374?u=d56a9778976761a0b0deb565a680273c102919cf&v=4",
+      "totalScore": 122.72601611391858,
+      "prScore": 122.72601611391858,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nothingxnowhere",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/140473048?v=4",
+      "totalScore": 103.67669875966865,
+      "prScore": 70.67669875966865,
+      "issueScore": 6,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "MLuber-bot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/317066007?v=4",
+      "totalScore": 99.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 99.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hhbb958",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/336115325?v=4",
+      "totalScore": 51,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 51,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "DIABLOX23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263777202?v=4",
+      "totalScore": 27.791072216481457,
+      "prScore": 27.591072216481457,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OutstandingRetard",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/202385977?v=4",
+      "totalScore": 22.783596335232385,
+      "prScore": 22.583596335232386,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wddygybw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/336149796?v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "CopperKoi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91732947?u=31aaece8627730e645b69f4a375e2ddeee00cd13&v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 93,
+  "mergedPRs": 52,
+  "newIssues": 12,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 19
 }
